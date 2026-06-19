@@ -175,6 +175,7 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
             || die "Klonen fehlgeschlagen."
     fi
+    chmod +x /opt/lancache-ng/setup.sh
     exec /opt/lancache-ng/setup.sh "$@"
 fi
 
