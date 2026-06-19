@@ -67,7 +67,9 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── SSL-Modus (CA-Zertifikat auf Clients installieren) ─────────────────────
+  # Nur aktiv wenn COMPOSE_PROFILES ssl enthält (setup.sh fragt danach)
   proxy-ssl:
+    profiles: [ssl]
     container_name: lancache-proxy-ssl
     image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
     environment:
@@ -94,6 +96,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
 
   dns-ssl:
+    profiles: [ssl]
     container_name: lancache-dns-ssl
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
     environment:
@@ -147,6 +150,7 @@ services:
       - CONTAINER_PROXY_SSL=lancache-proxy-ssl
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
+      - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
       - ${CACHE_DIR_STANDARD}:/cache/standard
       - ${CACHE_DIR_SSL}:/cache/ssl

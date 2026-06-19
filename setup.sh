@@ -77,8 +77,11 @@ cmd_debug() {
     docker compose ps
 
     print_step "Logs (letzte 30 Zeilen je Service)"
+    local ssl_enabled; ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+    local svc_list="proxy-standard dns-standard ui netdata watchdog"
+    [[ "${ssl_enabled:-1}" = "1" ]] && svc_list="proxy-standard dns-standard proxy-ssl dns-ssl ui netdata watchdog"
     local svc
-    for svc in proxy-standard dns-standard proxy-ssl dns-ssl ui netdata; do
+    for svc in $svc_list; do
         printf "\n${BOLD}--- %s ---${RESET}\n" "$svc"
         docker compose logs --tail=30 "$svc" 2>/dev/null || true
     done
@@ -163,38 +166,47 @@ ip -4 addr show | grep "inet " | grep -v " 127\." | grep -v " 172\." \
 printf "\n"
 
 while true; do
-    ask "Standard-Modus IP (kein CA-Zertifikat)" "${detected_ip:-192.168.1.10}"
+    ask "Server-IP (Standard-Modus)" "${detected_ip:-192.168.1.10}"
     IP_STANDARD="$REPLY"
     is_valid_ipv4 "$IP_STANDARD" && break
     print_error "Ungültige IPv4-Adresse: $IP_STANDARD"
 done
 
-suggested_ssl="${IP_STANDARD%.*}.$((${IP_STANDARD##*.} + 1))"
-
-while true; do
-    ask "SSL-Modus IP (CA-Zertifikat erforderlich)" "$suggested_ssl"
-    IP_SSL="$REPLY"
-    is_valid_ipv4 "$IP_SSL" && break
-    print_error "Ungültige IPv4-Adresse: $IP_SSL"
-done
-
-[[ "$IP_STANDARD" != "$IP_SSL" ]] \
-    || die "Standard-IP und SSL-IP dürfen nicht identisch sein."
-
-if ip -4 addr show | grep -q "inet ${IP_SSL}/"; then
-    print_ok "$IP_SSL ist bereits zugewiesen"
-else
-    print_warn "$IP_SSL ist noch nicht auf einem Interface zugewiesen"
-    ask "Jetzt hinzufügen? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [j/N]" "N"
-    if [[ "${REPLY,,}" = "j" ]]; then
-        ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
-            && print_ok "$IP_SSL hinzugefügt (nicht persistent)" \
-            || print_warn "Hinzufügen fehlgeschlagen — bitte manuell ausführen"
+printf "\n"
+printf "  ${BOLD}SSL-Modus${RESET}: cachet auch HTTPS-Downloads (Epic, EA, Blizzard…)\n"
+printf "  Braucht eine zweite IP und einmalig ein CA-Zertifikat auf den Clients.\n\n"
+ask "SSL-Modus aktivieren? [j/N]" "N"
+SSL_ENABLED=0
+IP_SSL=""
+if [[ "${REPLY,,}" = "j" ]]; then
+    SSL_ENABLED=1
+    suggested_ssl="${IP_STANDARD%.*}.$((${IP_STANDARD##*.} + 1))"
+    while true; do
+        ask "SSL-Modus IP (zweite LAN-IP)" "$suggested_ssl"
+        IP_SSL="$REPLY"
+        is_valid_ipv4 "$IP_SSL" && break
+        print_error "Ungültige IPv4-Adresse: $IP_SSL"
+    done
+    [[ "$IP_STANDARD" != "$IP_SSL" ]] \
+        || die "Standard-IP und SSL-IP müssen verschieden sein."
+    if ip -4 addr show | grep -q "inet ${IP_SSL}/"; then
+        print_ok "$IP_SSL ist bereits zugewiesen"
+    else
+        print_warn "$IP_SSL ist noch nicht auf einem Interface zugewiesen"
+        ask "Jetzt hinzufügen? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [j/N]" "N"
+        if [[ "${REPLY,,}" = "j" ]]; then
+            ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
+                && print_ok "$IP_SSL hinzugefügt (nicht persistent)" \
+                || print_warn "Hinzufügen fehlgeschlagen — bitte manuell ausführen"
+        fi
+        printf "\n"
+        print_warn "Für persistente Konfiguration nach Neustart:"
+        printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
+        printf "    interfaces: sudo nano /etc/network/interfaces\n"
     fi
-    printf "\n"
-    print_warn "Für persistente Konfiguration nach Neustart:"
-    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
-    printf "    interfaces: sudo nano /etc/network/interfaces\n"
+    print_ok "SSL-Modus aktiviert ($IP_SSL)"
+else
+    print_ok "SSL-Modus übersprungen — nur Standard-Modus aktiv"
 fi
 
 # ── 3. Installations-Verzeichnis ──────────────────────────────────────────────
@@ -216,11 +228,15 @@ print_ok "docker-compose.yml → $INSTALL_DIR/docker-compose.yml"
 # ── 4. Cache-Konfiguration ────────────────────────────────────────────────────
 print_step "Cache-Konfiguration"
 
-ask "Cache-Verzeichnis Standard-Modus" "$INSTALL_DIR/cache/standard"
+ask "Cache-Verzeichnis" "$INSTALL_DIR/cache/standard"
 CACHE_DIR_STANDARD="$REPLY"
 
-ask "Cache-Verzeichnis SSL-Modus" "$INSTALL_DIR/cache/ssl"
-CACHE_DIR_SSL="$REPLY"
+if [[ "$SSL_ENABLED" = "1" ]]; then
+    ask "Cache-Verzeichnis SSL-Modus" "$INSTALL_DIR/cache/ssl"
+    CACHE_DIR_SSL="$REPLY"
+else
+    CACHE_DIR_SSL="$CACHE_DIR_STANDARD"
+fi
 
 while true; do
     ask "Cache-Größe pro Modus in GiB" "500"
@@ -239,11 +255,12 @@ printf "  Watchtower prüft täglich ob neue Images auf GHCR verfügbar sind\n"
 printf "  und aktualisiert die Container automatisch. Standard: aktiv.\n\n"
 
 ask "Automatische Updates deaktivieren? [j/N]" "N"
+COMPOSE_PROFILES=""
+[[ "$SSL_ENABLED" = "1" ]] && COMPOSE_PROFILES="ssl"
 if [[ "${REPLY,,}" = "j" ]]; then
-    COMPOSE_PROFILES=""
     print_warn "Watchtower deaktiviert — manuelle Updates mit: ./setup.sh update"
 else
-    COMPOSE_PROFILES="watchtower"
+    [[ -n "$COMPOSE_PROFILES" ]] && COMPOSE_PROFILES="${COMPOSE_PROFILES},watchtower" || COMPOSE_PROFILES="watchtower"
     print_ok "Watchtower aktiv (prüft täglich auf neue Images)"
 fi
 
@@ -261,7 +278,11 @@ cat > "$INSTALL_DIR/.env" <<EOF
 IP_STANDARD=${IP_STANDARD}
 
 # SSL-Modus (CA-Zertifikat auf Clients installieren): HTTP + HTTPS gecacht
+# Leer = SSL-Modus deaktiviert
 IP_SSL=${IP_SSL}
+
+# ── SSL ───────────────────────────────────────────────────────────────────────
+SSL_ENABLED=${SSL_ENABLED}
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 CACHE_DIR_STANDARD=${CACHE_DIR_STANDARD}
@@ -279,16 +300,19 @@ STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}
 
 # ── Profile ───────────────────────────────────────────────────────────────────
-# watchtower = automatische tägliche Updates aktiv; leer = deaktiviert
+# ssl = SSL-Modus aktiv; watchtower = tägliche Updates; leer = beides aus
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 EOF
 print_ok ".env geschrieben: $INSTALL_DIR/.env"
 
 # ── 7. Cache-Verzeichnisse anlegen ────────────────────────────────────────────
 print_step "Cache-Verzeichnisse anlegen"
-mkdir -p "$CACHE_DIR_STANDARD" "$CACHE_DIR_SSL"
+mkdir -p "$CACHE_DIR_STANDARD"
 print_ok "Standard: $CACHE_DIR_STANDARD"
-print_ok "SSL:      $CACHE_DIR_SSL"
+if [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]]; then
+    mkdir -p "$CACHE_DIR_SSL"
+    print_ok "SSL:      $CACHE_DIR_SSL"
+fi
 
 # ── 8. Systemd-Watchdog ───────────────────────────────────────────────────────
 print_step "Systemd-Watchdog installieren"
@@ -353,13 +377,18 @@ printf "${BOLD}┌────────────────────�
 printf "${BOLD}│              Konfiguration                   │${RESET}\n"
 printf "${BOLD}├──────────────────────────────────────────────┤${RESET}\n"
 printf "  %-26s %s\n"    "Standard-IP:"              "$IP_STANDARD"
-printf "  %-26s %s\n"    "SSL-IP:"                   "$IP_SSL"
+if [[ "$SSL_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "SSL-IP:"                  "$IP_SSL"
+else
+    printf "  %-26s %s\n" "SSL-Modus:"               "deaktiviert"
+fi
 printf "  %-26s %s\n"    "Installations-Dir:"        "$INSTALL_DIR"
-printf "  %-26s %s\n"    "Cache Standard:"           "$CACHE_DIR_STANDARD"
-printf "  %-26s %s\n"    "Cache SSL:"                "$CACHE_DIR_SSL"
+printf "  %-26s %s\n"    "Cache:"                    "$CACHE_DIR_STANDARD"
+[[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]] \
+    && printf "  %-26s %s\n" "Cache SSL:"            "$CACHE_DIR_SSL"
 printf "  %-26s %s GiB\n" "Cache-Größe:"             "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache-RAM:"               "$CACHE_MEM_MB"
-if [[ -n "$COMPOSE_PROFILES" ]]; then
+if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
     printf "  %-26s %s\n" "Watchtower:"               "aktiv (täglich)"
 else
     printf "  %-26s %s\n" "Watchtower:"               "deaktiviert"
@@ -387,14 +416,18 @@ printf "${BOLD}${GREEN}═══════════════════
 printf "\n"
 printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080\n" "$IP_STANDARD"
 printf "\n"
-printf "  ${BOLD}CA-Zertifikat${RESET} (nach erstem Start verfügbar):\n"
-printf "    %s/certs/ca.crt\n" "$INSTALL_DIR"
-printf "    → auf Clients installieren für SSL-Modus\n"
-printf "    → Anleitung: %s/docs/install-ca-cert.md\n" "$SCRIPT_DIR"
-printf "\n"
+if [[ "$SSL_ENABLED" = "1" ]]; then
+    printf "  ${BOLD}CA-Zertifikat${RESET} (nach erstem Start verfügbar):\n"
+    printf "    %s/certs/ca.crt\n" "$INSTALL_DIR"
+    printf "    → auf Clients installieren für SSL-Modus\n"
+    printf "    → Anleitung: %s/docs/install-ca-cert.md\n" "$SCRIPT_DIR"
+    printf "\n"
+fi
 printf "  ${BOLD}DNS auf Clients einstellen:${RESET}\n"
-printf "    Standard-Modus (kein Zertifikat nötig): %s\n" "$IP_STANDARD"
-printf "    SSL-Modus (mit Zertifikat):              %s\n" "$IP_SSL"
+printf "    Standard-Modus (kein Zertifikat): %s\n" "$IP_STANDARD"
+if [[ "$SSL_ENABLED" = "1" ]]; then
+    printf "    SSL-Modus (mit Zertifikat):       %s\n" "$IP_SSL"
+fi
 printf "\n"
 printf "  ${BOLD}Befehle:${RESET}\n"
 printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
