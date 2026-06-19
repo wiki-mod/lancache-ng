@@ -88,7 +88,6 @@ done < "$DOMAINS_FILE"
     echo "    hostnames;"
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
-        printf "    %-45s %s;\n" "$domain"   "$domain"
         printf "    %-45s %s;\n" ".$domain"  "$domain"
     done < "$DOMAINS_FILE"
     echo "    default default;"
