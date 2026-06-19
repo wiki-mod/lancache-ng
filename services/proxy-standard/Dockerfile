@@ -8,7 +8,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "deb http://nginx.org/packages/mainline/debian/ trixie nginx" > /etc/apt/sources.list.d/nginx.list \
     && apt-get update && apt-get install -y --no-install-recommends \
     nginx \
-    nginx-module-stream \
     gettext-base \
     locales \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
