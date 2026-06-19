@@ -1,16 +1,12 @@
 # lancache-ng
 
-You have multiple PCs or consoles on your home network and everyone keeps downloading the same games. lancache-ng fixes that — it caches game and software downloads locally so every PC after the first gets it at full LAN speed instead of waiting for the internet.
-
-## Install
-
-Run this on the Linux machine that will be your cache server:
+Caches game and software downloads on your local network — so the second person to download something gets it at full LAN speed instead of waiting for the internet again.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | bash
 ```
 
-The script asks for your server's IP address and how much disk space to use, then sets everything up and starts the cache automatically. After that, just point your clients' DNS at the server — done.
+Run that on a Linux machine in your network. The script asks for your server IP and how much disk space to use, then handles everything automatically. Point your clients' DNS at the server and you're done.
 
 ---
 
