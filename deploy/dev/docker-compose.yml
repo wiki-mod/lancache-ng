@@ -1,0 +1,150 @@
+services:
+
+  # ── Standard mode (no CA cert required) ──────────────────────────────────
+  # HTTP: cached. HTTPS: SNI passthrough to real CDN (not cached).
+  proxy-standard:
+    build:
+      context: ../../services/proxy-standard
+    env_file:
+      - ../../config/dev/proxy.env
+    volumes:
+      - proxy-standard-cache:/var/cache/nginx/lancache
+      - proxy-standard-logs:/var/log/nginx
+    ports:
+      - "${IP_STANDARD}:8080:80"    # use port 8080 in dev to avoid conflicts
+      - "${IP_STANDARD}:8443:443"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      lancache:
+        ipv4_address: 172.28.0.2
+    restart: unless-stopped
+
+  dns-standard:
+    build:
+      context: ../../services/dns
+    env_file:
+      - ../../config/dev/dns-standard.env
+    volumes:
+      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+    ports:
+      # NOTE (Windows): Port 53 is used by the Windows DNS client.
+      # Stop "DNS Client" in services.msc, or test the proxy directly:
+      #   curl --resolve steamcontent.com:8080:127.0.0.1 http://steamcontent.com/
+      - "${IP_STANDARD}:5300:53/udp"   # port 5300 in dev to avoid conflicts
+      - "${IP_STANDARD}:5300:53/tcp"
+    networks:
+      lancache:
+        ipv4_address: 172.28.0.3
+    restart: unless-stopped
+
+  # ── SSL mode (CA cert must be installed on clients) ───────────────────────
+  # HTTP + HTTPS: both cached via TLS interception.
+  proxy-ssl:
+    build:
+      context: ../../services/proxy
+    env_file:
+      - ../../config/dev/proxy.env
+    volumes:
+      - ../../certs:/etc/nginx/ssl/ca
+      - proxy-ssl-cache:/var/cache/nginx/lancache
+      - proxy-ssl-logs:/var/log/nginx
+      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
+    ports:
+      - "${IP_SSL}:80:80"
+      - "${IP_SSL}:443:443"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      lancache:
+        ipv4_address: 172.28.0.4
+    restart: unless-stopped
+
+  dns-ssl:
+    build:
+      context: ../../services/dns
+    env_file:
+      - ../../config/dev/dns-ssl.env
+    volumes:
+      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+    ports:
+      - "${IP_SSL}:5353:53/udp"
+      - "${IP_SSL}:5353:53/tcp"
+    networks:
+      lancache:
+        ipv4_address: 172.28.0.5
+    restart: unless-stopped
+
+  # ── Admin UI ──────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ../../services/ui
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
+      - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
+      - proxy-standard-logs:/var/log/nginx/standard:ro
+      - proxy-ssl-logs:/var/log/nginx/ssl:ro
+      - proxy-standard-cache:/var/cache/standard:ro
+      - proxy-ssl-cache:/var/cache/ssl:ro
+    ports:
+      - "9090:8080"    # proxy-standard belegt schon 127.0.0.1:8080 → UI auf 9090
+    environment:
+      - DNS_STANDARD_SERVICE=dns-standard
+      - DNS_SSL_SERVICE=dns-ssl
+      - PROXY_SSL_SERVICE=proxy-ssl
+      - NETDATA_URL=http://netdata:19999
+      - STANDARD_CACHE_MAX_GB=10
+      - SSL_CACHE_MAX_GB=10
+      - STANDARD_IP=${IP_STANDARD}
+      - SSL_IP=${IP_SSL}
+    networks:
+      - lancache
+    depends_on:
+      - proxy-standard
+      - proxy-ssl
+      - netdata
+    restart: unless-stopped
+
+  # ── Netdata (system metrics backend, kein externer Port) ──────────────────
+  netdata:
+    image: netdata/netdata
+    hostname: lancache-netdata
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - netdataconfig:/etc/netdata
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - lancache
+    restart: unless-stopped
+
+networks:
+  lancache:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+
+volumes:
+  proxy-standard-cache:
+  proxy-ssl-cache:
+  proxy-standard-logs:
+  proxy-ssl-logs:
+  netdataconfig:
+  netdatalib:
+  netdatacache:

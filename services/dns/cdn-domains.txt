@@ -1,0 +1,158 @@
+# LanCache DNS — CDN domain list
+# One domain per line. The leading dot is added automatically (covers all subdomains).
+# Lines starting with # are ignored.
+
+# ---- Steam ----
+steamcontent.com
+content1.steampowered.com
+content2.steampowered.com
+content3.steampowered.com
+content4.steampowered.com
+content5.steampowered.com
+cs.steampowered.com
+
+# ---- Epic Games ----
+download.epicgames.com
+epicgames-download1.akamaized.net
+fastly.cdn.epicgames.com
+
+# ---- Blizzard / Battle.net ----
+level3.blizzard.com
+cdn.blizzard.com
+dist.blizzard.com
+blzddist1-a.akamaihd.net
+blzddist2-a.akamaihd.net
+
+# ---- EA / Origin ----
+download2.cdn.ea.com
+download.origin.com
+origin-a.akamaihd.net
+
+# ---- Riot Games ----
+lol.secure.dyn.riotcdn.net
+valorant.secure.dyn.riotcdn.net
+riotgamespatchcdn.riotgames.com
+
+# ---- Ubisoft ----
+cdn.ubi.com
+static3.cdn.ubi.com
+ubistatic-a.akamaihd.net
+
+# ---- GOG ----
+cdn.gog.com
+downloads.gog.com
+gamedownloads.gog.com
+
+# ---- Bethesda ----
+content.bethesda.net
+
+# ---- Rockstar ----
+gamedownloads.rockstargames.com
+
+# ---- Warframe ----
+content.warframe.com
+origin.warframe.com
+
+# ---- Path of Exile ----
+patchcdn.pathofexile.com
+
+# ---- Guild Wars 2 ----
+assetcdn.101.arenanetworks.com
+
+# ---- Windows Update / Microsoft ----
+download.windowsupdate.com
+fg.download.windowsupdate.com.delivery.microsoft.com
+emdl.ws.microsoft.com
+tlu.dl.delivery.mp.microsoft.com
+dl.delivery.mp.microsoft.com
+download.microsoft.com
+officecdn.microsoft.com
+officecdn-microsoft-com.akamaized.net
+software-download.microsoft.com
+
+# ---- Ubuntu / Canonical ----
+archive.ubuntu.com
+security.ubuntu.com
+ports.ubuntu.com
+releases.ubuntu.com
+esm.ubuntu.com
+
+# ---- Debian ----
+deb.debian.org
+security.debian.org
+cdimage.debian.org
+ftp.debian.org
+
+# ---- Fedora ----
+dl.fedoraproject.org
+mirrors.fedoraproject.org
+
+# ---- Rocky Linux ----
+dl.rockylinux.org
+download.rockylinux.org
+
+# ---- AlmaLinux ----
+repo.almalinux.org
+
+# ---- openSUSE ----
+download.opensuse.org
+mirrorcache.opensuse.org
+
+# ---- Linux Mint ----
+packages.linuxmint.com
+
+# ---- Arch Linux ----
+geo.mirror.pkgbuild.com
+mirror.pkgbuild.com
+
+# ---- CachyOS (Arch-based gaming distro) ----
+mirror.cachyos.org
+cdn.cachyos.org
+
+# ---- Garuda Linux (Arch-based gaming distro) ----
+cf-mirror.garudalinux.org
+builds.garudalinux.org
+
+# ---- Manjaro ----
+repo.manjaro.org
+cdn-mirror.manjaro.org
+
+# ---- EndeavourOS (Arch-based) ----
+fastpkg.endeavouros.com
+mirror.endeavouros.com
+
+# ---- Pop!_OS (System76, Ubuntu-based, gaming-friendly) ----
+apt.pop-os.org
+iso.pop-os.org
+
+# ---- Nobara (Fedora-based gaming distro, GloriousEggroll) ----
+updates.nobaraproject.org
+dl.nobaraproject.org
+
+# ---- SteamOS / Steam Deck ----
+repo.steamos.cloud
+steamdeck-packages.steamos.cloud
+
+# ---- NVIDIA ----
+download.nvidia.com
+us.download.nvidia.com
+international.download.nvidia.com
+uk.download.nvidia.com
+developer.download.nvidia.com
+
+# ---- AMD ----
+drivers.amd.com
+pat.downloads.amd.com
+
+# ---- Xbox / PlayStation ----
+# NOT listed here: consoles cannot install custom CAs.
+# If their CDN domains were redirected to our proxy, the TLS handshake
+# would fail and the console could not fall back (our DNS would keep
+# returning our proxy IP on retry). Omitting them means consoles get
+# real CDN IPs and everything works — just without caching.
+#
+# To enable Xbox PC (Game Pass for PC) caching on a LAN with no Xbox
+# consoles, add these manually:
+#   assets1.xboxlive.com
+#   xvcf1.xboxlive.com
+#   xvcf2.xboxlive.com

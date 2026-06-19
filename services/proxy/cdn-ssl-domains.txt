@@ -1,0 +1,114 @@
+# Root CDN domains — one per line.
+# At startup, a wildcard cert is generated for each (covers domain and *.domain).
+# IMPORTANT: wildcards only cover ONE subdomain level.
+# Example: for foo.bar.example.com, add bar.example.com (not example.com).
+
+# Steam
+steamcontent.com
+steampowered.com
+steamstatic.com
+
+# Epic Games
+epicgames.com
+unrealengine.com
+
+# Blizzard / Battle.net
+blizzard.com
+battle.net
+akamaihd.net
+
+# EA
+ea.com
+origin.com
+
+# Riot Games
+riotcdn.net
+riotgames.com
+
+# Ubisoft
+ubi.com
+
+# GOG
+gog.com
+
+# Bethesda
+bethesda.net
+
+# Rockstar
+rockstargames.com
+
+# Warframe
+warframe.com
+
+# Path of Exile
+pathofexile.com
+
+# Guild Wars 2
+arenanetworks.com
+
+# Windows Update / Microsoft
+windowsupdate.com
+microsoft.com
+ws.microsoft.com
+delivery.mp.microsoft.com
+dl.delivery.mp.microsoft.com
+akamaized.net
+
+# Ubuntu / Canonical
+ubuntu.com
+
+# Debian
+debian.org
+
+# Fedora
+fedoraproject.org
+
+# Rocky Linux
+rockylinux.org
+
+# AlmaLinux
+almalinux.org
+
+# openSUSE
+opensuse.org
+
+# Linux Mint
+linuxmint.com
+
+# Arch Linux
+mirror.pkgbuild.com
+
+# CachyOS
+cachyos.org
+
+# Garuda Linux
+garudalinux.org
+
+# Manjaro
+manjaro.org
+
+# EndeavourOS
+endeavouros.com
+
+# Pop!_OS
+pop-os.org
+
+# Nobara
+nobaraproject.org
+
+# SteamOS / Steam Deck
+steamos.cloud
+
+# NVIDIA
+# nvidia.com covers *.nvidia.com = download.nvidia.com
+# download.nvidia.com covers *.download.nvidia.com = us/international/uk/developer.download.nvidia.com
+nvidia.com
+download.nvidia.com
+
+# AMD
+# amd.com covers *.amd.com = drivers.amd.com
+# downloads.amd.com covers *.downloads.amd.com = pat.downloads.amd.com
+amd.com
+downloads.amd.com
+
+# Xbox and PlayStation are intentionally omitted — see services/dns/cdn-domains.txt for why.

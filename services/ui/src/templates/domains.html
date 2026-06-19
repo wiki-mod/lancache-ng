@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %} – Domains{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-6">
+
+  <div>
+    <h1 class="text-xl font-bold text-white">Domain-Verwaltung</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      Nach jeder Änderung werden die betroffenen Container automatisch neu gestartet (~3 Sek.).
+    </p>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+    <!-- DNS-Domains -->
+    <div class="card flex flex-col gap-4">
+      <div>
+        <h2 class="font-semibold text-slate-200">DNS-Liste</h2>
+        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen</p>
+      </div>
+
+      <!-- Add form -->
+      <form action="/domains/dns/add" method="post" class="flex gap-2">
+        <input type="text" name="domain" placeholder="z.B. steamcontent.com"
+               required
+               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <button type="submit"
+                class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+          Hinzufügen
+        </button>
+      </form>
+
+      <!-- Domain list -->
+      <div class="space-y-1 max-h-96 overflow-y-auto">
+        {% if dns_domains %}
+        {% for domain in dns_domains %}
+        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+          <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
+          <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
+            <input type="hidden" name="domain" value="{{ domain }}">
+            <button type="submit"
+                    onclick="return confirm('{{ domain }} aus der DNS-Liste entfernen?')"
+                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+              Entfernen
+            </button>
+          </form>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-slate-500 text-sm px-3 py-2">Liste ist leer.</p>
+        {% endif %}
+      </div>
+
+      <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
+    </div>
+
+    <!-- SSL-Domains -->
+    <div class="card flex flex-col gap-4">
+      <div>
+        <h2 class="font-semibold text-slate-200">SSL-Zertifikat-Liste</h2>
+        <p class="text-xs text-slate-500 mt-0.5">cdn-ssl-domains.txt · Root-Domains für Wildcard-Certs</p>
+      </div>
+
+      <!-- Add form -->
+      <form action="/domains/ssl/add" method="post" class="flex gap-2">
+        <input type="text" name="domain" placeholder="z.B. steampowered.com"
+               required
+               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500">
+        <button type="submit"
+                class="bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+          Hinzufügen
+        </button>
+      </form>
+
+      <!-- Domain list -->
+      <div class="space-y-1 max-h-96 overflow-y-auto">
+        {% if ssl_domains %}
+        {% for domain in ssl_domains %}
+        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+          <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
+          <form action="/domains/ssl/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
+            <input type="hidden" name="domain" value="{{ domain }}">
+            <button type="submit"
+                    onclick="return confirm('{{ domain }} aus der SSL-Liste entfernen?\nDer SSL-Proxy wird neu gestartet.')"
+                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+              Entfernen
+            </button>
+          </form>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-slate-500 text-sm px-3 py-2">Liste ist leer.</p>
+        {% endif %}
+      </div>
+
+      <p class="text-xs text-slate-500">{{ ssl_domains | length }} Einträge · Wildcard-Cert pro Root-Domain</p>
+    </div>
+
+  </div>
+
+  <!-- Info-Box -->
+  <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 text-sm text-blue-300">
+    <p class="font-semibold mb-1">Hinweis zum SSL-Modus</p>
+    <p>Die DNS-Liste steuert welche Domains auf den Cache-DNS zeigen.
+       Die SSL-Liste bestimmt für welche Domains ein Wildcard-Zertifikat ausgestellt wird.
+       Neue SSL-Domains brauchen einen Eintrag in <em>beiden</em> Listen.</p>
+  </div>
+
+</div>
+{% endblock %}

@@ -1,0 +1,7 @@
+# Force LF line endings — all files run inside Linux containers
+* text=auto eol=lf
+
+# Binary files — no line ending conversion
+*.crt binary
+*.key binary
+*.pem binary

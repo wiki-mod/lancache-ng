@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %} – Dashboard{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto space-y-6">
+
+  <h1 class="text-xl font-bold text-white">Dashboard</h1>
+
+  <!-- Cache-Übersicht -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+    <!-- Standard Cache -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-slate-200">Standard Cache</h2>
+        <span class="text-xs text-slate-500">HTTP · SNI-Passthrough</span>
+      </div>
+      <div class="mb-3">
+        <div class="flex justify-between text-sm mb-1">
+          <span class="text-slate-400">Speicher</span>
+          <span class="text-white font-mono">{{ standard_used_gb }} / {{ standard_max_gb }} GB</span>
+        </div>
+        <div class="w-full bg-slate-700 rounded-full h-2">
+          <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ standard_pct }}%"></div>
+        </div>
+        <p class="text-xs text-slate-500 mt-1">{{ standard_pct }}% belegt</p>
+      </div>
+      {% if standard_status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
+        <div>
+          <p class="text-2xl font-bold text-white">{{ standard_status.active }}</p>
+          <p class="text-xs text-slate-400">Verbindungen</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ standard_status.requests }}</p>
+          <p class="text-xs text-slate-400">Requests</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ standard_status.waiting }}</p>
+          <p class="text-xs text-slate-400">Wartend</p>
+        </div>
+      </div>
+      {% else %}
+      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
+      {% endif %}
+    </div>
+
+    <!-- SSL Cache -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-slate-200">SSL Cache</h2>
+        <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
+      </div>
+      <div class="mb-3">
+        <div class="flex justify-between text-sm mb-1">
+          <span class="text-slate-400">Speicher</span>
+          <span class="text-white font-mono">{{ ssl_used_gb }} / {{ ssl_max_gb }} GB</span>
+        </div>
+        <div class="w-full bg-slate-700 rounded-full h-2">
+          <div class="bg-purple-500 h-2 rounded-full transition-all" style="width: {{ ssl_pct }}%"></div>
+        </div>
+        <p class="text-xs text-slate-500 mt-1">{{ ssl_pct }}% belegt</p>
+      </div>
+      {% if ssl_status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
+        <div>
+          <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
+          <p class="text-xs text-slate-400">Verbindungen</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ ssl_status.requests }}</p>
+          <p class="text-xs text-slate-400">Requests</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ ssl_status.waiting }}</p>
+          <p class="text-xs text-slate-400">Wartend</p>
+        </div>
+      </div>
+      {% else %}
+      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Cache-Trefferquote -->
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="card text-center">
+      <p class="text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
+      <p class="text-sm text-slate-400 mt-1">Cache-Trefferquote</p>
+    </div>
+    <div class="card text-center">
+      <p class="text-3xl font-bold text-white">{{ log_stats.total_requests }}</p>
+      <p class="text-sm text-slate-400 mt-1">Requests gesamt</p>
+    </div>
+    <div class="card text-center">
+      <p class="text-3xl font-bold text-emerald-400">{{ log_stats.hits }}</p>
+      <p class="text-sm text-slate-400 mt-1">Cache HITs</p>
+    </div>
+    <div class="card text-center">
+      <p class="text-3xl font-bold text-white">{{ log_stats.total_bytes_gb | round(precision=1) }} GB</p>
+      <p class="text-sm text-slate-400 mt-1">Daten ausgeliefert</p>
+    </div>
+  </div>
+
+  <!-- Letzte Requests -->
+  <div class="card">
+    <h2 class="font-semibold text-slate-200 mb-3">Letzte Anfragen (SSL-Proxy)</h2>
+    {% if recent_logs %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-slate-400 text-left border-b border-slate-700">
+            <th class="pb-2 pr-4 font-medium">Host</th>
+            <th class="pb-2 pr-4 font-medium">Pfad</th>
+            <th class="pb-2 pr-4 font-medium">Status</th>
+            <th class="pb-2 pr-4 font-medium">Größe</th>
+            <th class="pb-2 font-medium">Cache</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700/50">
+          {% for entry in recent_logs %}
+          <tr class="hover:bg-slate-700/30 transition-colors">
+            <td class="py-1.5 pr-4 text-blue-400 font-mono text-xs">{{ entry.host }}</td>
+            <td class="py-1.5 pr-4 text-slate-300 font-mono text-xs max-w-xs truncate">{{ entry.path }}</td>
+            <td class="py-1.5 pr-4">
+              {% if entry.status < 300 %}
+              <span class="text-emerald-400 font-mono text-xs">{{ entry.status }}</span>
+              {% elif entry.status < 400 %}
+              <span class="text-blue-400 font-mono text-xs">{{ entry.status }}</span>
+              {% else %}
+              <span class="text-red-400 font-mono text-xs">{{ entry.status }}</span>
+              {% endif %}
+            </td>
+            <td class="py-1.5 pr-4 text-slate-400 font-mono text-xs">{{ entry.bytes_human }}</td>
+            <td class="py-1.5">
+              {% if entry.cache_status == "HIT" %}<span class="badge-hit">HIT</span>
+              {% elif entry.cache_status == "MISS" %}<span class="badge-miss">MISS</span>
+              {% elif entry.cache_status == "EXPIRED" %}<span class="badge-expired">EXPIRED</span>
+              {% else %}<span class="badge-other">{{ entry.cache_status }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-slate-500 text-sm">Noch keine Anfragen protokolliert.</p>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}

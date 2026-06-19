@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %} – Statistiken{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto space-y-6">
+
+  <div>
+    <h1 class="text-xl font-bold text-white">Systemstatistiken</h1>
+    <p class="text-sm text-slate-400 mt-1">Live-Daten via Netdata (automatisch aktualisiert)</p>
+  </div>
+
+  <!-- Charts Grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+    <div class="card">
+      <h3 class="font-semibold text-slate-200 mb-3">CPU-Auslastung</h3>
+      <canvas id="cpuChart" height="160"></canvas>
+    </div>
+
+    <div class="card">
+      <h3 class="font-semibold text-slate-200 mb-3">RAM-Nutzung</h3>
+      <canvas id="ramChart" height="160"></canvas>
+    </div>
+
+    <div class="card">
+      <h3 class="font-semibold text-slate-200 mb-3">Netzwerkdurchsatz</h3>
+      <canvas id="netChart" height="160"></canvas>
+    </div>
+
+    <div class="card">
+      <h3 class="font-semibold text-slate-200 mb-3">Festplatten-I/O</h3>
+      <canvas id="diskChart" height="160"></canvas>
+    </div>
+
+  </div>
+
+  <div id="netdata-error" class="hidden bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 text-sm text-yellow-300">
+    Netdata-Verbindung nicht verfügbar. Starte den Stack mit Netdata:
+    <code class="ml-2 font-mono text-xs">docker compose up netdata</code>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+const NETDATA = '/api/netdata';
+const POINTS  = 60;  // 1 Minute Historie
+const REFRESH  = 3000; // ms
+
+const chartDefaults = {
+  type: 'line',
+  options: {
+    responsive: true,
+    maintainAspectRatio: true,
+    animation: false,
+    plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12, font: { size: 11 } } } },
+    scales: {
+      x: { display: false },
+      y: {
+        grid: { color: '#334155' },
+        ticks: { color: '#94a3b8', font: { size: 11 } }
+      }
+    }
+  }
+};
+
+function makeChart(id, labels, datasets) {
+  const ctx = document.getElementById(id);
+  return new Chart(ctx, {
+    ...chartDefaults,
+    data: { labels: Array(POINTS).fill(''), datasets }
+  });
+}
+
+const cpuChart = makeChart('cpuChart', [], [{
+  label: 'CPU %', data: [], fill: true,
+  borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
+  tension: 0.3, pointRadius: 0, borderWidth: 2
+}]);
+
+const ramChart = makeChart('ramChart', [], [{
+  label: 'Belegt (GB)', data: [], fill: true,
+  borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)',
+  tension: 0.3, pointRadius: 0, borderWidth: 2
+}]);
+
+const netChart = makeChart('netChart', [], [
+  { label: 'Empfangen (MB/s)', data: [], fill: false, borderColor: '#10b981', tension: 0.3, pointRadius: 0, borderWidth: 2 },
+  { label: 'Gesendet (MB/s)',  data: [], fill: false, borderColor: '#f59e0b', tension: 0.3, pointRadius: 0, borderWidth: 2 },
+]);
+
+const diskChart = makeChart('diskChart', [], [
+  { label: 'Lesen (MB/s)',    data: [], fill: false, borderColor: '#06b6d4', tension: 0.3, pointRadius: 0, borderWidth: 2 },
+  { label: 'Schreiben (MB/s)',data: [], fill: false, borderColor: '#f43f5e', tension: 0.3, pointRadius: 0, borderWidth: 2 },
+]);
+
+function push(chart, ...values) {
+  values.forEach((v, i) => {
+    chart.data.datasets[i].data.push(v);
+    if (chart.data.datasets[i].data.length > POINTS)
+      chart.data.datasets[i].data.shift();
+  });
+  chart.data.labels = Array(chart.data.datasets[0].data.length).fill('');
+  chart.update('none');
+}
+
+async function fetchChart(path) {
+  const res = await fetch(`${NETDATA}/${path}&points=${POINTS}&group=average&format=json`);
+  if (!res.ok) throw new Error(res.status);
+  return res.json();
+}
+
+let errorShown = false;
+
+async function refresh() {
+  try {
+    // CPU
+    const cpu = await fetchChart('data?chart=system.cpu');
+    const cpuRow = cpu.data[cpu.data.length - 1];
+    const cpuPct = cpuRow ? (100 - cpuRow[cpuRow.length - 1]).toFixed(1) : 0;
+    push(cpuChart, parseFloat(cpuPct));
+    cpuChart.options.scales.y.max = 100;
+
+    // RAM
+    const ram = await fetchChart('data?chart=system.ram');
+    const ramRow = ram.data[ram.data.length - 1];
+    const usedGB = ramRow ? (ramRow[1] / 1024).toFixed(2) : 0;
+    push(ramChart, parseFloat(usedGB));
+
+    // Network — try eth0, fallback to eth1
+    let net;
+    try { net = await fetchChart('data?chart=net.eth0'); }
+    catch { net = await fetchChart('data?chart=net.eth1'); }
+    const netRow = net.data[net.data.length - 1];
+    const rxMB = netRow ? Math.abs(netRow[1] / 1000).toFixed(2) : 0;
+    const txMB = netRow ? Math.abs(netRow[2] / 1000).toFixed(2) : 0;
+    push(netChart, parseFloat(rxMB), parseFloat(txMB));
+
+    // Disk I/O
+    const disk = await fetchChart('data?chart=system.io');
+    const diskRow = disk.data[disk.data.length - 1];
+    const readMB  = diskRow ? Math.abs(diskRow[1] / 1000).toFixed(2) : 0;
+    const writeMB = diskRow ? Math.abs(diskRow[2] / 1000).toFixed(2) : 0;
+    push(diskChart, parseFloat(readMB), parseFloat(writeMB));
+
+    document.getElementById('netdata-error').classList.add('hidden');
+  } catch (e) {
+    if (!errorShown) {
+      document.getElementById('netdata-error').classList.remove('hidden');
+      errorShown = true;
+    }
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH);
+</script>
+{% endblock %}

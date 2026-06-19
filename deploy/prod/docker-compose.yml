@@ -1,0 +1,167 @@
+services:
+
+  # ── Standard mode (no CA cert required) ──────────────────────────────────
+  # HTTP: cached. HTTPS: SNI passthrough to real CDN (not cached).
+  proxy-standard:
+    image: ghcr.io/wiki-mod/lancache-ng/proxy-standard:latest
+    build:
+      context: ../../services/proxy-standard
+    env_file:
+      - ../../config/prod/proxy.env
+    volumes:
+      - proxy-standard-cache:/var/cache/nginx/lancache
+      - proxy-standard-logs:/var/log/nginx
+    ports:
+      - "${IP_STANDARD}:80:80"
+      - "${IP_STANDARD}:443:443"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dns-standard:
+    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    build:
+      context: ../../services/dns
+    env_file:
+      - ../../config/prod/dns-standard.env
+    volumes:
+      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+    ports:
+      - "${IP_STANDARD}:53:53/udp"
+      - "${IP_STANDARD}:53:53/tcp"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── SSL mode (CA cert must be installed on clients) ───────────────────────
+  # HTTP + HTTPS: both cached via TLS interception.
+  proxy-ssl:
+    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
+    build:
+      context: ../../services/proxy
+    env_file:
+      - ../../config/prod/proxy.env
+    volumes:
+      - ../../certs:/etc/nginx/ssl/ca:ro
+      - proxy-ssl-cache:/var/cache/nginx/lancache
+      - proxy-ssl-logs:/var/log/nginx
+      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
+    ports:
+      - "${IP_SSL}:80:80"
+      - "${IP_SSL}:443:443"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dns-ssl:
+    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    build:
+      context: ../../services/dns
+    env_file:
+      - ../../config/prod/dns-ssl.env
+    volumes:
+      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+    ports:
+      - "${IP_SSL}:53:53/udp"
+      - "${IP_SSL}:53:53/tcp"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Admin UI ──────────────────────────────────────────────────────────────
+  ui:
+    image: ghcr.io/wiki-mod/lancache-ng/ui:latest
+    build:
+      context: ../../services/ui
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
+      - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
+      - proxy-standard-logs:/var/log/nginx/standard:ro
+      - proxy-ssl-logs:/var/log/nginx/ssl:ro
+      - /srv/lancache/standard:/var/cache/standard:ro
+      - /srv/lancache/ssl:/var/cache/ssl:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - DNS_STANDARD_SERVICE=dns-standard
+      - DNS_SSL_SERVICE=dns-ssl
+      - PROXY_SSL_SERVICE=proxy-ssl
+      - NETDATA_URL=http://netdata:19999
+      - STANDARD_CACHE_MAX_GB=500
+      - SSL_CACHE_MAX_GB=500
+      - STANDARD_IP=${IP_STANDARD}
+      - SSL_IP=${IP_SSL}
+    depends_on:
+      - proxy-standard
+      - proxy-ssl
+      - netdata
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Netdata (system metrics backend, kein externer Port) ──────────────────
+  netdata:
+    image: netdata/netdata
+    hostname: lancache-netdata
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - netdataconfig:/etc/netdata
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  proxy-standard-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/lancache/standard
+  proxy-ssl-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/lancache/ssl
+  proxy-standard-logs:
+  proxy-ssl-logs:
+  netdataconfig:
+  netdatalib:
+  netdatacache:

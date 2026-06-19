@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %} – Einrichtung{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto space-y-8">
+
+  <div>
+    <h1 class="text-xl font-bold text-white">Einrichtung</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      Transparenter HTTP-Proxy und Client-Konfiguration.
+    </p>
+  </div>
+
+  <!-- ── Transparenter Proxy (Router) ─────────────────────────────────────── -->
+  <div class="card space-y-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Transparenter HTTP-Proxy <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Empfohlen</span></h2>
+      <p class="text-xs text-slate-400 mt-1">
+        Auf dem Router/Gateway einrichten — alle HTTP-Downloads aller LAN-Geräte werden automatisch gecacht,
+        ohne dass auf den Clients etwas konfiguriert werden muss. Gilt auch für Geräte ohne Proxy-Unterstützung.
+      </p>
+    </div>
+
+    <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3 text-xs text-amber-300">
+      <strong>Standard-Modus ({{ standard_ip }}):</strong> HTTP wird gecacht, HTTPS wird transparent durchgeleitet.
+      Kein CA-Zertifikat auf den Clients nötig.
+    </div>
+
+    <!-- iptables -->
+    <div>
+      <p class="text-xs font-medium text-slate-400 mb-2">iptables (auf dem Router/Gateway als root ausführen)</p>
+      <div class="relative">
+        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-iptables"># Transparenter HTTP-Cache — alle LAN-Anfragen auf Port 80 abfangen
+iptables -t nat -A PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
+  ! -d {{ standard_ip }} -j DNAT --to-destination {{ standard_ip }}:80
+
+# Beim Neustart persistent machen (Debian/Ubuntu)
+apt install iptables-persistent
+netfilter-persistent save</pre>
+        <button onclick="copyEl('cmd-iptables', this)"
+                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+          Kopieren
+        </button>
+      </div>
+      <p class="text-xs text-slate-500 mt-1"><code class="text-slate-400">LAN_INTERFACE</code> durch das interne Netz-Interface ersetzen (z. B. <code class="text-slate-400">eth1</code>, <code class="text-slate-400">br0</code>).</p>
+    </div>
+
+    <!-- nftables -->
+    <div>
+      <p class="text-xs font-medium text-slate-400 mb-2">nftables (moderner Ersatz für iptables)</p>
+      <div class="relative">
+        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-nftables">nft add table ip lancache
+nft add chain ip lancache prerouting \
+  '{ type nat hook prerouting priority -100; }'
+nft add rule ip lancache prerouting \
+  iifname "LAN_INTERFACE" tcp dport 80 \
+  ip daddr != {{ standard_ip }} \
+  dnat to {{ standard_ip }}:80</pre>
+        <button onclick="copyEl('cmd-nftables', this)"
+                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+          Kopieren
+        </button>
+      </div>
+    </div>
+
+    <!-- Rückgängig machen -->
+    <details class="text-xs text-slate-400">
+      <summary class="cursor-pointer hover:text-slate-300">Rückgängig machen (iptables)</summary>
+      <div class="relative mt-2">
+        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-iptables-del">iptables -t nat -D PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
+  ! -d {{ standard_ip }} -j DNAT --to-destination {{ standard_ip }}:80</pre>
+        <button onclick="copyEl('cmd-iptables-del', this)"
+                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+          Kopieren
+        </button>
+      </div>
+    </details>
+  </div>
+
+  <!-- ── Client-seitige Konfiguration ──────────────────────────────────────── -->
+  <div class="card space-y-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Client-seitige Proxy-Einstellung <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-slate-600/50 text-slate-400">Alternativ</span></h2>
+      <p class="text-xs text-slate-400 mt-1">
+        Ohne Router-Zugang: Proxy direkt im Paketmanager oder als Systemvariable konfigurieren.
+        Muss auf jedem Gerät einzeln eingerichtet werden.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 gap-3">
+
+      <!-- apt -->
+      <div>
+        <p class="text-xs font-medium text-slate-400 mb-1.5">apt (Debian · Ubuntu · Pop!_OS · Mint)</p>
+        <div class="relative">
+          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-apt">echo 'Acquire::http::Proxy "http://{{ standard_ip }}/";' \
+  | sudo tee /etc/apt/apt.conf.d/01lancache</pre>
+          <button onclick="copyEl('cmd-apt', this)"
+                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+            Kopieren
+          </button>
+        </div>
+      </div>
+
+      <!-- pacman / yay -->
+      <div>
+        <p class="text-xs font-medium text-slate-400 mb-1.5">pacman / yay (Arch · CachyOS · Garuda · Manjaro)</p>
+        <div class="relative">
+          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-pacman">echo 'http_proxy=http://{{ standard_ip }}' | sudo tee -a /etc/environment
+echo 'https_proxy=http://{{ standard_ip }}' | sudo tee -a /etc/environment</pre>
+          <button onclick="copyEl('cmd-pacman', this)"
+                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+            Kopieren
+          </button>
+        </div>
+        <p class="text-xs text-slate-500 mt-1">pacman hat keinen eingebauten Proxy — die Env-Variable wird vom Downloader (curl/wget) ausgewertet.</p>
+      </div>
+
+      <!-- dnf -->
+      <div>
+        <p class="text-xs font-medium text-slate-400 mb-1.5">dnf (Fedora · Nobara · AlmaLinux · Rocky)</p>
+        <div class="relative">
+          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-dnf">echo 'proxy=http://{{ standard_ip }}' | sudo tee -a /etc/dnf/dnf.conf</pre>
+          <button onclick="copyEl('cmd-dnf', this)"
+                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+            Kopieren
+          </button>
+        </div>
+      </div>
+
+      <!-- pip -->
+      <div>
+        <p class="text-xs font-medium text-slate-400 mb-1.5">pip (Python-Pakete)</p>
+        <div class="relative">
+          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-pip">pip config set global.proxy http://{{ standard_ip }}</pre>
+          <button onclick="copyEl('cmd-pip', this)"
+                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+            Kopieren
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── SSL-Modus ──────────────────────────────────────────────────────────── -->
+  <div class="card space-y-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">SSL-Modus ({{ ssl_ip }}) — auch HTTPS cachen</h2>
+      <p class="text-xs text-slate-400 mt-1">
+        Clients müssen das CA-Zertifikat einmalig installieren. Danach werden auch HTTPS-Downloads gecacht.
+        DNS-Server auf <code class="text-slate-300">{{ ssl_ip }}</code> setzen (statt {{ standard_ip }}).
+      </p>
+    </div>
+    <div>
+      <p class="text-xs font-medium text-slate-400 mb-2">CA-Zertifikat installieren</p>
+      <div class="relative">
+        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-ca-linux"># Linux (systemweit)
+sudo cp ca.crt /usr/local/share/ca-certificates/lancache-ca.crt
+sudo update-ca-certificates
+
+# Arch / CachyOS / Garuda (trust-store)
+sudo trust anchor --store ca.crt</pre>
+        <button onclick="copyEl('cmd-ca-linux', this)"
+                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+          Kopieren
+        </button>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">
+        Vollständige Anleitung für alle Betriebssysteme:
+        <a href="#" class="text-blue-400 hover:underline">docs/install-ca-cert.md</a>
+      </p>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyEl(id, btn) {
+  const text = document.getElementById(id).innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Kopiert!';
+    btn.classList.add('text-green-400');
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('text-green-400'); }, 1800);
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  });
+}
+</script>
+{% endblock %}

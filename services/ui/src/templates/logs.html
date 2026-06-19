@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %} – Logs{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto space-y-4">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-xl font-bold text-white">Access Logs</h1>
+      <p class="text-sm text-slate-400 mt-1">Letzte 200 Einträge aus beiden Proxies</p>
+    </div>
+    <button onclick="location.reload()"
+            class="text-sm text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
+      Aktualisieren
+    </button>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="flex gap-3 flex-wrap">
+    <button onclick="filterLogs('all')"     id="btn-all"     class="filter-btn active-filter text-xs px-3 py-1.5 rounded-lg border border-slate-600 text-slate-300 hover:text-white transition-colors">Alle</button>
+    <button onclick="filterLogs('HIT')"     id="btn-HIT"     class="filter-btn text-xs px-3 py-1.5 rounded-lg border border-slate-600 text-emerald-400 hover:text-white transition-colors">HIT</button>
+    <button onclick="filterLogs('MISS')"    id="btn-MISS"    class="filter-btn text-xs px-3 py-1.5 rounded-lg border border-slate-600 text-orange-400 hover:text-white transition-colors">MISS</button>
+    <button onclick="filterLogs('EXPIRED')" id="btn-EXPIRED" class="filter-btn text-xs px-3 py-1.5 rounded-lg border border-slate-600 text-yellow-400 hover:text-white transition-colors">EXPIRED</button>
+    <input  type="search" id="host-filter" placeholder="Host filtern..."
+            oninput="filterLogs('_input')"
+            class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 ml-auto">
+  </div>
+
+  <div class="card p-0 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs" id="log-table">
+        <thead class="bg-slate-700/50">
+          <tr class="text-slate-400 text-left">
+            <th class="px-4 py-3 font-medium w-36">Zeit</th>
+            <th class="px-4 py-3 font-medium">Client</th>
+            <th class="px-4 py-3 font-medium">Host</th>
+            <th class="px-4 py-3 font-medium">Methode</th>
+            <th class="px-4 py-3 font-medium max-w-xs">Pfad</th>
+            <th class="px-4 py-3 font-medium w-16">Status</th>
+            <th class="px-4 py-3 font-medium w-24">Größe</th>
+            <th class="px-4 py-3 font-medium w-24">Cache</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700/50" id="log-body">
+          {% if logs %}
+          {% for entry in logs %}
+          <tr class="hover:bg-slate-700/20 transition-colors log-row" data-cache="{{ entry.cache_status }}" data-host="{{ entry.host }}">
+            <td class="px-4 py-2 text-slate-500 font-mono">{{ entry.time | truncate(length=20, end="") }}</td>
+            <td class="px-4 py-2 text-slate-400 font-mono">{{ entry.ip }}</td>
+            <td class="px-4 py-2 text-blue-400 font-mono">{{ entry.host }}</td>
+            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.method }}</td>
+            <td class="px-4 py-2 text-slate-300 font-mono max-w-xs truncate">{{ entry.path }}</td>
+            <td class="px-4 py-2 font-mono">
+              {% if entry.status < 300 %}<span class="text-emerald-400">{{ entry.status }}</span>
+              {% elif entry.status < 400 %}<span class="text-blue-400">{{ entry.status }}</span>
+              {% else %}<span class="text-red-400">{{ entry.status }}</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-slate-400 font-mono">{{ entry.bytes_human }}</td>
+            <td class="px-4 py-2">
+              {% if entry.cache_status == "HIT" %}<span class="badge-hit">HIT</span>
+              {% elif entry.cache_status == "MISS" %}<span class="badge-miss">MISS</span>
+              {% elif entry.cache_status == "EXPIRED" %}<span class="badge-expired">EXPIRED</span>
+              {% else %}<span class="badge-other">{{ entry.cache_status }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% else %}
+          <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">Noch keine Log-Einträge</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentFilter = 'all';
+
+function filterLogs(filter) {
+  const hostVal = document.getElementById('host-filter').value.toLowerCase();
+
+  if (filter !== '_input') {
+    currentFilter = filter;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('bg-slate-700'));
+    const btn = document.getElementById('btn-' + filter);
+    if (btn) btn.classList.add('bg-slate-700');
+  }
+
+  document.querySelectorAll('.log-row').forEach(row => {
+    const cacheMatch = currentFilter === 'all' || row.dataset.cache === currentFilter;
+    const hostMatch  = !hostVal || row.dataset.host.includes(hostVal);
+    row.style.display = cacheMatch && hostMatch ? '' : 'none';
+  });
+}
+
+document.getElementById('btn-all').classList.add('bg-slate-700');
+</script>
+{% endblock %}
