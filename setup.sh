@@ -26,7 +26,7 @@ REPLY=""
 ask() {
     local prompt="$1" default="${2:-}"
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
-    read -r REPLY
+    read -r REPLY </dev/tty
     REPLY="${REPLY:-$default}"
 }
 
@@ -176,7 +176,7 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
             || die "Klonen fehlgeschlagen."
     fi
     chmod +x /opt/lancache-ng/setup.sh
-    exec /opt/lancache-ng/setup.sh "$@" </dev/tty
+    exec /opt/lancache-ng/setup.sh "$@"
 fi
 
 print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
