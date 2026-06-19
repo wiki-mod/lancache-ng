@@ -258,7 +258,7 @@ docker compose pull && docker compose up -d
 ```bash
 git clone https://github.com/wiki-mod/lancache-ng.git
 cd lancache-ng
-docker compose -f deploy/dev/docker-compose.yml up --build
+docker compose -f deploy/dev/docker-compose.yml up --build -d
 ```
 
 DNS ports are offset to avoid conflicts with the Windows DNS client:
@@ -270,6 +270,34 @@ DNS ports are offset to avoid conflicts with the Windows DNS client:
 | Standard proxy | `127.0.0.1:8080` |
 | SSL proxy | `127.0.0.1:80/443` |
 | Admin UI | `127.0.0.1:9090` |
+
+### Smoke test (copy-paste, works in Git Bash and PowerShell)
+
+```bash
+# 1. All containers healthy?
+docker compose -f deploy/dev/docker-compose.yml ps
+
+# 2. DNS resolves CDN hostnames to the proxy?
+docker exec lancache-dns-standard dig @127.0.0.1 steamcontent.com A +short
+#    → should print 127.0.0.1
+
+# 3. Proxy reachable and serving?
+curl -sf http://127.0.0.1:8080/healthz
+#    → ok
+
+# 4. Proxy caches a real CDN request (first: MISS, second: HIT)
+curl -sf -o /dev/null -w "%{http_code} %{size_download}B in %{time_total}s\n" \
+  --resolve "steamcontent.com:8080:127.0.0.1" \
+  "http://steamcontent.com/"
+#    → 200 (or 301/302 — CDN redirect is normal on bare /)
+
+# 5. Watchdog status (services green, disk %, purge timer)
+docker compose -f deploy/dev/docker-compose.yml exec watchdog \
+  cat /var/run/watchdog/status.json
+
+# 6. Watchdog logs (shows check results, any restarts)
+docker compose -f deploy/dev/docker-compose.yml logs watchdog --tail=20
+```
 
 ---
 
@@ -295,12 +323,39 @@ Available at `http://<server-ip>:8080`.
 
 ---
 
+## Watchdog
+
+The watchdog container monitors all services and keeps the stack running automatically.
+
+| Feature | Detail |
+|---------|--------|
+| **Health monitoring** | Polls each container's Docker health status every 30 s |
+| **Auto-restart** | Restarts a container after 3 consecutive failed health checks |
+| **Purge cron** | Daily: deletes cache files older than `CACHE_VALID_DAYS` (default 365 d) |
+| **Disk monitoring** | Checks real filesystem usage; warns at 85%, alarms at 95% |
+| **Status file** | Writes `/var/run/watchdog/status.json` — read by the Admin UI |
+
+The watchdog uses a [Docker socket proxy](https://github.com/Tecnativa/docker-socket-proxy) (`CONTAINERS + POST` only) instead of the raw Docker socket — exec and image operations are blocked at the proxy level.
+
+Tune thresholds in `config/prod/watchdog.env` (or `config/dev/watchdog.env` for dev):
+
+```env
+CHECK_INTERVAL=30      # seconds between checks
+RESTART_AFTER=3        # failures before restart
+DISK_WARN_PCT=85       # yellow in Admin UI
+DISK_ALARM_PCT=95      # red in Admin UI
+CACHE_VALID_DAYS=365   # purge files older than this
+```
+
+---
+
 ## Architecture
 
 ```
 services/proxy/           nginx — HTTP + HTTPS caching (SSL mode)
 services/proxy-standard/  nginx — HTTP caching + HTTPS passthrough (standard mode)
-services/dns/             DNS server (shared by both modes)
+services/dns/             BIND9 DNS server with RPZ (shared by both modes)
+services/watchdog/        health monitor, auto-restart, purge cron
 services/ui/              Rust/Axum admin UI
 config/dev/               development settings
 config/prod/              production settings
