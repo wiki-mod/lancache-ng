@@ -25,7 +25,7 @@ RUN mkdir -p \
 
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
-COPY proxy-params.conf /etc/nginx/proxy-params.conf
+COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
 COPY cdn-ssl-domains.txt /etc/nginx/cdn-ssl-domains.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

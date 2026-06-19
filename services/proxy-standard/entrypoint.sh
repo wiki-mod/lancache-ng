@@ -4,6 +4,9 @@ set -euo pipefail
 envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_INACTIVE}' \
     < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
+envsubst '${CACHE_SLICE_SIZE} ${CACHE_VALID_HIT} ${CACHE_VALID_ANY}' \
+    < /etc/nginx/proxy-params.conf.template > /etc/nginx/proxy-params.conf
+
 echo "[lancache-standard] Validating nginx config..."
 nginx -t
 
