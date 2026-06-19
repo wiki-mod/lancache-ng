@@ -4,7 +4,7 @@
 set -euo pipefail
 export LANG=C LC_ALL=C
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 
 # ── Colors (only when connected to a terminal) ────────────────────────────────
