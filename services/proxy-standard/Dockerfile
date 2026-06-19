@@ -10,7 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     nginx-module-stream \
     gettext-base \
+    locales \
+    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
