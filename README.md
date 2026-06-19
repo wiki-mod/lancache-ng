@@ -1,92 +1,49 @@
 # lancache-ng
 
-A LAN cache for game and software downloads — intercepts CDN traffic at the DNS level and serves cached files locally. Built as a modern alternative to [lancachenet](https://github.com/lancachenet) with two additions: **SSL interception** and **IPv6 support**.
+You have multiple PCs or consoles on your home network and everyone keeps downloading the same games. lancache-ng fixes that — it caches game and software downloads locally so every PC after the first gets it at full LAN speed instead of waiting for the internet.
 
-## How it works
-
-Clients point their DNS to this server. The DNS server returns the proxy's IP for known CDN hostnames. The proxy fetches and caches the content on first request; every subsequent client on the LAN gets it from the local cache at full network speed.
+Once it's running, your clients just point their DNS at the cache. Everything else is automatic.
 
 ## Two modes
 
-| Mode | DNS IP | HTTP | HTTPS | CA cert required? |
-|------|--------|------|-------|-------------------|
-| **Standard** | `192.168.234.10` | cached | passthrough to CDN | **No** |
-| **SSL** | `192.168.234.11` | cached | cached (TLS intercepted) | Yes |
+**Standard mode** — no setup needed on clients. HTTP downloads are cached. HTTPS connections are passed through directly to the CDN. Works on every device including consoles.
 
-**Standard mode** is the default and works on every device including consoles — no certificate needed. HTTP downloads are cached; HTTPS connections are forwarded transparently.
+**SSL mode** — HTTP and HTTPS downloads are both cached. Clients install a small CA certificate once (takes 30 seconds). Gives better cache hit rates for games that use HTTPS CDNs like Epic, EA, and Blizzard.
 
-**SSL mode** additionally caches HTTPS downloads by intercepting TLS. Clients must install a CA certificate once. Delivers higher cache hit rates for games that use HTTPS CDNs (Epic, EA, Blizzard, …). This mode is **optional** — you can run Standard mode only with a single IP.
+Both modes run at the same time on two separate IPs. Clients choose which one to use by setting their DNS server.
 
-> **Why no Xbox/PlayStation?** Consoles cannot install custom CA certificates. They are intentionally omitted from DNS so they reach real CDNs directly — uncached but fully functional. Xbox *PC* (Game Pass for PC) works and can be added to the domain list.
+## What gets cached
 
-## Supported platforms
+Steam, Epic Games, GOG, EA/Origin, Blizzard, Ubisoft, Riot, Rockstar, Warframe, Path of Exile, Guild Wars 2, Windows Update, Microsoft Office, NVIDIA and AMD drivers, most Linux package mirrors, and more.
 
-| Platform | Standard | SSL |
-|----------|----------|-----|
-| Steam | ✓ | ✓ |
-| Epic Games | ✓ | ✓ |
-| Blizzard / Battle.net | ✓ | ✓ |
-| EA / Origin | ✓ | ✓ |
-| GOG | ✓ | ✓ |
-| Bethesda | ✓ | ✓ |
-| Riot Games (LoL, Valorant) | ✓ | ✓ |
-| Ubisoft | ✓ | ✓ |
-| Rockstar | ✓ | ✓ |
-| Warframe | ✓ | ✓ |
-| Path of Exile | ✓ | ✓ |
-| Guild Wars 2 | ✓ | ✓ |
-| Windows Update / Microsoft | ✓ | ✓ |
-| Microsoft Office / 365 | ✓ | ✓ |
-| NVIDIA drivers | ✓ | ✓ |
-| AMD drivers | ✓ | ✓ |
-| Ubuntu / Debian / Fedora / Arch … | ✓ | ✓ |
-| SteamOS | ✓ | ✓ |
-| Xbox / PlayStation | — | — |
+Xbox and PlayStation consoles are intentionally not cached — they can't install custom CA certificates, so HTTPS caching would break them. They continue working normally by going directly to their CDNs.
 
 ---
 
-## Setup: Native / VM
+## Requirements
 
-### Requirements
+- A Linux machine that stays on (a small PC, a Raspberry Pi 5, a Proxmox VM, whatever)
+- Docker with the Compose plugin
+- Enough disk space for your cache (500 GB is a good starting point for a few gamers)
+- For SSL mode: a second IP address on the same network interface
 
-- Linux host (Debian 13 recommended)
-- Docker with Compose plugin
-- **Standard mode only:** one LAN IP
-- **Both modes:** two LAN IPs on the same interface
+---
 
-### 1. Configure two LAN IPs
+## Quick start
 
-Add a second IP address to your network interface. The method depends on your OS:
+The fastest way to get running — no git clone needed:
 
-**Debian/Ubuntu (netplan):**
-```yaml
-# /etc/netplan/01-netcfg.yaml
-network:
-  ethernets:
-    eth0:
-      addresses:
-        - 192.168.234.10/24
-        - 192.168.234.11/24
-```
 ```bash
-sudo netplan apply
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | bash
 ```
 
-**Debian (interfaces):**
-```
-# /etc/network/interfaces
-auto eth0
-iface eth0 inet static
-    address 192.168.234.10/24
+The setup script asks a few questions (IPs, cache size, where to store files) and starts everything automatically.
 
-auto eth0:1
-iface eth0:1 inet static
-    address 192.168.234.11/24
-```
+---
 
-> If you only want **Standard mode**, skip the second IP and ignore all `IP_SSL` references below.
+## Manual setup
 
-### 2. Clone and configure
+If you prefer to do it yourself:
 
 ```bash
 cd /opt
@@ -94,215 +51,90 @@ git clone https://github.com/wiki-mod/lancache-ng.git
 cd lancache-ng
 ```
 
-Edit `deploy/prod/.env`:
+**1. Set your IPs** — edit `deploy/prod/.env`:
 ```env
-IP_STANDARD=192.168.234.10
-IP_SSL=192.168.234.11
+IP_STANDARD=192.168.1.10
+IP_SSL=192.168.1.11
 ```
+If you only want standard mode, set both to the same IP and skip the second IP setup.
 
-Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` — set `PROXY_IP` to the matching IP in each file.
-
-Edit `config/prod/proxy.env` — set `CACHE_MAX_SIZE` to match your available disk space.
-
-### 3. Create cache directories
-
+**2. Create cache directories:**
 ```bash
 mkdir -p /opt/lancache-ng/cache/standard /opt/lancache-ng/cache/ssl
 ```
 
-Update `deploy/prod/.env` if you changed the paths:
-```env
-CACHE_DIR_STANDARD=/opt/lancache-ng/cache/standard
-CACHE_DIR_SSL=/opt/lancache-ng/cache/ssl
-```
-
-### 4. Start
-
+**3. Start:**
 ```bash
 docker compose -f deploy/prod/docker-compose.yml up -d --build
 ```
 
-### 5. SSL mode: install the CA certificate on clients
+**4. SSL mode only — get the CA certificate:**
 
-> Skip this step if you only use Standard mode.
-
-On first start, `proxy-ssl` generates a CA certificate automatically. Retrieve it:
-
+After the first start, copy the generated certificate to your clients:
 ```bash
 docker compose -f deploy/prod/docker-compose.yml cp proxy-ssl:/etc/nginx/ssl/ca/ca.crt ./certs/ca.crt
 ```
 
-Then install it on each client that should use SSL mode:
-
-| Platform | Script |
-|----------|--------|
-| **Windows** | `scripts\install-ca-cert.ps1` (run as Administrator) |
-| **Linux** | `scripts/install-ca-cert.sh` |
-| **Manual** | See [`docs/install-ca-cert.md`](docs/install-ca-cert.md) |
-
-### 6. Point clients to the cache
-
-Set DNS on each client (or via DHCP option 6):
-
-- **Standard mode (no cert needed):** DNS → `192.168.234.10`
-- **SSL mode (cert required):** DNS → `192.168.234.11`
+Then install it on each client using SSL mode:
+| | |
+|---|---|
+| Windows | `scripts\install-ca-cert.ps1` (run as Administrator) |
+| Linux | `scripts/install-ca-cert.sh` |
+| Manual | [docs/install-ca-cert.md](docs/install-ca-cert.md) |
 
 ---
 
-## Setup: Proxmox LXC
+## Point your clients at the cache
 
-Running lancache-ng inside a Proxmox LXC container works well. Two variants:
+Change the DNS server on each device (or push it via DHCP):
+
+- **No certificate:** DNS → `192.168.1.10`
+- **SSL mode (certificate installed):** DNS → `192.168.1.11`
+
+That's it. The first download of anything goes to the internet as normal. Every download after that comes from the cache.
 
 ---
 
-### Unprivileged container (recommended)
+## Does it work?
 
-Unprivileged containers are more secure — processes inside cannot gain host root even if compromised.
+On any PC that's pointing at the cache DNS:
 
-#### 1. Create the container
+```
+nslookup steamcontent.com
+```
 
-In the Proxmox web UI, create a new LXC container:
-- Template: Debian 13
-- Disk: at least your intended cache size + 10 GB for the OS
-- **Network: add two network interfaces** — one per mode (or one if Standard only)
-  - `eth0`: IP `192.168.234.10/24`, gateway
-  - `eth1`: IP `192.168.234.11/24` (no gateway needed)
+If the answer is the cache server's IP instead of a real CDN IP, DNS is working.
 
-#### 2. Enable Docker support
+Then download something twice. The second time should be noticeably faster — that's the cache serving it.
 
-Add to `/etc/pve/lxc/<id>.conf` on the **Proxmox host**:
+---
 
+## Proxmox
+
+Running in an LXC container works well. Use an unprivileged container if possible.
+
+In `/etc/pve/lxc/<id>.conf` on the Proxmox host:
 ```
 features: nesting=1,keyctl=1
 lxc.apparmor.profile: unconfined
 ```
 
-Restart the container after editing.
-
-#### 3. Fix ownership of cache directories (Proxmox host)
-
-In unprivileged containers, the root user inside maps to UID 100000 on the host. Create the cache directories and fix ownership **on the Proxmox host**:
-
+For port 53 in unprivileged containers:
 ```bash
-mkdir -p /opt/lancache-ng/cache/standard /opt/lancache-ng/cache/ssl
-chown -R 100000:100000 /opt/lancache-ng/cache/
+echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf && sysctl -p
 ```
 
-Then bind-mount them into the container by adding to `/etc/pve/lxc/<id>.conf`:
-```
-mp0: /opt/lancache-ng/cache,mp=/opt/lancache-ng/cache
-```
-
-#### 4. Fix port 53 (Proxmox host)
-
-Unprivileged containers cannot bind to ports below 1024 by default. On the **Proxmox host**:
-
-```bash
-echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
-sysctl -p
-```
-
-#### 5. Install Docker inside the container
-
-```bash
-curl -fsSL https://get.docker.com | sh
-```
-
-#### 6. Continue with Native setup
-
-From step 2 of the Native setup onwards — clone to `/opt/lancache-ng`, configure IPs, start.
+Give the container two network interfaces (eth0 + eth1, one IP each) and follow the normal setup from there.
 
 ---
 
-### Privileged container
+## Adding more games
 
-> ⚠️ **Warning:** Privileged containers share the host kernel namespace. A container escape could give an attacker host root access. Only use this on trusted, isolated networks.
-
-Privileged containers are simpler — Docker works without extra configuration.
-
-#### 1. Create the container
-
-Same as above, but leave **Unprivileged container** unchecked in the Proxmox UI.
-
-Add two network interfaces as above (eth0 + eth1, one IP each).
-
-#### 2. Install Docker inside the container
+Edit `services/dns/cdn-domains.txt` to add CDN hostnames for DNS. Edit `services/proxy/cdn-ssl-domains.txt` for SSL certificate coverage. Then rebuild:
 
 ```bash
-curl -fsSL https://get.docker.com | sh
+docker compose -f deploy/prod/docker-compose.yml up --build -d
 ```
-
-#### 3. Continue with Native setup
-
-From step 2 of the Native setup onwards.
-
----
-
-## Quick start — without cloning the repo
-
-No git required. Download the two config files and run:
-
-```bash
-curl -fsSL -o .env https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/deploy/quickstart/.env
-curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/deploy/quickstart/docker-compose.yml
-
-# Edit .env: set your LAN IPs and cache paths, then:
-mkdir -p /opt/lancache-ng/cache/standard /opt/lancache-ng/cache/ssl
-docker compose pull && docker compose up -d
-```
-
----
-
-## Development setup
-
-```bash
-git clone https://github.com/wiki-mod/lancache-ng.git
-cd lancache-ng
-docker compose -f deploy/dev/docker-compose.yml up --build -d
-```
-
-DNS ports are offset to avoid conflicts with the Windows DNS client:
-
-| Service | Dev port |
-|---------|----------|
-| Standard DNS | `127.0.0.1:5300` |
-| SSL DNS | `127.0.0.1:5353` |
-| Standard proxy | `127.0.0.1:8080` |
-| SSL proxy | `127.0.0.1:80/443` |
-| Admin UI | `127.0.0.1:9090` |
-
-### Testen — kein Docker nötig, funktioniert auf jedem Windows-PC im LAN
-
-Sobald der Stack läuft, kannst du von **jedem PC im Netzwerk** mit Bordmitteln testen.
-
-**Schritt 1 — DNS:** Setze auf deinem Windows-PC den DNS-Server auf die IP des Cache-Servers.
-
-Danach in CMD oder PowerShell:
-```
-nslookup steamcontent.com
-```
-Wenn der Cache läuft, antwortet er mit seiner eigenen IP statt der echten CDN-IP.
-
-**Schritt 2 — Proxy:** Lädt der Cache den Download durch?
-```
-curl http://steamcontent.com/
-```
-Beim ersten Aufruf holt der Cache die Datei vom Internet (`X-Cache: MISS`). Beim zweiten Aufruf kommt sie aus dem lokalen Cache (`X-Cache: HIT`) — merklich schneller.
-
-**Schritt 3 — Watchdog-Status** (nur auf dem Server-Rechner, der Docker hat):
-```bash
-docker compose -f deploy/dev/docker-compose.yml exec watchdog cat /var/run/watchdog/status.json
-```
-
-> Im Dev-Betrieb laufen DNS auf Port 5300/5353 statt 53 — daher DNS-Test aus dem LAN nur nach echtem DNS-Serverschwenk. Proxy-Test geht immer direkt über `curl http://127.0.0.1:8080/healthz` auf dem Server-Rechner.
-
----
-
-## Adding CDN domains
-
-1. **DNS** — add the hostname to [`services/dns/cdn-domains.txt`](services/dns/cdn-domains.txt)
-2. **SSL certs** — add the root domain to [`services/proxy/cdn-ssl-domains.txt`](services/proxy/cdn-ssl-domains.txt)
-3. Rebuild: `docker compose ... up --build`
 
 Or use the domain editor in the Admin UI — no rebuild needed.
 
@@ -310,59 +142,7 @@ Or use the domain editor in the Admin UI — no rebuild needed.
 
 ## Admin UI
 
-Available at `http://<server-ip>:8080`.
-
-- Cache fill level and hit/miss statistics
-- Live access log
-- Domain list editor
-- Netdata system metrics (CPU, RAM, network throughput, disk I/O)
-- Setup guide with copy-paste commands
-
----
-
-## Watchdog
-
-The watchdog container monitors all services and keeps the stack running automatically.
-
-| Feature | Detail |
-|---------|--------|
-| **Health monitoring** | Polls each container's Docker health status every 30 s |
-| **Auto-restart** | Restarts a container after 3 consecutive failed health checks |
-| **Purge cron** | Daily: deletes cache files older than `CACHE_VALID_DAYS` (default 365 d) |
-| **Disk monitoring** | Checks real filesystem usage; warns at 85%, alarms at 95% |
-| **Status file** | Writes `/var/run/watchdog/status.json` — read by the Admin UI |
-
-The watchdog uses a [Docker socket proxy](https://github.com/Tecnativa/docker-socket-proxy) (`CONTAINERS + POST` only) instead of the raw Docker socket — exec and image operations are blocked at the proxy level.
-
-Tune thresholds in `config/prod/watchdog.env` (or `config/dev/watchdog.env` for dev):
-
-```env
-CHECK_INTERVAL=30      # seconds between checks
-RESTART_AFTER=3        # failures before restart
-DISK_WARN_PCT=85       # yellow in Admin UI
-DISK_ALARM_PCT=95      # red in Admin UI
-CACHE_VALID_DAYS=365   # purge files older than this
-```
-
----
-
-## Architecture
-
-```
-services/proxy/           nginx — HTTP + HTTPS caching (SSL mode)
-services/proxy-standard/  nginx — HTTP caching + HTTPS passthrough (standard mode)
-services/dns/             BIND9 DNS server with RPZ (shared by both modes)
-services/watchdog/        health monitor, auto-restart, purge cron
-services/ui/              Rust/Axum admin UI
-config/dev/               development settings
-config/prod/              production settings
-certs/                    CA certificate (auto-generated on first start)
-deploy/dev/               docker-compose for development
-deploy/prod/              docker-compose for production
-deploy/quickstart/        docker-compose for pull-only deployment
-docs/                     end-user guides
-scripts/                  CA certificate install scripts
-```
+Opens at `http://<server-ip>:8080`. Shows cache fill level, hit/miss rates, active downloads, and lets you manage domains and settings without touching config files.
 
 ---
 
