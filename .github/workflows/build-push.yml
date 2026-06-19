@@ -24,6 +24,8 @@ jobs:
             context: services/proxy-standard
           - service: dns
             context: services/dns
+          - service: watchdog
+            context: services/watchdog
           - service: ui
             context: services/ui
 
