@@ -176,7 +176,7 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
             || die "Klonen fehlgeschlagen."
     fi
     chmod +x /opt/lancache-ng/setup.sh
-    exec /opt/lancache-ng/setup.sh "$@"
+    exec /opt/lancache-ng/setup.sh "$@" </dev/tty
 fi
 
 print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
