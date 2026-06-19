@@ -6,8 +6,6 @@ export LANG=C LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
-GITHUB_RAW="https://raw.githubusercontent.com/wiki-mod/lancache-ng/master"
-_TMPDIR=""
 
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
@@ -167,13 +165,17 @@ docker compose version >/dev/null 2>&1 \
     || die "Docker Compose Plugin fehlt — bitte Docker neu installieren."
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
-    print_warn "Kein lokales Repo gefunden — lade docker-compose.yml von GitHub..."
-    _TMPDIR=$(mktemp -d)
-    curl -fsSL "$GITHUB_RAW/deploy/quickstart/docker-compose.yml" \
-        -o "$_TMPDIR/docker-compose.yml" \
-        || die "Konnte docker-compose.yml nicht von GitHub laden."
-    QUICKSTART_COMPOSE="$_TMPDIR/docker-compose.yml"
-    print_ok "docker-compose.yml geladen"
+    print_warn "Kein lokales Repo gefunden — klone nach /opt/lancache-ng..."
+    command -v git >/dev/null 2>&1 \
+        || apt-get install -y --no-install-recommends git \
+        || die "git konnte nicht installiert werden."
+    if [[ -d "/opt/lancache-ng/.git" ]]; then
+        git -C /opt/lancache-ng pull --ff-only
+    else
+        git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+            || die "Klonen fehlgeschlagen."
+    fi
+    exec /opt/lancache-ng/setup.sh "$@"
 fi
 
 print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
