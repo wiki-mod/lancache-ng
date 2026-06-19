@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::Engine as _;
 use bollard::Docker;
 use std::sync::Arc;
 use tera::Tera;
@@ -28,6 +29,40 @@ const TEMPLATE_NAMES: &[&str] = &[
     "logs.html",
     "setup.html",
 ];
+
+async fn basic_auth(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let (user, pass) = match (&state.config.auth_user, &state.config.auth_password) {
+        (Some(u), Some(p)) => (u.as_str(), p.as_str()),
+        _ => return next.run(req).await,
+    };
+
+    let ok = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Basic "))
+        .and_then(|enc| base64::engine::general_purpose::STANDARD.decode(enc).ok())
+        .and_then(|dec| String::from_utf8(dec).ok())
+        .and_then(|creds| {
+            let mut it = creds.splitn(2, ':');
+            Some(it.next()? == user && it.next()? == pass)
+        })
+        .unwrap_or(false);
+
+    if ok {
+        next.run(req).await
+    } else {
+        axum::http::Response::builder()
+            .status(axum::http::StatusCode::UNAUTHORIZED)
+            .header("WWW-Authenticate", r#"Basic realm="LanCache Admin""#)
+            .body(axum::body::Body::from("Unauthorized"))
+            .unwrap()
+    }
+}
 
 fn load_templates(dir: &str) -> Tera {
     let mut t = Tera::default();
@@ -78,6 +113,7 @@ async fn main() -> Result<()> {
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/*path", get(routes::netdata_proxy::proxy))
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;

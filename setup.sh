@@ -264,7 +264,30 @@ else
     print_ok "Watchtower aktiv (prüft täglich auf neue Images)"
 fi
 
-# ── 6. .env schreiben ─────────────────────────────────────────────────────────
+# ── 6. Admin-UI Zugangschutz ──────────────────────────────────────────────────
+print_step "Admin-UI Zugangschutz"
+
+printf "  Die Admin-UI läuft auf http://%s:8080 — nur im lokalen Netz erreichbar.\n" "$IP_STANDARD"
+printf "  Ohne Passwort kann jeder im LAN Container neu starten und Domains ändern.\n\n"
+
+ask "Admin-UI mit Passwort schützen? [j/N]" "N"
+UI_AUTH_USER=""
+UI_AUTH_PASSWORD=""
+if [[ "${REPLY,,}" = "j" ]]; then
+    ask "Benutzername" "admin"
+    UI_AUTH_USER="$REPLY"
+    UI_AUTH_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+    printf "\n"
+    print_ok "Zugangsdaten:"
+    printf "    Benutzer:  ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
+    printf "    Passwort:  ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
+    print_warn "Passwort jetzt notieren — steht auch später in $INSTALL_DIR/.env"
+    printf "\n"
+else
+    print_ok "Kein Passwortschutz — Admin-UI öffentlich im LAN"
+fi
+
+# ── 7. .env schreiben ─────────────────────────────────────────────────────────
 print_step ".env schreiben"
 
 if [[ -f "$INSTALL_DIR/.env" ]]; then
@@ -302,10 +325,15 @@ SSL_CACHE_MAX_GB=${cache_gb}
 # ── Profile ───────────────────────────────────────────────────────────────────
 # ssl = SSL-Modus aktiv; watchtower = tägliche Updates; leer = beides aus
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
+
+# ── Admin-UI ──────────────────────────────────────────────────────────────────
+# Leer = kein Passwortschutz
+UI_AUTH_USER=${UI_AUTH_USER}
+UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 EOF
 print_ok ".env geschrieben: $INSTALL_DIR/.env"
 
-# ── 7. Cache-Verzeichnisse anlegen ────────────────────────────────────────────
+# ── 8. Cache-Verzeichnisse anlegen ────────────────────────────────────────────
 print_step "Cache-Verzeichnisse anlegen"
 mkdir -p "$CACHE_DIR_STANDARD"
 print_ok "Standard: $CACHE_DIR_STANDARD"
@@ -314,7 +342,7 @@ if [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]]; then
     print_ok "SSL:      $CACHE_DIR_SSL"
 fi
 
-# ── 8. Systemd-Watchdog ───────────────────────────────────────────────────────
+# ── 9. Systemd-Watchdog ───────────────────────────────────────────────────────
 print_step "Systemd-Watchdog installieren"
 
 if ! command -v systemctl >/dev/null 2>&1; then
@@ -371,7 +399,7 @@ EOF
     print_ok "lancache-converge.timer aktiviert (Konvergenz alle 5 Minuten)"
 fi
 
-# ── 9. Zusammenfassung + Bestätigung ─────────────────────────────────────────
+# ── 10. Zusammenfassung + Bestätigung ────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
 printf "${BOLD}│              Konfiguration                   │${RESET}\n"
@@ -393,13 +421,18 @@ if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
 else
     printf "  %-26s %s\n" "Watchtower:"               "deaktiviert"
 fi
+if [[ -n "$UI_AUTH_USER" ]]; then
+    printf "  %-26s %s\n" "Admin-UI Auth:"            "aktiv (Benutzer: $UI_AUTH_USER)"
+else
+    printf "  %-26s %s\n" "Admin-UI Auth:"            "deaktiviert"
+fi
 printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
 
 ask "Jetzt starten? [J/n]" "J"
 [[ "${REPLY,,}" != "n" ]] \
     || { printf "\n  Später starten mit: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
-# ── 10. Stack starten ─────────────────────────────────────────────────────────
+# ── 11. Stack starten ────────────────────────────────────────────────────────
 print_step "Images laden"
 cd "$INSTALL_DIR"
 docker compose pull || print_warn "Pull teilweise fehlgeschlagen — weiter mit gecachten Images"
@@ -408,13 +441,17 @@ print_step "Stack starten"
 docker compose up -d
 print_ok "Stack gestartet"
 
-# ── 11. Post-Start-Info ───────────────────────────────────────────────────────
+# ── 12. Post-Start-Info ──────────────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "${BOLD}${GREEN}  LanCache-NG läuft!${RESET}\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "\n"
-printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080\n" "$IP_STANDARD"
+if [[ -n "$UI_AUTH_USER" ]]; then
+    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080  (Benutzer: %s)\n" "$IP_STANDARD" "$UI_AUTH_USER"
+else
+    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080\n" "$IP_STANDARD"
+fi
 printf "\n"
 if [[ "$SSL_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA-Zertifikat${RESET} (nach erstem Start verfügbar):\n"

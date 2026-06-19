@@ -18,6 +18,8 @@ pub struct Config {
     pub ssl_cache_max_gb: f64,
     pub standard_ip: String,
     pub ssl_ip: String,
+    pub auth_user: Option<String>,
+    pub auth_password: Option<String>,
 }
 
 impl Config {
@@ -40,12 +42,18 @@ impl Config {
             ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", 10.0),
             standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
             ssl_ip: env_str("SSL_IP", "192.168.234.11"),
+            auth_user: env_opt("UI_AUTH_USER"),
+            auth_password: env_opt("UI_AUTH_PASSWORD"),
         }
     }
 }
 
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_opt(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
