@@ -2,7 +2,17 @@
 
 You have multiple PCs or consoles on your home network and everyone keeps downloading the same games. lancache-ng fixes that — it caches game and software downloads locally so every PC after the first gets it at full LAN speed instead of waiting for the internet.
 
-Once it's running, your clients just point their DNS at the cache. Everything else is automatic.
+## Install
+
+Run this on the Linux machine that will be your cache server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | bash
+```
+
+The script asks for your server's IP address and how much disk space to use, then sets everything up and starts the cache automatically. After that, just point your clients' DNS at the server — done.
+
+---
 
 ## Two modes
 
@@ -26,18 +36,6 @@ Xbox and PlayStation consoles are intentionally not cached — they can't instal
 - Docker with the Compose plugin
 - Enough disk space for your cache (500 GB is a good starting point for a few gamers)
 - For SSL mode: a second IP address on the same network interface
-
----
-
-## Quick start
-
-The fastest way to get running — no git clone needed:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | bash
-```
-
-The setup script asks a few questions (IPs, cache size, where to store files) and starts everything automatically.
 
 ---
 
