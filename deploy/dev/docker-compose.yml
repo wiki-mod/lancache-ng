@@ -3,6 +3,7 @@ services:
   # ── Standard mode (no CA cert required) ──────────────────────────────────
   # HTTP: cached. HTTPS: SNI passthrough to real CDN (not cached).
   proxy-standard:
+    container_name: lancache-proxy-standard
     build:
       context: ../../services/proxy-standard
     env_file:
@@ -18,12 +19,14 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     networks:
       lancache:
         ipv4_address: 172.28.0.2
     restart: unless-stopped
 
   dns-standard:
+    container_name: lancache-dns-standard
     build:
       context: ../../services/dns
     env_file:
@@ -41,6 +44,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     networks:
       lancache:
         ipv4_address: 172.28.0.3
@@ -49,6 +53,7 @@ services:
   # ── SSL mode (CA cert must be installed on clients) ───────────────────────
   # HTTP + HTTPS: both cached via TLS interception.
   proxy-ssl:
+    container_name: lancache-proxy-ssl
     build:
       context: ../../services/proxy
     env_file:
@@ -66,12 +71,14 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     networks:
       lancache:
         ipv4_address: 172.28.0.4
     restart: unless-stopped
 
   dns-ssl:
+    container_name: lancache-dns-ssl
     build:
       context: ../../services/dns
     env_file:
@@ -86,9 +93,39 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     networks:
       lancache:
         ipv4_address: 172.28.0.5
+    restart: unless-stopped
+
+  # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
+  # socket-proxy limits Docker access to container inspect + restart only
+  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      POST: "1"
+    networks:
+      - lancache
+    restart: unless-stopped
+
+  watchdog:
+    build:
+      context: ../../services/watchdog
+    env_file:
+      - ../../config/dev/watchdog.env
+    volumes:
+      - proxy-standard-cache:/cache/standard
+      - proxy-ssl-cache:/cache/ssl
+      - watchdog-status:/var/run/watchdog
+    depends_on:
+      - docker-socket-proxy
+    networks:
+      - lancache
     restart: unless-stopped
 
   # ── Admin UI ──────────────────────────────────────────────────────────────
@@ -155,6 +192,7 @@ volumes:
   proxy-ssl-cache:
   proxy-standard-logs:
   proxy-ssl-logs:
+  watchdog-status:
   netdataconfig:
   netdatalib:
   netdatacache:

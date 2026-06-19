@@ -3,6 +3,7 @@ services:
   # ── Standard mode (no CA cert required) ──────────────────────────────────
   # HTTP: cached. HTTPS: SNI passthrough to real CDN (not cached).
   proxy-standard:
+    container_name: lancache-proxy-standard
     image: ghcr.io/wiki-mod/lancache-ng/proxy-standard:latest
     build:
       context: ../../services/proxy-standard
@@ -19,6 +20,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -27,6 +29,7 @@ services:
         max-file: "3"
 
   dns-standard:
+    container_name: lancache-dns-standard
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
     build:
       context: ../../services/dns
@@ -42,6 +45,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -52,6 +56,7 @@ services:
   # ── SSL mode (CA cert must be installed on clients) ───────────────────────
   # HTTP + HTTPS: both cached via TLS interception.
   proxy-ssl:
+    container_name: lancache-proxy-ssl
     image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
     build:
       context: ../../services/proxy
@@ -70,6 +75,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -78,6 +84,7 @@ services:
         max-file: "3"
 
   dns-ssl:
+    container_name: lancache-dns-ssl
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
     build:
       context: ../../services/dns
@@ -93,6 +100,43 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
+  # socket-proxy limits Docker access to container inspect + restart only
+  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      POST: "1"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  watchdog:
+    image: ghcr.io/wiki-mod/lancache-ng/watchdog:latest
+    build:
+      context: ../../services/watchdog
+    env_file:
+      - ../../config/prod/watchdog.env
+    volumes:
+      - /srv/lancache/standard:/cache/standard
+      - /srv/lancache/ssl:/cache/ssl
+      - watchdog-status:/var/run/watchdog
+    depends_on:
+      - docker-socket-proxy
     restart: always
     logging:
       driver: json-file
@@ -172,6 +216,7 @@ volumes:
       device: /srv/lancache/ssl
   proxy-standard-logs:
   proxy-ssl-logs:
+  watchdog-status:
   netdataconfig:
   netdatalib:
   netdatacache:
