@@ -1,0 +1,32 @@
+acl rfc1918 {
+    10.0.0.0/8;
+    172.16.0.0/12;
+    192.168.0.0/16;
+};
+
+acl ula {
+    fc00::/7;
+};
+
+options {
+    directory   "/var/cache/bind";
+    pid-file    "/var/run/named/named.pid";
+
+    forwarders {
+        8.8.8.8;
+        8.8.4.4;
+        2001:4860:4860::8888;
+        2001:4860:4860::8844;
+    };
+    forward only;
+
+    listen-on     { any; };
+    listen-on-v6  { any; };
+
+    allow-query     { rfc1918; ula; localhost; };
+    allow-recursion { rfc1918; ula; localhost; };
+
+    dnssec-validation no;
+
+    response-policy { zone "rpz.lancache.lan"; };
+};

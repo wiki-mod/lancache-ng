@@ -29,13 +29,18 @@ services:
     env_file:
       - ../../config/dev/dns-standard.env
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
       # NOTE (Windows): Port 53 is used by the Windows DNS client.
       # Stop "DNS Client" in services.msc, or test the proxy directly:
       #   curl --resolve steamcontent.com:8080:127.0.0.1 http://steamcontent.com/
       - "${IP_STANDARD}:5300:53/udp"   # port 5300 in dev to avoid conflicts
       - "${IP_STANDARD}:5300:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       lancache:
         ipv4_address: 172.28.0.3
@@ -72,10 +77,15 @@ services:
     env_file:
       - ../../config/dev/dns-ssl.env
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
       - "${IP_SSL}:5353:53/udp"
       - "${IP_SSL}:5353:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       lancache:
         ipv4_address: 172.28.0.5

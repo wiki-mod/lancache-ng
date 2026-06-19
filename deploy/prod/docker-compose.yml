@@ -33,10 +33,15 @@ services:
     env_file:
       - ../../config/prod/dns-standard.env
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: always
     logging:
       driver: json-file
@@ -79,10 +84,15 @@ services:
     env_file:
       - ../../config/prod/dns-ssl.env
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/dnsmasq.d/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: always
     logging:
       driver: json-file

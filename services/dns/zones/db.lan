@@ -1,0 +1,4 @@
+$ORIGIN lan.
+$TTL 60
+@   SOA ns1.lan. admin.lan. 2024010101 3600 900 604800 60
+    NS  ns1.lan.

@@ -21,7 +21,7 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 ```
 services/proxy/          # nginx: HTTP + HTTPS caching (SSL mode, CA cert required)
 services/proxy-standard/ # nginx: HTTP caching + HTTPS passthrough (no CA cert needed)
-services/dns/            # dnsmasq DNS server (shared by both modes)
+services/dns/            # BIND9 DNS server with chroot (shared by both modes)
 config/dev/              # Settings for local development
 config/prod/             # Settings for production deployment
 certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
@@ -50,7 +50,7 @@ by configuring which DNS server IP they point to:
 
 ## How SSL Interception Works (ssl mode)
 
-1. **DNS spoofing**: dnsmasq resolves CDN hostnames (e.g. `steamcontent.com`) to the proxy's IP.
+1. **DNS spoofing**: BIND9 resolves CDN hostnames (e.g. `steamcontent.com`) to the proxy's IP via RPZ (Response Policy Zone).
 2. **Client connects** to proxy IP:443, sending SNI `steamcontent.com` in the TLS ClientHello.
 3. **nginx** reads the SNI via `$ssl_server_name`, looks up the matching cert in `ssl-map.conf`
    (generated at startup), and presents a wildcard cert for `steamcontent.com` signed by our CA.
@@ -73,7 +73,7 @@ by configuring which DNS server IP they point to:
   the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
 - **Upstream resolver must be real DNS**: nginx's `resolver` directive is set to `8.8.8.8`,
-  not our dnsmasq. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
+  not our BIND9. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
   back to the proxy → infinite loop.
 - **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
   workers wait. Critical for large game files that multiple clients might request simultaneously.
