@@ -51,6 +51,15 @@ cmd_update() {
         || die "Kein Stack in $install_dir gefunden. Zuerst ./setup.sh ausführen."
     cd "$install_dir"
 
+    if [[ -d "$install_dir/.git" ]]; then
+        print_step "Repo aktualisieren"
+        git -C "$install_dir" pull --ff-only \
+            || print_warn "git pull fehlgeschlagen — weiter mit lokaler Version"
+        cp "$install_dir/deploy/quickstart/docker-compose.yml" \
+           "$install_dir/docker-compose.yml"
+        print_ok "docker-compose.yml aktualisiert"
+    fi
+
     print_step "Neueste Images laden"
     docker compose pull || print_warn "Pull teilweise fehlgeschlagen — weiter mit gecachten Images"
 
