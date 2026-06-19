@@ -3,7 +3,7 @@ set -euo pipefail
 
 CHROOT="/var/lib/named"
 DOMAINS_FILE="/etc/bind/cdn-domains.txt"
-PROXY_IP="${PROXY_IP:?PROXY_IP is required — set it to the host machine's LAN IP}"
+PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 

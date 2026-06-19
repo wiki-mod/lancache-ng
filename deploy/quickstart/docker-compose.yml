@@ -25,6 +25,7 @@ services:
     environment:
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}
       - CACHE_MEM_MB=${CACHE_MEM_MB}
+      - CACHE_INACTIVE=${CACHE_INACTIVE}
     volumes:
       - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
       - proxy-standard-logs:/var/log/nginx
@@ -75,6 +76,7 @@ services:
     environment:
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}
       - CACHE_MEM_MB=${CACHE_MEM_MB}
+      - CACHE_INACTIVE=${CACHE_INACTIVE}
     volumes:
       - ./certs:/etc/nginx/ssl/ca          # CA wird hier beim ersten Start erzeugt
       - ${CACHE_DIR_SSL}:/var/cache/nginx/lancache
@@ -221,7 +223,7 @@ services:
   # Aktiv wenn COMPOSE_PROFILES=watchtower in .env gesetzt ist (Standard).
   # Deaktivieren: COMPOSE_PROFILES= (leer lassen) oder beim setup.sh Opt-out wählen.
   watchtower:
-    image: containrrr/watchtower
+    image: containrrr/watchtower:1.7.1
     profiles: [watchtower]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -98,7 +98,7 @@ done < "$DOMAINS_FILE"
 # ----------------------------------------------------------------
 # 4. Render nginx.conf from template (always fresh on each start)
 # ----------------------------------------------------------------
-envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE}' \
+envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_INACTIVE}' \
     < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 # ----------------------------------------------------------------
