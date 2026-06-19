@@ -49,6 +49,7 @@ arenanetworks.com
 # Windows Update / Microsoft
 windowsupdate.com
 ws.microsoft.com
+mp.microsoft.com
 akamaized.net
 
 # Ubuntu / Canonical
