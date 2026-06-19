@@ -6,6 +6,8 @@ export LANG=C LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
+GITHUB_RAW="https://raw.githubusercontent.com/wiki-mod/lancache-ng/master"
+_TMPDIR=""
 
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
@@ -141,16 +143,40 @@ print_step "Voraussetzungen prüfen"
 
 [[ "$(id -u)" = "0" ]] \
     || die "Dieses Skript muss als root ausgeführt werden (sudo ./setup.sh)."
-command -v docker >/dev/null 2>&1 \
-    || die "Docker nicht gefunden.\n  Installation: https://docs.docker.com/engine/install/"
-docker info >/dev/null 2>&1 \
-    || die "Docker-Daemon läuft nicht.\n  Starten mit: systemctl start docker"
-docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose Plugin fehlt.\n  Installation: https://docs.docker.com/compose/install/"
-[[ -f "$QUICKSTART_COMPOSE" ]] \
-    || die "docker-compose.yml nicht gefunden: $QUICKSTART_COMPOSE"
 
-print_ok "Docker $(docker --version | grep -oP '[\d.]+'  | head -1)"
+if ! command -v curl >/dev/null 2>&1; then
+    print_warn "curl fehlt — wird nachinstalliert..."
+    apt-get install -y --no-install-recommends curl \
+        || die "curl konnte nicht installiert werden."
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    print_warn "Docker nicht gefunden — wird jetzt installiert (get.docker.com)..."
+    curl -fsSL https://get.docker.com | sh \
+        || die "Docker-Installation fehlgeschlagen."
+    print_ok "Docker installiert"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    print_warn "Docker-Daemon läuft nicht — wird gestartet..."
+    systemctl enable --now docker \
+        || die "Docker-Daemon konnte nicht gestartet werden."
+fi
+
+docker compose version >/dev/null 2>&1 \
+    || die "Docker Compose Plugin fehlt — bitte Docker neu installieren."
+
+if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
+    print_warn "Kein lokales Repo gefunden — lade docker-compose.yml von GitHub..."
+    _TMPDIR=$(mktemp -d)
+    curl -fsSL "$GITHUB_RAW/deploy/quickstart/docker-compose.yml" \
+        -o "$_TMPDIR/docker-compose.yml" \
+        || die "Konnte docker-compose.yml nicht von GitHub laden."
+    QUICKSTART_COMPOSE="$_TMPDIR/docker-compose.yml"
+    print_ok "docker-compose.yml geladen"
+fi
+
+print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
 print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
 
 # ── 2. Netzwerk-IPs ───────────────────────────────────────────────────────────
@@ -457,7 +483,7 @@ if [[ "$SSL_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA-Zertifikat${RESET} (nach erstem Start verfügbar):\n"
     printf "    %s/certs/ca.crt\n" "$INSTALL_DIR"
     printf "    → auf Clients installieren für SSL-Modus\n"
-    printf "    → Anleitung: %s/docs/install-ca-cert.md\n" "$SCRIPT_DIR"
+    printf "    → Anleitung: https://github.com/wiki-mod/lancache-ng/wiki\n"
     printf "\n"
 fi
 printf "  ${BOLD}DNS auf Clients einstellen:${RESET}\n"
