@@ -271,33 +271,30 @@ DNS ports are offset to avoid conflicts with the Windows DNS client:
 | SSL proxy | `127.0.0.1:80/443` |
 | Admin UI | `127.0.0.1:9090` |
 
-### Smoke test (copy-paste, works in Git Bash and PowerShell)
+### Testen — kein Docker nötig, funktioniert auf jedem Windows-PC im LAN
 
-```bash
-# 1. All containers healthy?
-docker compose -f deploy/dev/docker-compose.yml ps
+Sobald der Stack läuft, kannst du von **jedem PC im Netzwerk** mit Bordmitteln testen.
 
-# 2. DNS resolves CDN hostnames to the proxy?
-docker exec lancache-dns-standard dig @127.0.0.1 steamcontent.com A +short
-#    → should print 127.0.0.1
+**Schritt 1 — DNS:** Setze auf deinem Windows-PC den DNS-Server auf die IP des Cache-Servers.
 
-# 3. Proxy reachable and serving?
-curl -sf http://127.0.0.1:8080/healthz
-#    → ok
-
-# 4. Proxy caches a real CDN request (first: MISS, second: HIT)
-curl -sf -o /dev/null -w "%{http_code} %{size_download}B in %{time_total}s\n" \
-  --resolve "steamcontent.com:8080:127.0.0.1" \
-  "http://steamcontent.com/"
-#    → 200 (or 301/302 — CDN redirect is normal on bare /)
-
-# 5. Watchdog status (services green, disk %, purge timer)
-docker compose -f deploy/dev/docker-compose.yml exec watchdog \
-  cat /var/run/watchdog/status.json
-
-# 6. Watchdog logs (shows check results, any restarts)
-docker compose -f deploy/dev/docker-compose.yml logs watchdog --tail=20
+Danach in CMD oder PowerShell:
 ```
+nslookup steamcontent.com
+```
+Wenn der Cache läuft, antwortet er mit seiner eigenen IP statt der echten CDN-IP.
+
+**Schritt 2 — Proxy:** Lädt der Cache den Download durch?
+```
+curl http://steamcontent.com/
+```
+Beim ersten Aufruf holt der Cache die Datei vom Internet (`X-Cache: MISS`). Beim zweiten Aufruf kommt sie aus dem lokalen Cache (`X-Cache: HIT`) — merklich schneller.
+
+**Schritt 3 — Watchdog-Status** (nur auf dem Server-Rechner, der Docker hat):
+```bash
+docker compose -f deploy/dev/docker-compose.yml exec watchdog cat /var/run/watchdog/status.json
+```
+
+> Im Dev-Betrieb laufen DNS auf Port 5300/5353 statt 53 — daher DNS-Test aus dem LAN nur nach echtem DNS-Serverschwenk. Proxy-Test geht immer direkt über `curl http://127.0.0.1:8080/healthz` auf dem Server-Rechner.
 
 ---
 
