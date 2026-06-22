@@ -46,8 +46,8 @@ fi
 echo "[lancache-dns] Creating LAN zones in authoritative database..."
 
 # Create LAN zones (will not error if already exist)
-pdnsutil --config-dir=/etc/pdns/auth create-zone lan. 127.0.0.1 || true
-pdnsutil --config-dir=/etc/pdns/auth create-zone local.lan. 127.0.0.1 || true
+pdnsutil --config-dir=/etc/pdns/auth create-zone lan. || true
+pdnsutil --config-dir=/etc/pdns/auth create-zone local.lan. || true
 
 # Create empty reverse zones for privacy (prevent external PTR leakage)
 for zone in \
@@ -71,7 +71,7 @@ for zone in \
     31.172.in-addr.arpa \
     c.f.ip6.arpa \
     d.f.ip6.arpa; do
-    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone." 127.0.0.1 || true
+    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone." || true
 done
 
 # ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
