@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-6">
+  <!-- DHCP Conflict Check -->
+  <div id="dhcp-check" class="bg-slate-800 border border-slate-700 rounded-lg p-4">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
+        <p id="check-status" class="text-sm text-slate-400">Prüfe auf fremde DHCP-Server...</p>
+      </div>
+      <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
+        Erneut prüfen
+      </button>
+    </div>
+  </div>
+
+  <!-- Subnet Configuration -->
+  <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
+    <h2 class="text-lg font-semibold text-white mb-4">Subnet-Konfiguration</h2>
+    <form method="POST" action="/dhcp/subnet" class="space-y-4">
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">Subnet (CIDR)</label>
+          <input type="text" name="subnet" value="10.0.0.0/24" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm" placeholder="z.B. 10.0.0.0/24">
+        </div>
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">Gateway *</label>
+          <input type="text" name="gateway" value="10.0.0.1" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm" required>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">IP-Pool Start</label>
+          <input type="text" name="pool_start" value="10.0.0.128" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+        </div>
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">IP-Pool Ende</label>
+          <input type="text" name="pool_end" value="10.0.0.254" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+        </div>
+      </div>
+
+      <!-- Advanced Settings (collapsed) -->
+      <details class="border-t border-slate-700 pt-4 mt-4">
+        <summary class="cursor-pointer text-slate-300 hover:text-white font-medium text-sm">Erweiterte Einstellungen</summary>
+        <div class="mt-4 space-y-4">
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm text-slate-300 mb-1">Lease-Zeit (Sekunden)</label>
+              <input type="text" name="lease_time" value="86400" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-300 mb-1">Domain</label>
+              <input type="text" name="domain" value="lan" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm text-slate-300 mb-1">NTP-Server</label>
+            <input type="text" name="ntp_servers" value="time.nist.gov" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+          </div>
+        </div>
+      </details>
+
+      <button type="submit" class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium text-sm">
+        Speichern
+      </button>
+    </form>
+  </div>
+
+  <!-- Statische Reservierungen -->
+  <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
+    <h2 class="text-lg font-semibold text-white mb-4">Statische Reservierungen</h2>
+
+    <form method="POST" action="/dhcp/static/add" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
+      <div class="grid grid-cols-3 gap-3">
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">MAC-Adresse</label>
+          <input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF" class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
+        </div>
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">IP-Adresse</label>
+          <input type="text" name="ip" placeholder="10.0.0.50" class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
+        </div>
+        <div>
+          <label class="block text-sm text-slate-300 mb-1">Hostname</label>
+          <input type="text" name="hostname" placeholder="mydevice" class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
+        </div>
+      </div>
+      <button type="submit" class="w-full px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
+        + Hinzufügen
+      </button>
+    </form>
+
+    <div class="space-y-2">
+      {% for res in reservations %}
+      <div class="flex items-center justify-between p-3 bg-slate-700 rounded hover:bg-slate-600">
+        <div class="text-sm">
+          <div class="text-white font-medium">{{ res.hostname }}</div>
+          <div class="text-slate-400">{{ res.mac }} → {{ res.ip }}</div>
+        </div>
+        <form method="POST" action="/dhcp/static/remove" class="inline">
+          <input type="hidden" name="mac" value="{{ res.mac }}">
+          <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
+            Entfernen
+          </button>
+        </form>
+      </div>
+      {% endfor %}
+      {% if reservations | length == 0 %}
+      <p class="text-slate-500 text-sm py-4 text-center">Keine Reservierungen vorhanden</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Aktive Leases (read-only) -->
+  <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
+    <h2 class="text-lg font-semibold text-white mb-4">Aktive DHCP-Leases</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="border-b border-slate-700">
+          <tr>
+            <th class="text-left py-2 text-slate-300">IP-Adresse</th>
+            <th class="text-left py-2 text-slate-300">MAC-Adresse</th>
+            <th class="text-left py-2 text-slate-300">Hostname</th>
+            <th class="text-left py-2 text-slate-300">Ablauf</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for lease in leases %}
+          <tr class="border-b border-slate-700 hover:bg-slate-700">
+            <td class="py-2 text-white">{{ lease.ip }}</td>
+            <td class="py-2 text-slate-300">{{ lease.mac }}</td>
+            <td class="py-2 text-slate-300">{{ lease.hostname }}</td>
+            <td class="py-2 text-slate-400">{{ lease.expires }}</td>
+          </tr>
+          {% endfor %}
+          {% if leases | length == 0 %}
+          <tr>
+            <td colspan="4" class="py-4 text-slate-500 text-center">Keine aktiven Leases</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+async function checkDhcpConflict() {
+  const statusEl = document.getElementById('check-status');
+  statusEl.textContent = 'Prüfe...';
+
+  try {
+    const res = await fetch('/api/dhcp/check');
+    const data = await res.json();
+
+    if (data.dhcp_found) {
+      statusEl.innerHTML = `<span class="text-yellow-400">⚠ DHCP-Server gefunden: ${data.server_ip}</span>`;
+    } else {
+      statusEl.innerHTML = '<span class="text-green-400">✓ Kein fremder DHCP-Server gefunden</span>';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
+  }
+}
+
+// Check on page load
+document.addEventListener('DOMContentLoaded', checkDhcpConflict);
+</script>
+{% endblock %}

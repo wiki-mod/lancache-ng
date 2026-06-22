@@ -29,4 +29,8 @@ options {
     dnssec-validation no;
 
     response-policy { zone "rpz.lancache.lan"; };
+
+    # IPv4-only mode: uncomment or set via AAAA_FILTER env var
+    # filter-aaaa-on-v4 yes;
+    # filter-aaaa-on-v6 yes;
 };

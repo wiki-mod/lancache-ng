@@ -128,6 +128,27 @@ services:
       - lancache
     restart: unless-stopped
 
+  # ── DHCP Server (Kea) ─────────────────────────────────────────────────────
+  # Two modes available (configured in UI):
+  # 1. Kea mode: own DHCP server with REST API
+  # 2. Proxy mode: dnsmasq proxy (optional, not yet implemented)
+  dhcp:
+    container_name: lancache-dhcp
+    build:
+      context: ../../services/dhcp
+    env_file:
+      - ../../config/dev/dhcp.env
+    environment:
+      - DHCP_DNS_PRIMARY=${IP_STANDARD}
+      - DHCP_DNS_SECONDARY=${IP_SSL}
+    ports:
+      - "67:67/udp"      # DHCP
+      - "127.0.0.1:8000:8000"  # Kea Control Agent API (localhost only in dev)
+    networks:
+      lancache:
+        ipv4_address: 172.28.0.6
+    restart: unless-stopped
+
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     build:
@@ -151,12 +172,15 @@ services:
       - SSL_CACHE_MAX_GB=10
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
+      - DHCP_API_URL=http://dhcp:8000
+      - DHCP_API_TOKEN=lancache-dhcp-dev-secret
     networks:
       - lancache
     depends_on:
       - proxy-standard
       - proxy-ssl
       - netdata
+      - dhcp
     restart: unless-stopped
 
   # ── Netdata (system metrics backend, kein externer Port) ──────────────────

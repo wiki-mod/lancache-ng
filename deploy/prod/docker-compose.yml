@@ -144,6 +144,29 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  # ── DHCP Server (Kea) ─────────────────────────────────────────────────────
+  # Full DHCP server with REST API control
+  # network_mode: host allows DHCP broadcast (port 67/udp)
+  dhcp:
+    container_name: lancache-dhcp
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp:latest
+    build:
+      context: ../../services/dhcp
+    env_file:
+      - ../../config/prod/dhcp.env
+    environment:
+      - DHCP_DNS_PRIMARY=${IP_STANDARD}
+      - DHCP_DNS_SECONDARY=${IP_SSL}
+    network_mode: host
+    cap_add:
+      - NET_BIND_SERVICE
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
@@ -168,6 +191,8 @@ services:
       - SSL_CACHE_MAX_GB=500
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
+      - DHCP_API_URL=http://localhost:8000
+      - DHCP_API_TOKEN=lancache-dhcp-prod-secret
     depends_on:
       - proxy-standard
       - proxy-ssl

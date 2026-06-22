@@ -3,6 +3,7 @@ FROM debian:13-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bind9 \
     bind9-dnsutils \
+    bind9-filter-aaaa \
     gettext-base \
     locales \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \

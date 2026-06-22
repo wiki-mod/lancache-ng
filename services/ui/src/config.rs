@@ -18,6 +18,8 @@ pub struct Config {
     pub ssl_cache_max_gb: f64,
     pub standard_ip: String,
     pub ssl_ip: String,
+    pub dhcp_api_url: String,
+    pub dhcp_api_token: String,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
 }
@@ -42,6 +44,8 @@ impl Config {
             ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", 10.0),
             standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
             ssl_ip: env_str("SSL_IP", "192.168.234.11"),
+            dhcp_api_url: env_str("DHCP_API_URL", "http://localhost:8000"),
+            dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
         }

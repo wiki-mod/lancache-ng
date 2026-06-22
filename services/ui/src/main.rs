@@ -24,6 +24,7 @@ pub struct AppState {
 const TEMPLATE_NAMES: &[&str] = &[
     "base.html",
     "dashboard.html",
+    "dhcp.html",
     "domains.html",
     "stats.html",
     "logs.html",
@@ -103,6 +104,11 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(routes::dashboard::dashboard))
+        .route("/dhcp", get(routes::dhcp::dhcp_page))
+        .route("/dhcp/subnet", post(routes::dhcp::update_subnet))
+        .route("/dhcp/static/add", post(routes::dhcp::add_reservation))
+        .route("/dhcp/static/remove", post(routes::dhcp::remove_reservation))
+        .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
