@@ -226,12 +226,14 @@ services:
     command:
       - |
         mkdir -p /etc/nats
-        [ -f /etc/nats/nats.conf ] || cp /nats-default.conf /etc/nats/nats.conf
+        sed "s/__NATS_LOCAL_TOKEN__/$NATS_LOCAL_TOKEN/" /nats-default.conf > /etc/nats/nats.conf
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - /srv/lancache/nats:/data
       - /srv/lancache/nats-conf:/etc/nats
       - ../../services/nats/nats.conf:/nats-default.conf:ro
+    environment:
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
     ports:
       - "4222:4222"
     restart: always

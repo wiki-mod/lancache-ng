@@ -203,12 +203,14 @@ services:
     command:
       - |
         mkdir -p /etc/nats
-        [ -f /etc/nats/nats.conf ] || cp /nats-default.conf /etc/nats/nats.conf
+        sed "s/__NATS_LOCAL_TOKEN__/$NATS_LOCAL_TOKEN/" /nats-default.conf > /etc/nats/nats.conf
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - nats-data:/data
       - nats-conf:/etc/nats
       - ../../services/nats/nats.conf:/nats-default.conf:ro
+    environment:
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
     networks:
       lancache:
         ipv4_address: 172.28.0.8

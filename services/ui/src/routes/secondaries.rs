@@ -3,8 +3,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, Json};
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use rand::Rng;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
@@ -177,21 +176,8 @@ pub async fn rotate_token(
 // ─── Helper Functions ───
 
 fn rand_token() -> String {
-    // Use time + pid as entropy source (good enough for LAN tokens)
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let pid = std::process::id();
-    let mut h = DefaultHasher::new();
-    now.as_nanos().hash(&mut h);
-    pid.hash(&mut h);
-    let a = h.finish();
-
-    // Generate another hash for second half
-    let mut h = DefaultHasher::new();
-    now.as_micros().hash(&mut h);
-    pid.hash(&mut h);
-    let b = h.finish();
-
-    format!("{:016x}{:016x}", a, b)
+    let bytes: [u8; 32] = rand::thread_rng().gen();
+    hex::encode(bytes)
 }
 
 pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

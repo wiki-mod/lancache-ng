@@ -23,3 +23,5 @@ base64 = "0.22"
 futures-util = "0.3"
 async-nats = "0.35"
 rusqlite = { version = "0.31", features = ["bundled"] }
+rand = "0.8"
+hex = "0.4"
