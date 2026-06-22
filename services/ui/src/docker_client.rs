@@ -53,6 +53,16 @@ pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&st
         }
     }
 
+    let inspect = docker
+        .inspect_exec(&exec.id)
+        .await
+        .context("Failed to inspect exec")?;
+    if let Some(code) = inspect.exit_code {
+        if code != 0 {
+            return Err(anyhow::anyhow!("Command exited with code {}", code));
+        }
+    }
+
     Ok(output)
 }
 

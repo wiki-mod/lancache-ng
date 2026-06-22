@@ -74,7 +74,7 @@ pub async fn register_secondary(
     // Validate name: alphanumeric + dash, non-empty, ≤32 chars
     if form.name.is_empty()
         || form.name.len() > 32
-        || !form.name.chars().all(|c| c.is_alphanumeric() || c == '-')
+        || !form.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -185,26 +185,20 @@ fn rand_token() -> String {
 }
 
 pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let db = state.db.lock().unwrap();
-
-    // Load all secondaries' nats tokens
-    let mut tokens = db
-        .prepare("SELECT nats_token FROM secondaries")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Also include the local token
-    tokens.push(state.config.nats_local_token.clone());
-
-    // Build nats.conf content
-    let users_block = tokens
-        .iter()
-        .map(|token| format!("    {{ token: \"{}\" }}", token))
-        .collect::<Vec<_>>()
-        .join(",\n");
-
-    let nats_conf = format!(
-        r#"jetstream {{ store_dir: /data }}
+    let nats_conf = {
+        let db = state.db.lock().unwrap();
+        let mut tokens = db
+            .prepare("SELECT nats_token FROM secondaries")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        tokens.push(state.config.nats_local_token.clone());
+        let users_block = tokens
+            .iter()
+            .map(|token| format!("    {{ token: \"{}\" }}", token))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            r#"jetstream {{ store_dir: /data }}
 
 authorization {{
   users: [
@@ -212,10 +206,10 @@ authorization {{
   ]
 }}
 "#,
-        users_block
-    );
+            users_block
+        )
+    }; // DB lock released before file write
 
-    // Write to file
     std::fs::write(&state.config.nats_conf_path, nats_conf)
         .map_err(|e| format!("Failed to write nats.conf: {}", e).into())
 }

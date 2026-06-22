@@ -139,6 +139,7 @@ pub async fn add_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
+    flush_recursor_cache(&state).await;
 
     Redirect::to("/domains")
 }
@@ -161,6 +162,7 @@ pub async fn remove_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
+    flush_recursor_cache(&state).await;
 
     Redirect::to("/domains")
 }

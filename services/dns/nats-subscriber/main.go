@@ -92,26 +92,23 @@ func main() {
 		log.Fatalf("Failed to get JetStream context: %v", err)
 	}
 
-	// Create or update stream LANCACHE_DNS
-	streamInfo, err := js.StreamInfo("LANCACHE_DNS")
-	if err != nil && err != nats.ErrStreamNotFound {
-		log.Fatalf("Failed to get stream info: %v", err)
-	}
-
-	if streamInfo == nil {
-		// Create stream
-		_, err = js.AddStream(&nats.StreamConfig{
-			Name:       "LANCACHE_DNS",
-			Subjects:   []string{"lancache.dns.>"},
-			Storage:    nats.FileStorage,
-			MaxAge:     7 * 24 * time.Hour,
-			Discard:    nats.DiscardOld,
-			NoAck:      false,
-			Retention:  nats.LimitsPolicy,
-		})
-		if err != nil {
+	// Create stream LANCACHE_DNS if it does not exist yet.
+	// Multiple subscribers may race to create it on first start — handle "already exists" gracefully.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:      "LANCACHE_DNS",
+		Subjects:  []string{"lancache.dns.>"},
+		Storage:   nats.FileStorage,
+		MaxAge:    7 * 24 * time.Hour,
+		Discard:   nats.DiscardOld,
+		NoAck:     false,
+		Retention: nats.LimitsPolicy,
+	})
+	if err != nil {
+		if _, infoErr := js.StreamInfo("LANCACHE_DNS"); infoErr != nil {
 			log.Fatalf("Failed to create stream: %v", err)
 		}
+		// Another subscriber already created the stream — that's fine
+	} else {
 		log.Println("Created stream LANCACHE_DNS")
 	}
 
@@ -174,6 +171,11 @@ func handleDNSRecord(msg *nats.Msg, pdnsAPIKey string) {
 		return
 	}
 
+	if record.Action != "replace" && record.Action != "delete" {
+		log.Printf("Unknown action %q for %s/%s, skipping", record.Action, record.Zone, record.Name)
+		return
+	}
+
 	rrset := RRset{
 		Name:       record.Name,
 		Type:       record.Type,
@@ -182,7 +184,7 @@ func handleDNSRecord(msg *nats.Msg, pdnsAPIKey string) {
 
 	if record.Action == "delete" {
 		rrset.ChangeType = "DELETE"
-	} else if record.Action == "replace" {
+	} else {
 		rrset.TTL = record.TTL
 		rrset.Records = record.Records
 	}
@@ -286,6 +288,12 @@ func reconciler(js nats.JetStreamContext, pdnsAPIKey string) {
 		}
 
 		for _, rrset := range zoneInfo.RRsets {
+			// SOA and NS are zone infrastructure records; syncing them would
+			// overwrite the secondary's own apex configuration.
+			if rrset.Type == "SOA" || rrset.Type == "NS" {
+				continue
+			}
+
 			msgID := "reconcile-lan-" + strings.TrimSuffix(rrset.Name, ".") + "-" + rrset.Type
 
 			recordPayload := map[string]interface{}{
