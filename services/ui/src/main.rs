@@ -136,6 +136,17 @@ async fn main() -> Result<()> {
         db,
     });
 
+    // Write initial nats.conf with auth tokens and reload NATS
+    if let Err(e) = routes::secondaries::update_nats_conf(&state).await {
+        tracing::warn!("Could not write initial nats.conf: {}", e);
+    } else {
+        let _ = docker_client::exec_in_container(
+            &state.docker,
+            &state.config.nats_service,
+            vec!["kill", "-HUP", "1"],
+        ).await;
+    }
+
     let app = Router::new()
         .route("/", get(routes::dashboard::dashboard))
         .route("/dhcp", get(routes::dhcp::dhcp_page))

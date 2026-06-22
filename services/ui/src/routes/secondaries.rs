@@ -194,7 +194,7 @@ fn rand_token() -> String {
     format!("{:016x}{:016x}", a, b)
 }
 
-async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = state.db.lock().unwrap();
 
     // Load all secondaries' nats tokens

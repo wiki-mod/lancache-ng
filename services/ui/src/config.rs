@@ -62,7 +62,7 @@ impl Config {
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
             nats_local_token: env_str("NATS_LOCAL_TOKEN", ""),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
-            nats_conf_path: env_str("NATS_CONF_PATH", "/data/nats.conf"),
+            nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
         }
     }

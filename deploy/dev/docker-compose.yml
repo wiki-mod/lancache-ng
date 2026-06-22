@@ -34,6 +34,7 @@ services:
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
+      - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
@@ -97,6 +98,7 @@ services:
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
+      - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
       - NATS_CONSUMER=dns-ssl
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
@@ -194,10 +196,19 @@ services:
   # ── NATS (message bus for DNS record sync) ────────────────────────────────
   nats:
     image: nats:2-alpine
-    command: ["-c", "/etc/nats/nats.conf", "--store_dir=/data"]
+    # On first start: copy default conf (no auth) into the shared volume,
+    # then exec nats-server. The UI overwrites nats.conf with auth on startup
+    # and sends SIGHUP to reload without a container restart.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /etc/nats
+        [ -f /etc/nats/nats.conf ] || cp /nats-default.conf /etc/nats/nats.conf
+        exec nats-server -c /etc/nats/nats.conf
     volumes:
       - nats-data:/data
-      - /data/nats.conf:/etc/nats/nats.conf:ro
+      - nats-conf:/etc/nats
+      - ../../services/nats/nats.conf:/nats-default.conf:ro
     networks:
       lancache:
         ipv4_address: 172.28.0.8
@@ -215,6 +226,7 @@ services:
       - proxy-ssl-logs:/var/log/nginx/ssl:ro
       - proxy-standard-cache:/var/cache/standard:ro
       - proxy-ssl-cache:/var/cache/ssl:ro
+      - nats-conf:/etc/nats          # shared with NATS: UI writes nats.conf here
     ports:
       - "9090:8080"    # proxy-standard belegt schon 127.0.0.1:8080 → UI auf 9090
     environment:
@@ -232,6 +244,8 @@ services:
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=lancache-pdns-dev-secret
       - NATS_URL=nats://nats:4222
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
+      - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-lancache-reg-dev-secret}
     networks:
       - lancache
     depends_on:
@@ -277,6 +291,7 @@ volumes:
   watchdog-status:
   kea-data:
   nats-data:
+  nats-conf:
   netdataconfig:
   netdatalib:
   netdatacache:
