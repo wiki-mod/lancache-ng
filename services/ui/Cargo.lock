@@ -1175,7 +1175,7 @@ dependencies = [
  "bollard",
  "futures-util",
  "hex",
- "rand 0.8.6",
+ "rand 0.10.1",
  "regex",
  "reqwest",
  "rusqlite",
