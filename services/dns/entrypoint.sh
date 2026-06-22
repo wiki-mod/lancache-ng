@@ -1,108 +1,148 @@
 #!/bin/bash
 set -euo pipefail
 
-CHROOT="/var/lib/named"
-DOMAINS_FILE="/etc/bind/cdn-domains.txt"
+# ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
+PDNS_API_KEY="${PDNS_API_KEY:-lancache-pdns-secret}"
+DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
+ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
+
+export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR
 
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
 
-# ── 1. Populate chroot with static configs ────────────────────────────────────
-mkdir -p \
-    "$CHROOT/etc/bind/zones" \
-    "$CHROOT/var/cache/bind" \
-    "$CHROOT/var/run/named"
+# ── 1. Generate Recursor Config ──────────────────────────────────────────────
+echo "[lancache-dns] Generating recursor.conf..."
+envsubst '${PDNS_API_KEY}' < /etc/pdns/recursor.conf.template > /tmp/recursor.conf && \
+    mv /tmp/recursor.conf /etc/pdns/recursor.conf
 
-cp  /etc/bind/named.conf         "$CHROOT/etc/bind/named.conf"
-cp  /etc/bind/named.conf.options "$CHROOT/etc/bind/named.conf.options"
-cp  /etc/bind/named.conf.local   "$CHROOT/etc/bind/named.conf.local"
-cp -r /etc/bind/zones/.          "$CHROOT/etc/bind/zones/"
+if [ "$LOG_QUERIES" = "1" ]; then
+    echo "[lancache-dns] Enabling query logging..."
+    sed -i 's/^loglevel=3$/loglevel=6/' /etc/pdns/recursor.conf
+fi
 
-# ── 2. Generate logging config ────────────────────────────────────────────────
-SEVERITY="warning"
-[ "$LOG_QUERIES" = "1" ] && SEVERITY="info"
+# ── 2. Generate Authoritative Config ─────────────────────────────────────────
+echo "[lancache-dns] Generating pdns.conf..."
+envsubst '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' < /etc/pdns/auth/pdns.conf.template > /tmp/pdns.conf && \
+    mv /tmp/pdns.conf /etc/pdns/auth/pdns.conf
 
-cat > "$CHROOT/etc/bind/named.conf.logging" <<EOF
-logging {
-    channel default_stderr {
-        stderr;
-        severity $SEVERITY;
-        print-severity yes;
-        print-time     yes;
-        print-category yes;
-    };
-    category default { default_stderr; };
-    category queries { default_stderr; };
-};
-EOF
+# ── 3. Initialize SQLite Database ────────────────────────────────────────────
+if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
+    echo "[lancache-dns] Initializing SQLite database..."
+    # Try both possible schema locations in Debian Trixie
+    if [ -f /usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql ]; then
+        sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql
+    elif [ -f /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql ]; then
+        sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql
+    else
+        echo "[lancache-dns] WARNING: Could not find schema.sqlite3.sql, will attempt auto-initialization"
+    fi
+    chown pdns:pdns /var/lib/powerdns/pdns.sqlite3
+fi
 
-# ── 3. Generate RPZ zone from cdn-domains.txt ─────────────────────────────────
+# ── 4. Create LAN Zones ──────────────────────────────────────────────────────
+echo "[lancache-dns] Creating LAN zones in authoritative database..."
+
+# Temporarily start auth server to initialize zones
+pdns_server --config-dir=/etc/pdns/auth --daemon=no --guardian=no &
+AUTH_PID=$!
+sleep 2
+
+# Create zones (will not error if already exist)
+pdnsutil --config-dir=/etc/pdns/auth create-zone lan. 127.0.0.1 || true
+pdnsutil --config-dir=/etc/pdns/auth create-zone local.lan. 127.0.0.1 || true
+
+# Create empty reverse zones for privacy (prevent external PTR leakage)
+for zone in \
+    10.in-addr.arpa \
+    168.192.in-addr.arpa \
+    16.172.in-addr.arpa \
+    17.172.in-addr.arpa \
+    18.172.in-addr.arpa \
+    19.172.in-addr.arpa \
+    20.172.in-addr.arpa \
+    21.172.in-addr.arpa \
+    22.172.in-addr.arpa \
+    23.172.in-addr.arpa \
+    24.172.in-addr.arpa \
+    25.172.in-addr.arpa \
+    26.172.in-addr.arpa \
+    27.172.in-addr.arpa \
+    28.172.in-addr.arpa \
+    29.172.in-addr.arpa \
+    30.172.in-addr.arpa \
+    31.172.in-addr.arpa \
+    c.f.ip6.arpa \
+    d.f.ip6.arpa; do
+    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone." 127.0.0.1 || true
+done
+
+# Shut down auth server to replace with fresh start
+kill $AUTH_PID 2>/dev/null || true
+wait $AUTH_PID 2>/dev/null || true
+sleep 1
+
+# ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
+echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
 SERIAL=$(date +%Y%m%d01)
-RPZ_FILE="$CHROOT/var/cache/bind/db.rpz"
+RPZ_FILE="/var/lib/powerdns/rpz.zone"
 
 {
-    echo "\$ORIGIN rpz.lancache.lan."
+    echo "\$ORIGIN rpz."
     echo "\$TTL 60"
-    echo "@ SOA localhost. admin.lancache.lan. $SERIAL 3600 900 604800 60"
-    echo "@ NS  localhost."
+    echo "@ SOA localhost. admin.rpz. $SERIAL 3600 900 604800 60"
+    echo "@ NS localhost."
     echo ""
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
-        printf "%s A %s\n"   "${domain}" "${PROXY_IP}"
-        printf "*.%s A %s\n" "${domain}" "${PROXY_IP}"
+        printf "%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
+        printf "*.%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
         if [ -n "$PROXY_IPV6" ]; then
-            printf "%s AAAA %s\n"   "${domain}" "${PROXY_IPV6}"
-            printf "*.%s AAAA %s\n" "${domain}" "${PROXY_IPV6}"
+            printf "%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
+            printf "*.%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
         fi
-    done < "$DOMAINS_FILE"
+    done < /etc/pdns/cdn-domains.txt
 } > "$RPZ_FILE"
 
 count=$(grep -c "^[a-zA-Z*]" "$RPZ_FILE" 2>/dev/null || true)
 echo "[lancache-dns] RPZ zone: ${count:-0} records written."
+chown pdns:pdns "$RPZ_FILE"
 
-chown -R bind:bind "$CHROOT/var"
+# ── 6. Start Both Processes (with restart loops) ─────────────────────────────
+echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
-# ── 3b. Generate LAN zones config (TSIG key + allow-update if DDNS_TSIG_KEY set) ─
-DDNS_TSIG_KEY="${DDNS_TSIG_KEY:-}"
-LAN_ZONES_FILE="$CHROOT/etc/bind/named.conf.lan-zones"
+run_auth() {
+    while true; do
+        pdns_server --config-dir=/etc/pdns/auth --guardian=no --daemon=no || true
+        echo "[lancache-dns] pdns_server exited, restarting in 3s..."
+        sleep 3
+    done
+}
 
-{
-    if [ -n "$DDNS_TSIG_KEY" ]; then
-        echo "key \"lancache-ddns-key\" {"
-        echo "    algorithm hmac-sha256;"
-        echo "    secret \"$DDNS_TSIG_KEY\";"
-        echo "};"
-        echo ""
-        ALLOW_UPDATE='    allow-update { key "lancache-ddns-key"; };'
-    else
-        ALLOW_UPDATE=""
-    fi
-    echo "zone \"lan\" {"
-    echo "    type primary;"
-    echo "    file \"/etc/bind/zones/db.lan\";"
-    [ -n "$ALLOW_UPDATE" ] && echo "$ALLOW_UPDATE"
-    echo "};"
-    echo ""
-    echo "zone \"local.lan\" {"
-    echo "    type primary;"
-    echo "    file \"/etc/bind/zones/db.local.lan\";"
-    echo "};"
-} > "$LAN_ZONES_FILE"
+run_recursor() {
+    while true; do
+        pdns_recursor --config-dir=/etc/pdns || true
+        echo "[lancache-dns] pdns_recursor exited, restarting in 3s..."
+        sleep 3
+    done
+}
 
-if [ -n "$DDNS_TSIG_KEY" ]; then
-    echo "[lancache-dns] DDNS enabled — TSIG key configured for zone 'lan'."
-else
-    echo "[lancache-dns] DDNS disabled — DDNS_TSIG_KEY not set."
-fi
+# Start auth server first
+run_auth &
+AUTH_PID=$!
 
-# ── 4. Validate config ─────────────────────────────────────────────────────────
-echo "[lancache-dns] Validating BIND9 config..."
-named-checkconf -t "$CHROOT" /etc/bind/named.conf
-named-checkzone rpz.lancache.lan "$RPZ_FILE"
+# Give auth time to come up before recursor starts
+sleep 2
 
-# ── 5. Start BIND9 ─────────────────────────────────────────────────────────────
-echo "[lancache-dns] Starting BIND9..."
-exec named -f -u bind -t "$CHROOT"
+# Start recursor
+run_recursor &
+REC_PID=$!
+
+# Handle termination
+trap "kill $AUTH_PID $REC_PID 2>/dev/null || true" EXIT TERM
+
+# Wait indefinitely
+wait

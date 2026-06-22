@@ -1,9 +1,10 @@
-FROM debian:13-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bind9 \
-    bind9-dnsutils \
-    bind9-filter-aaaa \
+    pdns-recursor \
+    pdns-server \
+    pdns-backend-sqlite3 \
+    sqlite3 \
     gettext-base \
     locales \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
@@ -12,21 +13,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# Pre-create chroot skeleton — entrypoint fills in the rest at runtime
-RUN mkdir -p \
-    /var/lib/named/etc/bind/zones \
-    /var/lib/named/var/cache/bind \
-    /var/lib/named/var/run/named \
-    && chown -R bind:bind /var/lib/named/var
+RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
+    && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
 
-COPY named.conf          /etc/bind/named.conf
-COPY named.conf.options  /etc/bind/named.conf.options
-COPY named.conf.local    /etc/bind/named.conf.local
-COPY zones/              /etc/bind/zones/
-COPY cdn-domains.txt     /etc/bind/cdn-domains.txt
-COPY entrypoint.sh       /entrypoint.sh
+COPY recursor.conf.template /etc/pdns/recursor.conf.template
+COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template
+COPY recursor.lua /etc/pdns/recursor.lua
+COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
+COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 53/udp 53/tcp
+EXPOSE 53/udp 53/tcp 8081 8082
 
 ENTRYPOINT ["/entrypoint.sh"]
