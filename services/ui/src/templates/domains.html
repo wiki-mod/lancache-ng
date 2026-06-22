@@ -177,5 +177,39 @@
        Neue SSL-Domains brauchen einen Eintrag in <em>beiden</em> Listen.</p>
   </div>
 
+  <!-- AAAA-Filter -->
+  <div class="card flex flex-col gap-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">IPv4-only Modus (AAAA-Filter)</h2>
+      <p class="text-xs text-slate-500 mt-0.5">
+        Unterdrückt IPv6-Antworten für alle Domains — Clients nutzen dann IPv4 und landen im Cache.
+        Wird per Lua im PowerDNS Recursor umgesetzt, kein DNS-Neustart nötig.
+      </p>
+    </div>
+
+    <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
+      <div class="flex items-center gap-2">
+        <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
+               {% if aaaa_filter_enabled %}checked{% endif %}
+               class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer">
+        <label for="aaaa-enabled" class="text-sm text-slate-300 cursor-pointer">
+          IPv4-only aktivieren
+        </label>
+      </div>
+      <button type="submit"
+              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        Speichern
+      </button>
+    </form>
+
+    <p class="text-xs text-slate-500">
+      {% if aaaa_filter_enabled %}
+      Status: <span class="text-green-400 font-semibold">Aktiviert</span>
+      {% else %}
+      Status: <span class="text-slate-400">Deaktiviert</span>
+      {% endif %}
+    </p>
+  </div>
+
 </div>
 {% endblock %}

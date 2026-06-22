@@ -27,6 +27,7 @@ forward-zones+=c.f.ip6.arpa=127.0.0.1:5300
 forward-zones+=d.f.ip6.arpa=127.0.0.1:5300
 
 lua-config-file=/etc/pdns/recursor.lua
+lua-dns-script=/etc/pdns/filter-aaaa.lua
 
 # ── Cache Persistence (Warm-Start) ───────────────────────────────────────────
 # PowerDNS dumps the record cache to disk on shutdown and reloads it on startup.

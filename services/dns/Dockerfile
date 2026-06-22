@@ -19,6 +19,7 @@ RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
 COPY recursor.conf.template /etc/pdns/recursor.conf.template
 COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template
 COPY recursor.lua /etc/pdns/recursor.lua
+COPY filter-aaaa.lua /etc/pdns/filter-aaaa.lua
 COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

@@ -21,6 +21,11 @@ pub struct LanRecordForm {
     pub ttl: Option<u32>,
 }
 
+#[derive(Deserialize)]
+pub struct AaaaFilterForm {
+    pub enabled: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RRset {
     pub name: String,
@@ -41,11 +46,13 @@ pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let ssl_domains = read_domain_file(&state.config.ssl_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
+    let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
 
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
     ctx.insert("ssl_domains", &ssl_domains);
     ctx.insert("lan_records", &lan_records);
+    ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("active_page", "domains");
 
     crate::routes::render(&state.templates, "domains.html", &ctx)
@@ -166,6 +173,24 @@ pub async fn remove_lan_record(
     Redirect::to("/domains")
 }
 
+pub async fn toggle_aaaa_filter(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<AaaaFilterForm>,
+) -> Redirect {
+    let enable = form.enabled == "1";
+    let cmd = if enable {
+        vec!["touch", "/var/lib/powerdns/aaaa-filter-enabled"]
+    } else {
+        vec!["rm", "-f", "/var/lib/powerdns/aaaa-filter-enabled"]
+    };
+    for svc in [&state.config.dns_standard_service, &state.config.dns_ssl_service] {
+        if let Err(e) = docker_client::exec_in_container(&state.docker, svc, cmd.clone()).await {
+            tracing::error!("AAAA filter toggle on {}: {}", svc, e);
+        }
+    }
+    Redirect::to("/domains")
+}
+
 async fn flush_recursor_cache(state: &AppState) {
     let url = format!("{}/api/v1/servers/localhost/cache/flush?type=packet", state.config.pdns_rec_url);
     state.http_client
@@ -174,6 +199,16 @@ async fn flush_recursor_cache(state: &AppState) {
         .send()
         .await
         .ok();
+}
+
+async fn is_aaaa_filter_enabled(state: &AppState) -> bool {
+    let result = docker_client::exec_in_container(
+        &state.docker,
+        &state.config.dns_standard_service,
+        vec!["test", "-f", "/var/lib/powerdns/aaaa-filter-enabled"],
+    )
+    .await;
+    result.is_ok()
 }
 
 async fn restart_ssl(state: &AppState) {
