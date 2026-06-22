@@ -941,6 +941,7 @@ dependencies = [
  "axum",
  "base64",
  "bollard",
+ "futures-util",
  "regex",
  "reqwest",
  "serde",
