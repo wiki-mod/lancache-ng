@@ -7,8 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     | tar xz --strip-components=1 -C /usr/local/bin sccache-v0.7.4-x86_64-unknown-linux-musl/sccache \
     && chmod +x /usr/local/bin/sccache
 
+ARG SCCACHE_REDIS_URL=
 ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_REDIS=redis://192.168.1.230:6379 \
+    SCCACHE_REDIS=${SCCACHE_REDIS_URL} \
     SCCACHE_REDIS_KEY_PREFIX=lancache-ui
 
 WORKDIR /build
