@@ -16,12 +16,19 @@ pub async fn proxy(
     if path.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let target = format!("{}/api/v1/{}", state.config.netdata_url, path);
+    let mut target = format!("{}/api/v1/{}", state.config.netdata_url, path);
+    if !params.is_empty() {
+        let qs = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&");
+        target = format!("{}?{}", target, qs);
+    }
 
     let upstream = state
         .http_client
         .get(&target)
-        .query(&params)
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
