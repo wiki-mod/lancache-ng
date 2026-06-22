@@ -3,7 +3,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, Json};
 use serde::{Deserialize, Serialize};
-use rand::Rng;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
@@ -181,7 +180,7 @@ pub async fn rotate_token(
 // ─── Helper Functions ───
 
 fn rand_token() -> String {
-    let bytes: [u8; 32] = rand::thread_rng().gen();
+    let bytes: [u8; 32] = rand::random();
     hex::encode(bytes)
 }
 
