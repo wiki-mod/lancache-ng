@@ -79,7 +79,7 @@ async fn main() {
 
     // Connect to NATS with reconnect settings
     let mut opts = async_nats::ConnectOptions::new()
-        .max_reconnects(Some(-1))
+        .max_reconnects(None)
         .reconnect_delay_callback(|_| Duration::from_secs(3));
 
     if let Some(token) = nats_token {
@@ -311,7 +311,7 @@ async fn handle_dns_flush(pdns_api_key: &str) {
     }
 }
 
-async fn reconciler(js: jetstream::JetStream, pdns_api_key: &str) {
+async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     loop {
