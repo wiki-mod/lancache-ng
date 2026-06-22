@@ -1,24 +1,24 @@
-# LanCache-NG — Quickstart (kein Repo-Clone nötig)
+# LanCache-NG — Quickstart (no repo clone needed)
 #
-# Voraussetzungen:
-#   1. setup.sh ausführen — konfiguriert .env und startet alles automatisch
-#      Oder manuell:
-#   2. .env editieren: IPs und Cache-Pfade anpassen
-#   3. Cache-Verzeichnisse anlegen:
+# Prerequisites:
+#   1. Run setup.sh — configures .env and starts everything automatically
+#      Or manually:
+#   2. Edit .env: adjust IPs and cache paths
+#   3. Create cache directories:
 #        mkdir -p /opt/lancache-ng/cache/standard /opt/lancache-ng/cache/ssl
-#   4. (optional) Zweite LAN-IP hinzufügen:
+#   4. (optional) Add second LAN IP:
 #        ip addr add 192.168.234.11/24 dev eth0
-#   5. Starten:
+#   5. Start:
 #        docker compose pull && docker compose up -d
-#   6. CA-Zertifikat für SSL-Modus abholen (nach dem ersten Start):
-#        ./certs/ca.crt → auf Clients installieren (docs: github.com/wiki-mod/lancache-ng)
+#   6. Get CA certificate for SSL mode (after first start):
+#        ./certs/ca.crt → install on clients (docs: github.com/wiki-mod/lancache-ng)
 #
-# Domain-Listen anpassen: über Admin-UI (Port 8080) oder
-# eigene Dateien mounten (siehe deploy/prod/docker-compose.yml im Repo).
+# Customize domain lists: via Admin UI (port 8080) or
+# mount custom files (see deploy/prod/docker-compose.yml in repo).
 
 services:
 
-  # ── Standard-Modus (kein CA-Zertifikat nötig) ─────────────────────────────
+  # ── Standard mode (no CA certificate needed) ──────────────────────────────
   proxy-standard:
     container_name: lancache-proxy-standard
     image: ghcr.io/wiki-mod/lancache-ng/proxy-standard:latest
@@ -94,8 +94,8 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
-  # ── SSL-Modus (CA-Zertifikat auf Clients installieren) ─────────────────────
-  # Nur aktiv wenn COMPOSE_PROFILES ssl enthält (setup.sh fragt danach)
+  # ── SSL mode (install CA certificate on clients) ───────────────────────────
+  # Only active if COMPOSE_PROFILES contains ssl (setup.sh prompts for this)
   proxy-ssl:
     profiles: [ssl]
     container_name: lancache-proxy-ssl
@@ -108,7 +108,7 @@ services:
       - CACHE_VALID_HIT=${CACHE_VALID_HIT}
       - CACHE_VALID_ANY=${CACHE_VALID_ANY}
     volumes:
-      - ./certs:/etc/nginx/ssl/ca          # CA wird hier beim ersten Start erzeugt
+      - ./certs:/etc/nginx/ssl/ca          # CA is generated here on first start
       - ${CACHE_DIR_SSL}:/var/cache/nginx/lancache
       - proxy-ssl-logs:/var/log/nginx
     ports:
@@ -155,9 +155,9 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
-  # ── Watchdog (Health-Monitor, Auto-Restart, Purge-Cron) ──────────────────
-  # socket-proxy begrenzt Docker-Zugriff auf Container-Inspect + Restart
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — kein exec, keine Images)
+  # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
+  # socket-proxy limits Docker access to container inspect + restart only
+  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
@@ -201,7 +201,7 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
-  # ── Admin-UI ───────────────────────────────────────────────────────────────
+  # ── Admin UI ───────────────────────────────────────────────────────────────
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
@@ -240,7 +240,7 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
-  # ── Netdata (System-Metriken) ──────────────────────────────────────────────
+  # ── Netdata (system metrics) ───────────────────────────────────────────────
   netdata:
     image: netdata/netdata
     hostname: lancache-netdata
@@ -260,9 +260,9 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
-  # ── Watchtower (automatische Updates) ────────────────────────────────────────
-  # Nur aktiv wenn COMPOSE_PROFILES watchtower enthält (setup.sh fragt danach)
-  # Fork von nicholas-fedor: aktiv gepflegt, NegotiateAPIVersion=true (Docker 29+)
+  # ── Watchtower (automatic updates) ────────────────────────────────────────────
+  # Only active if COMPOSE_PROFILES contains watchtower (setup.sh prompts for this)
+  # Fork from nicholas-fedor: actively maintained, NegotiateAPIVersion=true (Docker 29+)
   watchtower:
     profiles: [watchtower]
     image: ghcr.io/nicholas-fedor/watchtower:latest

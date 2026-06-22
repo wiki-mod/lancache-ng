@@ -4,19 +4,19 @@
 
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
-| nginx (proxy) | on | — | Mainline von nginx.org, Debian 13 Base |
-| BIND9 | on | dnsmasq | Chroot im Container |
-| Kea DHCP | off | — | Benötigt BIND9 (DDNS) |
-| Watchdog | on | — | Health-Checks, Auto-Restart, Purge-Cron |
-| syslog-ng | on | — | Zentrales Logging aller Container |
-| Admin UI | on | — | Axum/Rust, Tera, Tailwind, eigener Port |
-| Cache Warmer | off | — | steamcmd, auf Anfrage startbar |
+| nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
+| BIND9 | on | dnsmasq | Chroot in container |
+| Kea DHCP | off | — | Requires BIND9 (DDNS) |
+| Watchdog | on | — | Health checks, auto-restart, purge cron |
+| syslog-ng | on | — | Central logging for all containers |
+| Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
+| Cache Warmer | off | — | steamcmd, startable on demand |
 
 ## nginx
 
-Mainline von nginx.org (nicht Debian-Paket). Basis: `debian:13-slim`.
+Mainline from nginx.org (not Debian package). Base: `debian:13-slim`.
 
-**Performance-Konfiguration:**
+**Performance configuration:**
 
 ```nginx
 worker_processes      auto;
@@ -36,18 +36,18 @@ aio         threads=default;
 directio    4m;
 ```
 
-**Cache-Konfiguration (alle Werte als Env-Var + im Admin-UI konfigurierbar):**
+**Cache configuration (all values as env var + configurable in Admin UI):**
 
-| Variable | Default | Beschreibung |
+| Variable | Default | Description |
 |---|---|---|
-| `CACHE_MAX_SIZE` | `500g` | Max. Cachegröße — UI prüft gegen verfügbaren Disk-Platz |
-| `CACHE_MEM_MB` | `200` | keys_zone Größe (1MB ≈ 8.000 Keys) |
-| `CACHE_SLICE_SIZE` | `8m` | Slice-Größe: `4m/8m/16m/32m/64m/128m/256m/512m` |
-| `CACHE_VALID_HIT` | `365d` | Gültigkeitsdauer für 200/206/301/302 |
-| `CACHE_VALID_ANY` | `1m` | Gültigkeitsdauer für alles andere |
-| `CACHE_INACTIVE` | `365d` | Entfernen wenn X Tage nicht zugegriffen |
+| `CACHE_MAX_SIZE` | `500g` | Max cache size — UI checks against available disk space |
+| `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
+| `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
+| `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
+| `CACHE_VALID_ANY` | `1m` | Validity duration for everything else |
+| `CACHE_INACTIVE` | `365d` | Remove if not accessed for X days |
 
-**Slice Module** (für Range Requests bei Game-Downloads):
+**Slice module** (for range requests in game downloads):
 ```nginx
 slice               $CACHE_SLICE_SIZE;
 proxy_cache_key     "$host$uri$slice_range";
@@ -55,164 +55,164 @@ proxy_set_header    Range $slice_range;
 proxy_cache_valid   206 $CACHE_VALID_HIT;
 ```
 
-**Hinweis:** `max_size` ist kein hartes Limit — bei abgestürzten Workern kann der Cache drüber wachsen. Watchdog überwacht den echten Disk-Stand.
+**Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage.
 
 ## BIND9
 
-- Chroot unter `/var/lib/named` im Container
-- RPZ ersetzt `cdn-domains.txt` / `cdn-ssl-domains.txt`
-- IPv4 + IPv6 überall (dual-stack)
+- Chroot under `/var/lib/named` in container
+- RPZ replaces `cdn-domains.txt` / `cdn-ssl-domains.txt`
+- IPv4 + IPv6 everywhere (dual-stack)
 
-**Zonen:**
+**Zones:**
 
-| Zone | Typ | Zweck |
+| Zone | Type | Purpose |
 |---|---|---|
-| `lan` | primary | TLD für das LAN |
-| `local.lan` | primary | LAN-Hosts (via Admin-UI verwaltbar) |
+| `lan` | primary | LAN TLD |
+| `local.lan` | primary | LAN hosts (manageable via Admin UI) |
 | `10.in-addr.arpa` | primary | Reverse 10/8 |
 | `168.192.in-addr.arpa` | primary | Reverse 192.168/16 |
 | `16–31.172.in-addr.arpa` | primary | Reverse 172.16/12 |
-| `ip6.arpa` (ULA) | primary | IPv6 Reverse |
+| `ip6.arpa` (ULA) | primary | IPv6 reverse |
 
-**Optionale Features (Env-Variablen):**
+**Optional features (environment variables):**
 
-| Variable | Default | Bedeutung |
+| Variable | Default | Meaning |
 |---|---|---|
-| `ENABLE_ROOT_MIRROR` | `false` | Root Zone Mirror (AXFR von Root-Servern) |
-| `FILTER_AAAA_V4` | `false` | AAAA-Records für IPv4-Clients filtern |
-| `FILTER_AAAA_V6` | `false` | AAAA-Records für IPv6-Clients filtern |
-| `ENABLE_SECONDARY` | `false` | Secondary Zones aktivieren |
-| `SECONDARY_MASTERS` | — | IP des Primary-DNS |
-| `SECONDARY_ZONES` | — | Kommagetrennte Zonenliste |
+| `ENABLE_ROOT_MIRROR` | `false` | Root zone mirror (AXFR from root servers) |
+| `FILTER_AAAA_V4` | `false` | Filter AAAA records for IPv4 clients |
+| `FILTER_AAAA_V6` | `false` | Filter AAAA records for IPv6 clients |
+| `ENABLE_SECONDARY` | `false` | Enable secondary zones |
+| `SECONDARY_MASTERS` | — | Primary DNS IP |
+| `SECONDARY_ZONES` | — | Comma-separated zone list |
 
-**allow-query / allow-recursion:** offen für alle RFC-1918 + IPv6 ULA per Default
+**allow-query / allow-recursion:** open to all RFC-1918 + IPv6 ULA by default
 
-**nsupdate (RFC 2136):** TSIG-gesicherter Kanal für Admin-UI → BIND9
+**nsupdate (RFC 2136):** TSIG-secured channel for Admin UI → BIND9
 
 ## Kea DHCP
 
 - DHCPv4 + DHCPv6 (dual-stack)
-- IP-Bereiche als Start–End (keine CIDR-Pflicht)
-- Feste Zuweisungen: MAC → IP, editierbar über UI
-- DDNS → BIND9: Lease = automatisch A + PTR in `local.lan`
-- REST API (Kea Control Agent) für Admin-UI
+- IP ranges as start–end (no CIDR required)
+- Static assignments: MAC → IP, editable via UI
+- DDNS → BIND9: lease = automatically A + PTR in `local.lan`
+- REST API (Kea Control Agent) for Admin UI
 
 ## Watchdog
 
-Eigener leichtgewichtiger Container mit Docker-Socket-Zugriff (restart-Berechtigung).
+Lightweight container with Docker socket access (restart permission).
 
-**Health-Checks:**
-- nginx: HTTP-Request auf `/health`
-- BIND9: DNS-Query-Test
-- Kea: REST API Ping
-- syslog-ng: Prozess-Check
+**Health checks:**
+- nginx: HTTP request on `/health`
+- BIND9: DNS query test
+- Kea: REST API ping
+- syslog-ng: Process check
 
-**Auto-Restart:** X fehlgeschlagene Checks → `docker restart <container>`
+**Auto-restart:** X failed checks → `docker restart <container>`
 
-**Scheduled Purge (Cron, täglich):**
-- Entfernt Cache-Einträge älter als `CACHE_VALID_HIT` (`find -mtime`)
-- Ergänzt nginx `inactive` (die nach Zugriffszeit arbeitet)
+**Scheduled purge (cron, daily):**
+- Remove cache entries older than `CACHE_VALID_HIT` (`find -mtime`)
+- Complements nginx `inactive` (which works by access time)
 
-**Disk-Monitoring:**
-- Warnung im UI bei 85% Füllstand (gelb)
-- Alarm bei 95% (rot)
-- Prüft echten Disk-Stand, nicht nur nginx `max_size`
+**Disk monitoring:**
+- Warning in UI at 85% full (yellow)
+- Alarm at 95% (red)
+- Monitors actual disk usage, not just nginx `max_size`
 
-**Status:** wird als Ampelleiste im Admin-UI angezeigt (grün/gelb/rot pro Service)
+**Status:** displayed as traffic light bar in Admin UI (green/yellow/red per service)
 
 ## syslog-ng
 
-Zentrales Logging aller Container. Alle Services senden an syslog-ng.
+Central logging for all containers. All services send to syslog-ng.
 
-- Speicher selbstverwaltend: max. Dateigröße + automatische Rotation
-- Retention konfigurierbar (Default: 30 Tage)
-- **Log-Level pro Service im Admin-UI konfigurierbar:**
+- Self-managed storage: max file size + automatic rotation
+- Retention configurable (default: 30 days)
+- **Log level per service configurable in Admin UI:**
 
-| Service | Level-Optionen |
+| Service | Level options |
 |---|---|
 | nginx | `emerg / error / warn / info / debug` |
 | BIND9 | `critical / error / warning / notice / info / dynamic` |
 | Kea | `fatal / error / warn / info / debug` |
 | Watchdog | `error / info / debug` |
 
-- **Weiterleitung:** Ziel-IP + Port + Protokoll (UDP/TCP/TLS, RFC 5424 oder 3164) im Admin-UI konfigurierbar
-- Änderung im UI → schreibt Konfig → `syslog-ng-ctl reload`
+- **Forwarding:** destination IP + port + protocol (UDP/TCP/TLS, RFC 5424 or 3164) configurable in Admin UI
+- Change in UI → writes config → `syslog-ng-ctl reload`
 
 ## Cache Warming
 
-Eigener Container (`services/warmer`) mit `steamcmd`.
+Separate container (`services/warmer`) with `steamcmd`.
 
-**Ablauf:**
-1. User gibt Steam App-ID ein
-2. `steamcmd` holt Depot-Manifest (anonym für F2P, optional mit Account für Paid Games)
-3. Chunk-URLs werden über den lokalen Proxy gefetcht → landen im Cache
-4. Fortschritt live im Admin-UI (Chunks gesamt / erledigt / MB/s)
+**Workflow:**
+1. User enters Steam app ID
+2. `steamcmd` fetches depot manifest (anonymous for F2P, optional with account for paid games)
+3. Chunk URLs fetched through local proxy → cached
+4. Progress displayed live in Admin UI (total chunks / completed / MB/s)
 
-**Steam Account:** optional per Env-Var (`STEAM_USER`, `STEAM_PASS`) — nie im Repo, nie im Image.
+**Steam account:** optional via env var (`STEAM_USER`, `STEAM_PASS`) — never in repo, never in image.
 
-**Tracking:** welche App-IDs wurden gewärmt + welche CDN-URLs gehören dazu → Basis für gezieltes Purging.
+**Tracking:** which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
 
-Epic / GOG: nicht unterstützt.
+Epic / GOG: not supported.
 
-## Cache Retention & Bereinigung
+## Cache Retention & Cleanup
 
-**Drei Mechanismen zusammen:**
+**Three mechanisms combined:**
 
-| Mechanismus | Trigger | Grundlage |
+| Mechanism | Trigger | Basis |
 |---|---|---|
-| nginx `inactive` | automatisch, laufend | nicht zugegriffen seit `CACHE_INACTIVE` |
-| Watchdog Purge-Cron | täglich automatisch | Datei älter als `CACHE_VALID_HIT` |
-| Manuelles Purge | Admin-UI on-demand | frei wählbar |
+| nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
+| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_HIT` |
+| Manual purge | Admin UI on-demand | freely selectable |
 
-**Manuelles Purging im Admin-UI:**
+**Manual purging in Admin UI:**
 
-| Aktion | Granularität |
+| Action | Granularity |
 |---|---|
-| Gesamten Cache leeren | Alles |
-| Nach Alter bereinigen | Älter als X Tage — Vorschau "~X GB frei" vor Bestätigung |
-| Nach Zugriff bereinigen | Nicht zugegriffen seit X Tagen |
-| Einzelnen Titel löschen | Alle Chunks einer gewärmten App-ID |
-| Pinning | App-ID vor LRU + automatischem Purge schützen |
+| Clear entire cache | Everything |
+| Purge by age | Older than X days — preview "~X GB freed" before confirmation |
+| Purge by access | Not accessed for X days |
+| Delete single title | All chunks of a warmed app ID |
+| Pinning | Protect app ID from LRU + automatic purge |
 
-**Größenvalidierung:** Admin-UI prüft verfügbaren Disk-Platz beim Speichern von `CACHE_MAX_SIZE`. Warnung > 90% des verfügbaren Platzes, Fehler bei Überschreitung.
+**Size validation:** Admin UI checks available disk space when saving `CACHE_MAX_SIZE`. Warning > 90% of available space, error if exceeded.
 
-## Monitoring (Admin-UI)
+## Monitoring (Admin UI)
 
-- Netdata integriert (Proxy via `/api/netdata`)
-- Statistiken: CPU, RAM, Netzwerk MB/s (Echtzeit + Verlauf), Disk I/O
-- Dashboard: Cache-Füllstand, Hit/Miss-Rate, aktive Verbindungen
-- Watchdog-Ampelleiste: ein Indikator pro Service, persistent sichtbar
+- Netdata integrated (proxy via `/api/netdata`)
+- Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
+- Dashboard: cache fill level, hit/miss rate, active connections
+- Watchdog traffic light bar: one indicator per service, persistently visible
 
 ## Admin UI
 
-Läuft auf eigenem Axum-Webserver (Port 8080) — unabhängig von nginx. Wenn nginx down ist, ist das UI noch erreichbar und zeigt den Fehler.
+Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx is down, the UI is still reachable and shows the error.
 
-- Zwei Modi: **Anfänger** (geführt, kein Jargon) / **Experte** (technisch direkt)
-- DNS: Zonen anlegen, Host-Einträge, PTR-Haken bei LAN-IPs
-- Kea: Lease-Übersicht, feste Zuweisungen anlegen/editieren
-- Cache: Warming starten, Fortschritt, Purging, Retention + Slice/Size-Einstellungen
-- Logs: gefiltert nach Service, Level wählbar
-- Erweiterte Optionen (Root Mirror, Filter AAAA, Secondary, syslog-Weiterleitung) unter "Erweitert"
+- Two modes: **Beginner** (guided, no jargon) / **Expert** (technical direct)
+- DNS: create zones, host entries, PTR checkbox for LAN IPs
+- Kea: lease overview, create/edit static assignments
+- Cache: start warming, progress, purging, retention + slice/size settings
+- Logs: filtered by service, level selectable
+- Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced"
 
 ## IPv6
 
-- BIND9: dual-stack Listener, AAAA-Records, IPv6 Reverse Zonen
-- Kea: DHCPv6 parallel zu DHCPv4
-- nginx: bereits IPv6-fähig
-- Docker: IPv6 auf Linux-Host via `"ipv6": true` in `daemon.json`
+- BIND9: dual-stack listeners, AAAA records, IPv6 reverse zones
+- Kea: DHCPv6 parallel to DHCPv4
+- nginx: already IPv6-capable
+- Docker: IPv6 on Linux host via `"ipv6": true` in `daemon.json`
 
-## Sicherheit
+## Security
 
-- Alle generierten Secrets (TSIG-Keys, Kea API Token) werden beim Container-Start auto-generiert, nie im Repo
-- Docker-Socket im Watchdog: nur restart-Berechtigung, kein full admin
-- Repo ist public: keine echten IPs, Passwörter oder Keys in Konfig-Dateien
+- All generated secrets (TSIG keys, Kea API token) auto-generated at container start, never in repo
+- Docker socket in watchdog: restart permission only, no full admin
+- Repo is public: no real IPs, passwords, or keys in config files
 
-## Implementierungsreihenfolge
+## Implementation order
 
-1. nginx (Slice Module + Optimierungen)
+1. nginx (slice module + optimizations)
 2. BIND9
 3. Kea DHCP
 4. Watchdog
 5. syslog-ng
-6. Cache Warmer
+6. Cache warmer
 7. Admin UI

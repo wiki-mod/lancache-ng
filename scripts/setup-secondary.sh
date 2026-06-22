@@ -169,4 +169,4 @@ fi
 cd ..
 
 # Success message
-echo "Secondary DNS '${name}' läuft. DNS-IP dieses Hosts bei Clients eintragen."
+echo "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."

@@ -48,31 +48,31 @@ get_env_var() {
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "Kein Stack in $install_dir gefunden. Zuerst ./setup.sh ausführen."
+        || die "No stack found in $install_dir. Run ./setup.sh first."
     cd "$install_dir"
 
     if [[ -d "$install_dir/.git" ]]; then
-        print_step "Repo aktualisieren"
+        print_step "Updating repo"
         git -C "$install_dir" pull --ff-only \
-            || print_warn "git pull fehlgeschlagen — weiter mit lokaler Version"
+            || print_warn "git pull failed — continuing with local version"
         cp "$install_dir/deploy/quickstart/docker-compose.yml" \
            "$install_dir/docker-compose.yml"
-        print_ok "docker-compose.yml aktualisiert"
+        print_ok "docker-compose.yml updated"
     fi
 
-    print_step "Neueste Images laden"
-    docker compose pull || print_warn "Pull teilweise fehlgeschlagen — weiter mit gecachten Images"
+    print_step "Pulling latest images"
+    docker compose pull || print_warn "Pull partially failed — continuing with cached images"
 
-    print_step "Container neu starten"
+    print_step "Restarting containers"
     docker compose up -d --remove-orphans
-    print_ok "Stack aktualisiert"
+    print_ok "Stack updated"
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
 cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "Kein Stack in $install_dir gefunden. Zuerst ./setup.sh ausführen."
+        || die "No stack found in $install_dir. Run ./setup.sh first."
     cd "$install_dir"
 
     local env_file="$install_dir/.env"
@@ -82,10 +82,10 @@ cmd_debug() {
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
 
-    print_step "Container-Status"
+    print_step "Container status"
     docker compose ps
 
-    print_step "Logs (letzte 30 Zeilen je Service)"
+    print_step "Logs (last 30 lines per service)"
     local ssl_enabled; ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
     local svc_list="proxy-standard dns-standard ui netdata watchdog"
     [[ "${ssl_enabled:-1}" = "1" ]] && svc_list="proxy-standard dns-standard proxy-ssl dns-ssl ui netdata watchdog"
@@ -95,23 +95,23 @@ cmd_debug() {
         docker compose logs --tail=30 "$svc" 2>/dev/null || true
     done
 
-    print_step "Cache-Belegung"
+    print_step "Cache usage"
     local dir
     for dir in "$cache_std" "$cache_ssl"; do
         [[ -z "$dir" ]] && continue
         if [[ -d "$dir" ]]; then
             du -sh "$dir"
         else
-            print_warn "Verzeichnis nicht gefunden: $dir"
+            print_warn "Directory not found: $dir"
         fi
     done
 
-    print_step "Netzwerk (LAN-IPs)"
+    print_step "Network (LAN IPs)"
     ip -4 addr show | grep "inet " | grep -v " 127\." | grep -v " 172\." || true
 
-    print_step "Healthchecks"
+    print_step "Health checks"
     if ! command -v curl >/dev/null 2>&1; then
-        print_warn "curl nicht gefunden — Healthchecks übersprungen"
+        print_warn "curl not found — health checks skipped"
     else
         local ip
         for ip in "$ip_standard" "$ip_ssl"; do
@@ -119,7 +119,7 @@ cmd_debug() {
             if curl -sf "http://$ip/healthz" >/dev/null 2>&1; then
                 print_ok "http://$ip/healthz — OK"
             else
-                print_error "http://$ip/healthz — FEHLER"
+                print_error "http://$ip/healthz — ERROR"
             fi
         done
     fi
@@ -130,59 +130,59 @@ case "${1:-}" in
     update) cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
     debug)  cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
     "")     ;;
-    *)      die "Unbekannter Befehl: $1\nVerwendung: $0 [update|debug] [install-dir]" ;;
+    *)      die "Unknown command: $1\nUsage: $0 [update|debug] [install-dir]" ;;
 esac
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Hauptsetup
+# Main setup
 # ══════════════════════════════════════════════════════════════════════════════
 
 printf "\n"
 printf "${BOLD}╔══════════════════════════════════════════╗${RESET}\n"
-printf "${BOLD}║      LanCache-NG — Ersteinrichtung       ║${RESET}\n"
+printf "${BOLD}║      LanCache-NG — Initial Setup        ║${RESET}\n"
 printf "${BOLD}╚══════════════════════════════════════════╝${RESET}\n"
 printf "\n"
-printf "  Dieses Skript richtet LanCache-NG ein und startet alle Container.\n"
-printf "  Danach: ./setup.sh update  |  ./setup.sh debug\n"
+printf "  This script sets up LanCache-NG and starts all containers.\n"
+printf "  After: ./setup.sh update  |  ./setup.sh debug\n"
 
-# ── 1. Voraussetzungen ────────────────────────────────────────────────────────
-print_step "Voraussetzungen prüfen"
+# ── 1. Prerequisites ──────────────────────────────────────────────────────────
+print_step "Checking prerequisites"
 
 [[ "$(id -u)" = "0" ]] \
-    || die "Dieses Skript muss als root ausgeführt werden (sudo ./setup.sh)."
+    || die "This script must be run as root (sudo ./setup.sh)."
 
 if ! command -v curl >/dev/null 2>&1; then
-    print_warn "curl fehlt — wird nachinstalliert..."
+    print_warn "curl missing — installing now..."
     apt-get install -y --no-install-recommends curl \
-        || die "curl konnte nicht installiert werden."
+        || die "Failed to install curl."
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-    print_warn "Docker nicht gefunden — wird jetzt installiert (get.docker.com)..."
+    print_warn "Docker not found — installing now (get.docker.com)..."
     curl -fsSL https://get.docker.com | sh \
-        || die "Docker-Installation fehlgeschlagen."
-    print_ok "Docker installiert"
+        || die "Docker installation failed."
+    print_ok "Docker installed"
 fi
 
 if ! docker info >/dev/null 2>&1; then
-    print_warn "Docker-Daemon läuft nicht — wird gestartet..."
+    print_warn "Docker daemon not running — starting now..."
     systemctl enable --now docker \
-        || die "Docker-Daemon konnte nicht gestartet werden."
+        || die "Failed to start Docker daemon."
 fi
 
 docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose Plugin fehlt — bitte Docker neu installieren."
+    || die "Docker Compose plugin missing — please reinstall Docker."
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
-    print_warn "Kein lokales Repo gefunden — klone nach /opt/lancache-ng..."
+    print_warn "No local repo found — cloning to /opt/lancache-ng..."
     command -v git >/dev/null 2>&1 \
         || apt-get install -y --no-install-recommends git \
-        || die "git konnte nicht installiert werden."
+        || die "Failed to install git."
     if [[ -d "/opt/lancache-ng/.git" ]]; then
         git -C /opt/lancache-ng pull --ff-only
     else
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
-            || die "Klonen fehlgeschlagen."
+            || die "Clone failed."
     fi
     chmod +x /opt/lancache-ng/setup.sh
     exec /opt/lancache-ng/setup.sh "$@"
@@ -191,205 +191,204 @@ fi
 print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
 print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
 
-# ── 2. Netzwerk-IPs ───────────────────────────────────────────────────────────
-print_step "Netzwerk-Konfiguration"
+# ── 2. Network IPs ────────────────────────────────────────────────────────────
+print_step "Network configuration"
 
 detected_ip=$(ip -4 addr show | grep -oP '(?<=inet )[\d.]+' \
     | grep -v '^127\.' | grep -v '^172\.' | head -1 || true)
 detected_iface=$(ip -4 route show default | awk '{print $5}' | head -1 || true)
 
-printf "\n  Gefundene LAN-Adressen:\n"
+printf "\n  Found LAN addresses:\n"
 ip -4 addr show | grep "inet " | grep -v " 127\." | grep -v " 172\." \
     | awk '{print "    " $2}' || true
 printf "\n"
 
 while true; do
-    ask "Server-IP (Standard-Modus)" "${detected_ip:-192.168.1.10}"
+    ask "Server IP (Standard mode)" "${detected_ip:-192.168.1.10}"
     IP_STANDARD="$REPLY"
     is_valid_ipv4 "$IP_STANDARD" && break
-    print_error "Ungültige IPv4-Adresse: $IP_STANDARD"
+    print_error "Invalid IPv4 address: $IP_STANDARD"
 done
 
 printf "\n"
-printf "  ${BOLD}SSL-Modus${RESET}: cachet auch HTTPS-Downloads (Epic, EA, Blizzard…)\n"
-printf "  Braucht eine zweite IP und einmalig ein CA-Zertifikat auf den Clients.\n\n"
-ask "SSL-Modus aktivieren? [j/N]" "N"
+printf "  ${BOLD}SSL mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
+printf "  Requires a second IP and a CA certificate on clients.\n\n"
+ask "Enable SSL mode? [y/N]" "N"
 SSL_ENABLED=0
 IP_SSL=""
-if [[ "${REPLY,,}" = "j" ]]; then
+if [[ "${REPLY,,}" = "y" ]]; then
     SSL_ENABLED=1
     suggested_ssl="${IP_STANDARD%.*}.$((${IP_STANDARD##*.} + 1))"
     while true; do
-        ask "SSL-Modus IP (zweite LAN-IP)" "$suggested_ssl"
+        ask "SSL mode IP (second LAN IP)" "$suggested_ssl"
         IP_SSL="$REPLY"
         is_valid_ipv4 "$IP_SSL" && break
-        print_error "Ungültige IPv4-Adresse: $IP_SSL"
+        print_error "Invalid IPv4 address: $IP_SSL"
     done
     [[ "$IP_STANDARD" != "$IP_SSL" ]] \
-        || die "Standard-IP und SSL-IP müssen verschieden sein."
+        || die "Standard IP and SSL IP must be different."
     if ip -4 addr show | grep -q "inet ${IP_SSL}/"; then
-        print_ok "$IP_SSL ist bereits zugewiesen"
+        print_ok "$IP_SSL already assigned"
     else
-        print_warn "$IP_SSL ist noch nicht auf einem Interface zugewiesen"
-        ask "Jetzt hinzufügen? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [j/N]" "N"
-        if [[ "${REPLY,,}" = "j" ]]; then
+        print_warn "$IP_SSL not yet assigned to an interface"
+        ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
+        if [[ "${REPLY,,}" = "y" ]]; then
             ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
-                && print_ok "$IP_SSL hinzugefügt (nicht persistent)" \
-                || print_warn "Hinzufügen fehlgeschlagen — bitte manuell ausführen"
+                && print_ok "$IP_SSL added (not persistent)" \
+                || print_warn "Adding failed — please add manually"
         fi
         printf "\n"
-        print_warn "Für persistente Konfiguration nach Neustart:"
+        print_warn "For persistent configuration after reboot:"
         printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
         printf "    interfaces: sudo nano /etc/network/interfaces\n"
     fi
-    print_ok "SSL-Modus aktiviert ($IP_SSL)"
+    print_ok "SSL mode enabled ($IP_SSL)"
 else
-    print_ok "SSL-Modus übersprungen — nur Standard-Modus aktiv"
+    print_ok "SSL mode skipped — standard mode only"
 fi
 
-# ── 3. Installations-Verzeichnis ──────────────────────────────────────────────
-print_step "Installations-Verzeichnis"
+# ── 3. Installation directory ─────────────────────────────────────────────────
+print_step "Installation directory"
 
-ask "Verzeichnis" "/opt/lancache-ng"
+ask "Directory" "/opt/lancache-ng"
 INSTALL_DIR="$REPLY"
 
 if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
-    print_warn "Bestehendes Verzeichnis gefunden: $INSTALL_DIR"
-    ask "Überschreiben? [j/N]" "N"
-    [[ "${REPLY,,}" = "j" ]] || die "Abgebrochen."
+    print_warn "Existing directory found: $INSTALL_DIR"
+    ask "Overwrite? [y/N]" "N"
+    [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
 cp "$QUICKSTART_COMPOSE" "$INSTALL_DIR/docker-compose.yml"
-print_ok "docker-compose.yml → $INSTALL_DIR/docker-compose.yml"
+print_ok "docker-compose.yml copied to $INSTALL_DIR/docker-compose.yml"
 
-# ── 4. Cache-Konfiguration ────────────────────────────────────────────────────
-print_step "Cache-Konfiguration"
+# ── 4. Cache configuration ───────────────────────────────────────────────────
+print_step "Cache configuration"
 
-ask "Cache-Verzeichnis" "$INSTALL_DIR/cache/standard"
+ask "Cache directory" "$INSTALL_DIR/cache/standard"
 CACHE_DIR_STANDARD="$REPLY"
 
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    ask "Cache-Verzeichnis SSL-Modus" "$INSTALL_DIR/cache/ssl"
+    ask "Cache directory SSL mode" "$INSTALL_DIR/cache/ssl"
     CACHE_DIR_SSL="$REPLY"
 else
     CACHE_DIR_SSL="$CACHE_DIR_STANDARD"
 fi
 
 while true; do
-    ask "Cache-Größe pro Modus in GiB" "500"
+    ask "Cache size per mode in GiB" "500"
     cache_gb="$REPLY"
     [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
-    print_error "Bitte eine positive Ganzzahl eingeben (z.B. 500)."
+    print_error "Please enter a positive integer (e.g. 500)."
 done
 
-ask "Cache-RAM-Puffer in MB (keys_zone)" "512"
+ask "Cache RAM buffer in MB (keys_zone)" "512"
 CACHE_MEM_MB="$REPLY"
 
 # ── 5. Watchtower ─────────────────────────────────────────────────────────────
-print_step "Automatische Updates (Watchtower)"
+print_step "Automatic updates (Watchtower)"
 
-printf "  Watchtower prüft täglich ob neue Images verfügbar sind\n"
-printf "  und aktualisiert die Container automatisch. Standard: aktiv.\n\n"
+printf "  Watchtower checks daily for new images\n"
+printf "  and updates containers automatically. Default: enabled.\n\n"
 
-ask "Automatische Updates aktivieren? [J/n]" "J"
+ask "Enable automatic updates? [Y/n]" "Y"
 COMPOSE_PROFILES=""
 [[ "$SSL_ENABLED" = "1" ]] && COMPOSE_PROFILES="ssl"
 if [[ "${REPLY,,}" != "n" ]]; then
     [[ -n "$COMPOSE_PROFILES" ]] && COMPOSE_PROFILES="${COMPOSE_PROFILES},watchtower" || COMPOSE_PROFILES="watchtower"
-    print_ok "Watchtower aktiv (prüft täglich um 04:00 Uhr auf neue Images)"
+    print_ok "Watchtower enabled (checks daily at 04:00 for new images)"
 else
-    print_warn "Watchtower deaktiviert — manuelle Updates mit: ./setup.sh update"
+    print_warn "Watchtower disabled — manual updates with: ./setup.sh update"
 fi
 
-# ── 6. DHCP-Server ───────────────────────────────────────────────────────────
-print_step "DHCP-Server (optional)"
+# ── 6. DHCP server ───────────────────────────────────────────────────────────
+print_step "DHCP server (optional)"
 
-printf "  LanCache-NG kann als DHCP-Server laufen und Clients automatisch\n"
-printf "  die Cache-DNS-IPs zuweisen. Bestehender DHCP-Server (Router) kann\n"
-printf "  danach abgeschaltet werden.\n\n"
+printf "  LanCache-NG can run as a DHCP server and assign cache DNS IPs to clients.\n"
+printf "  The existing DHCP server (router) can then be shut down.\n\n"
 
-ask "DHCP-Server aktivieren? [j/N]" "N"
+ask "Enable DHCP server? [y/N]" "N"
 DHCP_ENABLED=0
 KEA_DATA_DIR=""
 DHCP_SUBNET=""
 DHCP_GATEWAY=""
 DHCP_RANGE_START=""
 DHCP_RANGE_END=""
-if [[ "${REPLY,,}" = "j" ]]; then
+if [[ "${REPLY,,}" = "y" ]]; then
     DHCP_ENABLED=1
 
-    ask "Kea-Daten-Verzeichnis (Config + Leases)" "$INSTALL_DIR/kea"
+    ask "Kea data directory (config + leases)" "$INSTALL_DIR/kea"
     KEA_DATA_DIR="$REPLY"
 
-    ask "DHCP-Subnet (CIDR)" "10.0.0.0/24"
+    ask "DHCP subnet (CIDR)" "10.0.0.0/24"
     DHCP_SUBNET="$REPLY"
 
     ask "Gateway" "10.0.0.1"
     DHCP_GATEWAY="$REPLY"
 
-    ask "IP-Pool Start" "10.0.0.128"
+    ask "IP pool start" "10.0.0.128"
     DHCP_RANGE_START="$REPLY"
 
-    ask "IP-Pool Ende" "10.0.0.254"
+    ask "IP pool end" "10.0.0.254"
     DHCP_RANGE_END="$REPLY"
 
-    print_ok "DHCP aktiviert — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
-    print_warn "Kea Control Agent Port 8000 wird per Firewall empfohlen"
+    print_ok "DHCP enabled — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
+    print_warn "Kea Control Agent port 8000 should be restricted by firewall"
     printf "    iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n\n"
 else
-    print_ok "DHCP übersprungen — bestehender Router-DHCP bleibt aktiv"
+    print_ok "DHCP skipped — existing router DHCP remains active"
 fi
 
-# ── 7. Admin-UI Zugangschutz ──────────────────────────────────────────────────
-print_step "Admin-UI Zugangschutz"
+# ── 7. Admin-UI access control ────────────────────────────────────────────────
+print_step "Admin-UI access control"
 
-printf "  Die Admin-UI läuft auf http://%s:8080 — nur im lokalen Netz erreichbar.\n" "$IP_STANDARD"
-printf "  Ohne Passwort kann jeder im LAN Container neu starten und Domains ändern.\n\n"
+printf "  Admin-UI runs on http://%s:8080 — only accessible within the local network.\n" "$IP_STANDARD"
+printf "  Without a password, anyone on the LAN can restart containers and change domains.\n\n"
 
-ask "Admin-UI mit Passwort schützen? [j/N]" "N"
+ask "Protect Admin-UI with password? [y/N]" "N"
 UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
-if [[ "${REPLY,,}" = "j" ]]; then
-    ask "Benutzername" "admin"
+if [[ "${REPLY,,}" = "y" ]]; then
+    ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
     UI_AUTH_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
     printf "\n"
-    print_ok "Zugangsdaten:"
-    printf "    Benutzer:  ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
-    printf "    Passwort:  ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
-    print_warn "Passwort jetzt notieren — steht auch später in $INSTALL_DIR/.env"
+    print_ok "Credentials:"
+    printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
+    printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
+    print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
     printf "\n"
 else
-    print_ok "Kein Passwortschutz — Admin-UI öffentlich im LAN"
+    print_ok "No password protection — Admin-UI public on LAN"
 fi
 
-# ── 8. .env schreiben ─────────────────────────────────────────────────────────
+# ── 8. Writing .env ───────────────────────────────────────────────────────────
 # Generate secrets
 DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
 NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
 SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
 
-print_step ".env schreiben"
+print_step "Writing .env"
 
 if [[ -f "$INSTALL_DIR/.env" ]]; then
-    ask ".env überschreiben? [j/N]" "N"
-    [[ "${REPLY,,}" = "j" ]] || die "Abgebrochen."
+    ask "Overwrite .env? [y/N]" "N"
+    [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
 cat > "$INSTALL_DIR/.env" <<EOF
-# ── LAN-IPs ───────────────────────────────────────────────────────────────────
-# Standard-Modus (kein CA-Zertifikat nötig): HTTP gecacht, HTTPS durchgeleitet
+# ── LAN IPs ────────────────────────────────────────────────────────────────────
+# Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_STANDARD=${IP_STANDARD}
 
-# SSL-Modus (CA-Zertifikat auf Clients installieren): HTTP + HTTPS gecacht
-# Leer = SSL-Modus deaktiviert
+# SSL mode (install CA certificate on clients): HTTP + HTTPS cached
+# Empty = SSL mode disabled
 IP_SSL=${IP_SSL}
 
-# ── SSL ───────────────────────────────────────────────────────────────────────
+# ── SSL ────────────────────────────────────────────────────────────────────────
 SSL_ENABLED=${SSL_ENABLED}
 
-# ── Cache ─────────────────────────────────────────────────────────────────────
+# ── Cache ──────────────────────────────────────────────────────────────────────
 CACHE_DIR_STANDARD=${CACHE_DIR_STANDARD}
 CACHE_DIR_SSL=${CACHE_DIR_SSL}
 
@@ -400,11 +399,11 @@ CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
-# Für die Admin-UI (GB als Zahl für den Füllstandsbalken)
+# For Admin-UI (GB as number for progress bar)
 STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}
 
-# ── DHCP ──────────────────────────────────────────────────────────────────────
+# ── DHCP ───────────────────────────────────────────────────────────────────────
 DHCP_ENABLED=${DHCP_ENABLED}
 KEA_DATA_DIR=${KEA_DATA_DIR}
 DHCP_SUBNET=${DHCP_SUBNET}
@@ -415,42 +414,42 @@ DHCP_RANGE_END=${DHCP_RANGE_END}
 # Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
 
-# ── NATS (DNS-Record-Sync-Bus) ────────────────────────────────────────────────
-# Token für lokale DNS-Container (generiert, nicht ändern)
+# ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
+# Token for local DNS containers (generated, do not change)
 NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-# Token für setup-secondary.sh — jeder der diesen kennt kann einen Secondary anmelden
+# Token for setup-secondary.sh — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
-# ── Profile ───────────────────────────────────────────────────────────────────
-# ssl = SSL-Modus aktiv; watchtower = automatische Updates; leer = beides aus
+# ── Profiles ───────────────────────────────────────────────────────────────────
+# ssl = SSL mode active; watchtower = automatic updates; empty = both disabled
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
-# ── Admin-UI ──────────────────────────────────────────────────────────────────
-# Leer = kein Passwortschutz
+# ── Admin-UI ───────────────────────────────────────────────────────────────────
+# Empty = no password protection
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 EOF
-print_ok ".env geschrieben: $INSTALL_DIR/.env"
+print_ok ".env written: $INSTALL_DIR/.env"
 
-# ── 9. Verzeichnisse anlegen ──────────────────────────────────────────────────
-print_step "Verzeichnisse anlegen"
+# ── 9. Creating directories ───────────────────────────────────────────────────
+print_step "Creating directories"
 mkdir -p "$CACHE_DIR_STANDARD"
-print_ok "Standard-Cache: $CACHE_DIR_STANDARD"
+print_ok "Standard cache: $CACHE_DIR_STANDARD"
 if [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]]; then
     mkdir -p "$CACHE_DIR_SSL"
-    print_ok "SSL-Cache:      $CACHE_DIR_SSL"
+    print_ok "SSL cache:      $CACHE_DIR_SSL"
 fi
 if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
     mkdir -p "$KEA_DATA_DIR"
-    print_ok "Kea-Daten:      $KEA_DATA_DIR"
+    print_ok "Kea data:       $KEA_DATA_DIR"
 fi
 
-# ── 10. Systemd-Watchdog ──────────────────────────────────────────────────────
-print_step "Systemd-Watchdog installieren"
+# ── 10. Installing systemd watchdog ───────────────────────────────────────────
+print_step "Installing systemd watchdog"
 
 if ! command -v systemctl >/dev/null 2>&1; then
-    print_warn "systemd nicht gefunden — Watchdog wird nicht installiert"
-    print_warn "Stack manuell nach Neustart starten: cd $INSTALL_DIR && docker compose up -d"
+    print_warn "systemd not found — watchdog will not be installed"
+    print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
 else
     cat > /etc/systemd/system/lancache.service <<EOF
 [Unit]
@@ -498,83 +497,83 @@ EOF
     systemctl daemon-reload
     systemctl enable --now lancache.service
     systemctl enable --now lancache-converge.timer
-    print_ok "lancache.service aktiviert (Start beim Booten)"
-    print_ok "lancache-converge.timer aktiviert (Konvergenz alle 5 Minuten)"
+    print_ok "lancache.service enabled (starts on boot)"
+    print_ok "lancache-converge.timer enabled (convergence check every 5 minutes)"
 fi
 
-# ── 11. Zusammenfassung + Bestätigung ────────────────────────────────────────
+# ── 11. Summary and confirmation ──────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
-printf "${BOLD}│              Konfiguration                   │${RESET}\n"
+printf "${BOLD}│              Configuration                   │${RESET}\n"
 printf "${BOLD}├──────────────────────────────────────────────┤${RESET}\n"
-printf "  %-26s %s\n"    "Standard-IP:"              "$IP_STANDARD"
+printf "  %-26s %s\n"    "Standard IP:"              "$IP_STANDARD"
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    printf "  %-26s %s\n" "SSL-IP:"                  "$IP_SSL"
+    printf "  %-26s %s\n" "SSL IP:"                  "$IP_SSL"
 else
-    printf "  %-26s %s\n" "SSL-Modus:"               "deaktiviert"
+    printf "  %-26s %s\n" "SSL mode:"                "disabled"
 fi
-printf "  %-26s %s\n"    "Installations-Dir:"        "$INSTALL_DIR"
-printf "  %-26s %s\n"    "Cache:"                    "$CACHE_DIR_STANDARD"
+printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
+printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR_STANDARD"
 [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]] \
     && printf "  %-26s %s\n" "Cache SSL:"            "$CACHE_DIR_SSL"
-printf "  %-26s %s GiB\n" "Cache-Größe:"             "$cache_gb"
-printf "  %-26s %s MB\n"  "Cache-RAM:"               "$CACHE_MEM_MB"
+printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
+printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
 if [[ "$DHCP_ENABLED" = "1" ]]; then
-    printf "  %-26s %s\n" "DHCP-Server:"              "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
+    printf "  %-26s %s\n" "DHCP server:"             "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
 else
-    printf "  %-26s %s\n" "DHCP-Server:"              "deaktiviert"
+    printf "  %-26s %s\n" "DHCP server:"             "disabled"
 fi
 if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
-    printf "  %-26s %s\n" "Watchtower:"               "aktiv (täglich 04:00)"
+    printf "  %-26s %s\n" "Watchtower:"              "enabled (daily at 04:00)"
 else
-    printf "  %-26s %s\n" "Watchtower:"               "deaktiviert"
+    printf "  %-26s %s\n" "Watchtower:"              "disabled"
 fi
 if [[ -n "$UI_AUTH_USER" ]]; then
-    printf "  %-26s %s\n" "Admin-UI Auth:"            "aktiv (Benutzer: $UI_AUTH_USER)"
+    printf "  %-26s %s\n" "Admin-UI auth:"           "enabled (user: $UI_AUTH_USER)"
 else
-    printf "  %-26s %s\n" "Admin-UI Auth:"            "deaktiviert"
+    printf "  %-26s %s\n" "Admin-UI auth:"           "disabled"
 fi
 printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
 
-ask "Jetzt starten? [J/n]" "J"
+ask "Start now? [Y/n]" "Y"
 [[ "${REPLY,,}" != "n" ]] \
-    || { printf "\n  Später starten mit: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
+    || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
-# ── 12. Stack starten ────────────────────────────────────────────────────────
-print_step "Images laden"
+# ── 12. Starting stack ───────────────────────────────────────────────────────
+print_step "Pulling images"
 cd "$INSTALL_DIR"
-docker compose pull || print_warn "Pull teilweise fehlgeschlagen — weiter mit gecachten Images"
+docker compose pull || print_warn "Pull partially failed — continuing with cached images"
 
-print_step "Stack starten"
+print_step "Starting stack"
 docker compose up -d
-print_ok "Stack gestartet"
+print_ok "Stack started"
 
-# ── 13. Post-Start-Info ──────────────────────────────────────────────────────
+# ── 13. Post-start info ──────────────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
-printf "${BOLD}${GREEN}  LanCache-NG läuft!${RESET}\n"
+printf "${BOLD}${GREEN}  LanCache-NG is running!${RESET}\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
-    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080  (Benutzer: %s)\n" "$IP_STANDARD" "$UI_AUTH_USER"
+    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080  (User: %s)\n" "$IP_STANDARD" "$UI_AUTH_USER"
 else
     printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080\n" "$IP_STANDARD"
 fi
 printf "\n"
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    printf "  ${BOLD}CA-Zertifikat${RESET} (nach erstem Start verfügbar):\n"
+    printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
     printf "    %s/certs/ca.crt\n" "$INSTALL_DIR"
-    printf "    → auf Clients installieren für SSL-Modus\n"
-    printf "    → Anleitung: https://github.com/wiki-mod/lancache-ng/wiki\n"
+    printf "    → install on clients for SSL mode\n"
+    printf "    → guide: https://github.com/wiki-mod/lancache-ng/wiki\n"
     printf "\n"
 fi
-printf "  ${BOLD}DNS auf Clients einstellen:${RESET}\n"
-printf "    Standard-Modus (kein Zertifikat): %s\n" "$IP_STANDARD"
+printf "  ${BOLD}Configure DNS on clients:${RESET}\n"
+printf "    Standard mode (no certificate): %s\n" "$IP_STANDARD"
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    printf "    SSL-Modus (mit Zertifikat):       %s\n" "$IP_SSL"
+    printf "    SSL mode (with certificate):    %s\n" "$IP_SSL"
 fi
 printf "\n"
-printf "  ${BOLD}Befehle:${RESET}\n"
+printf "  ${BOLD}Commands:${RESET}\n"
 printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
 printf "\n"
