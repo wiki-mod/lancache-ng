@@ -1,3 +1,9 @@
+# HINT:
+# WE ARE STILL EXTENDING AND CHANGING ROOT ELEMENTS.
+# THIS DOES NOT EFFECT THE WAY IT WORKS BUT IT ADDS A LOT OF FEATURES
+
+
+
 # lancache-ng
 
 Caches game and software downloads on your local network 
