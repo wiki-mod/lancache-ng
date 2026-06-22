@@ -1,7 +1,8 @@
 use crate::{docker_client, AppState};
 use axum::extract::{Form, State};
 use axum::response::{Html, Redirect};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
@@ -17,15 +18,41 @@ pub struct AaaaFilterForm {
     pub enabled: String,
 }
 
+#[derive(Deserialize)]
+pub struct LanRecordForm {
+    pub name: String,
+    pub record_type: String,
+    pub content: String,
+    pub ttl: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RRset {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub ttl: u32,
+    pub records: Vec<Record>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Record {
+    pub content: String,
+    pub disabled: bool,
+}
+
 pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let dns_domains = read_domain_file(&state.config.cdn_domains_file);
     let ssl_domains = read_domain_file(&state.config.ssl_domains_file);
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state.config.named_conf_options_file);
 
+    let lan_records = fetch_lan_records(&state).await;
+
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
     ctx.insert("ssl_domains", &ssl_domains);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
+    ctx.insert("lan_records", &lan_records);
     ctx.insert("active_page", "domains");
 
     crate::routes::render(&state.templates, "domains.html", &ctx)
@@ -41,7 +68,7 @@ pub async fn add_dns(State(state): State<Arc<AppState>>, Form(form): Form<AddFor
         if let Err(e) = wrote {
             tracing::error!("Failed to write dns domain: {}", e);
         } else {
-            restart_dns(&state).await;
+            flush_recursor_cache(&state).await;
         }
     }
     Redirect::to("/domains")
@@ -56,7 +83,7 @@ pub async fn remove_dns(State(state): State<Arc<AppState>>, Form(form): Form<Add
     if let Err(e) = removed {
         tracing::error!("Failed to remove dns domain: {}", e);
     } else {
-        restart_dns(&state).await;
+        flush_recursor_cache(&state).await;
     }
     Redirect::to("/domains")
 }
@@ -106,6 +133,71 @@ pub async fn toggle_aaaa_filter(
         restart_dns(&state).await;
     }
     Redirect::to("/domains")
+}
+
+pub async fn add_lan_record(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<LanRecordForm>,
+) -> Redirect {
+    let name = normalize_lan_name(&form.name);
+    let ttl = form.ttl.unwrap_or(300);
+
+    let payload = json!({
+        "rrsets": [{
+            "name": name,
+            "type": form.record_type,
+            "ttl": ttl,
+            "changetype": "REPLACE",
+            "records": [{"content": form.content, "disabled": false}]
+        }]
+    });
+
+    let url = format!("{}/api/v1/servers/localhost/zones/lan", state.config.pdns_auth_url);
+    state.http_client
+        .patch(&url)
+        .header("X-API-Key", &state.config.pdns_api_key)
+        .json(&payload)
+        .send()
+        .await
+        .ok();
+
+    Redirect::to("/domains")
+}
+
+pub async fn remove_lan_record(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<LanRecordForm>,
+) -> Redirect {
+    let name = normalize_lan_name(&form.name);
+
+    let payload = json!({
+        "rrsets": [{
+            "name": name,
+            "type": form.record_type,
+            "changetype": "DELETE"
+        }]
+    });
+
+    let url = format!("{}/api/v1/servers/localhost/zones/lan", state.config.pdns_auth_url);
+    state.http_client
+        .patch(&url)
+        .header("X-API-Key", &state.config.pdns_api_key)
+        .json(&payload)
+        .send()
+        .await
+        .ok();
+
+    Redirect::to("/domains")
+}
+
+async fn flush_recursor_cache(state: &AppState) {
+    let url = format!("{}/api/v1/servers/localhost/cache/flush?type=packet", state.config.pdns_rec_url);
+    state.http_client
+        .put(&url)
+        .header("X-API-Key", &state.config.pdns_api_key)
+        .send()
+        .await
+        .ok();
 }
 
 async fn restart_dns(state: &AppState) {
@@ -208,4 +300,42 @@ fn update_aaaa_filter(path: &str, enable: bool) -> anyhow::Result<()> {
         .join("\n");
     fs::write(path, format!("{}\n", new))?;
     Ok(())
+}
+
+async fn fetch_lan_records(state: &AppState) -> Vec<RRset> {
+    let url = format!("{}/api/v1/servers/localhost/zones/lan", state.config.pdns_auth_url);
+
+    match state.http_client
+        .get(&url)
+        .header("X-API-Key", &state.config.pdns_api_key)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    if let Some(rrsets) = data.get("rrsets").and_then(|v| v.as_array()) {
+                        rrsets.iter()
+                            .filter_map(|r| serde_json::from_value(r.clone()).ok())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                }
+                Err(_) => vec![],
+            }
+        }
+        Err(_) => vec![],
+    }
+}
+
+fn normalize_lan_name(name: &str) -> String {
+    let trimmed = name.trim().to_lowercase();
+    if trimmed.ends_with('.') {
+        trimmed
+    } else if trimmed.ends_with(".lan") {
+        format!("{}.", trimmed)
+    } else {
+        format!("{}.lan.", trimmed)
+    }
 }

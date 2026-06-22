@@ -23,6 +23,9 @@ pub struct Config {
     pub dhcp_api_token: String,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
+    pub pdns_auth_url: String,
+    pub pdns_rec_url: String,
+    pub pdns_api_key: String,
 }
 
 impl Config {
@@ -50,6 +53,9 @@ impl Config {
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
+            pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
+            pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
+            pdns_api_key: env_str("PDNS_API_KEY", ""),
         }
     }
 }

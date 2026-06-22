@@ -99,6 +99,76 @@
 
   </div>
 
+  <!-- LAN-Einträge -->
+  <div class="card flex flex-col gap-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
+      <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
+    </div>
+
+    <!-- Add form -->
+    <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
+      <div class="flex gap-2">
+        <input type="text" name="name" placeholder="z.B. myserver.lan."
+               required
+               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+        <select name="record_type" required
+                class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
+          <option value="">Typ wählen</option>
+          <option value="A">A</option>
+          <option value="AAAA">AAAA</option>
+          <option value="CNAME">CNAME</option>
+          <option value="MX">MX</option>
+          <option value="TXT">TXT</option>
+        </select>
+      </div>
+      <div class="flex gap-2">
+        <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
+               required min="1"
+               class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+        <input type="text" name="content" placeholder="z.B. 192.168.1.10 oder mail.example.com"
+               required
+               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+        <button type="submit"
+                class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+          Hinzufügen
+        </button>
+      </div>
+    </form>
+
+    <!-- Record list -->
+    <div class="space-y-1 max-h-96 overflow-y-auto">
+      {% if lan_records %}
+      {% for record in lan_records %}
+      <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+        <div class="flex-1 min-w-0">
+          <div class="flex gap-2 items-center">
+            <span class="font-mono text-sm text-slate-300">{{ record.name }}</span>
+            <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">{{ record.type }}</span>
+            <span class="text-xs text-slate-500">TTL: {{ record.ttl }}</span>
+          </div>
+          <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+        </div>
+        <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+          <input type="hidden" name="name" value="{{ record.name }}">
+          <input type="hidden" name="record_type" value="{{ record.type }}">
+          <input type="hidden" name="content" value="{% for c in record.records %}{{ c }}{% if not loop.last %};{% endif %}{% endfor %}">
+          <button type="submit"
+                  onclick="return confirm('{{ record.name }} ({{ record.type }}) entfernen?')"
+                  class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+            Entfernen
+          </button>
+        </form>
+      </div>
+      {% endfor %}
+      {% else %}
+      <p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>
+      {% endif %}
+    </div>
+
+    <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+  </div>
+
   <!-- Info-Box -->
   <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 text-sm text-blue-300">
     <p class="font-semibold mb-1">Hinweis zum SSL-Modus</p>

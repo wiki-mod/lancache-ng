@@ -35,12 +35,16 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
+      - pdns-data-standard:/var/lib/powerdns
     ports:
       # NOTE (Windows): Port 53 is used by the Windows DNS client.
       # Stop "DNS Client" in services.msc, or test the proxy directly:
       #   curl --resolve steamcontent.com:8080:127.0.0.1 http://steamcontent.com/
       - "${IP_STANDARD}:5300:53/udp"   # port 5300 in dev to avoid conflicts
       - "${IP_STANDARD}:5300:53/tcp"
+    expose:
+      - "8081"
+      - "8082"
     healthcheck:
       test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
@@ -89,9 +93,13 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
+      - pdns-data-ssl:/var/lib/powerdns
     ports:
       - "${IP_SSL}:5353:53/udp"
       - "${IP_SSL}:5353:53/tcp"
+    expose:
+      - "8081"
+      - "8082"
     healthcheck:
       test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
@@ -155,6 +163,7 @@ services:
         ipv4_address: 172.28.0.6
     restart: unless-stopped
 
+
   # ── DHCP Proxy (dnsmasq) ──────────────────────────────────────────────────
   # Proxy mode: sits next to existing DHCP server, overrides DNS options only.
   # Mutually exclusive with Kea mode (both want port 67/udp).
@@ -198,6 +207,9 @@ services:
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://dhcp:8000
       - DHCP_API_TOKEN=lancache-dhcp-dev-secret
+      - PDNS_AUTH_URL=http://dns-standard:8081
+      - PDNS_REC_URL=http://dns-standard:8082
+      - PDNS_API_KEY=lancache-pdns-dev-secret
     networks:
       - lancache
     depends_on:
@@ -245,3 +257,5 @@ volumes:
   netdataconfig:
   netdatalib:
   netdatacache:
+  pdns-data-standard:
+  pdns-data-ssl:

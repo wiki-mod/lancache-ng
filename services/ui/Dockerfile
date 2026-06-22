@@ -1,8 +1,15 @@
 FROM rust:slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+    pkg-config libssl-dev curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -L https://github.com/mozilla/sccache/releases/download/v0.7.4/sccache-v0.7.4-x86_64-unknown-linux-musl.tar.gz \
+    | tar xz --strip-components=1 -C /usr/local/bin sccache-v0.7.4-x86_64-unknown-linux-musl/sccache \
+    && chmod +x /usr/local/bin/sccache
+
+ENV RUSTC_WRAPPER=sccache \
+    SCCACHE_REDIS=redis://192.168.1.230:6379 \
+    SCCACHE_REDIS_KEY_PREFIX=lancache-ui
 
 WORKDIR /build
 COPY Cargo.toml ./
