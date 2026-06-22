@@ -1,8 +1,5 @@
 -- RPZ: CDN-Domains → Proxy-IP
-rpzFile("/var/lib/powerdns/rpz.zone", {
-  policyName="lancache-rpz",
-  localAuth=false
-})
+rpzFile("/var/lib/powerdns/rpz.zone", { policyName="lancache-rpz" })
 
 -- Root-Zone Mirror: keep root zone cached locally
 -- Enable with ROOT_ZONE_MIRROR=1 (default: 1, disable with 0)

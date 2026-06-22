@@ -32,26 +32,20 @@ envsubst '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' < /etc/pdns/auth/pdns.conf.templat
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     echo "[lancache-dns] Initializing SQLite database..."
-    # Try both possible schema locations in Debian Trixie
-    if [ -f /usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql ]; then
-        sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql
-    elif [ -f /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql ]; then
-        sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql
-    else
-        echo "[lancache-dns] WARNING: Could not find schema.sqlite3.sql, will attempt auto-initialization"
+    SCHEMA=$(find /usr/share -name 'schema.sqlite3.sql' 2>/dev/null | head -1)
+    if [ -z "$SCHEMA" ]; then
+        echo "[lancache-dns] FATAL: sqlite schema not found in /usr/share"
+        exit 1
     fi
+    echo "[lancache-dns] Using schema: $SCHEMA"
+    sqlite3 /var/lib/powerdns/pdns.sqlite3 < "$SCHEMA"
     chown pdns:pdns /var/lib/powerdns/pdns.sqlite3
 fi
 
 # ── 4. Create LAN Zones ──────────────────────────────────────────────────────
 echo "[lancache-dns] Creating LAN zones in authoritative database..."
 
-# Temporarily start auth server to initialize zones
-pdns_server --config-dir=/etc/pdns/auth --daemon=no --guardian=no &
-AUTH_PID=$!
-sleep 2
-
-# Create zones (will not error if already exist)
+# Create LAN zones (will not error if already exist)
 pdnsutil --config-dir=/etc/pdns/auth create-zone lan. 127.0.0.1 || true
 pdnsutil --config-dir=/etc/pdns/auth create-zone local.lan. 127.0.0.1 || true
 
@@ -79,11 +73,6 @@ for zone in \
     d.f.ip6.arpa; do
     pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone." 127.0.0.1 || true
 done
-
-# Shut down auth server to replace with fresh start
-kill $AUTH_PID 2>/dev/null || true
-wait $AUTH_PID 2>/dev/null || true
-sleep 1
 
 # ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."

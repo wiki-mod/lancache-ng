@@ -38,9 +38,9 @@ packetcache-servfail-ttl=30
 max-cache-entries=1000000
 max-packetcache-entries=500000
 
-# REST API (internal only, not exposed)
+# REST API (LAN-accessible, restricted by allow-from)
 webserver=yes
-webserver-address=127.0.0.1
+webserver-address=0.0.0.0
 webserver-port=8082
 webserver-allow-from=127.0.0.0/8,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
 api-key=${PDNS_API_KEY}
