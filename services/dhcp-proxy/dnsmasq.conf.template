@@ -1,0 +1,5 @@
+dhcp-range=${DHCP_SUBNET_START},proxy
+dhcp-option=6,${DHCP_DNS_PRIMARY},${DHCP_DNS_SECONDARY}
+dhcp-proxy=${UPSTREAM_DHCP_IP}
+log-dhcp
+no-daemon
