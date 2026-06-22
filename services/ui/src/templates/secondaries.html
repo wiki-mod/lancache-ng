@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %} – Secondaries{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-6">
+
+  <div>
+    <h1 class="text-xl font-bold text-white">Secondary DNS</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      Externe DNS-Instanzen die automatisch synchronisiert werden
+    </p>
+  </div>
+
+  <!-- Registration Instructions Card -->
+  <div class="card flex flex-col gap-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
+      <p class="text-xs text-slate-500 mt-0.5">Führen Sie den folgenden Befehl auf dem Secondary-Server aus</p>
+    </div>
+
+    <div class="bg-slate-900 rounded-lg p-4 font-mono text-sm text-slate-300 overflow-x-auto">
+      <code>./setup-secondary.sh --primary http://&lt;UI-URL&gt; --token &lt;REGISTRATION_TOKEN&gt; --name &lt;name&gt; --proxy-ip &lt;PROXY_IP&gt;</code>
+    </div>
+
+    <p class="text-xs text-slate-400">
+      <span class="font-semibold">Registrierungs-Token:</span> in SECONDARY_REGISTRATION_TOKEN gesetzt
+    </p>
+  </div>
+
+  <!-- Existing Secondaries Card -->
+  <div class="card flex flex-col gap-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Registrierte Secondaries</h2>
+      <p class="text-xs text-slate-500 mt-0.5">Automatisch synchronisierte DNS-Instanzen</p>
+    </div>
+
+    {% if secondaries %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-slate-700">
+            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Name</th>
+            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Consumer</th>
+            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Registriert</th>
+            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Zuletzt gesehen</th>
+            <th class="text-right px-3 py-2 text-slate-300 font-semibold">Aktionen</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700">
+          {% for secondary in secondaries %}
+          <tr class="hover:bg-slate-700/50 transition-colors">
+            <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
+            <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
+            <td class="px-3 py-2 text-slate-400 text-xs">{{ secondary.registered_at }}</td>
+            <td class="px-3 py-2 text-slate-400 text-xs">
+              {% if secondary.last_seen %}
+                {{ secondary.last_seen }}
+              {% else %}
+                <span class="text-slate-500">Nie</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 text-right space-x-2">
+              <button onclick="rotateToken('{{ secondary.name }}')"
+                      class="text-amber-400 hover:text-amber-300 text-xs px-2 py-1 rounded hover:bg-amber-500/10 transition-colors">
+                Token rotieren
+              </button>
+              <button onclick="removeSecondary('{{ secondary.name }}')"
+                      class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+                Entfernen
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-slate-500 text-sm px-3 py-2">Keine Secondaries registriert.</p>
+    {% endif %}
+  </div>
+
+</div>
+
+{% block scripts %}
+<script>
+  async function rotateToken(name) {
+    try {
+      const response = await fetch(`/api/secondary/${name}/rotate-token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Token erfolgreich rotiert für ${name}`);
+      } else {
+        alert(`Fehler beim Rotieren des Tokens: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  async function removeSecondary(name) {
+    if (!confirm(`${name} wirklich entfernen?`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/secondary/${name}`, {
+        method: 'DELETE'
+      });
+
+      if (response.ok) {
+        alert(`${name} erfolgreich entfernt.`);
+        location.reload();
+      } else {
+        alert(`Fehler beim Entfernen: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+</script>
+{% endblock %}
+{% endblock %}

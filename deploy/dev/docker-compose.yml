@@ -33,8 +33,11 @@ services:
       - ../../config/dev/dns-standard.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - NATS_URL=nats://nats:4222
+      - NATS_CONSUMER=dns-standard
+      - NATS_RECONCILER=1
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-standard:/var/lib/powerdns
     ports:
       # NOTE (Windows): Port 53 is used by the Windows DNS client.
@@ -54,6 +57,8 @@ services:
     networks:
       lancache:
         ipv4_address: 172.28.0.3
+    depends_on:
+      - nats
     restart: unless-stopped
 
   # ── SSL mode (CA cert must be installed on clients) ───────────────────────
@@ -91,8 +96,10 @@ services:
       - ../../config/dev/dns-ssl.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - NATS_URL=nats://nats:4222
+      - NATS_CONSUMER=dns-ssl
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-ssl:/var/lib/powerdns
     ports:
       - "${IP_SSL}:5353:53/udp"
@@ -109,6 +116,8 @@ services:
     networks:
       lancache:
         ipv4_address: 172.28.0.5
+    depends_on:
+      - nats
     restart: unless-stopped
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
@@ -152,6 +161,7 @@ services:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL}
       - DHCP_DNS_SERVER_IP=172.28.0.3
+      - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - kea-data:/var/lib/kea    # runtime config + leases persist across restarts
@@ -179,6 +189,18 @@ services:
       - NET_BIND_SERVICE
     profiles:
       - dhcp-proxy
+    restart: unless-stopped
+
+  # ── NATS (message bus for DNS record sync) ────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    command: ["-c", "/etc/nats/nats.conf", "--store_dir=/data"]
+    volumes:
+      - nats-data:/data
+      - /data/nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      lancache:
+        ipv4_address: 172.28.0.8
     restart: unless-stopped
 
   # ── Admin UI ──────────────────────────────────────────────────────────────
@@ -209,6 +231,7 @@ services:
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=lancache-pdns-dev-secret
+      - NATS_URL=nats://nats:4222
     networks:
       - lancache
     depends_on:
@@ -253,6 +276,7 @@ volumes:
   proxy-ssl-logs:
   watchdog-status:
   kea-data:
+  nats-data:
   netdataconfig:
   netdatalib:
   netdatacache:

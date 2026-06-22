@@ -37,8 +37,11 @@ services:
       - ../../config/prod/dns-standard.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - NATS_URL=nats://nats:4222
+      - NATS_CONSUMER=dns-standard
+      - NATS_RECONCILER=1
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - /srv/lancache/pdns-standard:/var/lib/powerdns
     ports:
       - "${IP_STANDARD}:53:53/udp"
@@ -52,6 +55,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    depends_on:
+      - nats
     restart: always
     logging:
       driver: json-file
@@ -98,8 +103,10 @@ services:
       - ../../config/prod/dns-ssl.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - NATS_URL=nats://nats:4222
+      - NATS_CONSUMER=dns-ssl
     volumes:
-      - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - /srv/lancache/pdns-ssl:/var/lib/powerdns
     ports:
       - "${IP_SSL}:53:53/udp"
@@ -113,6 +120,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    depends_on:
+      - nats
     restart: always
     logging:
       driver: json-file
@@ -170,6 +179,7 @@ services:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL}
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
+      - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - /srv/lancache/kea:/var/lib/kea    # runtime config + leases; create with: mkdir -p /srv/lancache/kea
@@ -207,6 +217,22 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  # ── NATS (message bus for DNS record sync) ────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    command: ["-c", "/etc/nats/nats.conf", "--store_dir=/data"]
+    volumes:
+      - /srv/lancache/nats:/data
+      - /etc/nats/nats.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "4222:4222"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
@@ -236,6 +262,7 @@ services:
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=lancache-pdns-prod-secret
+      - NATS_URL=nats://nats:4222
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -25,6 +25,11 @@ pub struct Config {
     pub pdns_auth_url: String,
     pub pdns_rec_url: String,
     pub pdns_api_key: String,
+    pub nats_url: String,
+    pub nats_local_token: String,
+    pub secondary_registration_token: String,
+    pub nats_conf_path: String,
+    pub nats_service: String,
 }
 
 impl Config {
@@ -54,6 +59,11 @@ impl Config {
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
+            nats_url: env_str("NATS_URL", "nats://nats:4222"),
+            nats_local_token: env_str("NATS_LOCAL_TOKEN", ""),
+            secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
+            nats_conf_path: env_str("NATS_CONF_PATH", "/data/nats.conf"),
+            nats_service: env_str("NATS_SERVICE", "nats"),
         }
     }
 }

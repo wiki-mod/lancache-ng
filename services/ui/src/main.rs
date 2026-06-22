@@ -10,7 +10,8 @@ use axum::{
 };
 use base64::Engine as _;
 use bollard::Docker;
-use std::sync::Arc;
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 use tera::Tera;
 
 pub struct AppState {
@@ -19,6 +20,8 @@ pub struct AppState {
     pub docker: Docker,
     pub http_client: reqwest::Client,
     pub file_lock: std::sync::Mutex<()>,
+    pub nats: async_nats::Client,
+    pub db: Mutex<Connection>,
 }
 
 const TEMPLATE_NAMES: &[&str] = &[
@@ -26,6 +29,7 @@ const TEMPLATE_NAMES: &[&str] = &[
     "dashboard.html",
     "dhcp.html",
     "domains.html",
+    "secondaries.html",
     "stats.html",
     "logs.html",
     "setup.html",
@@ -94,12 +98,42 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
+    let nats = {
+        let cfg_nats = &cfg;
+        if cfg_nats.nats_local_token.is_empty() {
+            async_nats::connect(&cfg_nats.nats_url).await
+                .expect("Cannot connect to NATS")
+        } else {
+            async_nats::ConnectOptions::new()
+                .token(cfg_nats.nats_local_token.clone())
+                .connect(&cfg_nats.nats_url).await
+                .expect("Cannot connect to NATS")
+        }
+    };
+
+    let db = {
+        let conn = Connection::open("/data/lancache-ui.db")
+            .expect("Cannot open UI database");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );"
+        ).expect("Cannot init database schema");
+        Mutex::new(conn)
+    };
+
     let state = Arc::new(AppState {
         templates,
         config: cfg,
         docker,
         http_client,
         file_lock: std::sync::Mutex::new(()),
+        nats,
+        db,
     });
 
     let app = Router::new()
@@ -124,6 +158,10 @@ async fn main() -> Result<()> {
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/*path", get(routes::netdata_proxy::proxy))
+        .route("/secondaries", get(routes::secondaries::secondaries_page))
+        .route("/api/secondary/register", post(routes::secondaries::register_secondary))
+        .route("/api/secondary/:name", axum::routing::delete(routes::secondaries::remove_secondary))
+        .route("/api/secondary/:name/rotate-token", post(routes::secondaries::rotate_token))
         .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
         .with_state(state);
 

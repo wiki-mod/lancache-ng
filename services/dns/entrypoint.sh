@@ -8,8 +8,12 @@ PDNS_API_KEY="${PDNS_API_KEY:-lancache-pdns-secret}"
 DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
+NATS_URL="${NATS_URL:-nats://nats:4222}"
+NATS_TOKEN="${NATS_TOKEN:-}"
+NATS_CONSUMER="${NATS_CONSUMER:-}"
+NATS_RECONCILER="${NATS_RECONCILER:-0}"
 
-export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR
+export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
@@ -130,8 +134,20 @@ sleep 2
 run_recursor &
 REC_PID=$!
 
+# ── 7. Start NATS Subscriber ────────────────────────────────────────────────
+run_nats_subscriber() {
+    while true; do
+        nats-subscriber || true
+        echo "[lancache-dns] nats-subscriber exited, restarting in 3s..."
+        sleep 3
+    done
+}
+
+run_nats_subscriber &
+NATS_PID=$!
+
 # Handle termination
-trap "kill $AUTH_PID $REC_PID 2>/dev/null || true" EXIT TERM
+trap "kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true" EXIT TERM
 
 # Wait indefinitely
 wait

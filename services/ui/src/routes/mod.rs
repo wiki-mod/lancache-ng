@@ -3,6 +3,7 @@ pub mod dhcp;
 pub mod domains;
 pub mod logs;
 pub mod netdata_proxy;
+pub mod secondaries;
 pub mod setup;
 pub mod stats;
 

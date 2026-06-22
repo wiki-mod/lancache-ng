@@ -1,3 +1,8 @@
+FROM golang:1.23-alpine AS subscriber-builder
+WORKDIR /build
+COPY nats-subscriber/ .
+RUN go mod download && CGO_ENABLED=0 GOOS=linux go build -o nats-subscriber .
+
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,6 +20,8 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
     && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
+
+COPY --from=subscriber-builder /build/nats-subscriber /usr/local/bin/nats-subscriber
 
 COPY recursor.conf.template /etc/pdns/recursor.conf.template
 COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template

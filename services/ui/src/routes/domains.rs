@@ -125,24 +125,20 @@ pub async fn add_lan_record(
     let name = normalize_lan_name(&form.name);
     let ttl = form.ttl.unwrap_or(300);
 
-    let payload = json!({
-        "rrsets": [{
-            "name": name,
-            "type": form.record_type,
-            "ttl": ttl,
-            "changetype": "REPLACE",
-            "records": [{"content": form.content, "disabled": false}]
-        }]
+    let msg = json!({
+        "action": "replace",
+        "zone": "lan",
+        "name": name,
+        "type": form.record_type,
+        "ttl": ttl,
+        "records": [{"content": form.content, "disabled": false}]
     });
-
-    let url = format!("{}/api/v1/servers/localhost/zones/lan", state.config.pdns_auth_url);
-    state.http_client
-        .patch(&url)
-        .header("X-API-Key", &state.config.pdns_api_key)
-        .json(&payload)
-        .send()
+    if let Err(e) = state.nats
+        .publish("lancache.dns.record", serde_json::to_vec(&msg).unwrap().into())
         .await
-        .ok();
+    {
+        tracing::error!("NATS publish failed: {}", e);
+    }
 
     Redirect::to("/domains")
 }
@@ -153,22 +149,18 @@ pub async fn remove_lan_record(
 ) -> Redirect {
     let name = normalize_lan_name(&form.name);
 
-    let payload = json!({
-        "rrsets": [{
-            "name": name,
-            "type": form.record_type,
-            "changetype": "DELETE"
-        }]
+    let msg = json!({
+        "action": "delete",
+        "zone": "lan",
+        "name": name,
+        "type": form.record_type
     });
-
-    let url = format!("{}/api/v1/servers/localhost/zones/lan", state.config.pdns_auth_url);
-    state.http_client
-        .patch(&url)
-        .header("X-API-Key", &state.config.pdns_api_key)
-        .json(&payload)
-        .send()
+    if let Err(e) = state.nats
+        .publish("lancache.dns.record", serde_json::to_vec(&msg).unwrap().into())
         .await
-        .ok();
+    {
+        tracing::error!("NATS publish failed: {}", e);
+    }
 
     Redirect::to("/domains")
 }
@@ -197,6 +189,12 @@ async fn flush_recursor_cache(state: &AppState) {
         .put(&url)
         .header("X-API-Key", &state.config.pdns_api_key)
         .send()
+        .await
+        .ok();
+
+    // Also publish flush event so all recursor instances clear their cache
+    state.nats
+        .publish("lancache.dns.flush", "{}".into())
         .await
         .ok();
 }
