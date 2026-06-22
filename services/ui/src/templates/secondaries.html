@@ -15,15 +15,23 @@
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Führen Sie den folgenden Befehl auf dem Secondary-Server aus</p>
+      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen</p>
     </div>
 
-    <div class="bg-slate-900 rounded-lg p-4 font-mono text-sm text-slate-300 overflow-x-auto">
-      <code>./setup-secondary.sh --primary http://&lt;UI-URL&gt; --token &lt;REGISTRATION_TOKEN&gt; --name &lt;name&gt; --proxy-ip &lt;PROXY_IP&gt;</code>
+    <div class="relative group">
+      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/scripts/setup-secondary.sh) \
+  --primary {{ primary_url }} \
+  --token {{ registration_token }} \
+  --name myname \
+  --proxy-ip {{ primary_url | replace(from="http://", to="") | replace(from=":8080", to="") }}</div>
+      <button onclick="copyCmd()"
+              class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors opacity-0 group-hover:opacity-100">
+        Kopieren
+      </button>
     </div>
 
-    <p class="text-xs text-slate-400">
-      <span class="font-semibold">Registrierungs-Token:</span> in SECONDARY_REGISTRATION_TOKEN gesetzt
+    <p class="text-xs text-slate-500">
+      Das Skript registriert den Secondary, generiert einen NATS-Token und startet den Container automatisch.
     </p>
   </div>
 
@@ -83,6 +91,15 @@
 
 {% block scripts %}
 <script>
+  function copyCmd() {
+    const text = document.getElementById('install-cmd').innerText;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = event.target;
+      btn.textContent = 'Kopiert!';
+      setTimeout(() => btn.textContent = 'Kopieren', 1500);
+    });
+  }
+
   async function rotateToken(name) {
     try {
       const response = await fetch(`/api/secondary/${name}/rotate-token`, {

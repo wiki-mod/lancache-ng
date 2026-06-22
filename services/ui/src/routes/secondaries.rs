@@ -51,9 +51,14 @@ pub async fn secondaries_page(State(state): State<Arc<AppState>>) -> Html<String
         })
         .unwrap_or_default();
 
+    let primary_url = format!("http://{}:8080", state.config.standard_ip);
+    let reg_token = &state.config.secondary_registration_token;
+
     let mut ctx = Context::new();
     ctx.insert("active_page", "secondaries");
     ctx.insert("secondaries", &secondaries);
+    ctx.insert("primary_url", &primary_url);
+    ctx.insert("registration_token", reg_token);
 
     crate::routes::render(&state.templates, "secondaries.html", &ctx)
 }
