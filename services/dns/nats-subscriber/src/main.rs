@@ -80,7 +80,7 @@ async fn main() {
     // Connect to NATS with reconnect settings
     let mut opts = async_nats::ConnectOptions::new()
         .max_reconnects(Some(-1))
-        .reconnect_delay_callback(|| Duration::from_secs(3));
+        .reconnect_delay_callback(|_| Duration::from_secs(3));
 
     if let Some(token) = nats_token {
         opts = opts.token(token);
