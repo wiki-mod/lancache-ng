@@ -1,6 +1,8 @@
 # lancache-ng
 
-Caches game and software downloads on your local network — so the second person to download something gets it at full LAN speed instead of waiting for the internet again.
+Caches game and software downloads on your local network 
+so the second person to download something gets it at full LAN speed instead of waiting for the internet again.
+Even, if you use HTTPS todays. Yes, you read right. You only need to install an Root-CA that you self generate and boom, caching baby :)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | bash
