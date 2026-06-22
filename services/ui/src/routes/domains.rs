@@ -14,11 +14,6 @@ pub struct AddForm {
 }
 
 #[derive(Deserialize)]
-pub struct AaaaFilterForm {
-    pub enabled: String,
-}
-
-#[derive(Deserialize)]
 pub struct LanRecordForm {
     pub name: String,
     pub record_type: String,
@@ -44,14 +39,12 @@ pub struct Record {
 pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let dns_domains = read_domain_file(&state.config.cdn_domains_file);
     let ssl_domains = read_domain_file(&state.config.ssl_domains_file);
-    let aaaa_filter_enabled = is_aaaa_filter_enabled(&state.config.named_conf_options_file);
 
     let lan_records = fetch_lan_records(&state).await;
 
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
     ctx.insert("ssl_domains", &ssl_domains);
-    ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("lan_records", &lan_records);
     ctx.insert("active_page", "domains");
 
@@ -114,23 +107,6 @@ pub async fn remove_ssl(State(state): State<Arc<AppState>>, Form(form): Form<Add
         tracing::error!("Failed to remove ssl domain: {}", e);
     } else {
         restart_ssl(&state).await;
-    }
-    Redirect::to("/domains")
-}
-
-pub async fn toggle_aaaa_filter(
-    State(state): State<Arc<AppState>>,
-    Form(form): Form<AaaaFilterForm>,
-) -> Redirect {
-    let enable = form.enabled == "1";
-    let result = {
-        let _guard = state.file_lock.lock().expect("file lock poisoned");
-        update_aaaa_filter(&state.config.named_conf_options_file, enable)
-    };
-    if let Err(e) = result {
-        tracing::error!("Failed to update AAAA filter: {}", e);
-    } else {
-        restart_dns(&state).await;
     }
     Redirect::to("/domains")
 }
@@ -200,14 +176,6 @@ async fn flush_recursor_cache(state: &AppState) {
         .ok();
 }
 
-async fn restart_dns(state: &AppState) {
-    for svc in [&state.config.dns_standard_service, &state.config.dns_ssl_service] {
-        if let Err(e) = docker_client::restart_service(&state.docker, svc).await {
-            tracing::error!("Restart {} failed: {}", svc, e);
-        }
-    }
-}
-
 async fn restart_ssl(state: &AppState) {
     if let Err(e) = docker_client::restart_service(&state.docker, &state.config.proxy_ssl_service).await {
         tracing::error!("Restart proxy-ssl failed: {}", e);
@@ -256,49 +224,6 @@ fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
         .map(|l| format!("{}\n", l))
         .collect();
     fs::write(path, new)?;
-    Ok(())
-}
-
-fn is_aaaa_filter_enabled(path: &str) -> bool {
-    let Ok(content) = fs::read_to_string(path) else {
-        return false;
-    };
-    content.lines().any(|l| {
-        let trimmed = l.trim();
-        (trimmed.starts_with("filter-aaaa-on-v4") || trimmed.starts_with("filter-aaaa-on-v6"))
-            && !trimmed.starts_with('#')
-    })
-}
-
-fn update_aaaa_filter(path: &str, enable: bool) -> anyhow::Result<()> {
-    let content = fs::read_to_string(path)?;
-    let new: String = content
-        .lines()
-        .map(|l| {
-            let trimmed = l.trim();
-            if trimmed.starts_with("# filter-aaaa-on-v4") {
-                if enable {
-                    "    filter-aaaa-on-v4 yes;".to_string()
-                } else {
-                    l.to_string()
-                }
-            } else if trimmed.starts_with("# filter-aaaa-on-v6") {
-                if enable {
-                    "    filter-aaaa-on-v6 yes;".to_string()
-                } else {
-                    l.to_string()
-                }
-            } else if trimmed.starts_with("filter-aaaa-on-v4") && !enable {
-                "    # filter-aaaa-on-v4 yes;".to_string()
-            } else if trimmed.starts_with("filter-aaaa-on-v6") && !enable {
-                "    # filter-aaaa-on-v6 yes;".to_string()
-            } else {
-                l.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(path, format!("{}\n", new))?;
     Ok(())
 }
 

@@ -116,7 +116,6 @@ async fn main() -> Result<()> {
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
         .route("/domains/ssl/add", post(routes::domains::add_ssl))
         .route("/domains/ssl/remove", post(routes::domains::remove_ssl))
-        .route("/domains/aaaa-filter", post(routes::domains::toggle_aaaa_filter))
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
         .route("/domains/lan/remove", post(routes::domains::remove_lan_record))
         .route("/stats", get(routes::stats::stats_page))

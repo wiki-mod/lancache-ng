@@ -7,7 +7,7 @@
   <div>
     <h1 class="text-xl font-bold text-white">Domain-Verwaltung</h1>
     <p class="text-sm text-slate-400 mt-1">
-      Nach jeder Änderung werden die betroffenen Container automatisch neu gestartet (~3 Sek.).
+      CDN-Domains und LAN-Records können ohne Container-Neustart live geändert werden.
     </p>
   </div>
 
@@ -147,12 +147,12 @@
             <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">{{ record.type }}</span>
             <span class="text-xs text-slate-500">TTL: {{ record.ttl }}</span>
           </div>
-          <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+          <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
         </div>
         <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
           <input type="hidden" name="name" value="{{ record.name }}">
           <input type="hidden" name="record_type" value="{{ record.type }}">
-          <input type="hidden" name="content" value="{% for c in record.records %}{{ c }}{% if not loop.last %};{% endif %}{% endfor %}">
+          <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
           <button type="submit"
                   onclick="return confirm('{{ record.name }} ({{ record.type }}) entfernen?')"
                   class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
@@ -175,36 +175,6 @@
     <p>Die DNS-Liste steuert welche Domains auf den Cache-DNS zeigen.
        Die SSL-Liste bestimmt für welche Domains ein Wildcard-Zertifikat ausgestellt wird.
        Neue SSL-Domains brauchen einen Eintrag in <em>beiden</em> Listen.</p>
-  </div>
-
-  <!-- AAAA-Filter Settings -->
-  <div class="card flex flex-col gap-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">IPv4-only Modus (AAAA-Filter)</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Deaktiviert IPv6-Adressen in BIND9-Antworten um zu verhindern, dass Clients CDN-Server direkt erreichen</p>
-    </div>
-
-    <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
-      <div class="flex items-center gap-2">
-        <input type="checkbox" id="aaaa-enabled" name="enabled" value="1" {% if aaaa_filter_enabled %}checked{% endif %}
-               class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer">
-        <label for="aaaa-enabled" class="text-sm text-slate-300 cursor-pointer">
-          IPv4-only aktivieren
-        </label>
-      </div>
-      <button type="submit"
-              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-        Speichern
-      </button>
-    </form>
-
-    <p class="text-xs text-slate-500">
-      {% if aaaa_filter_enabled %}
-      Status: <span class="text-green-400 font-semibold">Aktiviert</span>
-      {% else %}
-      Status: <span class="text-slate-400">Deaktiviert</span>
-      {% endif %}
-    </p>
   </div>
 
 </div>
