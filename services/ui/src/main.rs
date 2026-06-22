@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    tracing::info!("LanCache Admin UI läuft auf http://0.0.0.0:8080");
+    tracing::info!("LanCache Admin UI running on http://0.0.0.0:8080");
     axum::serve(listener, app).await?;
     Ok(())
 }
