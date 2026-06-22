@@ -42,6 +42,8 @@ services:
       retries: 3
       start_period: 20s
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
@@ -62,6 +64,8 @@ services:
       retries: 3
       start_period: 20s
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -93,6 +97,8 @@ services:
       retries: 3
       start_period: 20s
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
@@ -114,6 +120,8 @@ services:
       retries: 3
       start_period: 20s
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -129,6 +137,8 @@ services:
       CONTAINERS: "1"
       POST: "1"
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -156,6 +166,8 @@ services:
     depends_on:
       - docker-socket-proxy
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -187,6 +199,8 @@ services:
       - proxy-ssl
       - netdata
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -205,12 +219,28 @@ services:
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
-  # Watchtower entfernt: inkompatibel mit Docker 29 (API v1.25 < minimum v1.40).
-  # Updates: ./setup.sh update
+  # ── Watchtower (automatische Updates) ────────────────────────────────────────
+  # Nur aktiv wenn COMPOSE_PROFILES watchtower enthält (setup.sh fragt danach)
+  # Fork von nicholas-fedor: aktiv gepflegt, NegotiateAPIVersion=true (Docker 29+)
+  watchtower:
+    profiles: [watchtower]
+    image: ghcr.io/nicholas-fedor/watchtower:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
 
 volumes:
   proxy-standard-logs:

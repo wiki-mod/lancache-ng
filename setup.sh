@@ -286,10 +286,23 @@ done
 ask "Cache-RAM-Puffer in MB (keys_zone)" "512"
 CACHE_MEM_MB="$REPLY"
 
+# ── 5. Watchtower ─────────────────────────────────────────────────────────────
+print_step "Automatische Updates (Watchtower)"
+
+printf "  Watchtower prüft täglich ob neue Images verfügbar sind\n"
+printf "  und aktualisiert die Container automatisch. Standard: aktiv.\n\n"
+
+ask "Automatische Updates aktivieren? [J/n]" "J"
 COMPOSE_PROFILES=""
 [[ "$SSL_ENABLED" = "1" ]] && COMPOSE_PROFILES="ssl"
+if [[ "${REPLY,,}" != "n" ]]; then
+    [[ -n "$COMPOSE_PROFILES" ]] && COMPOSE_PROFILES="${COMPOSE_PROFILES},watchtower" || COMPOSE_PROFILES="watchtower"
+    print_ok "Watchtower aktiv (prüft täglich um 04:00 Uhr auf neue Images)"
+else
+    print_warn "Watchtower deaktiviert — manuelle Updates mit: ./setup.sh update"
+fi
 
-# ── 5. Admin-UI Zugangschutz ──────────────────────────────────────────────────
+# ── 6. Admin-UI Zugangschutz ──────────────────────────────────────────────────
 print_step "Admin-UI Zugangschutz"
 
 printf "  Die Admin-UI läuft auf http://%s:8080 — nur im lokalen Netz erreichbar.\n" "$IP_STANDARD"
@@ -312,7 +325,7 @@ else
     print_ok "Kein Passwortschutz — Admin-UI öffentlich im LAN"
 fi
 
-# ── 6. .env schreiben ─────────────────────────────────────────────────────────
+# ── 7. .env schreiben ─────────────────────────────────────────────────────────
 print_step ".env schreiben"
 
 if [[ -f "$INSTALL_DIR/.env" ]]; then
@@ -348,7 +361,7 @@ STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}
 
 # ── Profile ───────────────────────────────────────────────────────────────────
-# ssl = SSL-Modus aktiv; leer = SSL aus
+# ssl = SSL-Modus aktiv; watchtower = automatische Updates; leer = beides aus
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
 # ── Admin-UI ──────────────────────────────────────────────────────────────────
@@ -358,7 +371,7 @@ UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 EOF
 print_ok ".env geschrieben: $INSTALL_DIR/.env"
 
-# ── 7. Cache-Verzeichnisse anlegen ────────────────────────────────────────────
+# ── 8. Cache-Verzeichnisse anlegen ────────────────────────────────────────────
 print_step "Cache-Verzeichnisse anlegen"
 mkdir -p "$CACHE_DIR_STANDARD"
 print_ok "Standard: $CACHE_DIR_STANDARD"
@@ -367,7 +380,7 @@ if [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]]; then
     print_ok "SSL:      $CACHE_DIR_SSL"
 fi
 
-# ── 8. Systemd-Watchdog ───────────────────────────────────────────────────────
+# ── 9. Systemd-Watchdog ───────────────────────────────────────────────────────
 print_step "Systemd-Watchdog installieren"
 
 if ! command -v systemctl >/dev/null 2>&1; then
@@ -424,7 +437,7 @@ EOF
     print_ok "lancache-converge.timer aktiviert (Konvergenz alle 5 Minuten)"
 fi
 
-# ── 9. Zusammenfassung + Bestätigung ────────────────────────────────────────
+# ── 10. Zusammenfassung + Bestätigung ────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
 printf "${BOLD}│              Konfiguration                   │${RESET}\n"
@@ -441,6 +454,11 @@ printf "  %-26s %s\n"    "Cache:"                    "$CACHE_DIR_STANDARD"
     && printf "  %-26s %s\n" "Cache SSL:"            "$CACHE_DIR_SSL"
 printf "  %-26s %s GiB\n" "Cache-Größe:"             "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache-RAM:"               "$CACHE_MEM_MB"
+if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
+    printf "  %-26s %s\n" "Watchtower:"               "aktiv (täglich 04:00)"
+else
+    printf "  %-26s %s\n" "Watchtower:"               "deaktiviert"
+fi
 if [[ -n "$UI_AUTH_USER" ]]; then
     printf "  %-26s %s\n" "Admin-UI Auth:"            "aktiv (Benutzer: $UI_AUTH_USER)"
 else
@@ -452,7 +470,7 @@ ask "Jetzt starten? [J/n]" "J"
 [[ "${REPLY,,}" != "n" ]] \
     || { printf "\n  Später starten mit: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
-# ── 10. Stack starten ────────────────────────────────────────────────────────
+# ── 11. Stack starten ────────────────────────────────────────────────────────
 print_step "Images laden"
 cd "$INSTALL_DIR"
 docker compose pull || print_warn "Pull teilweise fehlgeschlagen — weiter mit gecachten Images"
@@ -461,7 +479,7 @@ print_step "Stack starten"
 docker compose up -d
 print_ok "Stack gestartet"
 
-# ── 11. Post-Start-Info ──────────────────────────────────────────────────────
+# ── 12. Post-Start-Info ──────────────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "${BOLD}${GREEN}  LanCache-NG läuft!${RESET}\n"
