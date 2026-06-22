@@ -1,51 +1,503 @@
-# HINT:
-# WE ARE STILL EXTENDING AND CHANGING ROOT ELEMENTS.
-# THIS DOES NOT EFFECT THE WAY IT WORKS BUT IT ADDS A LOT OF FEATURES
-
-
-
 # lancache-ng
 
-Caches game and software downloads on your local network 
-so the second person to download something gets it at full LAN speed instead of waiting for the internet again.
-Even, if you use HTTPS todays. Yes, you read right. You only need to install an Root-CA that you self generate and boom, caching baby :)
+LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.
+
+It stores game and software downloads inside your local network.  
+The first download still comes from the internet.  
+The next download can come from your local cache at LAN speed.
+
+This is useful when multiple PCs download the same games, updates or drivers.  
+It can reduce internet traffic, save bandwidth and make repeated downloads much faster.
+
+## Project status
+
+LanCache NG is still actively changing.
+
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional automatic updates and secondary DNS support.
+
+Some internal paths, root elements and service details may still change while the project grows.
+
+## What this project does
+
+LanCache NG combines several services into one Docker based stack:
+
+- DNS service for redirecting known CDN domains to your local cache
+- Nginx cache proxy for standard HTTP caching
+- optional SSL cache proxy for HTTPS capable clients
+- Admin UI for cache status, domains, DNS records, DHCP leases and settings
+- optional Kea DHCP server
+- optional DHCP proxy helper
+- optional Watchtower updates
+- optional watchdog and convergence checks
+- optional secondary DNS nodes synced through NATS
+
+The goal is simple:
+
+Your clients use LanCache NG as DNS server.  
+Known download domains are answered with the cache IP.  
+The cache proxy downloads and stores the requested files.  
+Later clients can receive the same files from your LAN.
+
+## Quick start
+
+Run this on a Linux machine inside your network:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-Run that on a Linux machine in your network. The script asks for your server IP and how much disk space to use, then handles everything automatically. Point your clients' DNS at the server and you're done.
+The setup script guides you through the installation.
 
----
+It can:
 
-## Two modes
+- check the required tools
+- install Docker if needed
+- clone the repository to `/opt/lancache-ng`
+- ask for the cache server IP
+- optionally enable SSL caching with a second IP
+- ask for cache directory and cache size
+- optionally enable automatic updates
+- optionally enable DHCP
+- optionally protect the Admin UI with a password
+- write the `.env` file
+- create required directories
+- start the Docker stack
+- install systemd startup and convergence checks
 
-**Standard mode** — no setup needed on clients. HTTP downloads are cached. HTTPS connections are passed through directly to the CDN. Works on every device including consoles.
+Default installation path:
 
-**SSL mode** — HTTP and HTTPS downloads are both cached. Clients install a small CA certificate once (takes 30 seconds). Gives better cache hit rates for games that use HTTPS CDNs like Epic, EA, and Blizzard.
+```text
+/opt/lancache-ng
+```
 
-Both modes run at the same time on two separate IPs. Clients choose which one to use by setting their DNS server.
+After setup, open the Admin UI:
 
-## What gets cached
+```text
+http://<server-ip>:8080
+```
 
-Steam, Epic Games, GOG, EA/Origin, Blizzard, Ubisoft, Riot, Rockstar, Warframe, Path of Exile, Guild Wars 2, Windows Update, Microsoft Office, NVIDIA and AMD drivers, most Linux package mirrors, and more.
+Example:
 
-Xbox and PlayStation consoles are intentionally not cached — they can't install custom CA certificates, so HTTPS caching would break them. They continue working normally by going directly to their CDNs.
+```text
+http://192.168.1.10:8080
+```
 
----
+## The two operating modes
+
+LanCache NG can run in two modes.
+
+### Standard mode
+
+Standard mode is the safest and easiest mode.
+
+It does not need a certificate on the clients.
+
+Use this mode if you want maximum compatibility.
+
+Standard mode:
+
+- caches HTTP downloads
+- passes HTTPS traffic through normally
+- works without client certificate setup
+- works well for PCs, consoles and general devices
+- is the recommended first test mode
+
+Example DNS target:
+
+```text
+192.168.1.10
+```
+
+### SSL mode
+
+SSL mode is optional.
+
+It can cache HTTP and HTTPS downloads, but it needs a locally generated Root CA certificate on every client that should use SSL caching.
+
+Use this mode only for devices you own and trust.
+
+SSL mode:
+
+- needs a second LAN IP
+- needs the generated CA certificate installed on each client
+- can improve cache hit rates for launchers and CDNs using HTTPS
+- is useful for Windows gaming PCs
+- is not suitable for most consoles
+
+Example DNS target:
+
+```text
+192.168.1.11
+```
+
+### Running both modes together
+
+Both modes can run at the same time.
+
+Example:
+
+| Mode | Client setup | DNS server |
+|---|---|---|
+| Standard mode | no certificate needed | `192.168.1.10` |
+| SSL mode | CA certificate installed | `192.168.1.11` |
+
+This lets you decide per client.
+
+A console can use standard mode.  
+A gaming PC with the certificate installed can use SSL mode.
+
+## What can be cached
+
+LanCache NG can cache many game, software and update downloads when the required domains are known.
+
+Examples:
+
+- Steam
+- Epic Games
+- GOG
+- EA and Origin
+- Blizzard and Battle.net
+- Ubisoft
+- Riot Games
+- Rockstar Games
+- Warframe
+- Path of Exile
+- Guild Wars 2
+- Windows Update
+- Microsoft Office
+- NVIDIA drivers
+- AMD drivers
+- Linux package mirrors
+
+Important:
+
+Not every platform behaves the same.  
+Some services change their CDN domains.  
+Some downloads use HTTPS in a way that only works with SSL mode.  
+Some clients may bypass the cache completely.
+
+The first download is normally a cache miss.  
+The second identical download is where the cache should help.
+
+## Console support
+
+Xbox, PlayStation and similar consoles should usually use standard mode.
+
+They normally cannot install a custom Root CA certificate in a useful way.  
+Because of that, SSL caching is not recommended for consoles.
+
+Consoles should continue to work normally through standard mode.  
+HTTPS traffic that cannot be cached is passed through to the original CDN.
 
 ## Requirements
 
-- A Linux machine that stays on (a small PC, a Raspberry Pi 5, a Proxmox VM, whatever)
-- Docker with the Compose plugin
-- Enough disk space for your cache (500 GB is a good starting point for a few gamers)
-- For SSL mode: a second IP address on the same network interface
+You need:
 
----
+- a Linux machine that stays online
+- Docker with the Docker Compose plugin
+- a static LAN IP for the cache server
+- enough disk space for the cache
+- port `53` free for DNS
+- port `80` free for HTTP cache traffic
+- port `443` free if SSL mode is enabled
+- port `8080` for the Admin UI
+- optional second LAN IP for SSL mode
+- optional port `67/udp` if using the built in DHCP server
+
+Recommended storage:
+
+| Environment | Suggested cache size |
+|---|---|
+| small test setup | 100 GB |
+| few gaming PCs | 500 GB |
+| LAN party or shared network | 1 TB or more |
+
+A fast SSD is nice, but a large HDD can also work.  
+The best choice depends on your network, internet speed and number of clients.
+
+## Installation with setup script
+
+Recommended installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
+```
+
+During setup you will be asked for the important values.
+
+Example values:
+
+| Setting | Example |
+|---|---|
+| Standard mode IP | `192.168.1.10` |
+| SSL mode IP | `192.168.1.11` |
+| install directory | `/opt/lancache-ng` |
+| standard cache directory | `/opt/lancache-ng/cache/standard` |
+| SSL cache directory | `/opt/lancache-ng/cache/ssl` |
+| cache size per mode | `500` GiB |
+| Admin UI port | `8080` |
+
+After setup, check the containers:
+
+```bash
+cd /opt/lancache-ng
+docker compose ps
+```
+
+Open the Admin UI:
+
+```text
+http://<standard-ip>:8080
+```
+
+## Updating
+
+If you installed with the setup script, update with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh update
+```
+
+The update command can:
+
+- pull the current repository state
+- update the compose file
+- pull newer images
+- restart the stack
+
+## Debug information
+
+If something does not work, run:
+
+```bash
+sudo /opt/lancache-ng/setup.sh debug
+```
+
+The debug command prints:
+
+- container status
+- recent logs
+- cache usage
+- detected LAN IPs
+- health check results
+
+You can also view live logs manually:
+
+```bash
+cd /opt/lancache-ng
+docker compose logs -f
+```
+
+## Point your clients to the cache
+
+LanCache NG works by DNS.
+
+A client must use the LanCache NG DNS IP.  
+You can set that manually per client or distribute it through DHCP.
+
+Example:
+
+| Client type | DNS server |
+|---|---|
+| normal client without certificate | `192.168.1.10` |
+| SSL client with certificate installed | `192.168.1.11` |
+
+On many routers you can set the DNS server handed out by DHCP.  
+Set it to the LanCache NG standard IP if you want all clients to use standard mode.
+
+For SSL mode, only point clients to the SSL IP after the CA certificate was installed.
+
+## Optional DHCP server
+
+LanCache NG can optionally run a Kea DHCP server.
+
+This can automatically give clients:
+
+- an IP address
+- gateway
+- DNS server
+- the correct cache DNS IP
+
+Use this only if you know which DHCP server should be active in your network.
+
+Important:
+
+Do not run two normal DHCP servers in the same network unless you planned it carefully.  
+If your router already provides DHCP, either keep using the router or switch DHCP fully to LanCache NG.
+
+## Optional DHCP proxy
+
+The repository also contains a DHCP proxy service.
+
+This is useful for advanced setups where another DHCP server still exists, but LanCache NG should help provide specific network options.
+
+Most users should start without this.  
+Use normal DNS configuration first.
+
+## Admin UI
+
+The Admin UI is available after setup:
+
+```text
+http://<server-ip>:8080
+```
+
+The Admin UI can be used for:
+
+- cache overview
+- cache fill level
+- hit and miss statistics
+- active downloads
+- domain management
+- LAN DNS records
+- DHCP leases
+- settings
+- secondary DNS management
+
+If the setup asks whether the Admin UI should be password protected, using a password is recommended.
+
+Do not expose the Admin UI to the internet.
+
+## SSL mode certificate
+
+SSL mode generates a local CA certificate.
+
+Clients using SSL mode must trust this certificate.
+
+After the first start, the certificate is available here:
+
+```text
+/opt/lancache-ng/certs/ca.crt
+```
+
+Depending on your installation path, the file may be inside your selected install directory.
+
+### Install on Windows
+
+Use PowerShell as Administrator:
+
+```powershell
+scripts\install-ca-cert.ps1
+```
+
+### Install on Linux
+
+Use:
+
+```bash
+sudo scripts/install-ca-cert.sh
+```
+
+### Manual instructions
+
+See:
+
+```text
+docs/install-ca-cert.md
+```
+
+### Firefox note
+
+Firefox can use its own certificate store.  
+If HTTPS caching does not work in Firefox, import the certificate into Firefox too.
+
+### Steam Deck note
+
+Steam Deck can require extra handling because the system is more locked down than a normal Linux desktop.  
+See the certificate documentation before using SSL mode on it.
+
+## Testing DNS
+
+On a client using LanCache NG as DNS server, run:
+
+```bash
+nslookup steamcontent.com
+```
+
+or specify the DNS server directly:
+
+```bash
+nslookup steamcontent.com 192.168.1.10
+```
+
+If DNS routing works, known CDN domains should resolve to your cache IP instead of a public CDN IP.
+
+## Testing the cache
+
+A simple test:
+
+1. Point a client to the LanCache NG DNS server.
+2. Download a supported game or update.
+3. Delete it or try the same download from another client.
+4. Download it again.
+5. Check whether the second download is faster.
+6. Check the Admin UI for cache activity.
+
+The first download normally goes to the internet.  
+The second download is the important test.
+
+## Adding or changing cached domains
+
+You can manage domains in the Admin UI.
+
+This is the easiest option and usually does not require a rebuild.
+
+Manual domain files:
+
+```text
+services/dns/cdn-domains.txt
+services/proxy/cdn-ssl-domains.txt
+```
+
+Use `cdn-domains.txt` for DNS based cache routing.  
+Use `cdn-ssl-domains.txt` for SSL mode certificate coverage.
+
+After manual file changes, rebuild and restart:
+
+```bash
+cd /opt/lancache-ng
+docker compose up --build -d
+```
+
+Only add domains you understand.  
+Wrong domains can break downloads or route traffic that should not be cached.
+
+## Secondary DNS
+
+LanCache NG can run additional DNS nodes on other machines.
+
+This is useful if:
+
+- you have more than one network area
+- you want DNS redundancy
+- you want another host to answer DNS requests
+- you want DNS closer to some clients
+
+Secondary DNS nodes sync with the primary through NATS.
+
+Setup example:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/scripts/setup-secondary.sh) \
+  --primary http://192.168.1.10:8080 \
+  --token <SECONDARY_REGISTRATION_TOKEN> \
+  --name my-secondary \
+  --proxy-ip 192.168.1.10
+```
+
+The registration token is generated during primary setup and stored in `.env`.
+
+You can also view a ready command inside the Admin UI under the secondary DNS section.
+
+After setup, point additional clients to the secondary DNS IP.
 
 ## Manual setup
 
-If you prefer to do it yourself:
+The setup script is recommended.
+
+Manual setup is useful if you want to inspect and control every file yourself.
+
+Clone the repository:
 
 ```bash
 cd /opt
@@ -53,120 +505,233 @@ git clone https://github.com/wiki-mod/lancache-ng.git
 cd lancache-ng
 ```
 
-**1. Set your IPs** — edit `deploy/prod/.env`:
+Edit the production environment file:
+
+```bash
+nano deploy/prod/.env
+```
+
+Set at least:
+
 ```env
 IP_STANDARD=192.168.1.10
 IP_SSL=192.168.1.11
-```
-If you only want standard mode, set both to the same IP and skip the second IP setup.
 
-**2. Create required directories:**
+SSL_ENABLED=1
+
+CACHE_DIR_STANDARD=/srv/lancache/standard
+CACHE_DIR_SSL=/srv/lancache/ssl
+
+CACHE_MAX_SIZE=500g
+CACHE_MEM_MB=512
+
+STANDARD_CACHE_MAX_GB=500
+SSL_CACHE_MAX_GB=500
+```
+
+If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
+
+```env
+DDNS_TSIG_KEY=<generate-a-secret>
+NATS_LOCAL_TOKEN=<generate-a-secret>
+SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
+```
+
+Create directories:
+
 ```bash
-mkdir -p /srv/lancache/standard /srv/lancache/ssl /srv/lancache/kea
+mkdir -p /srv/lancache/standard
+mkdir -p /srv/lancache/ssl
+mkdir -p /srv/lancache/kea
 ```
 
-**3. Start:**
+Start the stack:
+
 ```bash
 docker compose -f deploy/prod/docker-compose.yml up -d --build
 ```
 
-**4. SSL mode only — get the CA certificate:**
+Check status:
 
-After the first start, copy the generated certificate to your clients:
 ```bash
-docker compose -f deploy/prod/docker-compose.yml cp proxy-ssl:/etc/nginx/ssl/ca/ca.crt ./certs/ca.crt
+docker compose -f deploy/prod/docker-compose.yml ps
 ```
 
-Then install it on each client using SSL mode:
-| | |
-|---|---|
-| Windows | `scripts\install-ca-cert.ps1` (run as Administrator) |
-| Linux | `scripts/install-ca-cert.sh` |
-| Manual | [docs/install-ca-cert.md](docs/install-ca-cert.md) |
+## Proxmox LXC notes
 
----
+LanCache NG can run inside a Proxmox LXC container.
 
-## Point your clients at the cache
+Recommended:
 
-Change the DNS server on each device (or push it via DHCP):
+- use a Debian based container
+- use enough disk space
+- enable nesting
+- keep the container inside your LAN
+- give the container a static IP
+- use a second IP if SSL mode is enabled
 
-- **No certificate:** DNS → `192.168.1.10`
-- **SSL mode (certificate installed):** DNS → `192.168.1.11`
+Example LXC config on the Proxmox host:
 
-That's it. The first download of anything goes to the internet as normal. Every download after that comes from the cache.
-
----
-
-## Does it work?
-
-On any PC that's pointing at the cache DNS:
-
-```
-nslookup steamcontent.com
-```
-
-If the answer is the cache server's IP instead of a real CDN IP, DNS is working.
-
-Then download something twice. The second time should be noticeably faster — that's the cache serving it.
-
----
-
-## Proxmox
-
-Running in an LXC container works well. Use an unprivileged container if possible.
-
-In `/etc/pve/lxc/<id>.conf` on the Proxmox host:
-```
+```text
 features: nesting=1,keyctl=1
 lxc.apparmor.profile: unconfined
 ```
 
-For port 53 in unprivileged containers:
-```bash
-echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf && sysctl -p
-```
-
-Give the container two network interfaces (eth0 + eth1, one IP each) and follow the normal setup from there.
-
----
-
-## Adding more games
-
-Edit `services/dns/cdn-domains.txt` to add CDN hostnames for DNS. Edit `services/proxy/cdn-ssl-domains.txt` for SSL certificate coverage. Then rebuild:
+For unprivileged containers and port `53`, this can be needed on the host:
 
 ```bash
-docker compose -f deploy/prod/docker-compose.yml up --build -d
+echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
+sysctl -p
 ```
 
-Or use the domain editor in the Admin UI — no rebuild needed.
+If SSL mode is enabled, give the container two usable LAN IPs.
 
----
+## Ports
 
-## Admin UI
+| Port | Protocol | Used for |
+|---|---|---|
+| `53` | TCP and UDP | DNS |
+| `80` | TCP | HTTP cache |
+| `443` | TCP | SSL mode cache |
+| `8080` | TCP | Admin UI |
+| `67` | UDP | optional DHCP server |
+| `8000` | TCP | optional Kea control agent |
 
-Opens at `http://<server-ip>:8080`. Shows cache fill level, hit/miss rates, active downloads, and lets you manage domains, LAN DNS records, DHCP leases, and settings without touching config files.
+Keep these ports inside your LAN.  
+Do not expose them directly to the internet.
 
----
+## Repository layout
 
-## Secondary DNS
+Important paths:
 
-Run additional DNS containers on other machines to serve more clients without extra proxies. All DNS instances stay in sync automatically via NATS JetStream — a LAN record added in the UI appears on every secondary within seconds.
+```text
+deploy/quickstart/       Quickstart compose used by setup.sh
+deploy/prod/             Production compose files
+deploy/secondary/        Secondary DNS compose files
+docs/                    Documentation
+scripts/                 Helper scripts
+services/dns/            DNS service
+services/proxy-standard/ Standard mode proxy
+services/proxy/          SSL mode proxy
+services/ui/             Admin UI
+services/watchdog/       Watchdog service
+services/dhcp/           Kea DHCP service
+services/dhcp-proxy/     DHCP proxy service
+services/nats/           NATS sync service
+certs/                   Generated or mounted certificates
+```
 
-**Set up a secondary on another host:**
+## Common problems
+
+### DNS does not answer
+
+Check that the container is running:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/scripts/setup-secondary.sh) \
-  --primary http://192.168.1.10:8080 \
-  --token <SECONDARY_REGISTRATION_TOKEN> \
-  --name myvm \
-  --proxy-ip 192.168.1.10
+cd /opt/lancache-ng
+docker compose ps
 ```
 
-The script registers the secondary with the primary, generates a NATS token for it, writes a `docker-compose.yml` + `.env`, and starts the container. Point additional clients at the secondary's IP for DNS.
+Check whether port `53` is already used by another service:
 
-`SECONDARY_REGISTRATION_TOKEN` is generated automatically by `setup.sh` and written to `.env`. The Admin UI under **Secondaries** shows the ready-to-paste command with your actual token and primary URL pre-filled. Manage secondaries (view, remove, rotate tokens) there as well.
+```bash
+ss -tulpen | grep ':53'
+```
 
----
+Common causes:
+
+- another DNS server is already using port `53`
+- systemd resolved is listening on port `53`
+- the client is not using the LanCache NG DNS IP
+- firewall rules block DNS
+- Docker is not running
+
+### Client still downloads from the internet
+
+This can be normal for the first download.
+
+Check:
+
+- is the client using the correct DNS server
+- is the domain part of the cache domain list
+- is the download using HTTPS
+- if SSL mode is needed, is the client using the SSL DNS IP
+- if SSL mode is needed, is the CA certificate installed
+
+### SSL mode does not work
+
+Check:
+
+- the client uses the SSL mode DNS IP
+- the second IP is really assigned to the server
+- the CA certificate is installed
+- Firefox has the certificate if Firefox is used
+- the domain exists in the SSL domain list
+- the SSL proxy container is running
+
+### Admin UI does not open
+
+Check:
+
+```bash
+cd /opt/lancache-ng
+docker compose ps
+docker compose logs --tail=100 ui
+```
+
+Common causes:
+
+- wrong IP
+- blocked port `8080`
+- UI container not running
+- firewall blocks access
+- manual production setup binds UI differently than quickstart setup
+
+### Cache hit rate is low
+
+A low hit rate can happen when:
+
+- everything is downloaded for the first time
+- every client downloads different files
+- the platform changed CDN domains
+- the download uses unsupported HTTPS behavior
+- the domain is missing from the domain list
+- the cache size is too small and old files are removed
+
+## Security notes
+
+LanCache NG is intended for trusted local networks.
+
+Recommended:
+
+- do not expose DNS, proxy or Admin UI to the internet
+- protect the Admin UI with a password
+- keep generated tokens private
+- keep the CA private
+- install the CA certificate only on clients you own and trust
+- do not use SSL mode for unknown or guest devices
+- review the setup script before running it on important systems
+
+A local Root CA can inspect traffic for configured domains.  
+That is required for SSL caching, but it also means the CA must be handled carefully.
+
+## When to use which mode
+
+Use standard mode when:
+
+- you want the easiest setup
+- you use consoles
+- you do not want to install certificates
+- you only want safe basic caching
+- you are testing the project for the first time
+
+Use SSL mode when:
+
+- you control the client device
+- you can install the CA certificate
+- you want better cache coverage
+- you understand that HTTPS caching needs trust in the local CA
+- you are using supported game launchers on PCs
 
 ## License
 
