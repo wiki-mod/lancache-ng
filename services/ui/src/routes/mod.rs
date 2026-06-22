@@ -15,7 +15,7 @@ pub fn render(templates: &Tera, name: &str, ctx: &Context) -> Html<String> {
         Ok(html) => Html(html),
         Err(e) => Html(format!(
             "<html><body style='background:#0f172a;color:#f87171;font-family:monospace;padding:2rem'>\
-            <h2>Template-Fehler: {}</h2><p>{}</p></body></html>",
+            <h2>Template error: {}</h2><p>{}</p></body></html>",
             name, e
         )),
     }
