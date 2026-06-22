@@ -28,15 +28,53 @@ forward-zones+=d.f.ip6.arpa=127.0.0.1:5300
 
 lua-config-file=/etc/pdns/recursor.lua
 
-# Cache tuning
+# ── Cache Persistence (Warm-Start) ───────────────────────────────────────────
+# PowerDNS dumps the record cache to disk on shutdown and reloads it on startup.
+# This avoids a cold cache after a container restart — similar to BIND9's dump-file.
+# The file lives on the persistent volume (/var/lib/powerdns) so it survives restarts.
+# cache-save-interval: how often (seconds) a background snapshot is written while running.
+# If the process crashes without a clean shutdown, the last periodic snapshot is used.
+cache-save-file=/var/lib/powerdns/recursor-cache.dump
+cache-save-interval=300
+
+# ── Prefetch / Proactive Refresh ─────────────────────────────────────────────
+# refresh-on-ttl-perc: when a cached entry's remaining TTL drops below this
+#   percentage of its original TTL, PowerDNS proactively fetches a fresh answer
+#   in the background — the client still gets the (still-valid) cached answer
+#   without waiting. Effectively zero-latency cache refresh.
+#   Example: a record with TTL 3600s gets refreshed when ~360s remain.
+# serve-stale-extensions: if the upstream is unreachable, keep serving the
+#   expired entry for this many extra TTL-extension cycles (unit: multiples of
+#   the record's original TTL, capped at 1 day per extension).
+#   This keeps DNS working during brief upstream outages.
+# minimum-ttl-override: clamp all TTLs to at least this many seconds.
+#   Prevents low-TTL records (e.g. CDN health-check records with TTL=5) from
+#   causing constant upstream traffic and defeating the cache entirely.
 refresh-on-ttl-perc=10
 serve-stale-extensions=120
 minimum-ttl-override=60
+
+# ── Record Cache Size ────────────────────────────────────────────────────────
+# max-cache-entries: maximum number of DNS records held in the record cache.
+#   Each entry is roughly 200–400 bytes. 1 000 000 entries ≈ 200–400 MB RAM.
+#   For a home/LAN cache this is generous; reduce if RAM is tight.
+# max-packetcache-entries: stores complete DNS responses (question → answer).
+#   Fastest possible path — no record assembly needed. Uses more RAM per entry.
+max-cache-entries=1000000
+max-packetcache-entries=500000
+
+# ── Packet Cache TTLs ────────────────────────────────────────────────────────
+# packetcache-ttl: how long a successful (NOERROR) response is cached as-is.
+#   Clients asking the exact same question within this window get an instant reply.
+# packetcache-negative-ttl: TTL for NXDOMAIN / NODATA responses.
+#   Keeps "this host doesn't exist" answers cached so upstream isn't hammered
+#   for typos or non-existent names.
+# packetcache-servfail-ttl: TTL for SERVFAIL responses.
+#   Short on purpose — upstreams recover quickly and we don't want to cache
+#   failures for long.
 packetcache-ttl=3600
 packetcache-negative-ttl=120
 packetcache-servfail-ttl=30
-max-cache-entries=1000000
-max-packetcache-entries=500000
 
 # REST API (LAN-accessible, restricted by allow-from)
 webserver=yes
