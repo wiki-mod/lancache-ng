@@ -188,7 +188,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
-      - ../../services/dns/named.conf.options:/data/named.conf.options
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-standard-logs:/var/log/nginx/standard:ro
       - proxy-ssl-logs:/var/log/nginx/ssl:ro

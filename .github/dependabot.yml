@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Rust (Admin UI)
+  - package-ecosystem: cargo
+    directory: /services/ui
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns: ["*"]
