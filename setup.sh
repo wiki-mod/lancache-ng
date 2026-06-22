@@ -365,8 +365,10 @@ else
 fi
 
 # ── 8. .env schreiben ─────────────────────────────────────────────────────────
-# Generate TSIG key for Kea DDNS ↔ BIND9 (shared across DHCP + DNS containers)
+# Generate secrets
 DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
+NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
+SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
 
 print_step ".env schreiben"
 
@@ -410,8 +412,14 @@ DHCP_GATEWAY=${DHCP_GATEWAY}
 DHCP_RANGE_START=${DHCP_RANGE_START}
 DHCP_RANGE_END=${DHCP_RANGE_END}
 
-# Shared TSIG key for Kea DDNS → BIND9 updates. Keep secret.
+# Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+
+# ── NATS (DNS-Record-Sync-Bus) ────────────────────────────────────────────────
+# Token für lokale DNS-Container (generiert, nicht ändern)
+NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
+# Token für setup-secondary.sh — jeder der diesen kennt kann einen Secondary anmelden
+SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profile ───────────────────────────────────────────────────────────────────
 # ssl = SSL-Modus aktiv; watchtower = automatische Updates; leer = beides aus

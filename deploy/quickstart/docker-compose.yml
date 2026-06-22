@@ -48,12 +48,36 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
+  nats:
+    image: nats:2-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /etc/nats
+        printf 'jetstream { store_dir: /data }\nauthorization { users: [{ token: "%s" }] }\n' "$NATS_LOCAL_TOKEN" > /etc/nats/nats.conf
+        exec nats-server -c /etc/nats/nats.conf
+    environment:
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
+    volumes:
+      - nats-data:/data
+      - nats-conf:/etc/nats
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
   dns-standard:
     container_name: lancache-dns-standard
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
     environment:
       - PROXY_IP=${IP_STANDARD}
       - LOG_QUERIES=0
+      - NATS_URL=nats://nats:4222
+      - NATS_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_CONSUMER=dns-standard
+      - NATS_RECONCILER=1
+    depends_on:
+      - nats
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
@@ -110,6 +134,11 @@ services:
     environment:
       - PROXY_IP=${IP_SSL}
       - LOG_QUERIES=0
+      - NATS_URL=nats://nats:4222
+      - NATS_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_CONSUMER=dns-ssl
+    depends_on:
+      - nats
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
@@ -194,10 +223,16 @@ services:
       - SSL_CACHE_MAX_GB=${SSL_CACHE_MAX_GB}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
+      - NATS_URL=nats://nats:4222
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
+      - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
+    volumes:
+      - nats-conf:/etc/nats
     depends_on:
       - proxy-standard
       - proxy-ssl
       - netdata
+      - nats
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -246,6 +281,8 @@ volumes:
   proxy-standard-logs:
   proxy-ssl-logs:
   watchdog-status:
+  nats-data:
+  nats-conf:
   netdataconfig:
   netdatalib:
   netdatacache:

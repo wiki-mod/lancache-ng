@@ -144,7 +144,27 @@ Or use the domain editor in the Admin UI — no rebuild needed.
 
 ## Admin UI
 
-Opens at `http://<server-ip>:8080`. Shows cache fill level, hit/miss rates, active downloads, and lets you manage domains and settings without touching config files.
+Opens at `http://<server-ip>:8080`. Shows cache fill level, hit/miss rates, active downloads, and lets you manage domains, LAN DNS records, DHCP leases, and settings without touching config files.
+
+---
+
+## Secondary DNS
+
+Run additional DNS containers on other machines to serve more clients without extra proxies. All DNS instances stay in sync automatically via NATS JetStream — a LAN record added in the UI appears on every secondary within seconds.
+
+**Set up a secondary on another host:**
+
+```bash
+./scripts/setup-secondary.sh \
+  --primary http://192.168.1.10:8080 \
+  --token <SECONDARY_REGISTRATION_TOKEN> \
+  --name myvm \
+  --proxy-ip 192.168.1.10
+```
+
+The script registers the secondary with the primary, generates a NATS token for it, writes a `docker-compose.yml` + `.env`, and starts the container. Point additional clients at the secondary's IP for DNS.
+
+`SECONDARY_REGISTRATION_TOKEN` is generated automatically by `setup.sh` and written to `.env`. Manage secondaries (view, remove, rotate tokens) in the Admin UI under **Secondaries**.
 
 ---
 
