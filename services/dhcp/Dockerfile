@@ -8,14 +8,18 @@ RUN apt-get update && apt-get install -y \
     gettext \
     openssl \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    nmap \
+    iptables \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -f /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_host_cmds.so
 
-COPY kea-dhcp4.conf /etc/kea/
-COPY kea-ctrl-agent.conf /etc/kea/
-COPY kea-dhcp-ddns.conf /etc/kea/
+# Config templates — expanded once into /var/lib/kea/ on first boot
+COPY kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.template
+COPY kea-ctrl-agent.conf /etc/kea/kea-ctrl-agent.conf.template
+COPY kea-dhcp-ddns.conf /etc/kea/kea-dhcp-ddns.conf.template
 COPY entrypoint.sh /entrypoint.sh
 
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh && mkdir -p /var/lib/kea /var/run/kea
 
 EXPOSE 67/udp 8000
 

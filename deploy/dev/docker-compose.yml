@@ -31,6 +31,8 @@ services:
       context: ../../services/dns
     env_file:
       - ../../config/dev/dns-standard.env
+    environment:
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
@@ -83,6 +85,8 @@ services:
       context: ../../services/dns
     env_file:
       - ../../config/dev/dns-ssl.env
+    environment:
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
@@ -141,6 +145,10 @@ services:
     environment:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL}
+      - DHCP_DNS_SERVER_IP=172.28.0.3
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+    volumes:
+      - kea-data:/var/lib/kea    # runtime config + leases persist across restarts
     ports:
       - "67:67/udp"      # DHCP
       - "127.0.0.1:8000:8000"  # Kea Control Agent API (localhost only in dev)
@@ -217,6 +225,7 @@ volumes:
   proxy-standard-logs:
   proxy-ssl-logs:
   watchdog-status:
+  kea-data:
   netdataconfig:
   netdatalib:
   netdatacache:

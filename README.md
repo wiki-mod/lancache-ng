@@ -52,9 +52,9 @@ IP_SSL=192.168.1.11
 ```
 If you only want standard mode, set both to the same IP and skip the second IP setup.
 
-**2. Create cache directories:**
+**2. Create required directories:**
 ```bash
-mkdir -p /opt/lancache-ng/cache/standard /opt/lancache-ng/cache/ssl
+mkdir -p /srv/lancache/standard /srv/lancache/ssl /srv/lancache/kea
 ```
 
 **3. Start:**

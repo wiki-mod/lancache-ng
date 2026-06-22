@@ -302,7 +302,46 @@ else
     print_warn "Watchtower deaktiviert — manuelle Updates mit: ./setup.sh update"
 fi
 
-# ── 6. Admin-UI Zugangschutz ──────────────────────────────────────────────────
+# ── 6. DHCP-Server ───────────────────────────────────────────────────────────
+print_step "DHCP-Server (optional)"
+
+printf "  LanCache-NG kann als DHCP-Server laufen und Clients automatisch\n"
+printf "  die Cache-DNS-IPs zuweisen. Bestehender DHCP-Server (Router) kann\n"
+printf "  danach abgeschaltet werden.\n\n"
+
+ask "DHCP-Server aktivieren? [j/N]" "N"
+DHCP_ENABLED=0
+KEA_DATA_DIR=""
+DHCP_SUBNET=""
+DHCP_GATEWAY=""
+DHCP_RANGE_START=""
+DHCP_RANGE_END=""
+if [[ "${REPLY,,}" = "j" ]]; then
+    DHCP_ENABLED=1
+
+    ask "Kea-Daten-Verzeichnis (Config + Leases)" "$INSTALL_DIR/kea"
+    KEA_DATA_DIR="$REPLY"
+
+    ask "DHCP-Subnet (CIDR)" "10.0.0.0/24"
+    DHCP_SUBNET="$REPLY"
+
+    ask "Gateway" "10.0.0.1"
+    DHCP_GATEWAY="$REPLY"
+
+    ask "IP-Pool Start" "10.0.0.128"
+    DHCP_RANGE_START="$REPLY"
+
+    ask "IP-Pool Ende" "10.0.0.254"
+    DHCP_RANGE_END="$REPLY"
+
+    print_ok "DHCP aktiviert — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
+    print_warn "Kea Control Agent Port 8000 wird per Firewall empfohlen"
+    printf "    iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n\n"
+else
+    print_ok "DHCP übersprungen — bestehender Router-DHCP bleibt aktiv"
+fi
+
+# ── 7. Admin-UI Zugangschutz ──────────────────────────────────────────────────
 print_step "Admin-UI Zugangschutz"
 
 printf "  Die Admin-UI läuft auf http://%s:8080 — nur im lokalen Netz erreichbar.\n" "$IP_STANDARD"
@@ -325,7 +364,10 @@ else
     print_ok "Kein Passwortschutz — Admin-UI öffentlich im LAN"
 fi
 
-# ── 7. .env schreiben ─────────────────────────────────────────────────────────
+# ── 8. .env schreiben ─────────────────────────────────────────────────────────
+# Generate TSIG key for Kea DDNS ↔ BIND9 (shared across DHCP + DNS containers)
+DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
+
 print_step ".env schreiben"
 
 if [[ -f "$INSTALL_DIR/.env" ]]; then
@@ -360,6 +402,17 @@ CACHE_INACTIVE=365d
 STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}
 
+# ── DHCP ──────────────────────────────────────────────────────────────────────
+DHCP_ENABLED=${DHCP_ENABLED}
+KEA_DATA_DIR=${KEA_DATA_DIR}
+DHCP_SUBNET=${DHCP_SUBNET}
+DHCP_GATEWAY=${DHCP_GATEWAY}
+DHCP_RANGE_START=${DHCP_RANGE_START}
+DHCP_RANGE_END=${DHCP_RANGE_END}
+
+# Shared TSIG key for Kea DDNS → BIND9 updates. Keep secret.
+DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+
 # ── Profile ───────────────────────────────────────────────────────────────────
 # ssl = SSL-Modus aktiv; watchtower = automatische Updates; leer = beides aus
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
@@ -371,16 +424,20 @@ UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 EOF
 print_ok ".env geschrieben: $INSTALL_DIR/.env"
 
-# ── 8. Cache-Verzeichnisse anlegen ────────────────────────────────────────────
-print_step "Cache-Verzeichnisse anlegen"
+# ── 9. Verzeichnisse anlegen ──────────────────────────────────────────────────
+print_step "Verzeichnisse anlegen"
 mkdir -p "$CACHE_DIR_STANDARD"
-print_ok "Standard: $CACHE_DIR_STANDARD"
+print_ok "Standard-Cache: $CACHE_DIR_STANDARD"
 if [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]]; then
     mkdir -p "$CACHE_DIR_SSL"
-    print_ok "SSL:      $CACHE_DIR_SSL"
+    print_ok "SSL-Cache:      $CACHE_DIR_SSL"
+fi
+if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
+    mkdir -p "$KEA_DATA_DIR"
+    print_ok "Kea-Daten:      $KEA_DATA_DIR"
 fi
 
-# ── 9. Systemd-Watchdog ───────────────────────────────────────────────────────
+# ── 10. Systemd-Watchdog ──────────────────────────────────────────────────────
 print_step "Systemd-Watchdog installieren"
 
 if ! command -v systemctl >/dev/null 2>&1; then
@@ -437,7 +494,7 @@ EOF
     print_ok "lancache-converge.timer aktiviert (Konvergenz alle 5 Minuten)"
 fi
 
-# ── 10. Zusammenfassung + Bestätigung ────────────────────────────────────────
+# ── 11. Zusammenfassung + Bestätigung ────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
 printf "${BOLD}│              Konfiguration                   │${RESET}\n"
@@ -454,6 +511,11 @@ printf "  %-26s %s\n"    "Cache:"                    "$CACHE_DIR_STANDARD"
     && printf "  %-26s %s\n" "Cache SSL:"            "$CACHE_DIR_SSL"
 printf "  %-26s %s GiB\n" "Cache-Größe:"             "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache-RAM:"               "$CACHE_MEM_MB"
+if [[ "$DHCP_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "DHCP-Server:"              "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
+else
+    printf "  %-26s %s\n" "DHCP-Server:"              "deaktiviert"
+fi
 if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
     printf "  %-26s %s\n" "Watchtower:"               "aktiv (täglich 04:00)"
 else
@@ -470,7 +532,7 @@ ask "Jetzt starten? [J/n]" "J"
 [[ "${REPLY,,}" != "n" ]] \
     || { printf "\n  Später starten mit: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
-# ── 11. Stack starten ────────────────────────────────────────────────────────
+# ── 12. Stack starten ────────────────────────────────────────────────────────
 print_step "Images laden"
 cd "$INSTALL_DIR"
 docker compose pull || print_warn "Pull teilweise fehlgeschlagen — weiter mit gecachten Images"
@@ -479,7 +541,7 @@ print_step "Stack starten"
 docker compose up -d
 print_ok "Stack gestartet"
 
-# ── 12. Post-Start-Info ──────────────────────────────────────────────────────
+# ── 13. Post-Start-Info ──────────────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "${BOLD}${GREEN}  LanCache-NG läuft!${RESET}\n"

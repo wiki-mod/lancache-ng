@@ -35,6 +35,8 @@ services:
       context: ../../services/dns
     env_file:
       - ../../config/prod/dns-standard.env
+    environment:
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
@@ -90,6 +92,8 @@ services:
       context: ../../services/dns
     env_file:
       - ../../config/prod/dns-ssl.env
+    environment:
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/bind/cdn-domains.txt
     ports:
@@ -157,9 +161,14 @@ services:
     environment:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL}
+      - DHCP_DNS_SERVER_IP=${IP_STANDARD}
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+    volumes:
+      - /srv/lancache/kea:/var/lib/kea    # runtime config + leases; create with: mkdir -p /srv/lancache/kea
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
+      - NET_ADMIN       # needed for iptables rules restricting port 8000 to Docker-internal
     restart: always
     logging:
       driver: json-file
@@ -191,8 +200,10 @@ services:
       - SSL_CACHE_MAX_GB=500
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
-      - DHCP_API_URL=http://localhost:8000
+      - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=lancache-dhcp-prod-secret
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - proxy-standard
       - proxy-ssl

@@ -27,6 +27,9 @@ services/dhcp/keys/
 .DS_Store
 Thumbs.db
 
+# Rust build artifacts
+services/ui/target/
+
 # Editor
 *.swp
 *.swo

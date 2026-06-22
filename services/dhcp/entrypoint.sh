@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# Create necessary directories
 mkdir -p /var/run/kea /var/lib/kea
 
 # Defaults
@@ -15,44 +14,56 @@ mkdir -p /var/run/kea /var/lib/kea
 : ${DHCP_DNS_PRIMARY:=127.0.0.1}
 : ${DHCP_DNS_SECONDARY:=127.0.0.1}
 : ${KEA_CTRL_TOKEN:=lancache-dhcp-secret}
+: ${DHCP_DNS_SERVER_IP:=127.0.0.1}
+: ${KEA_CTRL_HOST:=0.0.0.0}
 
-# Generate TSIG key if not set (for DDNS)
+# Generate TSIG key if not set (for DDNS) — stored in the runtime config on first boot
 if [ -z "$DDNS_TSIG_KEY" ]; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n' | tr '+/' '-_')
-    echo "Generated TSIG key: $DDNS_TSIG_KEY"
     export DDNS_TSIG_KEY
 fi
 
-# Calculate max lease time (2x the default)
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN \
+       DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY \
+       KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP KEA_CTRL_HOST
 
-# Export all vars for envsubst
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_SERVERS}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${KEA_CTRL_HOST}'
 
-# Replace env variables in configs
-for conf in /etc/kea/kea-dhcp4.conf /etc/kea/kea-ctrl-agent.conf /etc/kea/kea-dhcp-ddns.conf; do
-    if [ -f "$conf" ]; then
-        envsubst < "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+# Generate runtime configs from templates on first boot only.
+# Once generated, the files live on the mounted volume and survive restarts.
+# Changes via UI (config-set + config-write) update /var/lib/kea/kea-dhcp4.conf directly.
+for name in kea-dhcp4 kea-ctrl-agent kea-dhcp-ddns; do
+    TEMPLATE="/etc/kea/${name}.conf.template"
+    RUNTIME="/var/lib/kea/${name}.conf"
+    if [ ! -f "$RUNTIME" ]; then
+        envsubst "$ENVSUBST_VARS" < "$TEMPLATE" > "$RUNTIME"
+        echo "First boot: generated $RUNTIME"
     fi
 done
 
-# Start Kea DHCPv4 server
+# Restrict Kea Control Agent API (port 8000) to Docker-internal networks.
+# Without this, network_mode:host exposes the API on all LAN interfaces.
+if command -v iptables >/dev/null 2>&1; then
+    iptables -I INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT
+    iptables -I INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
+    iptables -I INPUT -p tcp --dport 8000                   -j DROP
+    echo "Kea Control Agent API restricted to Docker-internal access"
+fi
+
 echo "Starting Kea DHCPv4 server (Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START - $DHCP_RANGE_END)..."
-kea-dhcp4 -c /etc/kea/kea-dhcp4.conf &
+kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
 DHCP_PID=$!
 
-# Start Kea Control Agent
-echo "Starting Kea Control Agent on 0.0.0.0:8000..."
-kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf &
+echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
+kea-ctrl-agent -c /var/lib/kea/kea-ctrl-agent.conf &
 AGENT_PID=$!
 
-# Start Kea DHCP DDNS server (optional, for DNS updates)
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
-    kea-dhcp-ddns -c /etc/kea/kea-dhcp-ddns.conf &
+    kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &
     DDNS_PID=$!
 fi
 
-# Wait for all processes (trap to handle signals)
-trap "kill $DHCP_PID $AGENT_PID $DDNS_PID 2>/dev/null || true" EXIT TERM
+trap "kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true" EXIT TERM
 wait

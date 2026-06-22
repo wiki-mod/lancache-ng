@@ -65,6 +65,39 @@ echo "[lancache-dns] RPZ zone: ${count:-0} records written."
 
 chown -R bind:bind "$CHROOT/var"
 
+# ── 3b. Generate LAN zones config (TSIG key + allow-update if DDNS_TSIG_KEY set) ─
+DDNS_TSIG_KEY="${DDNS_TSIG_KEY:-}"
+LAN_ZONES_FILE="$CHROOT/etc/bind/named.conf.lan-zones"
+
+{
+    if [ -n "$DDNS_TSIG_KEY" ]; then
+        echo "key \"lancache-ddns-key\" {"
+        echo "    algorithm hmac-sha256;"
+        echo "    secret \"$DDNS_TSIG_KEY\";"
+        echo "};"
+        echo ""
+        ALLOW_UPDATE='    allow-update { key "lancache-ddns-key"; };'
+    else
+        ALLOW_UPDATE=""
+    fi
+    echo "zone \"lan\" {"
+    echo "    type primary;"
+    echo "    file \"/etc/bind/zones/db.lan\";"
+    [ -n "$ALLOW_UPDATE" ] && echo "$ALLOW_UPDATE"
+    echo "};"
+    echo ""
+    echo "zone \"local.lan\" {"
+    echo "    type primary;"
+    echo "    file \"/etc/bind/zones/db.local.lan\";"
+    echo "};"
+} > "$LAN_ZONES_FILE"
+
+if [ -n "$DDNS_TSIG_KEY" ]; then
+    echo "[lancache-dns] DDNS enabled — TSIG key configured for zone 'lan'."
+else
+    echo "[lancache-dns] DDNS disabled — DDNS_TSIG_KEY not set."
+fi
+
 # ── 4. Validate config ─────────────────────────────────────────────────────────
 echo "[lancache-dns] Validating BIND9 config..."
 named-checkconf -t "$CHROOT" /etc/bind/named.conf
