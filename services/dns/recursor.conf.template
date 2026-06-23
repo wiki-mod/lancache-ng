@@ -29,15 +29,6 @@ forward-zones+=d.f.ip6.arpa=127.0.0.1:5300
 lua-config-file=/etc/pdns/recursor.lua
 lua-dns-script=/etc/pdns/filter-aaaa.lua
 
-# ── Cache Persistence (Warm-Start) ───────────────────────────────────────────
-# PowerDNS dumps the record cache to disk on shutdown and reloads it on startup.
-# This avoids a cold cache after a container restart — similar to BIND9's dump-file.
-# The file lives on the persistent volume (/var/lib/powerdns) so it survives restarts.
-# cache-save-interval: how often (seconds) a background snapshot is written while running.
-# If the process crashes without a clean shutdown, the last periodic snapshot is used.
-cache-save-file=/var/lib/powerdns/recursor-cache.dump
-cache-save-interval=300
-
 # ── Prefetch / Proactive Refresh ─────────────────────────────────────────────
 # refresh-on-ttl-perc: when a cached entry's remaining TTL drops below this
 #   percentage of its original TTL, PowerDNS proactively fetches a fresh answer
