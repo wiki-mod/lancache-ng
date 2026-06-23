@@ -210,6 +210,7 @@ services:
       - proxy-ssl-logs:/var/log/nginx/ssl:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/standard:ro
       - ${CACHE_DIR_SSL}:/var/cache/ssl:ro
+      - nats-conf:/etc/nats
     ports:
       - "${IP_STANDARD}:8080:8080"
     environment:
@@ -226,8 +227,6 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
-    volumes:
-      - nats-conf:/etc/nats
     depends_on:
       - proxy-standard
       - proxy-ssl
