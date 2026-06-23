@@ -78,6 +78,7 @@ pub struct LogEntry {
     pub status: u16,
     pub bytes_human: String,
     pub cache_status: String,
+    pub source: String,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -181,6 +182,7 @@ fn parse_log_line(re: &Regex, line: &str) -> Option<LogEntry> {
         status: caps[5].parse().unwrap_or(0),
         bytes_human: format_bytes(bytes),
         cache_status: caps[7].to_string(),
+        source: String::new(),
     })
 }
 

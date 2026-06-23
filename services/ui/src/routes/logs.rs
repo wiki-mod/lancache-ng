@@ -1,10 +1,19 @@
 use crate::{nginx_client, AppState};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Html;
+use serde::Deserialize;
 use std::sync::Arc;
 use tera::Context;
 
-pub async fn logs_page(State(state): State<Arc<AppState>>) -> Html<String> {
+#[derive(Deserialize)]
+pub struct LogFilter {
+    pub filter: Option<String>,
+}
+
+pub async fn logs_page(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<LogFilter>,
+) -> Html<String> {
     let (standard_logs, ssl_logs) = tokio::join!(
         tokio::task::spawn_blocking({
             let p = state.config.standard_log.clone();
@@ -16,15 +25,30 @@ pub async fn logs_page(State(state): State<Arc<AppState>>) -> Html<String> {
         }),
     );
 
+    // Tag logs with their source
+    let mut standard_logs = standard_logs.unwrap_or_default();
+    for entry in standard_logs.iter_mut() {
+        entry.source = "Standard".to_string();
+    }
+
+    let mut ssl_logs = ssl_logs.unwrap_or_default();
+    for entry in ssl_logs.iter_mut() {
+        entry.source = "SSL".to_string();
+    }
+
     let mut all_logs: Vec<_> = standard_logs
-        .unwrap_or_default()
         .into_iter()
-        .chain(ssl_logs.unwrap_or_default())
+        .chain(ssl_logs)
         .collect();
 
     // Show most recent first
     all_logs.reverse();
     all_logs.truncate(200);
+
+    // Apply cache status filter if provided
+    if let Some(filter) = &params.filter {
+        all_logs.retain(|entry| &entry.cache_status == filter);
+    }
 
     let mut ctx = Context::new();
     ctx.insert("logs", &all_logs);
