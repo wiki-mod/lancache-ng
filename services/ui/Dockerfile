@@ -40,6 +40,8 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
 
+RUN mkdir -p /data
+
 EXPOSE 8080
 
 ENV TEMPLATE_DIR=/templates \
