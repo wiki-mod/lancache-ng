@@ -12,7 +12,18 @@ permissions:
   packages: write
 
 jobs:
+  validate-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose files
+        run: |
+          docker compose -f deploy/quickstart/docker-compose.yml --profile ssl config --quiet
+          docker compose -f deploy/dev/docker-compose.yml config --quiet
+          docker compose -f deploy/prod/docker-compose.yml config --quiet
+
   build:
+    needs: validate-compose
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
