@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
-        .route("/api/netdata/*path", get(routes::netdata_proxy::proxy))
+        .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
         .route("/api/secondary/register", post(routes::secondaries::register_secondary))
         .route("/api/secondary/:name", axum::routing::delete(routes::secondaries::remove_secondary))
