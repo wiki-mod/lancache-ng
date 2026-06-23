@@ -216,6 +216,18 @@ services:
         ipv4_address: 172.28.0.8
     restart: unless-stopped
 
+  # ── Log aggregator (optional, start with: docker compose --profile logging up) ──
+  syslog:
+    image: fluent/fluent-bit:3
+    profiles: [logging]
+    volumes:
+      - proxy-standard-logs:/var/log/nginx/standard:ro
+      - proxy-ssl-logs:/var/log/nginx/ssl:ro
+      - ../../services/syslog/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - logs:/var/log/lancache
+      - syslog-data:/data
+    restart: unless-stopped
+
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     build:
@@ -272,6 +284,8 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - logs:/var/log/lancache:ro
+      - ../../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
     networks:
       - lancache
     restart: unless-stopped
@@ -299,3 +313,5 @@ volumes:
   netdatacache:
   pdns-data-standard:
   pdns-data-ssl:
+  logs:
+  syslog-data:

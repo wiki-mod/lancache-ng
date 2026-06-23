@@ -66,6 +66,26 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+  # ── Log aggregator (optional, start with: docker compose --profile logging up) ──
+  syslog:
+    image: fluent/fluent-bit:3
+    profiles: [logging]
+    command: >
+      /fluent-bit/bin/fluent-bit
+      -i tail -p path=/var/log/nginx/standard/access.log -p tag=nginx.standard -p db=/data/flb-standard.db
+      -i tail -p path=/var/log/nginx/ssl/access.log -p tag=nginx.ssl -p db=/data/flb-ssl.db
+      -o file -m nginx.standard -p path=/var/log/lancache -p file=nginx-standard.log -p format=plain
+      -o file -m nginx.ssl -p path=/var/log/lancache -p file=nginx-ssl.log -p format=plain
+    volumes:
+      - proxy-standard-logs:/var/log/nginx/standard:ro
+      - proxy-ssl-logs:/var/log/nginx/ssl:ro
+      - logs:/var/log/lancache
+      - syslog-data:/data
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
   dns-standard:
     container_name: lancache-dns-standard
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
@@ -252,6 +272,7 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - logs:/var/log/lancache:ro
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -285,3 +306,5 @@ volumes:
   netdataconfig:
   netdatalib:
   netdatacache:
+  logs:
+  syslog-data:
