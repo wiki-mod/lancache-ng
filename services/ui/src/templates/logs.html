@@ -38,7 +38,8 @@
             <th class="px-4 py-3 font-medium max-w-xs">Pfad</th>
             <th class="px-4 py-3 font-medium w-16">Status</th>
             <th class="px-4 py-3 font-medium w-24">Größe</th>
-            <th class="px-4 py-3 font-medium w-24">Cache</th>
+            <th class="px-4 py-3 font-medium w-20">Cache</th>
+            <th class="px-4 py-3 font-medium w-20">Proxy</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-700/50" id="log-body">
@@ -64,10 +65,11 @@
               {% else %}<span class="badge-other">{{ entry.cache_status }}</span>
               {% endif %}
             </td>
+            <td class="px-4 py-2 text-xs text-slate-400">{{ entry.source }}</td>
           </tr>
           {% endfor %}
           {% else %}
-          <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">Noch keine Log-Einträge</td></tr>
+          <tr><td colspan="9" class="px-4 py-8 text-center text-slate-500">Noch keine Log-Einträge</td></tr>
           {% endif %}
         </tbody>
       </table>
