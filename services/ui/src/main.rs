@@ -171,8 +171,8 @@ async fn main() -> Result<()> {
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
         .route("/api/secondary/register", post(routes::secondaries::register_secondary))
-        .route("/api/secondary/:name", axum::routing::delete(routes::secondaries::remove_secondary))
-        .route("/api/secondary/:name/rotate-token", post(routes::secondaries::rotate_token))
+        .route("/api/secondary/{name}", axum::routing::delete(routes::secondaries::remove_secondary))
+        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token))
         .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
         .with_state(state);
 
