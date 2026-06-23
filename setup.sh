@@ -125,12 +125,102 @@ cmd_debug() {
     fi
 }
 
+# ── reconfigure subcommand ─────────────────────────────────────────────────────
+cmd_reconfigure() {
+    printf "\n"
+    printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
+    printf "${BOLD}║  LanCache-NG — Reconfigure IPs        ║${RESET}\n"
+    printf "${BOLD}╚═══════════════════════════════════════╝${RESET}\n"
+    printf "\n"
+
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh --reconfigure)."
+
+    print_step "Reading current configuration"
+
+    local deploy_env="$SCRIPT_DIR/deploy/prod/.env"
+    local dns_standard_env="$SCRIPT_DIR/config/prod/dns-standard.env"
+    local dns_ssl_env="$SCRIPT_DIR/config/prod/dns-ssl.env"
+
+    [[ -f "$deploy_env" ]] || die "Configuration not found: $deploy_env"
+    [[ -f "$dns_standard_env" ]] || die "Configuration not found: $dns_standard_env"
+    [[ -f "$dns_ssl_env" ]] || die "Configuration not found: $dns_ssl_env"
+
+    local current_ip_standard current_ip_ssl
+    current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env")
+    current_ip_ssl=$(get_env_var IP_SSL "$deploy_env")
+
+    printf "\n  ${BOLD}Current configuration:${RESET}\n"
+    printf "    Standard IP: %s\n" "$current_ip_standard"
+    printf "    SSL IP:      %s\n" "$current_ip_ssl"
+    printf "\n"
+
+    print_step "Prompt for new IPs"
+
+    while true; do
+        ask "New standard mode IP" "$current_ip_standard"
+        new_ip_standard="$REPLY"
+        is_valid_ipv4 "$new_ip_standard" && break
+        print_error "Invalid IPv4 address: $new_ip_standard"
+    done
+
+    printf "\n"
+    while true; do
+        ask "New SSL mode IP" "$current_ip_ssl"
+        new_ip_ssl="$REPLY"
+        is_valid_ipv4 "$new_ip_ssl" && break
+        print_error "Invalid IPv4 address: $new_ip_ssl"
+    done
+
+    [[ "$new_ip_standard" != "$new_ip_ssl" ]] \
+        || die "Standard IP and SSL IP must be different."
+
+    printf "\n"
+    printf "  ${BOLD}New configuration:${RESET}\n"
+    printf "    Standard IP: %s\n" "$new_ip_standard"
+    printf "    SSL IP:      %s\n" "$new_ip_ssl"
+    printf "\n"
+
+    ask "Apply changes? [y/N]" "N"
+    [[ "${REPLY,,}" = "y" ]] || { printf "\n  Cancelled.\n\n"; exit 0; }
+
+    print_step "Updating configuration files"
+
+    sed -i "s|^IP_STANDARD=.*|IP_STANDARD=$new_ip_standard|" "$deploy_env" \
+        && print_ok "Updated: $deploy_env"
+
+    sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env" \
+        && print_ok "Updated: $deploy_env"
+
+    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env" \
+        && print_ok "Updated: $dns_standard_env"
+
+    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env" \
+        && print_ok "Updated: $dns_ssl_env"
+
+    print_step "Restarting containers"
+
+    cd "$SCRIPT_DIR"
+    docker compose -f "$SCRIPT_DIR/deploy/prod/docker-compose.yml" up -d \
+        && print_ok "Stack restarted"
+
+    printf "\n"
+    printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
+    printf "${BOLD}${GREEN}  Reconfiguration complete!${RESET}\n"
+    printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
+    printf "\n"
+    printf "  Done. Update your clients to use the new DNS IP.\n\n"
+
+    exit 0
+}
+
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
 case "${1:-}" in
-    update) cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
-    debug)  cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
-    "")     ;;
-    *)      die "Unknown command: $1\nUsage: $0 [update|debug] [install-dir]" ;;
+    update)      cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
+    debug)       cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
+    --reconfigure) cmd_reconfigure; exit 0 ;;
+    "")          ;;
+    *)           die "Unknown command: $1\nUsage: $0 [update|debug|--reconfigure] [install-dir]" ;;
 esac
 
 # ══════════════════════════════════════════════════════════════════════════════
