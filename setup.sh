@@ -335,7 +335,9 @@ if [[ "${REPLY,,}" = "y" ]]; then
 
     print_ok "DHCP enabled — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
     print_warn "Kea Control Agent port 8000 should be restricted by firewall"
-    printf "    iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n\n"
+    printf "  iptables (legacy):  iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n"
+    printf "  nftables:           nft add rule inet filter input tcp dport 8000 ip saddr != 172.28.0.0/16 drop\n"
+    printf "  ufw:                ufw deny from any to any port 8000\n\n"
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
