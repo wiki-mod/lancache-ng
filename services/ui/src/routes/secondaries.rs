@@ -185,34 +185,10 @@ fn rand_token() -> String {
 }
 
 pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let nats_conf = {
-        let db = state.db.lock().unwrap();
-        let secondaries = db
-            .prepare("SELECT name, nats_token FROM secondaries")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Create user entry for local token
-        let mut users = vec![format!("    {{ user: \"local\", password: \"{}\" }}", state.config.nats_local_token)];
-
-        // Add user entries for each secondary
-        for (name, token) in secondaries {
-            users.push(format!("    {{ user: \"{}\", password: \"{}\" }}", name, token));
-        }
-
-        let users_block = users.join(",\n");
-        format!(
-            r#"jetstream {{ store_dir: /data }}
-
-authorization {{
-  users: [
-{}
-  ]
-}}
-"#,
-            users_block
-        )
-    }; // DB lock released before file write
+    let nats_conf = format!(
+        "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  token: \"{}\"\n}}\n",
+        state.config.nats_local_token
+    );
 
     std::fs::write(&state.config.nats_conf_path, nats_conf)
         .map_err(|e| format!("Failed to write nats.conf: {}", e).into())
