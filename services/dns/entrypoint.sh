@@ -117,7 +117,7 @@ run_auth() {
 
 run_recursor() {
     while true; do
-        pdns_recursor --config-dir=/etc/pdns || true
+        pdns_recursor --config-dir=/etc/pdns --enable-old-settings || true
         echo "[lancache-dns] pdns_recursor exited, restarting in 3s..."
         sleep 3
     done
