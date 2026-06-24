@@ -83,6 +83,15 @@ echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
 SERIAL=$(date +%s | tail -c 10)
 RPZ_FILE="/var/lib/powerdns/rpz.zone"
 
+# Preserve monotonic RPZ SOA serials: ensure SERIAL doesn't go backwards
+if [ -f "$RPZ_FILE" ]; then
+    OLD_SERIAL=$(grep -oP '^\s*@\s+SOA\s+[^\s]+\s+[^\s]+\s+\K\d+' "$RPZ_FILE" 2>/dev/null || echo 0)
+    if [ "$SERIAL" -le "$OLD_SERIAL" ]; then
+        SERIAL=$(( OLD_SERIAL + 1 ))
+        echo "[lancache-dns] Monotonic serial: new=$SERIAL (was $OLD_SERIAL)"
+    fi
+fi
+
 {
     echo "\$ORIGIN rpz."
     echo "\$TTL 60"
