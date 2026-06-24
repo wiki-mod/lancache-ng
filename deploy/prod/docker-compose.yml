@@ -284,6 +284,7 @@ services:
       - proxy-standard
       - proxy-ssl
       - netdata
+      - nats
     restart: always
     logging:
       driver: json-file

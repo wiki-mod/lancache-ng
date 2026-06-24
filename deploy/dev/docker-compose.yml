@@ -269,6 +269,7 @@ services:
       - proxy-ssl
       - netdata
       - dhcp
+      - nats
     restart: unless-stopped
 
   # ── Netdata (system metrics backend, kein externer Port) ──────────────────
