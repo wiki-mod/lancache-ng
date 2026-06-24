@@ -36,7 +36,7 @@ envsubst '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' < /etc/pdns/auth/pdns.conf.templat
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     echo "[lancache-dns] Initializing SQLite database..."
-    SCHEMA=$(find /usr/share -name 'schema.sqlite3.sql' 2>/dev/null | head -1)
+    SCHEMA=$(find /usr/share -name 'schema.sqlite3.sql' -print -quit 2>/dev/null)
     if [ -z "$SCHEMA" ]; then
         echo "[lancache-dns] FATAL: sqlite schema not found in /usr/share"
         exit 1
@@ -80,7 +80,7 @@ done
 
 # ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
-SERIAL=$(date +%Y%m%d01)
+SERIAL=$(date +%s | tail -c 10)
 RPZ_FILE="/var/lib/powerdns/rpz.zone"
 
 {
@@ -128,8 +128,19 @@ run_recursor() {
 run_auth &
 AUTH_PID=$!
 
-# Give auth time to come up before recursor starts
-sleep 2
+# Wait for pdns_server to be ready before starting recursor (polling with timeout)
+READY=0
+for i in {1..10}; do
+    if pdns_control ping >/dev/null 2>&1; then
+        echo "[lancache-dns] pdns_server is ready (attempt $i)"
+        READY=1
+        break
+    fi
+    sleep 0.5
+done
+if [ $READY -eq 0 ]; then
+    echo "[lancache-dns] WARNING: pdns_server did not respond to ping; recursor will start anyway"
+fi
 
 # Start recursor
 run_recursor &
@@ -148,7 +159,7 @@ run_nats_subscriber &
 NATS_PID=$!
 
 # Handle termination
-trap "kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true" EXIT TERM
+trap "kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true" EXIT TERM INT
 
 # Wait indefinitely
 wait
