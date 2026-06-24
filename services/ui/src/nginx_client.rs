@@ -141,6 +141,21 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
 }
 
 pub fn get_cache_size_gb(path: &str) -> f64 {
+    // Validate path: must be absolute and within allowed directories
+    use std::path::Path;
+    let path_obj = Path::new(path);
+
+    // Must be an absolute path
+    if !path_obj.is_absolute() {
+        return 0.0;
+    }
+
+    // Only allow specific cache directories
+    let allowed_prefixes = ["/srv/lancache/standard", "/srv/lancache/ssl", "/data/lancache"];
+    if !allowed_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+        return 0.0;
+    }
+
     let output = Command::new("du").args(["-sb", path]).output();
     match output {
         Ok(out) => {
