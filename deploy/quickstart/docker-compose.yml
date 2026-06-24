@@ -16,6 +16,8 @@
 # Customize domain lists: via Admin UI (port 8080) or
 # mount custom files (see deploy/prod/docker-compose.yml in repo).
 
+name: lancache-ng
+
 services:
 
   # ── Standard mode (no CA certificate needed) ──────────────────────────────
