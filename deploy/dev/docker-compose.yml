@@ -1,3 +1,5 @@
+name: lancache-ng
+
 services:
 
   # ── Standard mode (no CA cert required) ──────────────────────────────────
