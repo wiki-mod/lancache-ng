@@ -25,7 +25,7 @@ envsubst '${PDNS_API_KEY}' < /etc/pdns/recursor.conf.template > /tmp/recursor.co
 
 if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
-    sed -i 's/^loglevel=3$/loglevel=6/' /etc/pdns/recursor.conf
+    sed -i 's/^  loglevel: 3$/  loglevel: 6/' /etc/pdns/recursor.conf
 fi
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
@@ -118,7 +118,7 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
-        pdns_recursor --config-dir=/etc/pdns --enable-old-settings || true
+        pdns_recursor --config-dir=/etc/pdns || true
         echo "[lancache-dns] pdns_recursor exited, restarting in 3s..."
         sleep 3
     done
