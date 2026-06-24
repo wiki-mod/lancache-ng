@@ -100,11 +100,11 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 2. Render https.conf from template only if SSL mode is enabled
+# 2. Remove https.conf when SSL mode is disabled
+#    (Docker routes IP_SSL:443→container:443 and IP_STANDARD:443→container:8443,
+#    so https.conf can safely listen on 0.0.0.0:443 — only SSL clients reach it)
 # ────────────────────────────────────────────────────────────────────────────
-if [ "${SSL_ENABLED}" = "1" ] && [ -f /etc/nginx/conf.d/https.conf.template ]; then
-    envsubst '' < /etc/nginx/conf.d/https.conf.template > /etc/nginx/conf.d/https.conf
-elif [ "${SSL_ENABLED}" = "0" ]; then
+if [ "${SSL_ENABLED}" = "0" ]; then
     rm -f /etc/nginx/conf.d/https.conf
 fi
 
