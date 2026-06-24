@@ -15,6 +15,8 @@ mkdir -p /var/run/kea /var/lib/kea
 : ${DHCP_DNS_SECONDARY:=127.0.0.1}
 : ${KEA_CTRL_TOKEN:=lancache-dhcp-secret}
 : ${DHCP_DNS_SERVER_IP:=127.0.0.1}
+: ${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}
+: ${DHCP_DDNS_PORT:=53}
 : ${KEA_CTRL_HOST:=0.0.0.0}
 
 # Verify KEA_CTRL_TOKEN is set and not the placeholder
@@ -33,9 +35,10 @@ fi
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
 export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN \
        DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY \
-       KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP KEA_CTRL_HOST
+       KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL \
+       DHCP_DDNS_PORT KEA_CTRL_HOST
 
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_SERVERS}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${KEA_CTRL_HOST}'
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_SERVERS}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
 
 # Generate runtime configs from templates on first boot only.
 # Once generated, the files live on the mounted volume and survive restarts.
@@ -52,9 +55,11 @@ done
 # Restrict Kea Control Agent API (port 8000) to Docker-internal networks.
 # Without this, network_mode:host exposes the API on all LAN interfaces.
 if command -v iptables >/dev/null 2>&1; then
-    iptables -I INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT
-    iptables -I INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
-    iptables -I INPUT -p tcp --dport 8000                   -j DROP
+    # Check and add rules only if they don't exist (prevents accumulation on restart)
+    # ACCEPT rules must come before DROP (rules are evaluated top-to-bottom)
+    iptables -C INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
+    iptables -C INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT
+    iptables -C INPUT -p tcp --dport 8000                   -j DROP    2>/dev/null || iptables -A INPUT -p tcp --dport 8000                   -j DROP
     echo "Kea Control Agent API restricted to Docker-internal access"
 fi
 
