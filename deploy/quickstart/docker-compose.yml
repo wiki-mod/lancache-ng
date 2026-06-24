@@ -104,7 +104,7 @@ services:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
     healthcheck:
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD", "rec_control", "ping"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -165,7 +165,7 @@ services:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
     healthcheck:
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD", "rec_control", "ping"]
       interval: 30s
       timeout: 5s
       retries: 3
