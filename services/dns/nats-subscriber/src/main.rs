@@ -25,7 +25,8 @@ struct RRset {
     record_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl: Option<i32>,
-    changetype: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changetype: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     records: Option<Vec<HashMap<String, serde_json::Value>>>,
 }
@@ -211,9 +212,9 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
     };
 
     let (changetype, ttl_val, records_val) = match record.action.as_str() {
-        "delete" => ("DELETE".to_string(), None, None),
+        "delete" => (Some("DELETE".to_string()), None, None),
         "replace" => (
-            "REPLACE".to_string(),
+            Some("REPLACE".to_string()),
             Some(record.ttl),
             Some(record.records.clone()),
         ),
