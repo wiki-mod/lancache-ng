@@ -4,7 +4,7 @@ set -euo pipefail
 # ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
-PDNS_API_KEY="${PDNS_API_KEY:-lancache-pdns-secret}"
+PDNS_API_KEY="${PDNS_API_KEY:-CHANGE_ME_PDNS_API_KEY}"
 DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
@@ -12,6 +12,14 @@ NATS_URL="${NATS_URL:-nats://nats:4222}"
 NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
+
+# Fail if PDNS_API_KEY is still the default placeholder
+if [ "$PDNS_API_KEY" = "CHANGE_ME_PDNS_API_KEY" ]; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to the default placeholder 'CHANGE_ME_PDNS_API_KEY'"
+    echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
+    echo "[lancache-dns] Set PDNS_API_KEY in your config files or docker-compose environment."
+    exit 1
+fi
 
 export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 

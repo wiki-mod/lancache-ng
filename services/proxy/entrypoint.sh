@@ -29,8 +29,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
             -subj "/CN=LanCache-NG CA/O=LanCache-NG/C=DE" \
             -keyout "$CA_DIR/ca.key" \
-            -out    "$CA_DIR/ca.crt" 2>/dev/null
-        echo ""
+            -out    "$CA_DIR/ca.crt"         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
         echo "║              ACTION REQUIRED — READ BEFORE CONTINUING            ║"
         echo "╠══════════════════════════════════════════════════════════════════╣"
@@ -56,19 +55,16 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
         openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
-            -keyout "$key" -out /tmp/lancache-cert.csr 2>/dev/null
-        if [ -n "$ext" ]; then
+            -keyout "$key" -out /tmp/lancache-cert.csr         if [ -n "$ext" ]; then
             openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -extfile <(printf "%s" "$ext") \
-                -out "$crt" 2>/dev/null
-        else
+                -out "$crt"         else
             openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
-                -out "$crt" 2>/dev/null
-        fi
+                -out "$crt"         fi
         rm -f /tmp/lancache-cert.csr
     }
 
