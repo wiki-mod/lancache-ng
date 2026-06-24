@@ -10,6 +10,7 @@ content3.steampowered.com
 content4.steampowered.com
 content5.steampowered.com
 cs.steampowered.com
+lancache.steampowered.com
 
 # ---- Epic Games ----
 download.epicgames.com
