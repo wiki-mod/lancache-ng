@@ -42,6 +42,8 @@ jobs:
             ~/.cargo/git
             ${{ matrix.path }}/target
           key: ${{ runner.os }}-cargo-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: cargo test (${{ matrix.service }})
         run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml
 
