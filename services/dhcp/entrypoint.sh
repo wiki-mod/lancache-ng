@@ -17,6 +17,13 @@ mkdir -p /var/run/kea /var/lib/kea
 : ${DHCP_DNS_SERVER_IP:=127.0.0.1}
 : ${KEA_CTRL_HOST:=0.0.0.0}
 
+# Verify KEA_CTRL_TOKEN is set and not the placeholder
+if [ "$KEA_CTRL_TOKEN" = "CHANGE_ME_KEA_CTRL_TOKEN" ]; then
+    echo "ERROR: KEA_CTRL_TOKEN is still set to the placeholder 'CHANGE_ME_KEA_CTRL_TOKEN'"
+    echo "Please set a strong token in your .env file before starting the container."
+    exit 1
+fi
+
 # Generate TSIG key if not set (for DDNS) — stored in the runtime config on first boot
 if [ -z "$DDNS_TSIG_KEY" ]; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n' | tr '+/' '-_')
