@@ -29,7 +29,8 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
             -subj "/CN=LanCache-NG CA/O=LanCache-NG/C=DE" \
             -keyout "$CA_DIR/ca.key" \
-            -out    "$CA_DIR/ca.crt"         echo ""
+            -out    "$CA_DIR/ca.crt" 2>/dev/null
+        echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
         echo "║              ACTION REQUIRED — READ BEFORE CONTINUING            ║"
         echo "╠══════════════════════════════════════════════════════════════════╣"
@@ -55,16 +56,19 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
         openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
-            -keyout "$key" -out /tmp/lancache-cert.csr         if [ -n "$ext" ]; then
+            -keyout "$key" -out /tmp/lancache-cert.csr 2>/dev/null
+        if [ -n "$ext" ]; then
             openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -extfile <(printf "%s" "$ext") \
-                -out "$crt"         else
+                -out "$crt" 2>/dev/null
+        else
             openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
-                -out "$crt"         fi
+                -out "$crt" 2>/dev/null
+        fi
         rm -f /tmp/lancache-cert.csr
     }
 
@@ -96,11 +100,11 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 2. Remove https.conf when SSL mode is disabled
-#    (Docker routes IP_SSL:443→container:443 and IP_STANDARD:443→container:8443,
-#    so https.conf can safely listen on 0.0.0.0:443 — only SSL clients reach it)
+# 2. Render https.conf from template only if SSL mode is enabled
 # ────────────────────────────────────────────────────────────────────────────
-if [ "${SSL_ENABLED}" = "0" ]; then
+if [ "${SSL_ENABLED}" = "1" ] && [ -f /etc/nginx/conf.d/https.conf.template ]; then
+    envsubst '' < /etc/nginx/conf.d/https.conf.template > /etc/nginx/conf.d/https.conf
+elif [ "${SSL_ENABLED}" = "0" ]; then
     rm -f /etc/nginx/conf.d/https.conf
 fi
 
