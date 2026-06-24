@@ -397,3 +397,68 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // PDNS GET /zones/{zone} responses do NOT include changetype.
+    // This test guards against regressions where changetype becomes
+    // a required field again, which would break the reconciler.
+    #[test]
+    fn zone_info_deserializes_without_changetype() {
+        let json = r#"{
+            "rrsets": [
+                {"name": "test.lan.", "type": "A", "ttl": 300, "records": [{"content": "192.168.1.1", "disabled": false}]},
+                {"name": "test.lan.", "type": "SOA", "ttl": 3600, "records": [{"content": "ns1.lan. admin.lan. 1 3600 900 604800 60", "disabled": false}]}
+            ]
+        }"#;
+        let info: ZoneInfo = serde_json::from_str(json).expect("ZoneInfo must deserialize without changetype");
+        assert_eq!(info.rrsets.len(), 2);
+        assert!(info.rrsets[0].changetype.is_none());
+    }
+
+    // PDNS PATCH requests require changetype to be present and serialized.
+    #[test]
+    fn rrset_serializes_with_changetype_for_patch() {
+        let rrset = RRset {
+            name: "host.lan.".to_string(),
+            record_type: "A".to_string(),
+            ttl: Some(300),
+            changetype: Some("REPLACE".to_string()),
+            records: Some(vec![]),
+        };
+        let json = serde_json::to_string(&rrset).expect("RRset must serialize");
+        assert!(json.contains("changetype"));
+        assert!(json.contains("REPLACE"));
+    }
+
+    // skip_serializing_if must suppress changetype when None (GET context).
+    #[test]
+    fn rrset_omits_changetype_when_none() {
+        let rrset = RRset {
+            name: "host.lan.".to_string(),
+            record_type: "A".to_string(),
+            ttl: Some(300),
+            changetype: None,
+            records: None,
+        };
+        let json = serde_json::to_string(&rrset).expect("RRset must serialize");
+        assert!(!json.contains("changetype"));
+    }
+
+    #[test]
+    fn dns_record_deserializes_from_nats_message() {
+        let json = r#"{
+            "action": "replace",
+            "zone": "lan",
+            "name": "myhost.lan.",
+            "type": "A",
+            "ttl": 60,
+            "records": [{"content": "10.0.0.5", "disabled": false}]
+        }"#;
+        let record: DNSRecord = serde_json::from_str(json).expect("DNSRecord must deserialize");
+        assert_eq!(record.action, "replace");
+        assert_eq!(record.zone, "lan");
+    }
+}

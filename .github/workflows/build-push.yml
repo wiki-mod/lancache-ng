@@ -22,8 +22,31 @@ jobs:
           docker compose -f deploy/dev/docker-compose.yml config --quiet
           docker compose -f deploy/prod/docker-compose.yml config --quiet
 
-  build:
+  test:
     needs: validate-compose
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: dns/nats-subscriber
+            path: services/dns/nats-subscriber
+          - service: ui
+            path: services/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.path }}/target
+          key: ${{ runner.os }}-cargo-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
+      - name: cargo test (${{ matrix.service }})
+        run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml
+
+  build:
+    needs: [validate-compose, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
