@@ -33,10 +33,7 @@ pub struct Secondary {
 // ─── Handlers ───
 
 pub async fn secondaries_page(State(state): State<Arc<AppState>>) -> Html<String> {
-    let db = match state.db.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let db = state.db.lock().unwrap();
 
     let secondaries = db
         .prepare("SELECT name, consumer_name, registered_at, last_seen FROM secondaries ORDER BY registered_at DESC")
@@ -92,10 +89,7 @@ pub async fn register_secondary(
 
     // INSERT OR REPLACE INTO secondaries
     {
-        let db = match state.db.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let db = state.db.lock().unwrap();
         db.execute(
             "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, registered_at, last_seen)
              VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -131,10 +125,7 @@ pub async fn remove_secondary(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     {
-        let db = match state.db.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let db = state.db.lock().unwrap();
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -163,10 +154,7 @@ pub async fn rotate_token(
     let nats_token = state.config.nats_local_token.clone();
 
     {
-        let db = match state.db.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let db = state.db.lock().unwrap();
         db.execute(
             "UPDATE secondaries SET nats_token = ? WHERE name = ?",
             [nats_token.clone(), name],
