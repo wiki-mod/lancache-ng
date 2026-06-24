@@ -52,7 +52,7 @@ services:
       - "8081"
       - "8082"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -112,7 +112,7 @@ services:
       - "8081"
       - "8082"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -159,6 +159,23 @@ pub async fn rotate_token(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Check if secondary exists
+    {
+        let db = state.db.lock().unwrap();
+        let exists = db
+            .query_row(
+                "SELECT 1 FROM secondaries WHERE name = ? LIMIT 1",
+                [&name],
+                |_| Ok(true),
+            )
+            .ok()
+            .is_some();
+
+        if !exists {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
     let new_token = rand_token();
 
     {

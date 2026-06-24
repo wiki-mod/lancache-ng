@@ -106,7 +106,7 @@ services:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -169,7 +169,7 @@ services:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
