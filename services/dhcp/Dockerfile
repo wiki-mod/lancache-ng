@@ -10,8 +10,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     nmap \
     iptables \
-    && rm -rf /var/lib/apt/lists/* \
-    && test -f /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_host_cmds.so
+    && rm -rf /var/lib/apt/lists/*
 
 # Config templates — expanded once into /var/lib/kea/ on first boot
 COPY kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.template
