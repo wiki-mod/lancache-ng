@@ -23,7 +23,8 @@ pub struct LanRecordForm {
 
 #[derive(Deserialize)]
 pub struct AaaaFilterForm {
-    pub enabled: String,
+    #[serde(default)]
+    pub enabled: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -171,7 +172,7 @@ pub async fn toggle_aaaa_filter(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AaaaFilterForm>,
 ) -> Redirect {
-    let enable = form.enabled == "1";
+    let enable = form.enabled.as_deref() == Some("1");
     let cmd = if enable {
         vec!["touch", "/var/lib/powerdns/aaaa-filter-enabled"]
     } else {
