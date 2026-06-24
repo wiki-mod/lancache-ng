@@ -129,7 +129,7 @@ maybe_purge() {
         local count=0
         while IFS= read -r file; do
             rm -f "$file"
-            ((count++))
+            count=$(( count + 1 ))
         done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" 2>/dev/null)
         log "Purged $count files from $dir"
     done
