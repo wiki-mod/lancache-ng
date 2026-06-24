@@ -51,7 +51,7 @@ services:
       - "8081"
       - "8082"
     healthcheck:
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD", "rec_control", "ping"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -117,7 +117,7 @@ services:
       - "8081"
       - "8082"
     healthcheck:
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD", "rec_control", "ping"]
       interval: 30s
       timeout: 5s
       retries: 3
