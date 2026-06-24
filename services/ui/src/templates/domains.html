@@ -154,7 +154,9 @@
           <input type="hidden" name="record_type" value="{{ record.type }}">
           <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
           <button type="submit"
-                  onclick="return confirm('{{ record.name }} ({{ record.type }}) entfernen?')"
+                  data-record-name="{{ record.name }}"
+                  data-record-type="{{ record.type }}"
+                  onclick="return confirmRemoveRecord(this)"
                   class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
             Entfernen
           </button>
@@ -212,4 +214,11 @@
   </div>
 
 </div>
+
+{% block scripts %}
+<script>
+  function confirmRemoveRecord(btn) {
+    return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
+  }
+</script>
 {% endblock %}
