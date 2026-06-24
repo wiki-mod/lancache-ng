@@ -10,7 +10,7 @@ CACHE_DIR_STANDARD="${CACHE_DIR_STANDARD:-/cache/standard}"
 CACHE_DIR_SSL="${CACHE_DIR_SSL:-/cache/ssl}"
 CACHE_VALID_DAYS="${CACHE_VALID_DAYS:-365}"
 STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"
-PURGE_STAMP="/tmp/last-purge"
+PURGE_STAMP="/var/run/watchdog/purge.stamp"
 
 SSL_ENABLED="${SSL_ENABLED:-1}"
 
@@ -126,11 +126,14 @@ maybe_purge() {
     log "Daily purge: removing cache files older than ${CACHE_VALID_DAYS} days"
     for dir in "$CACHE_DIR_STANDARD" "$CACHE_DIR_SSL"; do
         [ -d "$dir" ] || continue
-        local count
-        count=$(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" 2>/dev/null | wc -l | tr -d ' ')
-        find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" -delete 2>/dev/null || true
+        local count=0
+        while IFS= read -r file; do
+            rm -f "$file"
+            ((count++))
+        done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" 2>/dev/null)
         log "Purged $count files from $dir"
     done
+    mkdir -p "$(dirname "$PURGE_STAMP")"
     echo "$now" > "$PURGE_STAMP"
 }
 
