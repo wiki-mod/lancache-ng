@@ -468,20 +468,20 @@ if [[ -f "$env_file" ]]; then
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
-# Generate or preserve secrets
-if ! grep -q "^DDNS_TSIG_KEY=" "$env_file" 2>/dev/null; then
+# Generate or preserve secrets (only preserve non-empty values)
+if ! grep -q "^DDNS_TSIG_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
 else
     DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
 fi
 
-if ! grep -q "^NATS_LOCAL_TOKEN=" "$env_file" 2>/dev/null; then
+if ! grep -q "^NATS_LOCAL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
     NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
 else
     NATS_LOCAL_TOKEN=$(get_env_var NATS_LOCAL_TOKEN "$env_file")
 fi
 
-if ! grep -q "^SECONDARY_REGISTRATION_TOKEN=" "$env_file" 2>/dev/null; then
+if ! grep -q "^SECONDARY_REGISTRATION_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
     SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
 else
     SECONDARY_REGISTRATION_TOKEN=$(get_env_var SECONDARY_REGISTRATION_TOKEN "$env_file")
