@@ -242,6 +242,8 @@ services:
       - nats-conf:/etc/nats
     ports:
       - "${IP_STANDARD}:8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
