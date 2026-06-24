@@ -178,6 +178,10 @@ async fn main() {
                                 if let Err(e) = msg.ack().await {
                                     eprintln!("Error acknowledging message: {}", e);
                                 }
+                            } else {
+                                // P2 fix: Brief delay before retry to reduce ordering issues on redelivery.
+                                // Without ack(), NATS will requeue the message automatically.
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
                         Err(e) => eprintln!("Message error: {}", e),
@@ -217,8 +221,10 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
     let record: DNSRecord = match serde_json::from_slice(&msg.payload) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error parsing DNS record: {}", e);
-            return false;
+            // P2 fix: Ack unrecoverable parse failures (e.g., malformed delete events missing ttl/records).
+            // Nacking would cause infinite retry of malformed messages.
+            eprintln!("Acking unrecoverable DNS record parse failure (malformed message): {}", e);
+            return true;
         }
     };
 
@@ -230,8 +236,10 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
             Some(record.records.clone()),
         ),
         action => {
-            eprintln!("Unknown action: {}", action);
-            return false;
+            // P2 fix: Ack unrecoverable parse failures (unknown action).
+            // Nacking would cause infinite retry of malformed messages.
+            eprintln!("Acking unrecoverable DNS record parse failure (unknown action: {})", action);
+            return true;
         }
     };
 
@@ -250,8 +258,10 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
     let payload = match serde_json::to_string(&update) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error marshaling PATCH payload: {}", e);
-            return false;
+            // P2 fix: Ack unrecoverable serialization failures.
+            // Nacking would cause infinite retry of malformed messages.
+            eprintln!("Acking unrecoverable DNS record serialization failure (malformed message): {}", e);
+            return true;
         }
     };
 
@@ -278,9 +288,20 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
                     record.zone, record.name, record.record_type, record.action
                 );
                 true
+            } else if resp.status().is_client_error() {
+                // P2 fix: Ack on 4xx client errors (invalid data, permanent failure).
+                // Retrying won't help; the record data itself is malformed.
+                eprintln!("PDNS client error (acking, won't retry): {} {} for zone={} name={} type={}",
+                    resp.status(),
+                    resp.status().canonical_reason().unwrap_or(""),
+                    record.zone,
+                    record.name,
+                    record.record_type
+                );
+                true
             } else {
-                eprintln!(
-                    "PDNS error: {} {} for zone={} name={} type={}",
+                // 5xx or other server errors: retry by returning false
+                eprintln!("PDNS server error (will retry): {} {} for zone={} name={} type={}",
                     resp.status(),
                     resp.status().canonical_reason().unwrap_or(""),
                     record.zone,
@@ -291,7 +312,8 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
             }
         }
         Err(e) => {
-            eprintln!("Error sending PATCH request: {}", e);
+            // P2 fix: Network errors are retriable (transient), return false to retry
+            eprintln!("Error sending PATCH request (will retry): {}", e);
             false
         }
     }
