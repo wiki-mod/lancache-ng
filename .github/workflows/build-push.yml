@@ -47,7 +47,7 @@ jobs:
       - name: cargo test (${{ matrix.service }})
         env:
           RUSTC_WRAPPER: ""
-        run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml
+        run: cargo test --locked --manifest-path ${{ matrix.path }}/Cargo.toml
 
   build:
     needs: [validate-compose, test]
