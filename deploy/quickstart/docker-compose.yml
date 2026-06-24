@@ -98,6 +98,7 @@ services:
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      - PDNS_API_KEY=lancache-pdns-prod-secret
     volumes:
       - dns-standard-data:/var/lib/powerdns
     depends_on:
@@ -161,6 +162,7 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-ssl
+      - PDNS_API_KEY=lancache-pdns-prod-secret
     volumes:
       - dns-ssl-data:/var/lib/powerdns
     depends_on:
