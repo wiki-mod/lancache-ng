@@ -33,8 +33,6 @@ jobs:
             path: services/dns/nats-subscriber
           - service: ui
             path: services/ui
-          - service: watchdog
-            path: services/watchdog
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
