@@ -1,78 +1,84 @@
-local-address=0.0.0.0
-local-port=53
-allow-from=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,fc00::/7
+incoming:
+  listen:
+    - 0.0.0.0
+  port: 53
+  allow_from:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 127.0.0.0/8
+    - fc00::/7
 
-# Forward LAN zones to local authoritative server on port 5300
-forward-zones=lan=127.0.0.1:5300
-forward-zones+=local.lan=127.0.0.1:5300
-forward-zones+=10.in-addr.arpa=127.0.0.1:5300
-forward-zones+=168.192.in-addr.arpa=127.0.0.1:5300
-forward-zones+=16.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=17.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=18.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=19.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=20.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=21.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=22.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=23.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=24.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=25.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=26.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=27.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=28.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=29.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=30.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=31.172.in-addr.arpa=127.0.0.1:5300
-forward-zones+=c.f.ip6.arpa=127.0.0.1:5300
-forward-zones+=d.f.ip6.arpa=127.0.0.1:5300
+recursor:
+  forward_zones:
+    - zone: lan
+      forwarders: [127.0.0.1:5300]
+    - zone: local.lan
+      forwarders: [127.0.0.1:5300]
+    - zone: 10.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 168.192.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 16.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 17.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 18.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 19.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 20.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 21.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 22.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 23.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 24.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 25.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 26.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 27.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 28.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 29.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 30.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: 31.172.in-addr.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: c.f.ip6.arpa
+      forwarders: [127.0.0.1:5300]
+    - zone: d.f.ip6.arpa
+      forwarders: [127.0.0.1:5300]
+  lua_config_file: /etc/pdns/recursor.lua
+  lua_dns_script: /etc/pdns/filter-aaaa.lua
+  minimum_ttl_override: 60
 
-lua-config-file=/etc/pdns/recursor.lua
-lua-dns-script=/etc/pdns/filter-aaaa.lua
+recordcache:
+  max_entries: 1000000
+  refresh_on_ttl_perc: 10
+  serve_stale_extensions: 120
 
-# ── Prefetch / Proactive Refresh ─────────────────────────────────────────────
-# refresh-on-ttl-perc: when a cached entry's remaining TTL drops below this
-#   percentage of its original TTL, PowerDNS proactively fetches a fresh answer
-#   in the background — the client still gets the (still-valid) cached answer
-#   without waiting. Effectively zero-latency cache refresh.
-#   Example: a record with TTL 3600s gets refreshed when ~360s remain.
-# serve-stale-extensions: if the upstream is unreachable, keep serving the
-#   expired entry for this many extra TTL-extension cycles (unit: multiples of
-#   the record's original TTL, capped at 1 day per extension).
-#   This keeps DNS working during brief upstream outages.
-# minimum-ttl-override: clamp all TTLs to at least this many seconds.
-#   Prevents low-TTL records (e.g. CDN health-check records with TTL=5) from
-#   causing constant upstream traffic and defeating the cache entirely.
-refresh-on-ttl-perc=10
-serve-stale-extensions=120
-minimum-ttl-override=60
+packetcache:
+  max_entries: 500000
+  ttl: 3600
+  negative_ttl: 120
+  servfail_ttl: 30
 
-# ── Record Cache Size ────────────────────────────────────────────────────────
-# max-cache-entries: maximum number of DNS records held in the record cache.
-#   Each entry is roughly 200–400 bytes. 1 000 000 entries ≈ 200–400 MB RAM.
-#   For a home/LAN cache this is generous; reduce if RAM is tight.
-# max-packetcache-entries: stores complete DNS responses (question → answer).
-#   Fastest possible path — no record assembly needed. Uses more RAM per entry.
-max-cache-entries=1000000
-max-packetcache-entries=500000
+webservice:
+  address: 0.0.0.0
+  port: 8082
+  allow_from:
+    - 127.0.0.0/8
+    - 172.16.0.0/12
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+  api_key: ${PDNS_API_KEY}
 
-# ── Packet Cache TTLs ────────────────────────────────────────────────────────
-# packetcache-ttl: how long a successful (NOERROR) response is cached as-is.
-#   Clients asking the exact same question within this window get an instant reply.
-# packetcache-negative-ttl: TTL for NXDOMAIN / NODATA responses.
-#   Keeps "this host doesn't exist" answers cached so upstream isn't hammered
-#   for typos or non-existent names.
-# packetcache-servfail-ttl: TTL for SERVFAIL responses.
-#   Short on purpose — upstreams recover quickly and we don't want to cache
-#   failures for long.
-packetcache-ttl=3600
-packetcache-negative-ttl=120
-packetcache-servfail-ttl=30
-
-# REST API (LAN-accessible, restricted by allow-from)
-webserver=yes
-webserver-address=0.0.0.0
-webserver-port=8082
-webserver-allow-from=127.0.0.0/8,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
-api-key=${PDNS_API_KEY}
-
-loglevel=3
+logging:
+  loglevel: 3
