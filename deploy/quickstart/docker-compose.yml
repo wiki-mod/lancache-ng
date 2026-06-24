@@ -98,6 +98,8 @@ services:
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+    volumes:
+      - dns-standard-data:/var/lib/powerdns
     depends_on:
       - nats
     ports:
@@ -159,6 +161,8 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-ssl
+    volumes:
+      - dns-ssl-data:/var/lib/powerdns
     depends_on:
       - nats
     ports:
@@ -216,6 +220,7 @@ services:
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+      - proxy-standard
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -246,12 +251,15 @@ services:
       - SSL_CACHE_MAX_GB=${SSL_CACHE_MAX_GB}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
+      - PDNS_AUTH_URL=http://dns-standard:8081
+      - PDNS_REC_URL=http://dns-standard:8082
+      - PDNS_API_KEY=lancache-pdns-prod-secret
+      - DHCP_API_URL=http://host.docker.internal:8000
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
     depends_on:
       - proxy-standard
-      - proxy-ssl
       - netdata
       - nats
     restart: always
@@ -310,3 +318,5 @@ volumes:
   netdatacache:
   logs:
   syslog-data:
+  dns-standard-data:
+  dns-ssl-data:
