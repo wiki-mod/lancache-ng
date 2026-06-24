@@ -255,7 +255,7 @@ fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let new: String = content
         .lines()
-        .filter(|l| l.trim() != domain)
+        .filter(|l| !l.trim().is_empty() && l.trim() != domain)
         .map(|l| format!("{}\n", l))
         .collect();
     fs::write(path, new)?;

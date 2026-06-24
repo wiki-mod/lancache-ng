@@ -78,9 +78,10 @@ response=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
   "${primary}/api/secondary/register")
+exit_code=$?
 
 # Check curl exit code
-if [[ $? -ne 0 ]]; then
+if [[ $exit_code -ne 0 ]]; then
   echo "Error: Failed to connect to primary server at ${primary}"
   exit 1
 fi
@@ -159,8 +160,9 @@ EOF
 echo "Starting secondary DNS container..."
 cd "$secondary_dir"
 docker compose up -d
+exit_code=$?
 
-if [[ $? -ne 0 ]]; then
+if [[ $exit_code -ne 0 ]]; then
   echo "Error: Failed to start docker compose"
   cd ..
   exit 1
