@@ -49,9 +49,10 @@ done
 # Without this, network_mode:host exposes the API on all LAN interfaces.
 if command -v iptables >/dev/null 2>&1; then
     # Check and add rules only if they don't exist (prevents accumulation on restart)
-    iptables -C INPUT -p tcp --dport 8000                   -j DROP    2>/dev/null || iptables -A INPUT -p tcp --dport 8000                   -j DROP
+    # ACCEPT rules must come before DROP (rules are evaluated top-to-bottom)
     iptables -C INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
     iptables -C INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT
+    iptables -C INPUT -p tcp --dport 8000                   -j DROP    2>/dev/null || iptables -A INPUT -p tcp --dport 8000                   -j DROP
     echo "Kea Control Agent API restricted to Docker-internal access"
 fi
 
