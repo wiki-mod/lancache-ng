@@ -135,6 +135,12 @@ services:
     ports:
       - "${LISTEN_IP:-0.0.0.0}:53:53/udp"
       - "${LISTEN_IP:-0.0.0.0}:53:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "rec_control ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: always
     logging:
       driver: json-file
