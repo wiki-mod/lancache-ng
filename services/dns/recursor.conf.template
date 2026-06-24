@@ -10,6 +10,7 @@ incoming:
     - fc00::/7
 
 recursor:
+  # Forward LAN zones to local authoritative server on port 5300
   forward_zones:
     - zone: lan
       forwarders: [127.0.0.1:5300]
@@ -57,19 +58,47 @@ recursor:
       forwarders: [127.0.0.1:5300]
   lua_config_file: /etc/pdns/recursor.lua
   lua_dns_script: /etc/pdns/filter-aaaa.lua
+  # Clamp all TTLs to at least this many seconds.
+  # Prevents low-TTL records (e.g. CDN health-check records with TTL=5) from
+  # causing constant upstream traffic and defeating the cache entirely.
   minimum_ttl_override: 60
 
+# ── Record Cache ─────────────────────────────────────────────────────────────
 recordcache:
+  # max_entries: maximum number of DNS records held in the record cache.
+  # Each entry is roughly 200–400 bytes. 1 000 000 entries ≈ 200–400 MB RAM.
+  # For a home/LAN cache this is generous; reduce if RAM is tight.
   max_entries: 1000000
+  # refresh_on_ttl_perc: when a cached entry's remaining TTL drops below this
+  # percentage of its original TTL, PowerDNS proactively fetches a fresh answer
+  # in the background — the client still gets the (still-valid) cached answer
+  # without waiting. Effectively zero-latency cache refresh.
+  # Example: a record with TTL 3600s gets refreshed when ~360s remain.
   refresh_on_ttl_perc: 10
+  # serve_stale_extensions: if the upstream is unreachable, keep serving the
+  # expired entry for this many extra TTL-extension cycles (unit: multiples of
+  # the record's original TTL, capped at 1 day per extension).
+  # This keeps DNS working during brief upstream outages.
   serve_stale_extensions: 120
 
+# ── Packet Cache ─────────────────────────────────────────────────────────────
 packetcache:
+  # max_entries: stores complete DNS responses (question → answer).
+  # Fastest possible path — no record assembly needed. Uses more RAM per entry.
   max_entries: 500000
+  # ttl: how long a successful (NOERROR) response is cached as-is.
+  # Clients asking the exact same question within this window get an instant reply.
   ttl: 3600
+  # negative_ttl: TTL for NXDOMAIN / NODATA responses.
+  # Keeps "this host doesn't exist" answers cached so upstream isn't hammered
+  # for typos or non-existent names.
   negative_ttl: 120
+  # servfail_ttl: TTL for SERVFAIL responses.
+  # Short on purpose — upstreams recover quickly and we don't want to cache
+  # failures for long.
   servfail_ttl: 30
 
+# ── REST API (LAN-accessible, restricted by allow_from) ──────────────────────
 webservice:
   address: 0.0.0.0
   port: 8082
