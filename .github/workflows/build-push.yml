@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   validate-compose:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, lancache]
     steps:
       - uses: actions/checkout@v4
       - name: Validate compose files
@@ -24,7 +24,7 @@ jobs:
 
   test:
     needs: validate-compose
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, lancache]
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +47,7 @@ jobs:
 
   build:
     needs: [validate-compose, test]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, lancache]
     strategy:
       fail-fast: false
       matrix:
