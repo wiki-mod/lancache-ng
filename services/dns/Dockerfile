@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     gettext-base \
     locales \
+    iproute2 \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
