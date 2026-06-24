@@ -87,10 +87,10 @@ cmd_debug() {
 
     print_step "Logs (last 30 lines per service)"
     local ssl_enabled; ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
-    local svc_list="proxy-standard dns-standard ui netdata watchdog"
-    [[ "${ssl_enabled:-1}" = "1" ]] && svc_list="proxy-standard dns-standard proxy-ssl dns-ssl ui netdata watchdog"
+    local -a svc_list=(proxy-standard dns-standard ui netdata watchdog)
+    [[ "${ssl_enabled:-1}" = "1" ]] && svc_list=(proxy-standard dns-standard proxy-ssl dns-ssl ui netdata watchdog)
     local svc
-    for svc in $svc_list; do
+    for svc in "${svc_list[@]}"; do
         printf "\n${BOLD}--- %s ---${RESET}\n" "$svc"
         docker compose logs --tail=30 "$svc" 2>/dev/null || true
     done
@@ -186,11 +186,9 @@ cmd_reconfigure() {
 
     print_step "Updating configuration files"
 
-    sed -i "s|^IP_STANDARD=.*|IP_STANDARD=$new_ip_standard|" "$deploy_env" \
-        && print_ok "Updated: $deploy_env"
-
-    sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env" \
-        && print_ok "Updated: $deploy_env"
+    sed -i "s|^IP_STANDARD=.*|IP_STANDARD=$new_ip_standard|" "$deploy_env"
+    sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
+    print_ok "Updated: $deploy_env"
 
     sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env" \
         && print_ok "Updated: $dns_standard_env"
@@ -308,7 +306,7 @@ SSL_ENABLED=0
 IP_SSL=""
 if [[ "${REPLY,,}" = "y" ]]; then
     SSL_ENABLED=1
-    suggested_ssl="${IP_STANDARD%.*}.$((${IP_STANDARD##*.} + 1))"
+    suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
     while true; do
         ask "SSL mode IP (second LAN IP)" "$suggested_ssl"
         IP_SSL="$REPLY"
