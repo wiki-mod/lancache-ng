@@ -524,10 +524,13 @@ CACHE_DIR_SSL=/srv/lancache/cache
 
 CACHE_MAX_SIZE=500g
 CACHE_MEM_MB=512
+NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
 
 STANDARD_CACHE_MAX_GB=500
 SSL_CACHE_MAX_GB=500
 ```
+
+Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
