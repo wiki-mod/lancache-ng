@@ -80,7 +80,7 @@ done
 
 # ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
-SERIAL=$(date +%s | tail -c 10)
+SERIAL=$(date +%s | tail -c 11)
 RPZ_FILE="/var/lib/powerdns/rpz.zone"
 
 # Preserve monotonic RPZ SOA serials: ensure SERIAL doesn't go backwards
@@ -140,7 +140,7 @@ AUTH_PID=$!
 # Wait for pdns_server to be ready before starting recursor (polling with timeout)
 READY=0
 for i in {1..10}; do
-    if pdns_control ping >/dev/null 2>&1; then
+    if pdns_control rping >/dev/null 2>&1; then
         echo "[lancache-dns] pdns_server is ready (attempt $i)"
         READY=1
         break
