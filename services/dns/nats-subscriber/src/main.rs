@@ -15,8 +15,10 @@ struct DNSRecord {
     name: String,
     #[serde(rename = "type")]
     record_type: String,
-    ttl: i32,
-    records: Vec<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    ttl: Option<i32>,
+    #[serde(default)]
+    records: Option<Vec<HashMap<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -232,8 +234,8 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         "delete" => (Some("DELETE".to_string()), None, None),
         "replace" => (
             Some("REPLACE".to_string()),
-            Some(record.ttl),
-            Some(record.records.clone()),
+            record.ttl,
+            record.records.clone(),
         ),
         action => {
             // P2 fix: Ack unrecoverable parse failures (unknown action).
