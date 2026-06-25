@@ -16,15 +16,15 @@ NATS_RECONCILER="${NATS_RECONCILER:-0}"
 # Fail if PDNS_API_KEY is still the default placeholder
 if [ "$PDNS_API_KEY" = "CHANGE_ME_PDNS_API_KEY" ]; then
     echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to the default placeholder 'CHANGE_ME_PDNS_API_KEY'"
+    echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
+    echo "[lancache-dns] Set PDNS_API_KEY in your config files or docker-compose environment."
+    exit 1
+fi
 
-# Fail if PDNS_API_KEY is too short (weak)
+# Fail if PDNS_API_KEY is too short (weak) — checked for all values, not just placeholders
 if [ ${#PDNS_API_KEY} -lt 16 ]; then
     echo "[lancache-dns] FATAL: PDNS_API_KEY is too short (${#PDNS_API_KEY} characters, minimum 16 required)"
     echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
-    exit 1
-fi
-    echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
-    echo "[lancache-dns] Set PDNS_API_KEY in your config files or docker-compose environment."
     exit 1
 fi
 
