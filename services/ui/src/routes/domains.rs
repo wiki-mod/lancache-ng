@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tera::Context;
 
@@ -126,13 +127,24 @@ pub async fn add_lan_record(
     let name = normalize_lan_name(&form.name);
     let ttl = form.ttl.unwrap_or(300);
 
+    let Some((record_type, content)) =
+        validate_lan_record(&name, &form.record_type, &form.content, ttl)
+    else {
+        tracing::warn!(
+            name = %form.name,
+            record_type = %form.record_type,
+            "Rejected invalid LAN record"
+        );
+        return Redirect::to("/domains");
+    };
+
     let msg = json!({
         "action": "replace",
         "zone": "lan",
         "name": name,
-        "type": form.record_type,
+        "type": record_type,
         "ttl": ttl,
-        "records": [{"content": form.content, "disabled": false}]
+        "records": [{"content": content, "disabled": false}]
     });
     if let Err(e) = state.nats
         .publish("lancache.dns.record", serde_json::to_vec(&msg).unwrap().into())
@@ -151,11 +163,28 @@ pub async fn remove_lan_record(
 ) -> Redirect {
     let name = normalize_lan_name(&form.name);
 
+    let Some(record_type) = normalize_record_type(&form.record_type) else {
+        tracing::warn!(
+            name = %form.name,
+            record_type = %form.record_type,
+            "Rejected invalid LAN record delete"
+        );
+        return Redirect::to("/domains");
+    };
+
+    if !is_valid_lan_name(&name) {
+        tracing::warn!(
+            name = %form.name,
+            "Rejected invalid LAN name for delete"
+        );
+        return Redirect::to("/domains");
+    }
+
     let msg = json!({
         "action": "delete",
         "zone": "lan",
         "name": name,
-        "type": form.record_type
+        "type": record_type
     });
     if let Err(e) = state.nats
         .publish("lancache.dns.record", serde_json::to_vec(&msg).unwrap().into())
@@ -216,6 +245,96 @@ async fn restart_ssl(state: &AppState) {
     if let Err(e) = docker_client::restart_service(&state.docker, &state.config.proxy_ssl_service).await {
         tracing::error!("Restart proxy-ssl failed: {}", e);
     }
+}
+
+const MIN_TTL: u32 = 1;
+const MAX_TTL: u32 = 86_400;
+
+fn normalize_record_type(record_type: &str) -> Option<&'static str> {
+    match record_type.trim().to_ascii_uppercase().as_str() {
+        "A" => Some("A"),
+        "AAAA" => Some("AAAA"),
+        "CNAME" => Some("CNAME"),
+        "MX" => Some("MX"),
+        "TXT" => Some("TXT"),
+        _ => None,
+    }
+}
+
+fn is_valid_dns_fqdn(name: &str) -> bool {
+    let name = name.trim();
+
+    if name.is_empty() || name.len() > 253 || !name.ends_with('.') {
+        return false;
+    }
+
+    name.trim_end_matches('.')
+        .split('.')
+        .all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
+fn is_valid_lan_name(name: &str) -> bool {
+    is_valid_dns_fqdn(name) && name.ends_with(".lan.")
+}
+
+fn is_valid_txt_content(content: &str) -> bool {
+    let content = content.trim();
+
+    !content.is_empty()
+        && content.len() <= 255
+        && !content.chars().any(char::is_control)
+}
+
+fn is_valid_mx_content(content: &str) -> bool {
+    let mut parts = content.split_whitespace();
+
+    let Some(priority) = parts.next() else {
+        return false;
+    };
+    let Some(exchange) = parts.next() else {
+        return false;
+    };
+
+    parts.next().is_none()
+        && priority.parse::<u16>().is_ok()
+        && is_valid_dns_fqdn(&normalize_lan_name(exchange))
+}
+
+fn validate_lan_record(
+    name: &str,
+    record_type: &str,
+    content: &str,
+    ttl: u32,
+) -> Option<(&'static str, String)> {
+    if !(MIN_TTL..=MAX_TTL).contains(&ttl) {
+        return None;
+    }
+
+    if !is_valid_lan_name(name) {
+        return None;
+    }
+
+    let record_type = normalize_record_type(record_type)?;
+    let content = content.trim();
+
+    let valid_content = match record_type {
+        "A" => content.parse::<Ipv4Addr>().is_ok(),
+        "AAAA" => content.parse::<Ipv6Addr>().is_ok(),
+        "CNAME" => is_valid_dns_fqdn(&normalize_lan_name(content)),
+        "MX" => is_valid_mx_content(content),
+        "TXT" => is_valid_txt_content(content),
+        _ => false,
+    };
+
+    valid_content.then(|| (record_type, content.to_string()))
 }
 
 fn is_valid_domain(domain: &str) -> bool {
