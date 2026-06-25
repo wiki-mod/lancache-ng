@@ -485,6 +485,11 @@ if ! grep -q "^SECONDARY_REGISTRATION_TOKEN=[^[:space:]]" "$env_file" 2>/dev/nul
 else
     SECONDARY_REGISTRATION_TOKEN=$(get_env_var SECONDARY_REGISTRATION_TOKEN "$env_file")
 fi
+nif ! grep -q "^PDNS_API_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+    PDNS_API_KEY=$(openssl rand -hex 32)
+else
+    PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
+fi
 
 cat > "$INSTALL_DIR/.env" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
@@ -528,6 +533,9 @@ DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
 # Token for local DNS containers (generated, do not change)
 NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
 # Token for setup-secondary.sh — anyone who knows this can register a secondary
+
+# Shared PowerDNS API key for DNS containers and Admin UI. Keep secret.
+PDNS_API_KEY=${PDNS_API_KEY}
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────

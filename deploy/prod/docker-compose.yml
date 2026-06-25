@@ -48,6 +48,7 @@ services:
     env_file:
       - ../../config/prod/dns-standard.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
@@ -85,6 +86,7 @@ services:
     env_file:
       - ../../config/prod/dns-ssl.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
@@ -251,7 +253,7 @@ services:
       - DHCP_API_TOKEN=lancache-dhcp-prod-secret
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      - PDNS_API_KEY=lancache-pdns-prod-secret
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
