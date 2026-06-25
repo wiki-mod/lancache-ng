@@ -254,12 +254,29 @@ fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
 
 fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
-    let new: String = content
+    let mut removed = false;
+
+    let new = content
         .lines()
-        .filter(|l| !l.trim().is_empty() && l.trim() != domain)
-        .map(|l| format!("{}\n", l))
-        .collect();
-    fs::write(path, new)?;
+        .filter(|line| {
+            let keep = line.trim() != domain;
+            if !keep {
+                removed = true;
+            }
+            keep
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if removed {
+        let new = if content.ends_with('\n') && !new.is_empty() {
+            format!("{new}\n")
+        } else {
+            new
+        };
+        fs::write(path, new)?;
+    }
+
     Ok(())
 }
 
