@@ -16,6 +16,14 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 - The user is not a programmer. Make all technical decisions independently; only ask when a choice has real operational impact (hardware, cost, network topology).
 - Chat language: German. Code language: English.
 
+## Governance
+
+See `.github/AGENTS.md` for the full coding standards and architecture reference.
+
+- **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
+- **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
+- **No direct pushes to master**: all changes go through pull requests.
+
 ## Architecture
 
 ```
@@ -137,10 +145,3 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
 Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
 fully. The Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` on the host.
 
-## Governance
-
-See `.github/agents.md` for the full coding standards and architecture reference.
-
-- **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
-- **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
-- **No direct pushes to master**: all changes go through pull requests.
