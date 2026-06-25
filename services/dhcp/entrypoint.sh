@@ -55,12 +55,30 @@ done
 # Restrict Kea Control Agent API (port 8000) to Docker-internal networks.
 # Without this, network_mode:host exposes the API on all LAN interfaces.
 if command -v iptables >/dev/null 2>&1; then
-    # Check and add rules only if they don't exist (prevents accumulation on restart)
-    # ACCEPT rules must come before DROP (rules are evaluated top-to-bottom)
-    iptables -C INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
-    iptables -C INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT
-    iptables -C INPUT -p tcp --dport 8000                   -j DROP    2>/dev/null || iptables -A INPUT -p tcp --dport 8000                   -j DROP
-    echo "Kea Control Agent API restricted to Docker-internal access"
+    # Remove any legacy inline rules from old implementations (self-heal)
+    iptables -D INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT 2>/dev/null || true
+    iptables -D INPUT -p tcp --dport 8000 -s 127.0.0.0/8 -j ACCEPT 2>/dev/null || true
+    iptables -D INPUT -p tcp --dport 8000 -j DROP 2>/dev/null || true
+
+    # Remove the jump rule if it exists
+    iptables -D INPUT -j LANCACHE_KEA_CTRL 2>/dev/null || true
+
+    # Flush and delete the custom chain if it exists
+    iptables -F LANCACHE_KEA_CTRL 2>/dev/null || true
+    iptables -X LANCACHE_KEA_CTRL 2>/dev/null || true
+
+    # Create the custom chain
+    iptables -N LANCACHE_KEA_CTRL
+
+    # Add rules to the custom chain (order matters: ACCEPT before DROP)
+    iptables -A LANCACHE_KEA_CTRL -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
+    iptables -A LANCACHE_KEA_CTRL -p tcp --dport 8000 -s 127.0.0.0/8 -j ACCEPT
+    iptables -A LANCACHE_KEA_CTRL -p tcp --dport 8000 -j DROP
+
+    # Jump to the custom chain from INPUT
+    iptables -A INPUT -j LANCACHE_KEA_CTRL
+
+    echo "Kea Control Agent API restricted to Docker-internal access (using managed chain)"
 fi
 
 echo "Starting Kea DHCPv4 server (Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START - $DHCP_RANGE_END)..."
@@ -77,5 +95,20 @@ if command -v kea-dhcp-ddns &> /dev/null; then
     DDNS_PID=$!
 fi
 
-trap 'kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true' EXIT TERM
+trap '
+    # Kill all background processes
+    kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true
+
+    # Clean up iptables chain if it exists
+    if command -v iptables >/dev/null 2>&1; then
+        # Remove the jump rule from INPUT
+        iptables -D INPUT -j LANCACHE_KEA_CTRL 2>/dev/null || true
+
+        # Flush the custom chain
+        iptables -F LANCACHE_KEA_CTRL 2>/dev/null || true
+
+        # Delete the custom chain
+        iptables -X LANCACHE_KEA_CTRL 2>/dev/null || true
+    fi
+' EXIT TERM
 wait
