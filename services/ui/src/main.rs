@@ -65,7 +65,12 @@ async fn basic_auth(
             .status(axum::http::StatusCode::UNAUTHORIZED)
             .header("WWW-Authenticate", r#"Basic realm="LanCache Admin""#)
             .body(axum::body::Body::from("Unauthorized"))
-            .unwrap()
+            .unwrap_or_else(|_| {
+                axum::http::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap()
+            })
     }
 }
 
