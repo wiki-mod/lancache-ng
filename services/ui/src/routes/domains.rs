@@ -172,7 +172,12 @@ pub async fn remove_lan_record(
         return Redirect::to("/domains");
     };
 
-    if !is_valid_lan_name(&name) {
+    let name_ok = if record_type == "TXT" {
+        is_valid_lan_name_txt(&name)
+    } else {
+        is_valid_lan_name(&name)
+    };
+    if !name_ok {
         tracing::warn!(
             name = %form.name,
             "Rejected invalid LAN name for delete"
@@ -262,6 +267,14 @@ fn normalize_record_type(record_type: &str) -> Option<&'static str> {
 }
 
 fn is_valid_dns_fqdn(name: &str) -> bool {
+    is_valid_dns_fqdn_impl(name, false)
+}
+
+fn is_valid_dns_fqdn_allow_underscore(name: &str) -> bool {
+    is_valid_dns_fqdn_impl(name, true)
+}
+
+fn is_valid_dns_fqdn_impl(name: &str, allow_underscore: bool) -> bool {
     let name = name.trim();
 
     if name.is_empty() || name.len() > 253 || !name.ends_with('.') {
@@ -277,7 +290,8 @@ fn is_valid_dns_fqdn(name: &str) -> bool {
                 && !label.ends_with('-')
                 && label
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+                        || (allow_underscore && c == '_'))
         })
 }
 
@@ -285,12 +299,14 @@ fn is_valid_lan_name(name: &str) -> bool {
     is_valid_dns_fqdn(name) && name.ends_with(".lan.")
 }
 
+fn is_valid_lan_name_txt(name: &str) -> bool {
+    is_valid_dns_fqdn_allow_underscore(name) && name.ends_with(".lan.")
+}
+
 fn is_valid_txt_content(content: &str) -> bool {
     let content = content.trim();
 
-    !content.is_empty()
-        && content.len() <= 255
-        && !content.chars().any(char::is_control)
+    !content.is_empty() && !content.chars().any(char::is_control)
 }
 
 fn is_valid_mx_content(content: &str) -> bool {
@@ -318,11 +334,16 @@ fn validate_lan_record(
         return None;
     }
 
-    if !is_valid_lan_name(name) {
+    let record_type = normalize_record_type(record_type)?;
+
+    let name_valid = if record_type == "TXT" {
+        is_valid_lan_name_txt(name)
+    } else {
+        is_valid_lan_name(name)
+    };
+    if !name_valid {
         return None;
     }
-
-    let record_type = normalize_record_type(record_type)?;
     let content = content.trim();
 
     let valid_content = match record_type {
