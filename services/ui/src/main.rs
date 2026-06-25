@@ -104,9 +104,13 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::from_env();
 
-    // Validate that both UI_AUTH_USER and UI_AUTH_PASSWORD are set
-    if cfg.auth_user.is_none() || cfg.auth_password.is_none() {
-        anyhow::bail!("UI_AUTH_USER and UI_AUTH_PASSWORD environment variables must both be set and non-empty");
+    // Auth is optional: only activate if both vars are non-empty.
+    let auth_enabled = cfg.auth_user.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+        && cfg.auth_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    if !auth_enabled {
+        tracing::warn!(
+            "UI_AUTH_USER or UI_AUTH_PASSWORD is not set — starting without authentication"
+        );
     }
 
     let templates = load_templates(&cfg.template_dir);
@@ -164,7 +168,12 @@ async fn main() -> Result<()> {
         ).await;
     }
 
-    let app = Router::new()
+    // Routes that are always public (protected by their own token).
+    let public_routes = Router::new()
+        .route("/api/secondary/register", post(routes::secondaries::register_secondary));
+
+    // Routes that are protected by Basic Auth when auth is enabled.
+    let protected_routes = Router::new()
         .route("/", get(routes::dashboard::dashboard))
         .route("/dhcp", get(routes::dhcp::dhcp_page))
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
@@ -187,10 +196,19 @@ async fn main() -> Result<()> {
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
-        .route("/api/secondary/register", post(routes::secondaries::register_secondary))
         .route("/api/secondary/{name}", axum::routing::delete(routes::secondaries::remove_secondary))
-        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token))
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
+        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token));
+
+    let protected_routes = if auth_enabled {
+        protected_routes
+            .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
+    } else {
+        protected_routes
+    };
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
