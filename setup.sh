@@ -26,7 +26,7 @@ REPLY=""
 ask() {
     local prompt="$1" default="${2:-}"
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
-    read -r REPLY </dev/tty
+    read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
 }
 
