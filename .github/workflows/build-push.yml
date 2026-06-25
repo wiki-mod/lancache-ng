@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   shellcheck:
@@ -61,6 +60,9 @@ jobs:
   build:
     needs: [validate-compose, test]
     runs-on: [self-hosted, linux, lancache]
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
