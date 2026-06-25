@@ -38,7 +38,8 @@ if [ ! -f "$CA_DIR/ca.crt" ] || [ ! -f "$CA_DIR/ca.key" ]; then
 fi
 
 # Serial counter for cert signing (must be in /tmp, not CA_DIR which may be read-only)
-echo "01" > "$SERIAL_FILE"
+# Only initialize if it doesn't exist yet, so serial increments across container restarts
+[ -f "$SERIAL_FILE" ] || echo "01" > "$SERIAL_FILE"
 
 # ----------------------------------------------------------------
 # 2. Generate per-domain wildcard certs signed by our CA

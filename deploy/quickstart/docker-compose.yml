@@ -98,6 +98,7 @@ services:
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      - PDNS_API_KEY=lancache-pdns-prod-secret
     volumes:
       - dns-standard-data:/var/lib/powerdns
     depends_on:
@@ -106,7 +107,7 @@ services:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -161,6 +162,7 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-ssl
+      - PDNS_API_KEY=lancache-pdns-prod-secret
     volumes:
       - dns-ssl-data:/var/lib/powerdns
     depends_on:
@@ -169,7 +171,7 @@ services:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -240,6 +242,8 @@ services:
       - nats-conf:/etc/nats
     ports:
       - "${IP_STANDARD}:8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
