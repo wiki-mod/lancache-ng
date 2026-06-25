@@ -1,6 +1,7 @@
 FROM rust:slim@sha256:811d6caab4a84e6148c8722128993c1caf152156868b2b66f3a26af189b0dad8 AS subscriber-builder
 WORKDIR /build
 COPY nats-subscriber/ .
+COPY nats-subscriber/Cargo.lock ./
 RUN cargo build --release --locked
 
 FROM debian:trixie-slim@sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1
