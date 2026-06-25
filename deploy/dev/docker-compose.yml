@@ -154,6 +154,8 @@ services:
     ports:
       - "67:67/udp"      # DHCP
       - "127.0.0.1:8000:8000"  # Kea Control Agent API (localhost only in dev)
+    cap_add:
+      - NET_ADMIN
     networks:
       lancache:
         ipv4_address: 172.28.0.6

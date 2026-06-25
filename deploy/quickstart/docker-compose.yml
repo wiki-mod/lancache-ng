@@ -234,7 +234,11 @@ services:
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # NOTE: Docker socket is mounted read-only for security.
+      # Full read-write access would expose complete Docker API on LAN without auth.
+      # For full control (container restart, image pull, etc), use socket-proxy pattern
+      # (see deploy/prod/docker-compose.yml with tecnativa/docker-socket-proxy).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - proxy-standard-logs:/var/log/nginx/standard:ro
       - proxy-ssl-logs:/var/log/nginx/ssl:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/standard:ro
