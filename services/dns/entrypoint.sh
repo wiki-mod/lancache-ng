@@ -176,7 +176,7 @@ run_nats_subscriber &
 NATS_PID=$!
 
 # Handle termination
-trap "kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true" EXIT TERM INT
+trap 'kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true' EXIT TERM INT
 
 # Wait indefinitely
 wait
