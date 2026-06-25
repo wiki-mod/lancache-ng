@@ -12,6 +12,7 @@ use base64::Engine as _;
 use bollard::Docker;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use subtle::ConstantTimeEq;
 use tera::Tera;
 
 pub struct AppState {
@@ -54,7 +55,12 @@ async fn basic_auth(
         .and_then(|dec| String::from_utf8(dec).ok())
         .and_then(|creds| {
             let mut it = creds.splitn(2, ':');
-            Some(it.next()? == user && it.next()? == pass)
+            let provided_user = it.next()?;
+            let provided_pass = it.next()?;
+            Some(
+                provided_user.as_bytes().ct_eq(user.as_bytes()).into()
+                    && provided_pass.as_bytes().ct_eq(pass.as_bytes()).into()
+            )
         })
         .unwrap_or(false);
 
