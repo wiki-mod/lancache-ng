@@ -45,6 +45,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: cargo test (${{ matrix.service }})
+        env:
+          RUSTC_WRAPPER: ""
         run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml
 
   build:
