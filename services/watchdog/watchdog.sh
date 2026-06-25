@@ -114,17 +114,33 @@ EOF
 maybe_purge() {
     local now; now=$(date +%s)
     local last=0
-    [ -f "$PURGE_STAMP" ] && last=$(cat "$PURGE_STAMP")
+
+    # Validate and read purge stamp
+    if [ -f "$PURGE_STAMP" ]; then
+        last=$(cat "$PURGE_STAMP")
+        case "$last" in
+            ''|*[!0-9]*) last=0 ;;
+        esac
+    fi
     [ $((now - last)) -lt 86400 ] && return
+
+    # Validate cache valid days setting
+    case "$CACHE_VALID_DAYS" in
+        ''|*[!0-9]*)
+            log "Invalid CACHE_VALID_DAYS=${CACHE_VALID_DAYS}; skipping purge"
+            return
+            ;;
+    esac
 
     log "Daily purge: removing cache files older than ${CACHE_VALID_DAYS} days"
     for dir in "$CACHE_DIR_STANDARD" "$CACHE_DIR_SSL"; do
         [ -d "$dir" ] || continue
         local count=0
-        while IFS= read -r file; do
-            rm -f "$file"
-            count=$(( count + 1 ))
-        done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" 2>/dev/null)
+        while IFS= read -r -d '' file; do
+            if rm -f -- "$file"; then
+                count=$(( count + 1 ))
+            fi
+        done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 2>/dev/null)
         log "Purged $count files from $dir"
     done
     mkdir -p "$(dirname "$PURGE_STAMP")"
