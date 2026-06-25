@@ -40,10 +40,16 @@ async fn basic_auth(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let (user, pass) = match (&state.config.auth_user, &state.config.auth_password) {
-        (Some(u), Some(p)) => (u.as_str(), p.as_str()),
-        _ => return next.run(req).await,
-    };
+    let user = state
+        .config
+        .auth_user
+        .as_deref()
+        .expect("UI_AUTH_USER validated at startup");
+    let pass = state
+        .config
+        .auth_password
+        .as_deref()
+        .expect("UI_AUTH_PASSWORD validated at startup");
 
     let ok = req
         .headers()
@@ -97,6 +103,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = config::Config::from_env();
+
+    // Validate that both UI_AUTH_USER and UI_AUTH_PASSWORD are set
+    if cfg.auth_user.is_none() || cfg.auth_password.is_none() {
+        anyhow::bail!("UI_AUTH_USER and UI_AUTH_PASSWORD environment variables must both be set and non-empty");
+    }
+
     let templates = load_templates(&cfg.template_dir);
     let docker = Docker::connect_with_socket_defaults()?;
     let http_client = reqwest::Client::builder()
