@@ -467,6 +467,12 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets (only preserve non-empty values)
+if ! grep -q "^KEA_CTRL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+    KEA_CTRL_TOKEN=$(openssl rand -hex 32)
+else
+    KEA_CTRL_TOKEN=$(get_env_var KEA_CTRL_TOKEN "$env_file")
+fi
+
 if ! grep -q "^DDNS_TSIG_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
 else
@@ -519,6 +525,9 @@ DHCP_SUBNET=${DHCP_SUBNET}
 DHCP_GATEWAY=${DHCP_GATEWAY}
 DHCP_RANGE_START=${DHCP_RANGE_START}
 DHCP_RANGE_END=${DHCP_RANGE_END}
+
+# Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
+KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
 
 # Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY}

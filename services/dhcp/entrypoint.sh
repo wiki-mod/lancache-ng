@@ -13,18 +13,20 @@ mkdir -p /var/run/kea /var/lib/kea
 : "${DHCP_NTP_SERVERS:=time.nist.gov}"
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
-: "${KEA_CTRL_TOKEN:=lancache-dhcp-secret}"
+: "${KEA_CTRL_TOKEN:=}"
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 : "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
 : "${DHCP_DDNS_PORT:=53}"
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
-# Verify KEA_CTRL_TOKEN is set and not the placeholder
-if [ "$KEA_CTRL_TOKEN" = "CHANGE_ME_KEA_CTRL_TOKEN" ]; then
-    echo "ERROR: KEA_CTRL_TOKEN is still set to the placeholder 'CHANGE_ME_KEA_CTRL_TOKEN'"
-    echo "Please set a strong token in your .env file before starting the container."
-    exit 1
-fi
+# Verify KEA_CTRL_TOKEN is set to a non-default secret.
+case "$KEA_CTRL_TOKEN" in
+    ""|"CHANGE_ME_KEA_CTRL_TOKEN"|"lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
+        echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
+        echo "Generate one with: openssl rand -hex 32"
+        exit 1
+        ;;
+esac
 
 # Generate TSIG key if not set (for DDNS) — stored in the runtime config on first boot
 if [ -z "$DDNS_TSIG_KEY" ]; then
