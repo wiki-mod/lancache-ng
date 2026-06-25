@@ -5,7 +5,6 @@ CA_DIR="/etc/nginx/ssl/ca"
 CERT_DIR="/etc/nginx/ssl/certs"
 DOMAINS_FILE="/etc/nginx/cdn-ssl-domains.txt"
 SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
-SERIAL_FILE="/tmp/lancache-ca.srl"
 
 # ────────────────────────────────────────────────────────────────────────────
 # 0. Validate required environment variables
@@ -53,11 +52,12 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         echo ""
     fi
 
-    echo "01" > "$SERIAL_FILE"
     mkdir -p "$CERT_DIR"
 
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
+        # Use a random serial number to avoid collisions across container restarts (#71)
+        local serial="0x$(openssl rand -hex 8)"
         if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
             -keyout "$key" -out /tmp/lancache-cert.csr; then
             rm -f /tmp/lancache-cert.csr
@@ -67,7 +67,8 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         if [ -n "$ext" ]; then
             if ! openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
-                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
+                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
+                -set_serial "$serial" \
                 -extfile <(printf "%s" "$ext") \
                 -out "$crt"; then
                 rm -f /tmp/lancache-cert.csr
@@ -77,7 +78,8 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         else
             if ! openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
-                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
+                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
+                -set_serial "$serial" \
                 -out "$crt"; then
                 rm -f /tmp/lancache-cert.csr
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
@@ -87,8 +89,14 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         rm -f /tmp/lancache-cert.csr
     }
 
-    [ ! -f "$CERT_DIR/default.crt" ] && \
-        _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt"
+    if [ ! -f "$CERT_DIR/default.crt" ]; then
+        # Add SAN to default cert to avoid TLS failures for unmatched domains (#72)
+        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \
+            "subjectAltName=DNS:localhost,DNS:*.localhost"; then
+            echo "[lancache] ERROR: Failed to generate default certificate" >&2
+            exit 1
+        fi
+    fi
 
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
