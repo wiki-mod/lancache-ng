@@ -1,62 +1,37 @@
-# Coding Standards & Architecture Reference
-
-This file is read by GitHub Copilot and other AI coding tools. Follow these rules on every change.
+# Repository Governance
 
 ## Language
 
-- **GitHub content** (issues, PRs, commit messages, comments, documentation): English only.
-- **Code and configuration**: English only.
-- **Chat with the project owner**: German.
+All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**.
 
-## Project Stack
+## Project Language
 
-- **Rust** — the only permitted application language. No Go, Python, Node.js, or other runtimes without explicit approval from `@djdomi`.
-- **Shell (bash)** — for container entrypoints and scripts.
-- **nginx, PowerDNS, NATS JetStream, Kea DHCP** — infrastructure components.
-- Everything runs in **Docker containers** based on **Debian 13 (Trixie)**.
+This project is written in **Rust**. Shell scripts are permitted for entrypoints and automation.
 
-## Architecture Overview
+No other runtime language (Go, Python, Node.js, etc.) may be introduced without explicit approval from @djdomi.
 
-Two-mode LAN cache (DNS-spoofed download caching):
+## Architecture
 
-| Mode | DNS IP | Port 80 | Port 443 | CA cert? |
-|---|---|---|---|---|
-| standard | `IP_STANDARD` | cached | SNI passthrough | No |
-| ssl | `IP_SSL` | cached | MITM-cached | Yes |
+A LAN cache that intercepts and caches game/software downloads. Two operating modes:
 
-Two separate nginx services handle the modes:
-- `services/proxy-standard`: SNI passthrough (nginx stream module) for standard mode
-- `services/proxy`: TLS interception (nginx http block with cert generation) for SSL mode
+| Mode | Port 443 | CA cert needed? |
+|---|---|---|
+| standard | SNI passthrough | No |
+| ssl | MITM-cached (TLS interception) | Yes |
 
-## Key Patterns
+Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
-- **Multi-stage Docker builds**: `rust:slim` builder → `debian:trixie-slim` runtime.
-- **No OpenSSL Rust dependencies in slim images**: use `reqwest` with `rustls-tls` feature, not `openssl-sys`.
-- **sccache**: opt-in only via `SCCACHE_REDIS_URL` build arg — never hardcoded.
-- **Cache key**: `$host$uri` (not `$request_uri`) — CDN query signatures must not bust the cache.
-- **nginx resolver**: always `8.8.8.8`, never the LAN DNS — avoids proxy loops.
-- **Serial file**: write to `/tmp/lancache-ca.srl`, not next to the CA key (which may be read-only).
+## Coding Patterns
 
-## What NOT to Do
+- **Docker builds**: multi-stage with `rust:slim` builder. Do not use `rust:latest` or Debian-based builder images for Rust.
+- **TLS in Rust**: use `reqwest` with `default-features = false, features = ["rustls-tls"]`. Never add `openssl-sys` as a dependency — `rust:slim` has no OpenSSL headers.
+- **sccache**: only activated via opt-in `SCCACHE_REDIS_URL` build arg. Never hardcode a Redis URL.
+- **Cache key**: nginx uses `$host$uri` (not `$request_uri`) — CDN query-string signatures must not bust the cache.
+- **DNS resolver in nginx**: must point to `8.8.8.8`, never to the local BIND9/PowerDNS — that would cause an infinite loop.
 
-- No direct pushes to `master` — all changes go through pull requests.
-- No hardcoded LAN IPs in Dockerfiles or application code.
-- No new languages or runtimes without explicit approval from `@djdomi`.
-- Do not add `runs-on: ubuntu-latest` — use `[self-hosted, linux]`.
-- The standard proxy requires nginx's stream module (`libnginx-mod-stream` Debian package) for SNI passthrough — load it via `load_module modules/ngx_stream_module.so;` in `nginx.conf`.
+## What Not To Do
 
-## Directory Structure
-
-```
-services/proxy/          # nginx: TLS interception (SSL mode)
-services/proxy-standard/ # nginx: SNI passthrough (standard mode, stream module)
-services/dns/            # PowerDNS (auth + recursor) with NATS subscriber
-services/ui/             # Admin UI (Rust/Axum)
-services/dhcp/           # Kea DHCP server
-services/watchdog/       # Container health monitor
-config/dev/              # Dev environment settings
-config/prod/             # Production settings
-deploy/dev/              # docker-compose for local development
-deploy/prod/             # docker-compose for production
-certs/                   # CA certificate (auto-generated if missing)
-```
+- Do not push directly to `master`. All changes go through pull requests.
+- Do not hardcode LAN IP addresses (e.g. `192.168.x.x`) in Dockerfiles or source files.
+- Do not introduce a new programming language without explicit approval.
+- Do not use `proxy_cache_key $request_uri` — query strings contain per-request CDN signatures.
