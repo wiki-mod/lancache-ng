@@ -241,6 +241,7 @@ print_step "Checking prerequisites"
 
 if ! command -v curl >/dev/null 2>&1; then
     print_warn "curl missing — installing now..."
+    apt-get update -y
     apt-get install -y --no-install-recommends curl \
         || die "Failed to install curl."
 fi
@@ -263,9 +264,11 @@ docker compose version >/dev/null 2>&1 \
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
-    command -v git >/dev/null 2>&1 \
-        || apt-get install -y --no-install-recommends git \
-        || die "Failed to install git."
+    if ! command -v git >/dev/null 2>&1; then
+        apt-get update -y
+        apt-get install -y --no-install-recommends git \
+            || die "Failed to install git."
+    fi
     if [[ -d "/opt/lancache-ng/.git" ]]; then
         git -C /opt/lancache-ng pull --ff-only
     else
@@ -454,16 +457,32 @@ else
 fi
 
 # ── 8. Writing .env ───────────────────────────────────────────────────────────
-# Generate secrets
-DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
-NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
-SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
-
 print_step "Writing .env"
 
-if [[ -f "$INSTALL_DIR/.env" ]]; then
+env_file="$INSTALL_DIR/.env"
+
+if [[ -f "$env_file" ]]; then
     ask "Overwrite .env? [y/N]" "N"
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
+fi
+
+# Generate or preserve secrets (only preserve non-empty values)
+if ! grep -q "^DDNS_TSIG_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+    DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
+else
+    DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
+fi
+
+if ! grep -q "^NATS_LOCAL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+    NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
+else
+    NATS_LOCAL_TOKEN=$(get_env_var NATS_LOCAL_TOKEN "$env_file")
+fi
+
+if ! grep -q "^SECONDARY_REGISTRATION_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+    SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
+else
+    SECONDARY_REGISTRATION_TOKEN=$(get_env_var SECONDARY_REGISTRATION_TOKEN "$env_file")
 fi
 
 cat > "$INSTALL_DIR/.env" <<EOF
