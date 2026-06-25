@@ -423,7 +423,7 @@ fn read_domain_file(path: &str) -> Vec<String> {
     };
     BufReader::new(file)
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(Result::ok)
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect()
@@ -534,7 +534,10 @@ mod tests {
             normalize_delete_record_type("HTTPS"),
             Some("HTTPS".to_string())
         );
-        assert_eq!(normalize_delete_record_type("SVCB"), Some("SVCB".to_string()));
+        assert_eq!(
+            normalize_delete_record_type("SVCB"),
+            Some("SVCB".to_string())
+        );
         assert_eq!(
             normalize_delete_record_type("TYPE257"),
             Some("TYPE257".to_string())

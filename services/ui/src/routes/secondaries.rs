@@ -79,7 +79,10 @@ pub async fn register_secondary(
     // Validate name: alphanumeric + dash, non-empty, ≤32 chars
     if form.name.is_empty()
         || form.name.len() > 32
-        || !form.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || !form
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -206,7 +209,9 @@ pub async fn rotate_token(
 
 // ─── Helper Functions ───
 
-pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn update_nats_conf(
+    state: &AppState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nats_conf = format!(
         "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  token: \"{}\"\n}}\n",
         state.config.nats_local_token
