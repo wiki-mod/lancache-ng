@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 mod config;
 mod docker_client;
 mod nginx_client;
