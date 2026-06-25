@@ -13,6 +13,11 @@ pub struct RegisterForm {
     pub name: String,
 }
 
+#[derive(Deserialize)]
+pub struct RotateForm {
+    pub token: String,
+}
+
 #[derive(Serialize)]
 pub struct RegisterResponse {
     pub nats_url: String,
@@ -79,7 +84,9 @@ pub async fn register_secondary(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // All secondaries share the local NATS token
+    // All secondaries share the local NATS token.
+    // NOTE: Full per-secondary token isolation requires NATS JetStream user management,
+    // which is out of scope. The current shared token approach is a known limitation.
     let nats_token = state.config.nats_local_token.clone();
     let consumer_name = form.name.clone();
     let now = SystemTime::now()
@@ -149,17 +156,31 @@ pub async fn remove_secondary(
 pub async fn rotate_token(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // All secondaries share the local NATS token, so just return the current token
+    // Validate token
+    if form.token != state.config.secondary_registration_token {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // All secondaries share the local NATS token, so return the current token.
+    // NOTE: Full per-secondary token isolation requires NATS JetStream user management,
+    // which is out of scope. The current shared token approach is a known limitation.
     let nats_token = state.config.nats_local_token.clone();
 
-    {
+    // Update the secondary's stored token and verify the secondary exists
+    let rows_affected = {
         let db = state.db.lock().unwrap();
         db.execute(
             "UPDATE secondaries SET nats_token = ? WHERE name = ?",
-            [nats_token.clone(), name],
+            [nats_token.clone(), name.clone()],
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    // Return 404 if the secondary doesn't exist
+    if rows_affected == 0 {
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // Update NATS conf (regenerate if needed, though configuration is unchanged)
