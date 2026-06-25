@@ -2,7 +2,6 @@ use crate::{docker_client, AppState};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, Json};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -132,10 +131,15 @@ pub async fn remove_secondary(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    {
+    let rows_affected = {
         let db = state.db.lock().unwrap();
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    // Return 404 if the secondary doesn't exist
+    if rows_affected == 0 {
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // Update NATS conf

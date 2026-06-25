@@ -10,19 +10,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG SCCACHE_REDIS_URL=
 
 WORKDIR /build
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 # Pre-cache dependencies (sccache used only when SCCACHE_REDIS_URL build arg is provided)
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
     && mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && cargo build --release 2>&1; rm -rf src
+    && cargo build --release --locked 2>&1; rm -rf src
 
 COPY src ./src
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
-    && touch src/main.rs && cargo build --release
+    && touch src/main.rs && cargo build --release --locked
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM debian:trixie-slim@sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1

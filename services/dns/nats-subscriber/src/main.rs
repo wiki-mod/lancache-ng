@@ -40,21 +40,6 @@ struct ZoneUpdate {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ZoneContent {
-    content: String,
-    disabled: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ZoneRecord {
-    name: String,
-    #[serde(rename = "type")]
-    record_type: String,
-    ttl: i32,
-    records: Vec<ZoneContent>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct ZoneInfo {
     rrsets: Vec<RRset>,
 }
@@ -149,7 +134,14 @@ async fn main() {
     println!("Created durable subscriber: {}", nats_consumer);
 
     // Create shared HTTP client (#68 fix)
-    let http_client = Arc::new(Client::new());
+    let http_client = Arc::new(
+        Client::builder()
+            .timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .expect("failed to build shared HTTP client"),
+    );
 
     // Start reconciler if enabled
     if nats_reconciler.as_deref() == Some("1") {
@@ -278,7 +270,6 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         .header("X-API-Key", pdns_api_key)
         .header("Content-Type", "application/json")
         .body(payload)
-        .timeout(Duration::from_secs(10))
         .send()
         .await;
 
@@ -328,7 +319,6 @@ async fn handle_dns_flush(pdns_api_key: &str, http_client: &Arc<Client>) -> bool
     let result = http_client
         .put(url)
         .header("X-API-Key", pdns_api_key)
-        .timeout(Duration::from_secs(10))
         .send()
         .await;
 
@@ -365,7 +355,6 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
         let result = http_client
             .get(url)
             .header("X-API-Key", pdns_api_key)
-            .timeout(Duration::from_secs(10))
             .send()
             .await;
 
@@ -424,11 +413,12 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
                         .publish_with_headers("lancache.dns.record", headers, payload.into())
                         .await
                     {
-                        Ok(publish_ack) => {
-                            if let Err(e) = publish_ack.await {
+                        Ok(publish_ack) => match publish_ack.await {
+                            Ok(_) => {}
+                            Err(e) => {
                                 eprintln!("Reconciler: error waiting for publish ack: {}", e);
                             }
-                        }
+                        },
                         Err(e) => {
                             eprintln!("Reconciler: error publishing record: {}", e);
                         }
