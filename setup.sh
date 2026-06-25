@@ -87,7 +87,8 @@ cmd_debug() {
 
     print_step "Logs (last 30 lines per service)"
     local ssl_enabled; ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
-    local -a svc_list=(proxy-standard dns-standard ui netdata watchdog)
+    local -a svc_list
+    svc_list=(proxy-standard dns-standard ui netdata watchdog)
     [[ "${ssl_enabled:-1}" = "1" ]] && svc_list=(proxy-standard dns-standard proxy-ssl dns-ssl ui netdata watchdog)
     local svc
     for svc in "${svc_list[@]}"; do
@@ -190,11 +191,11 @@ cmd_reconfigure() {
     sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
     print_ok "Updated: $deploy_env"
 
-    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env" \
-        && print_ok "Updated: $dns_standard_env"
+    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env"
+    print_ok "Updated: $dns_standard_env"
 
-    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env" \
-        && print_ok "Updated: $dns_ssl_env"
+    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env"
+    print_ok "Updated: $dns_ssl_env"
 
     print_step "Restarting containers"
 
@@ -473,6 +474,12 @@ else
     DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
 fi
 
+if ! grep -q "^PDNS_API_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+    PDNS_API_KEY=$(openssl rand -hex 32)
+else
+    PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
+fi
+
 if ! grep -q "^NATS_LOCAL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
     NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
 else
@@ -525,6 +532,10 @@ DHCP_RANGE_END=${DHCP_RANGE_END}
 
 # Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+
+# ── PowerDNS API ───────────────────────────────────────────────────────────────
+# API key for PowerDNS Authoritative + Recursor (generated, do not change)
+PDNS_API_KEY=${PDNS_API_KEY}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
 # Token for local DNS containers (generated, do not change)

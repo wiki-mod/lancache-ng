@@ -11,6 +11,13 @@ use tera::Context;
 
 // ─── Data Structures ───
 
+#[derive(Debug)]
+enum DhcpCheckStatus {
+    Found(String),
+    NotFound,
+    Unavailable(String),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Subnet {
     pub id: u32,
@@ -250,11 +257,20 @@ pub async fn remove_reservation(
 }
 
 pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let conflict_result = check_other_dhcp(&state).await;
-    Json(json!({
-        "dhcp_found": conflict_result.is_some(),
-        "server_ip": conflict_result
-    }))
+    let status = check_other_dhcp(&state).await;
+    match status {
+        DhcpCheckStatus::Found(ip) => Json(json!({
+            "status": "found",
+            "output": ip
+        })),
+        DhcpCheckStatus::NotFound => Json(json!({
+            "status": "not_found"
+        })),
+        DhcpCheckStatus::Unavailable(reason) => Json(json!({
+            "status": "unavailable",
+            "reason": reason
+        })),
+    }
 }
 
 // ─── Kea API Core ───
@@ -538,8 +554,8 @@ async fn call_kea_reservation_del(
     kea_result(&resp)
 }
 
-async fn check_other_dhcp(state: &AppState) -> Option<String> {
-    let output = exec_in_container(
+async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
+    let output = match exec_in_container(
         &state.docker,
         "dhcp",
         vec![
@@ -553,7 +569,17 @@ async fn check_other_dhcp(state: &AppState) -> Option<String> {
         ],
     )
     .await
-    .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            // Check if the error is due to nmap not being found
+            let err_msg = e.to_string();
+            if err_msg.contains("nmap") || err_msg.contains("not found") || err_msg.contains("No such file") {
+                return DhcpCheckStatus::Unavailable("nmap is not installed in the DHCP container".to_string());
+            }
+            return DhcpCheckStatus::Unavailable(format!("Failed to execute DHCP check: {}", err_msg));
+        }
+    };
 
     // Parse "Server Identifier: 192.168.1.1" from nmap output
     for line in output.lines() {
@@ -561,11 +587,11 @@ async fn check_other_dhcp(state: &AppState) -> Option<String> {
         if let Some(rest) = line.strip_prefix("Server Identifier:") {
             let ip = rest.trim().to_string();
             if !ip.is_empty() {
-                return Some(ip);
+                return DhcpCheckStatus::Found(ip);
             }
         }
     }
-    None
+    DhcpCheckStatus::NotFound
 }
 
 // ─── Validators ───

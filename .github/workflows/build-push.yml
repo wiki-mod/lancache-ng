@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   shellcheck:
@@ -52,7 +51,9 @@ jobs:
             ${{ matrix.path }}/target
           key: ${{ runner.os }}-cargo-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
       - name: cargo test (${{ matrix.service }})
         env:
           RUSTC_WRAPPER: ""
@@ -61,6 +62,9 @@ jobs:
   build:
     needs: [validate-compose, test]
     runs-on: [self-hosted, linux, lancache]
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +75,10 @@ jobs:
             context: services/dns
           - service: watchdog
             context: services/watchdog
+          - service: dhcp
+            context: services/dhcp
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
           - service: ui
             context: services/ui
 
