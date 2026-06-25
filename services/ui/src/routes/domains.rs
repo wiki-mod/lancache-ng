@@ -282,16 +282,18 @@ fn normalize_record_type(record_type: &str) -> Option<&'static str> {
 
 fn normalize_delete_record_type(record_type: &str) -> Option<String> {
     let record_type = record_type.trim().to_ascii_uppercase();
-    let type_code = record_type
-        .strip_prefix("TYPE")
-        .and_then(|code| code.parse::<u16>().ok());
 
-    if normalize_record_type(&record_type).is_some()
-        || matches!(
-            record_type.as_str(),
-            "CAA" | "NS" | "PTR" | "SOA" | "SRV" | "SSHFP" | "TLSA"
-        )
-        || type_code.is_some()
+    if let Some(code) = record_type.strip_prefix("TYPE") {
+        return code.parse::<u16>().ok().map(|_| record_type);
+    }
+
+    if !record_type.is_empty()
+        && record_type.len() <= 16
+        && record_type
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        && record_type.chars().all(|c| c.is_ascii_alphanumeric())
     {
         Some(record_type)
     } else {
@@ -518,10 +520,32 @@ mod tests {
     fn allows_deleting_existing_lan_rrsets_outside_add_whitelist() {
         assert_eq!(normalize_delete_record_type("srv"), Some("SRV".to_string()));
         assert_eq!(normalize_delete_record_type("CAA"), Some("CAA".to_string()));
+        assert_eq!(normalize_delete_record_type("DS"), Some("DS".to_string()));
+        assert_eq!(
+            normalize_delete_record_type("DNSKEY"),
+            Some("DNSKEY".to_string())
+        );
+        assert_eq!(
+            normalize_delete_record_type("NAPTR"),
+            Some("NAPTR".to_string())
+        );
+        assert_eq!(normalize_delete_record_type("LOC"), Some("LOC".to_string()));
+        assert_eq!(
+            normalize_delete_record_type("HTTPS"),
+            Some("HTTPS".to_string())
+        );
+        assert_eq!(normalize_delete_record_type("SVCB"), Some("SVCB".to_string()));
         assert_eq!(
             normalize_delete_record_type("TYPE257"),
             Some("TYPE257".to_string())
         );
+        assert_eq!(
+            normalize_delete_record_type("TYPE65535"),
+            Some("TYPE65535".to_string())
+        );
+        assert!(normalize_delete_record_type("TYPE65536").is_none());
+        assert!(normalize_delete_record_type("bad-type").is_none());
+        assert!(normalize_delete_record_type("123").is_none());
         assert!(is_valid_lan_name_for_delete("_sip._tcp.lan."));
         assert!(is_valid_lan_name_for_delete("*.dev.lan."));
         assert!(is_valid_lan_name_for_delete("lan."));
