@@ -73,6 +73,10 @@ jobs:
             context: services/dns
           - service: watchdog
             context: services/watchdog
+          - service: dhcp
+            context: services/dhcp
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
           - service: ui
             context: services/ui
 
