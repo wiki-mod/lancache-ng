@@ -54,33 +54,30 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     mkdir -p "$CERT_DIR"
 
+    # Persist the serial counter in the CA volume so it survives container restarts (#71).
+    # Initialized with a nanosecond timestamp on first use to avoid colliding with any
+    # serials that were issued under the old "echo 01" scheme.
+    SERIAL_FILE="$CA_DIR/ca.srl"
+    if [ ! -f "$SERIAL_FILE" ]; then
+        printf '%016x
+' "$(date +%s%N)" > "$SERIAL_FILE"
+    fi
+
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
-        # Use a random serial number to avoid collisions across container restarts (#71)
-        local serial="0x$(openssl rand -hex 8)"
-        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
-            -keyout "$key" -out /tmp/lancache-cert.csr; then
+        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \n            -keyout "$key" -out /tmp/lancache-cert.csr; then
             rm -f /tmp/lancache-cert.csr
             echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
             return 1
         fi
         if [ -n "$ext" ]; then
-            if ! openssl x509 -req -days 3650 \
-                -in /tmp/lancache-cert.csr \
-                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
-                -set_serial "$serial" \
-                -extfile <(printf "%s" "$ext") \
-                -out "$crt"; then
+            if ! openssl x509 -req -days 3650 \n                -in /tmp/lancache-cert.csr \n                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \n                -extfile <(printf "%s" "$ext") \n                -out "$crt"; then
                 rm -f /tmp/lancache-cert.csr
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
         else
-            if ! openssl x509 -req -days 3650 \
-                -in /tmp/lancache-cert.csr \
-                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
-                -set_serial "$serial" \
-                -out "$crt"; then
+            if ! openssl x509 -req -days 3650 \n                -in /tmp/lancache-cert.csr \n                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \n                -out "$crt"; then
                 rm -f /tmp/lancache-cert.csr
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
@@ -89,15 +86,24 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         rm -f /tmp/lancache-cert.csr
     }
 
-    if [ ! -f "$CERT_DIR/default.crt" ]; then
-        # Add SAN to default cert to avoid TLS failures for unmatched domains (#72)
-        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \
-            "subjectAltName=DNS:localhost,DNS:*.localhost"; then
+    # Returns 0 (true = needs regen) if the default cert is missing or lacks a SAN (#72).
+    # This ensures existing deployments with a CN-only default.crt get it regenerated.
+    _default_cert_needs_regen() {
+        [ ! -f "$CERT_DIR/default.crt" ] && return 0
+        openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null \n            | grep -q "DNS:" && return 1
+        return 0
+    }
+
+    if _default_cert_needs_regen; then
+        # Generate or regenerate the fallback cert with a proper SAN (#72).
+        # Include IP_SSL in the SAN so clients connecting to that IP also pass validation.
+        local _default_san="DNS:lancache-default"
+        [ -n "${IP_SSL}" ] && _default_san="${_default_san},IP:${IP_SSL}"
+        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \n            "subjectAltName=${_default_san}"; then
             echo "[lancache] ERROR: Failed to generate default certificate" >&2
             exit 1
         fi
     fi
-
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
         [ -f "$CERT_DIR/${domain}.crt" ] && continue
