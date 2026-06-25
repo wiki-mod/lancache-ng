@@ -44,6 +44,7 @@ services:
     env_file:
       - ../../config/dev/dns-standard.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
@@ -81,6 +82,7 @@ services:
     env_file:
       - ../../config/dev/dns-ssl.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
