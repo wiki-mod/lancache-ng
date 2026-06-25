@@ -263,9 +263,11 @@ async function checkDhcpConflict() {
     const res = await fetch('/api/dhcp/check');
     const data = await res.json();
     if (data.dhcp_found) {
-      statusEl.innerHTML = `<span class="text-yellow-400">&#9888; DHCP-Server gefunden: ${data.server_ip}</span>`;
+      statusEl.className = 'text-sm text-yellow-400';
+      statusEl.textContent = `⚠ DHCP-Server gefunden: ${data.server_ip ?? ''}`;
     } else {
-      statusEl.innerHTML = '<span class="text-green-400">&#10003; Kein fremder DHCP-Server gefunden</span>';
+      statusEl.className = 'text-sm text-green-400';
+      statusEl.textContent = '✓ Kein fremder DHCP-Server gefunden';
     }
   } catch (e) {
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
