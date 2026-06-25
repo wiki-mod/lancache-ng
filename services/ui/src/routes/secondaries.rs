@@ -72,7 +72,11 @@ pub async fn register_secondary(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(form): axum::extract::Json<RegisterForm>,
 ) -> Result<Json<RegisterResponse>, StatusCode> {
-    // Validate token
+    // Validate token — reject if token is unconfigured (empty) to prevent
+    // accidental open registration when SECONDARY_REGISTRATION_TOKEN is unset.
+    if state.config.secondary_registration_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -164,7 +168,10 @@ pub async fn rotate_token(
     Path(name): Path<String>,
     axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Validate token
+    // Validate token — reject if token is unconfigured (empty).
+    if state.config.secondary_registration_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
     }
