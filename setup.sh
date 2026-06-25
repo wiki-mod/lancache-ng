@@ -437,7 +437,7 @@ fi
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
-printf "  Admin-UI runs on http://%s:8080 — only accessible within the local network.\n" "$IP_STANDARD"
+printf "  Admin-UI runs on http://127.0.0.1:8080 — accessible from this host (localhost only by default).\n"
 printf "  Without a password, anyone on the LAN can restart containers and change domains.\n\n"
 
 ask "Protect Admin-UI with password? [y/N]" "N"
@@ -675,9 +675,9 @@ printf "${BOLD}${GREEN}  LanCache-NG is running!${RESET}\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
-    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080  (User: %s)\n" "$IP_STANDARD" "$UI_AUTH_USER"
+    printf "  ${BOLD}Admin-UI:${RESET}    http://127.0.0.1:8080  (User: %s)\n" "$UI_AUTH_USER"
 else
-    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080\n" "$IP_STANDARD"
+    printf "  ${BOLD}Admin-UI:${RESET}    http://127.0.0.1:8080\n"
 fi
 printf "\n"
 if [[ "$SSL_ENABLED" = "1" ]]; then
