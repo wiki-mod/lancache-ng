@@ -47,7 +47,7 @@ jobs:
       - name: cargo test (${{ matrix.service }})
         env:
           RUSTC_WRAPPER: ""
-        run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml
+        run: cargo test --locked --manifest-path ${{ matrix.path }}/Cargo.toml
 
   build:
     needs: [validate-compose, test]
@@ -58,8 +58,6 @@ jobs:
         include:
           - service: proxy
             context: services/proxy
-          - service: proxy-standard
-            context: services/proxy-standard
           - service: dns
             context: services/dns
           - service: watchdog

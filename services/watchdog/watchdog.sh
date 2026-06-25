@@ -14,18 +14,16 @@ PURGE_STAMP="/var/run/watchdog/purge.stamp"
 
 SSL_ENABLED="${SSL_ENABLED:-1}"
 
-C_PROXY_STD="${CONTAINER_PROXY_STANDARD:-lancache-proxy-standard}"
+C_PROXY="${CONTAINER_PROXY:-lancache-proxy}"
 C_DNS_STD="${CONTAINER_DNS_STANDARD:-lancache-dns-standard}"
 if [ "$SSL_ENABLED" = "1" ]; then
-    C_PROXY_SSL="${CONTAINER_PROXY_SSL:-lancache-proxy-ssl}"
     C_DNS_SSL="${CONTAINER_DNS_SSL:-lancache-dns-ssl}"
 else
-    C_PROXY_SSL=""
     C_DNS_SSL=""
 fi
 
-F_PROXY_STD=0; F_PROXY_SSL=0; F_DNS_STD=0; F_DNS_SSL=0
-H_PROXY_STD="unknown"; H_PROXY_SSL="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
 
@@ -93,24 +91,20 @@ write_status() {
     mkdir -p "$(dirname "$STATUS_FILE")"
 
     local ssl_services=""
-    local ssl_disk=""
     if [ "$SSL_ENABLED" = "1" ]; then
         ssl_services=",
-    \"$C_PROXY_SSL\": {\"status\": \"$(health_color "$H_PROXY_SSL")\", \"health\": \"$H_PROXY_SSL\", \"failures\": $F_PROXY_SSL},
     \"$C_DNS_SSL\":   {\"status\": \"$(health_color "$H_DNS_SSL")\",   \"health\": \"$H_DNS_SSL\",   \"failures\": $F_DNS_SSL}"
-        ssl_disk=",
-    \"ssl\": $(disk_info "$CACHE_DIR_SSL")"
     fi
 
     cat > "${STATUS_FILE}.tmp" <<EOF
 {
   "updated": "$ts",
   "services": {
-    "$C_PROXY_STD": {"status": "$(health_color "$H_PROXY_STD")", "health": "$H_PROXY_STD", "failures": $F_PROXY_STD},
+    "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
     "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD}${ssl_services}
   },
   "disk": {
-    "standard": ${disk_std}${ssl_disk}
+    "standard": ${disk_std}
   }
 }
 EOF
@@ -137,14 +131,13 @@ maybe_purge() {
     echo "$now" > "$PURGE_STAMP"
 }
 
-log "Starting. Monitoring: $C_PROXY_STD $C_PROXY_SSL $C_DNS_STD $C_DNS_SSL"
+log "Starting. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 
 while true; do
-    check_and_maybe_restart "$C_PROXY_STD" F_PROXY_STD H_PROXY_STD
+    check_and_maybe_restart "$C_PROXY" F_PROXY H_PROXY
     check_and_maybe_restart "$C_DNS_STD"   F_DNS_STD   H_DNS_STD
     if [ "$SSL_ENABLED" = "1" ]; then
-        check_and_maybe_restart "$C_PROXY_SSL" F_PROXY_SSL H_PROXY_SSL
         check_and_maybe_restart "$C_DNS_SSL"   F_DNS_SSL   H_DNS_SSL
     fi
     write_status

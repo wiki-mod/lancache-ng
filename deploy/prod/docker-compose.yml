@@ -2,21 +2,31 @@ name: lancache-ng
 
 services:
 
-  # ── Standard mode (no CA cert required) ──────────────────────────────────
-  # HTTP: cached. HTTPS: SNI passthrough to real CDN (not cached).
-  proxy-standard:
-    container_name: lancache-proxy-standard
-    image: ghcr.io/wiki-mod/lancache-ng/proxy-standard:latest
+  # ── Unified proxy (standard + SSL mode in one container) ─────────────────
+  # Port 80: HTTP caching (shared cache for both modes)
+  # Port 8443 (standard): SNI passthrough to real CDN (no client cert needed)
+  # Port 443 (SSL): HTTPS caching via TLS interception (CA cert required)
+  proxy:
+    container_name: lancache-proxy
+    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
     build:
-      context: ../../services/proxy-standard
+      context: ../../services/proxy
     env_file:
       - ../../config/prod/proxy.env
+    environment:
+      - IP_STANDARD=${IP_STANDARD}
+      - IP_SSL=${IP_SSL}
+      - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
-      - proxy-standard-cache:/var/cache/nginx/lancache
-      - proxy-standard-logs:/var/log/nginx
+      - ../../certs:/etc/nginx/ssl/ca:ro
+      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
+      - proxy-cache:/var/cache/nginx/lancache
+      - proxy-logs:/var/log/nginx
     ports:
       - "${IP_STANDARD}:80:80"
-      - "${IP_STANDARD}:443:443"
+      - "${IP_STANDARD}:443:8443"
+      - "${IP_SSL}:80:80"
+      - "${IP_SSL}:443:443"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
       interval: 30s
@@ -66,36 +76,6 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
-
-  # ── SSL mode (CA cert must be installed on clients) ───────────────────────
-  # HTTP + HTTPS: both cached via TLS interception.
-  proxy-ssl:
-    container_name: lancache-proxy-ssl
-    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
-    build:
-      context: ../../services/proxy
-    env_file:
-      - ../../config/prod/proxy.env
-    volumes:
-      - ../../certs:/etc/nginx/ssl/ca:ro
-      - proxy-ssl-cache:/var/cache/nginx/lancache
-      - proxy-ssl-logs:/var/log/nginx
-      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
-    ports:
-      - "${IP_SSL}:80:80"
-      - "${IP_SSL}:443:443"
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    restart: always
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   dns-ssl:
     container_name: lancache-dns-ssl
@@ -157,8 +137,7 @@ services:
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
-      - /srv/lancache/standard:/cache/standard
-      - /srv/lancache/ssl:/cache/ssl
+      - proxy-cache:/cache/standard
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
@@ -254,20 +233,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
-      - proxy-standard-logs:/var/log/nginx/standard:ro
-      - proxy-ssl-logs:/var/log/nginx/ssl:ro
-      - /srv/lancache/standard:/var/cache/standard:ro
-      - /srv/lancache/ssl:/var/cache/ssl:ro
+      - proxy-logs:/var/log/nginx:ro
+      - proxy-cache:/var/cache/proxy:ro
       - /srv/lancache/nats-conf:/etc/nats   # shared with NATS: UI writes nats.conf here
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
-      - PROXY_SSL_SERVICE=proxy-ssl
+      - PROXY_SERVICE=proxy
       - NETDATA_URL=http://netdata:19999
-      - STANDARD_CACHE_MAX_GB=500
-      - SSL_CACHE_MAX_GB=500
+      - CACHE_MAX_GB=500
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://host.docker.internal:8000
@@ -281,8 +257,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - proxy-standard
-      - proxy-ssl
+      - proxy
       - netdata
       - nats
     restart: always
@@ -315,20 +290,13 @@ services:
         max-file: "3"
 
 volumes:
-  proxy-standard-cache:
+  proxy-cache:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /srv/lancache/standard
-  proxy-ssl-cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /srv/lancache/ssl
-  proxy-standard-logs:
-  proxy-ssl-logs:
+      device: /srv/lancache/cache
+  proxy-logs:
   watchdog-status:
   netdataconfig:
   netdatalib:

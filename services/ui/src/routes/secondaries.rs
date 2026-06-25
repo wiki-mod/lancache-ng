@@ -82,8 +82,8 @@ pub async fn register_secondary(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Generate random token
-    let nats_token = rand_token();
+    // All secondaries share the local NATS token
+    let nats_token = state.config.nats_local_token.clone();
     let consumer_name = form.name.clone();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -104,7 +104,7 @@ pub async fn register_secondary(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    // Update NATS conf
+    // Update NATS conf (regenerate if needed, though configuration is unchanged)
     update_nats_conf(&state)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -159,24 +159,8 @@ pub async fn rotate_token(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Check if secondary exists
-    {
-        let db = state.db.lock().unwrap();
-        let exists = db
-            .query_row(
-                "SELECT 1 FROM secondaries WHERE name = ? LIMIT 1",
-                [&name],
-                |_| Ok(true),
-            )
-            .ok()
-            .is_some();
-
-        if !exists {
-            return Err(StatusCode::NOT_FOUND);
-        }
-    }
-
-    let new_token = rand_token();
+    // All secondaries share the local NATS token, so just return the current token
+    let nats_token = state.config.nats_local_token.clone();
 
     {
         let db = match state.db.lock() {
@@ -185,12 +169,12 @@ pub async fn rotate_token(
         };
         db.execute(
             "UPDATE secondaries SET nats_token = ? WHERE name = ?",
-            [new_token.clone(), name],
+            [nats_token.clone(), name],
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    // Update NATS conf
+    // Update NATS conf (regenerate if needed, though configuration is unchanged)
     update_nats_conf(&state)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -203,15 +187,10 @@ pub async fn rotate_token(
     )
     .await;
 
-    Ok(Json(serde_json::json!({"nats_token": new_token})))
+    Ok(Json(serde_json::json!({"nats_token": nats_token})))
 }
 
 // ─── Helper Functions ───
-
-fn rand_token() -> String {
-    let bytes: [u8; 32] = rand::random();
-    hex::encode(bytes)
-}
 
 pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nats_conf = format!(
