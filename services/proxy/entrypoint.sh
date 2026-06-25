@@ -65,19 +65,27 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
-        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \n            -keyout "$key" -out /tmp/lancache-cert.csr; then
+        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \\
+            -keyout "$key" -out /tmp/lancache-cert.csr; then
             rm -f /tmp/lancache-cert.csr
             echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
             return 1
         fi
         if [ -n "$ext" ]; then
-            if ! openssl x509 -req -days 3650 \n                -in /tmp/lancache-cert.csr \n                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \n                -extfile <(printf "%s" "$ext") \n                -out "$crt"; then
+            if ! openssl x509 -req -days 3650 \\
+                -in /tmp/lancache-cert.csr \\
+                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \\
+                -extfile <(printf "%s" "$ext") \\
+                -out "$crt"; then
                 rm -f /tmp/lancache-cert.csr
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
         else
-            if ! openssl x509 -req -days 3650 \n                -in /tmp/lancache-cert.csr \n                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \n                -out "$crt"; then
+            if ! openssl x509 -req -days 3650 \\
+                -in /tmp/lancache-cert.csr \\
+                -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \\
+                -out "$crt"; then
                 rm -f /tmp/lancache-cert.csr
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
@@ -90,16 +98,18 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     # This ensures existing deployments with a CN-only default.crt get it regenerated.
     _default_cert_needs_regen() {
         [ ! -f "$CERT_DIR/default.crt" ] && return 0
-        openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null \n            | grep -q "DNS:" && return 1
+        openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null \\
+            | grep -q "DNS:" && return 1
         return 0
     }
 
     if _default_cert_needs_regen; then
         # Generate or regenerate the fallback cert with a proper SAN (#72).
         # Include IP_SSL in the SAN so clients connecting to that IP also pass validation.
-        local _default_san="DNS:lancache-default"
+        _default_san="DNS:lancache-default"
         [ -n "${IP_SSL}" ] && _default_san="${_default_san},IP:${IP_SSL}"
-        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \n            "subjectAltName=${_default_san}"; then
+        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \\
+            "subjectAltName=${_default_san}"; then
             echo "[lancache] ERROR: Failed to generate default certificate" >&2
             exit 1
         fi
