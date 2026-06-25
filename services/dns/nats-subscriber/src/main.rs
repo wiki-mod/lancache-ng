@@ -374,7 +374,6 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
         let result = http_client
             .get(url)
             .header("X-API-Key", pdns_api_key)
-            .timeout(Duration::from_secs(10))
             .send()
             .await;
 
@@ -428,16 +427,17 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
                     let mut headers = async_nats::HeaderMap::new();
                     headers.insert(async_nats::header::NATS_MESSAGE_ID, msg_id.as_str());
 
-                    // #69 fix: properly await the PublishAckFuture
+                    // #69 fix: properly await the PublishAckFuture with improved observability
                     match js
                         .publish_with_headers("lancache.dns.record", headers, payload.into())
                         .await
                     {
-                        Ok(publish_ack) => {
-                            if let Err(e) = publish_ack.await {
+                        Ok(publish_ack) => match publish_ack.await {
+                            Ok(_) => {}
+                            Err(e) => {
                                 eprintln!("Reconciler: error waiting for publish ack: {}", e);
                             }
-                        }
+                        },
                         Err(e) => {
                             eprintln!("Reconciler: error publishing record: {}", e);
                         }

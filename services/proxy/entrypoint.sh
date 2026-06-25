@@ -87,18 +87,25 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         rm -f /tmp/lancache-cert.csr
     }
 
-    [ ! -f "$CERT_DIR/default.crt" ] && \
-        _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt"
+    if [ ! -f "$CERT_DIR/default.crt" ]; then
+        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt"; then
+            echo "[lancache] ERROR: Failed to generate default certificate" >&2
+            exit 1
+        fi
+    fi
 
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
         [ -f "$CERT_DIR/${domain}.crt" ] && continue
 
         echo "[lancache] Generating cert for $domain..."
-        _sign_cert "$domain" \
+        if ! _sign_cert "$domain" \
             "$CERT_DIR/${domain}.key" \
             "$CERT_DIR/${domain}.crt" \
-            "subjectAltName=DNS:${domain},DNS:*.${domain}"
+            "subjectAltName=DNS:${domain},DNS:*.${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for domain $domain" >&2
+            exit 1
+        fi
     done < "$DOMAINS_FILE"
 
     {
