@@ -36,13 +36,13 @@ services:
       - SSL_ENABLED=${SSL_ENABLED:-0}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
-      - ${CACHE_DIR}:/var/cache/nginx/lancache
+      - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
-      - "${IP_SSL}:80:80"
-      - "${IP_SSL}:443:443"
+      - "${IP_SSL:-127.0.0.1}:80:80"
+      - "${IP_SSL:-127.0.0.1}:443:443"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
       interval: 30s
@@ -179,7 +179,7 @@ services:
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - SSL_ENABLED=${SSL_ENABLED:-0}
     volumes:
-      - ${CACHE_DIR}:/cache/cache
+      - ${CACHE_DIR_STANDARD}:/cache/cache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
@@ -196,7 +196,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - proxy-logs:/var/log/nginx:ro
-      - ${CACHE_DIR}:/var/cache/proxy:ro
+      - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
       - "${IP_STANDARD}:8080:8080"
@@ -207,7 +207,8 @@ services:
       - NETDATA_URL=http://netdata:19999
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
-      - CACHE_MAX_GB=${CACHE_MAX_GB}
+      - STANDARD_CACHE_MAX_GB=${STANDARD_CACHE_MAX_GB}
+      - SSL_CACHE_MAX_GB=${SSL_CACHE_MAX_GB}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - NATS_URL=nats://nats:4222

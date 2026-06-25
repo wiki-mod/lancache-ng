@@ -519,8 +519,8 @@ IP_SSL=192.168.1.11
 
 SSL_ENABLED=1
 
-CACHE_DIR_STANDARD=/srv/lancache/standard
-CACHE_DIR_SSL=/srv/lancache/ssl
+CACHE_DIR_STANDARD=/srv/lancache/cache
+CACHE_DIR_SSL=/srv/lancache/cache
 
 CACHE_MAX_SIZE=500g
 CACHE_MEM_MB=512
@@ -540,8 +540,7 @@ SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 Create directories:
 
 ```bash
-mkdir -p /srv/lancache/standard
-mkdir -p /srv/lancache/ssl
+mkdir -p /srv/lancache/cache
 mkdir -p /srv/lancache/kea
 ```
 
