@@ -179,6 +179,22 @@ Some clients may bypass the cache completely.
 The first download is normally a cache miss.  
 The second identical download is where the cache should help.
 
+### Cache policy
+
+LanCache NG is not a generic forward proxy. It is designed to force caching for known game,
+software and update CDN downloads that you intentionally route through the cache.
+
+The nginx cache key intentionally uses the host and path, not the full request URI with the
+query string. Many CDN download URLs include per-request signatures or expiry tokens in the
+query string. Including those values in the cache key would make each signed URL look like a
+different object and would greatly reduce cache hits. The full request URI is still forwarded
+to the upstream CDN for validation; only the local cache key ignores the query string.
+
+For the same reason, LanCache NG intentionally ignores selected upstream cache headers such as
+`Cache-Control`, `Expires`, `Vary` and `Set-Cookie` for cached download responses. Do not use
+LanCache NG as a general-purpose proxy, and only add CDN domains that you understand and want
+to cache.
+
 ## Console support
 
 Xbox, PlayStation and similar consoles should usually use standard mode.
