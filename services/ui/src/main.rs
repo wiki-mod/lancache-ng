@@ -5,6 +5,7 @@ mod routes;
 
 use anyhow::Result;
 use axum::{
+    response::IntoResponse,
     routing::{get, post},
     Router,
 };
@@ -67,16 +68,21 @@ async fn basic_auth(
     if ok {
         next.run(req).await
     } else {
-        axum::http::Response::builder()
+        match axum::http::Response::builder()
             .status(axum::http::StatusCode::UNAUTHORIZED)
             .header("WWW-Authenticate", r#"Basic realm="LanCache Admin""#)
             .body(axum::body::Body::from("Unauthorized"))
-            .unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(axum::body::Body::from("Internal Server Error"))
-                    .unwrap()
-            })
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to build basic auth challenge response");
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
