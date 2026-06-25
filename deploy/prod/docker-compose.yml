@@ -18,7 +18,7 @@ services:
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
-      - ../../certs:/etc/nginx/ssl/ca:ro
+      - ../../certs:/etc/nginx/ssl/ca
       - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
@@ -243,7 +243,8 @@ services:
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
       - NETDATA_URL=http://netdata:19999
-      - CACHE_MAX_GB=500
+      - STANDARD_CACHE_MAX_GB=500
+      - SSL_CACHE_MAX_GB=500
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://host.docker.internal:8000

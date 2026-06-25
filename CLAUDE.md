@@ -92,16 +92,16 @@ by configuring which DNS server IP they point to:
 - **`libnginx-mod-stream`**: The standard proxy needs nginx's stream module for SNI passthrough.
   This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
   at the top of `nginx.conf` (before the `events {}` block).
-- **Serial file in `/tmp`**: The CA key is in a `:ro` mounted volume in prod. OpenSSL's
-  `-CAcreateserial` would try to write `ca.srl` to the same directory — that fails. Instead
-  we write the serial file to `/tmp/lancache-ca.srl` and pass it with `-CAserial`.
+- **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
+  serial file is always written to `/tmp/lancache-ca.srl` rather than the certs directory,
+  and passed with `-CAserial`.
 
 ## Dev vs Prod Split
 
 | | dev | prod |
 |---|---|---|
 | Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `/srv/lancache/{standard,ssl}` on host |
+| Cache volume | Docker named volume | `/srv/lancache/cache` on host |
 | CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
 | DNS query logging | On | Off |
 | Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
@@ -131,7 +131,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
    Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
    Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
    Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directories: `mkdir -p /srv/lancache/standard /srv/lancache/ssl`
+   Create cache directory: `mkdir -p /srv/lancache/cache`
 
 ## Adding More CDN Domains
 
