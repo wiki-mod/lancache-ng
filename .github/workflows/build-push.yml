@@ -12,6 +12,15 @@ permissions:
   packages: write
 
 jobs:
+  shellcheck:
+    runs-on: [self-hosted, linux, lancache]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+      - name: Run ShellCheck
+        run: find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" | xargs shellcheck --severity=warning
+
   validate-compose:
     runs-on: [self-hosted, linux, lancache]
     steps:

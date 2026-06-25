@@ -4,20 +4,20 @@ set -e
 mkdir -p /var/run/kea /var/lib/kea
 
 # Defaults
-: ${DHCP_SUBNET:=10.0.0.0/24}
-: ${DHCP_RANGE_START:=10.0.0.128}
-: ${DHCP_RANGE_END:=10.0.0.254}
-: ${DHCP_GATEWAY:=10.0.0.1}
-: ${DHCP_DOMAIN:=lan}
-: ${DHCP_LEASE_TIME:=86400}
-: ${DHCP_NTP_SERVERS:=time.nist.gov}
-: ${DHCP_DNS_PRIMARY:=127.0.0.1}
-: ${DHCP_DNS_SECONDARY:=127.0.0.1}
-: ${KEA_CTRL_TOKEN:=lancache-dhcp-secret}
-: ${DHCP_DNS_SERVER_IP:=127.0.0.1}
-: ${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}
-: ${DHCP_DDNS_PORT:=53}
-: ${KEA_CTRL_HOST:=0.0.0.0}
+: "${DHCP_SUBNET:=10.0.0.0/24}"
+: "${DHCP_RANGE_START:=10.0.0.128}"
+: "${DHCP_RANGE_END:=10.0.0.254}"
+: "${DHCP_GATEWAY:=10.0.0.1}"
+: "${DHCP_DOMAIN:=lan}"
+: "${DHCP_LEASE_TIME:=86400}"
+: "${DHCP_NTP_SERVERS:=time.nist.gov}"
+: "${DHCP_DNS_PRIMARY:=127.0.0.1}"
+: "${DHCP_DNS_SECONDARY:=127.0.0.1}"
+: "${KEA_CTRL_TOKEN:=lancache-dhcp-secret}"
+: "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
+: "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
+: "${DHCP_DDNS_PORT:=53}"
+: "${KEA_CTRL_HOST:=0.0.0.0}"
 
 # Verify KEA_CTRL_TOKEN is set and not the placeholder
 if [ "$KEA_CTRL_TOKEN" = "CHANGE_ME_KEA_CTRL_TOKEN" ]; then
