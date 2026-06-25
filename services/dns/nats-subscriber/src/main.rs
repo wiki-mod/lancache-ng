@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -14,8 +15,10 @@ struct DNSRecord {
     name: String,
     #[serde(rename = "type")]
     record_type: String,
-    ttl: i32,
-    records: Vec<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    ttl: Option<i32>,
+    #[serde(default)]
+    records: Option<Vec<HashMap<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -145,12 +148,16 @@ async fn main() {
 
     println!("Created durable subscriber: {}", nats_consumer);
 
+    // Create shared HTTP client (#68 fix)
+    let http_client = Arc::new(Client::new());
+
     // Start reconciler if enabled
     if nats_reconciler.as_deref() == Some("1") {
         let js_clone = js.clone();
         let pdns_api_key_clone = pdns_api_key.clone();
+        let client_clone = http_client.clone();
         tokio::spawn(async move {
-            reconciler(js_clone, &pdns_api_key_clone).await;
+            reconciler(js_clone, &pdns_api_key_clone, client_clone).await;
         });
     }
 
@@ -167,47 +174,59 @@ async fn main() {
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
                         Ok(msg) => {
-                            handle_message(&msg, &pdns_api_key).await;
-                            if let Err(e) = msg.ack().await {
-                                eprintln!("Error acknowledging message: {}", e);
+                            let result = handle_message(&msg, &pdns_api_key, &http_client).await;
+                            // #56 fix: only ack on success; on failure, don't ack so JetStream redelivers
+                            if result {
+                                if let Err(e) = msg.ack().await {
+                                    eprintln!("Error acknowledging message: {}", e);
+                                }
+                            } else {
+                                // P2 fix: Brief delay before retry to reduce ordering issues on redelivery.
+                                // Without ack(), NATS will requeue the message automatically.
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
                         Err(e) => eprintln!("Message error: {}", e),
                     }
                 }
             }
-            Err(e) => eprintln!("Fetch error: {}", e),
+            // #87 fix: add backoff on fetch error
+            Err(e) => {
+                eprintln!("Fetch error: {}", e);
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
         }
     }
 }
 
-async fn handle_message(msg: &async_nats::jetstream::Message, pdns_api_key: &str) {
+async fn handle_message(msg: &async_nats::jetstream::Message, pdns_api_key: &str, http_client: &Arc<Client>) -> bool {
     let subject = msg.subject.as_ref();
 
     if subject.starts_with("lancache.dns.heartbeat") {
         // Ignore heartbeat messages
-        return;
+        return true;
     }
 
     if subject == "lancache.dns.record" {
-        handle_dns_record(msg, pdns_api_key).await;
-        return;
+        return handle_dns_record(msg, pdns_api_key, http_client).await;
     }
 
     if subject == "lancache.dns.flush" {
-        handle_dns_flush(pdns_api_key).await;
-        return;
+        return handle_dns_flush(pdns_api_key, http_client).await;
     }
 
     println!("Unknown subject: {}", subject);
+    true
 }
 
-async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &str) {
+async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &str, http_client: &Arc<Client>) -> bool {
     let record: DNSRecord = match serde_json::from_slice(&msg.payload) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error parsing DNS record: {}", e);
-            return;
+            // P2 fix: Ack unrecoverable parse failures (e.g., malformed delete events missing ttl/records).
+            // Nacking would cause infinite retry of malformed messages.
+            eprintln!("Acking unrecoverable DNS record parse failure (malformed message): {}", e);
+            return true;
         }
     };
 
@@ -215,12 +234,14 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         "delete" => (Some("DELETE".to_string()), None, None),
         "replace" => (
             Some("REPLACE".to_string()),
-            Some(record.ttl),
-            Some(record.records.clone()),
+            record.ttl,
+            record.records.clone(),
         ),
         action => {
-            eprintln!("Unknown action: {}", action);
-            return;
+            // P2 fix: Ack unrecoverable parse failures (unknown action).
+            // Nacking would cause infinite retry of malformed messages.
+            eprintln!("Acking unrecoverable DNS record parse failure (unknown action: {})", action);
+            return true;
         }
     };
 
@@ -239,8 +260,10 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
     let payload = match serde_json::to_string(&update) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error marshaling PATCH payload: {}", e);
-            return;
+            // P2 fix: Ack unrecoverable serialization failures.
+            // Nacking would cause infinite retry of malformed messages.
+            eprintln!("Acking unrecoverable DNS record serialization failure (malformed message): {}", e);
+            return true;
         }
     };
 
@@ -249,8 +272,8 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         record.zone
     );
 
-    let client = Client::new();
-    let result = client
+    // #68 fix: use shared client instead of creating new one
+    let result = http_client
         .patch(&url)
         .header("X-API-Key", pdns_api_key)
         .header("Content-Type", "application/json")
@@ -266,28 +289,43 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
                     "Updated DNS record: zone={} name={} type={} action={}",
                     record.zone, record.name, record.record_type, record.action
                 );
-            } else {
-                eprintln!(
-                    "PDNS error: {} {} for zone={} name={} type={}",
+                true
+            } else if resp.status().is_client_error() {
+                // P2 fix: Ack on 4xx client errors (invalid data, permanent failure).
+                // Retrying won't help; the record data itself is malformed.
+                eprintln!("PDNS client error (acking, won't retry): {} {} for zone={} name={} type={}",
                     resp.status(),
                     resp.status().canonical_reason().unwrap_or(""),
                     record.zone,
                     record.name,
                     record.record_type
                 );
+                true
+            } else {
+                // 5xx or other server errors: retry by returning false
+                eprintln!("PDNS server error (will retry): {} {} for zone={} name={} type={}",
+                    resp.status(),
+                    resp.status().canonical_reason().unwrap_or(""),
+                    record.zone,
+                    record.name,
+                    record.record_type
+                );
+                false
             }
         }
         Err(e) => {
-            eprintln!("Error sending PATCH request: {}", e);
+            // P2 fix: Network errors are retriable (transient), return false to retry
+            eprintln!("Error sending PATCH request (will retry): {}", e);
+            false
         }
     }
 }
 
-async fn handle_dns_flush(pdns_api_key: &str) {
+async fn handle_dns_flush(pdns_api_key: &str, http_client: &Arc<Client>) -> bool {
     let url = "http://127.0.0.1:8082/api/v1/servers/localhost/cache/flush?type=packet";
 
-    let client = Client::new();
-    let result = client
+    // #68 fix: use shared client instead of creating new one
+    let result = http_client
         .put(url)
         .header("X-API-Key", pdns_api_key)
         .timeout(Duration::from_secs(10))
@@ -298,21 +336,24 @@ async fn handle_dns_flush(pdns_api_key: &str) {
         Ok(resp) => {
             if resp.status().is_success() {
                 println!("Flushed PDNS cache");
+                true
             } else {
                 eprintln!(
                     "PDNS flush error: {} {}",
                     resp.status(),
                     resp.status().canonical_reason().unwrap_or("")
                 );
+                false
             }
         }
         Err(e) => {
             eprintln!("Error sending flush request: {}", e);
+            false
         }
     }
 }
 
-async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str) {
+async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http_client: Arc<Client>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     loop {
@@ -320,8 +361,8 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str) {
 
         let url = "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan";
 
-        let client = Client::new();
-        let result = client
+        // #68 fix: use shared client instead of creating new one
+        let result = http_client
             .get(url)
             .header("X-API-Key", pdns_api_key)
             .timeout(Duration::from_secs(10))
@@ -378,11 +419,16 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str) {
                     let mut headers = async_nats::HeaderMap::new();
                     headers.insert(async_nats::header::NATS_MESSAGE_ID, msg_id.as_str());
 
+                    // #69 fix: properly await the PublishAckFuture
                     match js
                         .publish_with_headers("lancache.dns.record", headers, payload.into())
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(publish_ack) => {
+                            if let Err(e) = publish_ack.await {
+                                eprintln!("Reconciler: error waiting for publish ack: {}", e);
+                            }
+                        }
                         Err(e) => {
                             eprintln!("Reconciler: error publishing record: {}", e);
                         }
