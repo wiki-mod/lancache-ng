@@ -1,4 +1,4 @@
-FROM rust:slim AS builder
+FROM rust:slim@sha256:811d6caab4a84e6148c8722128993c1caf152156868b2b66f3a26af189b0dad8 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev curl \
@@ -25,7 +25,7 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
     && touch src/main.rs && cargo build --release
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
