@@ -77,5 +77,5 @@ if command -v kea-dhcp-ddns &> /dev/null; then
     DDNS_PID=$!
 fi
 
-trap "kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true" EXIT TERM
+trap 'kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true' EXIT TERM
 wait
