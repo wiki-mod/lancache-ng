@@ -196,17 +196,22 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+
   # ── Admin UI ───────────────────────────────────────────────────────────────
+  # SECURITY: UI is bound to localhost (127.0.0.1:8080) by default.
+  # Direct Docker socket mount removed. Docker operations are proxied through
+  # docker-socket-proxy (read-only; container inspection only, no exec/images).
+  # To expose on LAN, override ports in .env AND set UI_AUTH_USER + UI_AUTH_PASSWORD.
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - proxy-logs:/var/log/nginx:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
-      - "${IP_STANDARD}:8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -229,6 +234,7 @@ services:
       - proxy
       - netdata
       - nats
+      - docker-socket-proxy
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
