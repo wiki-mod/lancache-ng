@@ -474,6 +474,12 @@ else
     DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
 fi
 
+if ! grep -q "^PDNS_API_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+    PDNS_API_KEY=$(openssl rand -hex 32)
+else
+    PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
+fi
+
 if ! grep -q "^NATS_LOCAL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
     NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
 else
@@ -509,6 +515,9 @@ CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
+# Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
+NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+
 # For Admin-UI (GB as number for progress bar)
 STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}
@@ -523,6 +532,10 @@ DHCP_RANGE_END=${DHCP_RANGE_END}
 
 # Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+
+# ── PowerDNS API ───────────────────────────────────────────────────────────────
+# API key for PowerDNS Authoritative + Recursor (generated, do not change)
+PDNS_API_KEY=${PDNS_API_KEY}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
 # Token for local DNS containers (generated, do not change)

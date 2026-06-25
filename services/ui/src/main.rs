@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 mod config;
 mod docker_client;
 mod nginx_client;
@@ -5,6 +7,7 @@ mod routes;
 
 use anyhow::Result;
 use axum::{
+    response::IntoResponse,
     routing::{get, post},
     Router,
 };
@@ -67,16 +70,21 @@ async fn basic_auth(
     if ok {
         next.run(req).await
     } else {
-        axum::http::Response::builder()
+        match axum::http::Response::builder()
             .status(axum::http::StatusCode::UNAUTHORIZED)
             .header("WWW-Authenticate", r#"Basic realm="LanCache Admin""#)
             .body(axum::body::Body::from("Unauthorized"))
-            .unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(axum::body::Body::from("Internal Server Error"))
-                    .unwrap()
-            })
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to build basic auth challenge response");
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
@@ -91,6 +99,40 @@ fn load_templates(dir: &str) -> Tera {
             .unwrap_or_else(|e| panic!("Cannot parse template {}: {}", name, e));
     }
     t
+}
+
+async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
+    let mut delay = std::time::Duration::from_secs(1);
+    let max_delay = std::time::Duration::from_secs(30);
+
+    loop {
+        let result = if cfg.nats_local_token.is_empty() {
+            async_nats::connect(&cfg.nats_url).await
+        } else {
+            async_nats::ConnectOptions::new()
+                .token(cfg.nats_local_token.clone())
+                .connect(&cfg.nats_url)
+                .await
+        };
+
+        match result {
+            Ok(client) => {
+                tracing::info!("Connected to NATS at {}", cfg.nats_url);
+                return client;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Cannot connect to NATS at {}: {}. Retrying in {:?}",
+                    cfg.nats_url,
+                    err,
+                    delay
+                );
+
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(delay * 2, max_delay);
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -109,18 +151,7 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let nats = {
-        let cfg_nats = &cfg;
-        if cfg_nats.nats_local_token.is_empty() {
-            async_nats::connect(&cfg_nats.nats_url).await
-                .expect("Cannot connect to NATS")
-        } else {
-            async_nats::ConnectOptions::new()
-                .token(cfg_nats.nats_local_token.clone())
-                .connect(&cfg_nats.nats_url).await
-                .expect("Cannot connect to NATS")
-        }
-    };
+    let nats = connect_nats_with_retry(&cfg).await;
 
     let db = {
         let conn = Connection::open("/data/lancache-ui.db")
