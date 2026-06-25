@@ -5,8 +5,8 @@
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
 | nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
-| BIND9 | on | dnsmasq | Chroot in container |
-| Kea DHCP | off | — | Requires BIND9 (DDNS) |
+| PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
+| Kea DHCP | off | — | Requires PowerDNS (DDNS via nsupdate) |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog-ng | on | — | Central logging for all containers |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
@@ -57,10 +57,10 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 
 **Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage.
 
-## BIND9
+## PowerDNS
 
-- Chroot under `/var/lib/named` in container
-- RPZ replaces `cdn-domains.txt` / `cdn-ssl-domains.txt`
+- Runs in two processes: authoritative (answering CDN zones) + recursor (recursive queries for clients)
+- Zone data from `/etc/pdns` directory: `cdn-domains.txt` compiled into PowerDNS zones
 - IPv4 + IPv6 everywhere (dual-stack)
 
 **Zones:**
@@ -87,14 +87,14 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 
 **allow-query / allow-recursion:** open to all RFC-1918 + IPv6 ULA by default
 
-**nsupdate (RFC 2136):** TSIG-secured channel for Admin UI → BIND9
+**nsupdate (RFC 2136):** TSIG-secured channel for Admin UI → PowerDNS authoritative
 
 ## Kea DHCP
 
 - DHCPv4 + DHCPv6 (dual-stack)
 - IP ranges as start–end (no CIDR required)
 - Static assignments: MAC → IP, editable via UI
-- DDNS → BIND9: lease = automatically A + PTR in `local.lan`
+- DDNS → PowerDNS: lease = automatically A + PTR in `local.lan` via nsupdate (RFC 2136)
 - REST API (Kea Control Agent) for Admin UI
 
 ## Watchdog
@@ -103,7 +103,7 @@ Lightweight container with Docker socket access (restart permission).
 
 **Health checks:**
 - nginx: HTTP request on `/health`
-- BIND9: DNS query test
+- PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
 - syslog-ng: Process check
 
@@ -131,7 +131,7 @@ Central logging for all containers. All services send to syslog-ng.
 | Service | Level options |
 |---|---|
 | nginx | `emerg / error / warn / info / debug` |
-| BIND9 | `critical / error / warning / notice / info / dynamic` |
+| PowerDNS | `critical / error / warning / notice / info / debug` |
 | Kea | `fatal / error / warn / info / debug` |
 | Watchdog | `error / info / debug` |
 
@@ -196,7 +196,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 
 ## IPv6
 
-- BIND9: dual-stack listeners, AAAA records, IPv6 reverse zones
+- PowerDNS: dual-stack listeners, AAAA records, IPv6 reverse zones
 - Kea: DHCPv6 parallel to DHCPv4
 - nginx: already IPv6-capable
 - Docker: IPv6 on Linux host via `"ipv6": true` in `daemon.json`
@@ -210,7 +210,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 ## Implementation order
 
 1. nginx (slice module + optimizations)
-2. BIND9
+2. PowerDNS (authoritative + recursor)
 3. Kea DHCP
 4. Watchdog
 5. syslog-ng
