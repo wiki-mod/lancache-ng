@@ -161,7 +161,10 @@ async fn main() {
         });
     }
 
-    // Main fetch loop
+    // Main fetch loop with exponential backoff (#87 fix)
+    let mut backoff_secs = 1u64;
+    const MAX_BACKOFF_SECS: u64 = 30;
+
     loop {
         let fetch_result = consumer.fetch()
             .max_messages(10)
@@ -171,6 +174,9 @@ async fn main() {
 
         match fetch_result {
             Ok(mut messages) => {
+                // Reset backoff on successful fetch
+                backoff_secs = 1;
+
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
                         Ok(msg) => {
@@ -190,10 +196,13 @@ async fn main() {
                     }
                 }
             }
-            // #87 fix: add backoff on fetch error
+            // #87 fix: exponential backoff on fetch error to prevent busy-spin loop
             Err(e) => {
-                eprintln!("Fetch error: {}", e);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                eprintln!("Fetch error: {} (backing off for {} second(s))", e, backoff_secs);
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+
+                // Double backoff for next iteration, capped at MAX_BACKOFF_SECS
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
             }
         }
     }
