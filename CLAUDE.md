@@ -18,7 +18,7 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
 ## Governance
 
-See `.github/agents.md` for the full coding standards and architecture reference.
+See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
 - **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
 - **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
@@ -144,3 +144,4 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
 
 Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
 fully. The Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` on the host.
+
