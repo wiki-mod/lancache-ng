@@ -1,0 +1,24 @@
+# Keep Docker build contexts small and deterministic.
+.git
+.gitignore
+.github
+
+# Local build output and caches.
+target
+**/target
+.cache
+.tmp
+tmp
+
+# Editor and OS files.
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Logs and local runtime files.
+*.log
+*.pid
+.env
+.env.*
