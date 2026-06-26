@@ -186,14 +186,22 @@ async fn main() {
                         Err(e) => {
                             eprintln!("Message error: {}", e);
                             had_stream_error = true;
+                            // Break out of the inner loop so the outer backoff fires.
+                            // Continuing to call messages.next() on a broken stream
+                            // would busy-spin inside the Ok(messages) arm.
+                            break;
                         }
                     }
                 }
 
-                // Only reset backoff if the message stream completed without errors.
-                // Stream errors surface via messages.next(), not fetch(), so resetting
-                // on fetch() success alone would mask persistent stream failures.
-                if !had_stream_error {
+                // Apply backoff on stream errors, or reset on a clean batch.
+                // Stream errors surface via messages.next(), not fetch(), so we
+                // must handle them here rather than in the Err(fetch) arm.
+                if had_stream_error {
+                    eprintln!("Stream error(s); backing off for {} second(s)", backoff_secs);
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                } else {
                     backoff_secs = 1;
                 }
             }
