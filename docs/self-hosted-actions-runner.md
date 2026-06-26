@@ -58,6 +58,8 @@ Replace `actions-runner:actions-runner` with the runner account and group. If pa
 
 ## CodeQL
 
-The CodeQL workflow uses `github/codeql-action` on the same self-hosted runner labels. No separate CodeQL package needs to be installed on Debian; the action downloads and manages the CodeQL bundle during the workflow run.
+The CodeQL workflow uses advanced setup with `github/codeql-action` on self-hosted runners labeled `self-hosted`, `linux`, `lancache` and `codeql`. No separate CodeQL package needs to be installed on Debian; the action downloads and manages the CodeQL bundle during the workflow run.
+
+Disable CodeQL default setup in GitHub before enabling this workflow. GitHub rejects SARIF uploaded by an advanced CodeQL workflow while default setup remains enabled for the repository.
 
 The runner only needs outbound network access to GitHub to download actions, upload CodeQL results and fetch dependencies used by the repository checks.
