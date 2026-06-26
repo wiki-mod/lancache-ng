@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG SCCACHE_REDIS_URL=
 
 WORKDIR /build
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 # Pre-cache dependencies (sccache used only when SCCACHE_REDIS_URL build arg is provided)
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
