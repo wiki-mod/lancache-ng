@@ -79,12 +79,9 @@ jobs:
       - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-v0
+          key: ${{ runner.os }}-cargo-audit-0.21
       - name: Install cargo-audit
-        run: |
-          if ! command -v cargo-audit >/dev/null 2>&1; then
-            cargo install cargo-audit --locked
-          fi
+        run: cargo install cargo-audit --version 0.21 --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
@@ -110,14 +107,17 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Build local scan image
-        run: docker build --pull -t lancache-ng-scan:${{ matrix.service }} ${{ matrix.context }}
+        run: docker build --pull --platform linux/amd64 -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} ${{ matrix.context }}
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.31.0
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.31.0
         with:
-          image-ref: lancache-ng-scan:${{ matrix.service }}
+          image-ref: lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+      - name: Remove scan image
+        if: always()
+        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} || true
 
   build:
     needs: [validate-compose, test, cargo-audit, container-scan]
