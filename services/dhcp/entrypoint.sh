@@ -55,12 +55,40 @@ done
 # Restrict Kea Control Agent API (port 8000) to Docker-internal networks.
 # Without this, network_mode:host exposes the API on all LAN interfaces.
 if command -v iptables >/dev/null 2>&1; then
-    # Check and add rules only if they don't exist (prevents accumulation on restart)
-    # ACCEPT rules must come before DROP (rules are evaluated top-to-bottom)
-    iptables -C INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT
-    iptables -C INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT  2>/dev/null || iptables -A INPUT -p tcp --dport 8000 -s 127.0.0.0/8   -j ACCEPT
-    iptables -C INPUT -p tcp --dport 8000                   -j DROP    2>/dev/null || iptables -A INPUT -p tcp --dport 8000                   -j DROP
-    echo "Kea Control Agent API restricted to Docker-internal access"
+    KEA_CTRL_CHAIN="LANCACHE_KEA_CTRL"
+
+    # Create or reset the managed chain. Keeping the chain stable avoids
+    # failures when duplicate jump rules from previous starts still reference it.
+    iptables -N "$KEA_CTRL_CHAIN" 2>/dev/null || true
+    iptables -F "$KEA_CTRL_CHAIN"
+
+    # Remove every managed jump and every legacy inline rule from old
+    # implementations, so hosts with pre-existing duplicates self-heal.
+    while iptables -D INPUT -p tcp --dport 8000 -j "$KEA_CTRL_CHAIN" 2>/dev/null; do
+        :
+    done
+    while iptables -D INPUT -j "$KEA_CTRL_CHAIN" 2>/dev/null; do
+        :
+    done
+    while iptables -D INPUT -p tcp --dport 8000 -s 172.16.0.0/12 -j ACCEPT 2>/dev/null; do
+        :
+    done
+    while iptables -D INPUT -p tcp --dport 8000 -s 127.0.0.0/8 -j ACCEPT 2>/dev/null; do
+        :
+    done
+    while iptables -D INPUT -p tcp --dport 8000 -j DROP 2>/dev/null; do
+        :
+    done
+
+    # Insert one scoped jump near the top of INPUT before broader accept rules.
+    iptables -I INPUT 1 -p tcp --dport 8000 -j "$KEA_CTRL_CHAIN"
+
+    # Rebuild intended policy in the managed chain (order matters: ACCEPT before DROP).
+    iptables -A "$KEA_CTRL_CHAIN" -s 172.16.0.0/12 -j ACCEPT
+    iptables -A "$KEA_CTRL_CHAIN" -s 127.0.0.0/8 -j ACCEPT
+    iptables -A "$KEA_CTRL_CHAIN" -j DROP
+
+    echo "Kea Control Agent API restricted to Docker-internal access (using managed chain)"
 fi
 
 echo "Starting Kea DHCPv4 server (Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START - $DHCP_RANGE_END)..."
@@ -77,5 +105,24 @@ if command -v kea-dhcp-ddns &> /dev/null; then
     DDNS_PID=$!
 fi
 
-trap 'kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true' EXIT TERM
+trap '
+    # Kill all background processes
+    kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true
+
+    # Clean up iptables chain if it exists
+    if command -v iptables >/dev/null 2>&1; then
+        # Remove all managed jump rules from INPUT. Include the old unscoped
+        # form for compatibility with previous entrypoint versions.
+        while iptables -D INPUT -p tcp --dport 8000 -j LANCACHE_KEA_CTRL 2>/dev/null; do
+            :
+        done
+        while iptables -D INPUT -j LANCACHE_KEA_CTRL 2>/dev/null; do
+            :
+        done
+
+        # Flush and delete the custom chain
+        iptables -F LANCACHE_KEA_CTRL 2>/dev/null || true
+        iptables -X LANCACHE_KEA_CTRL 2>/dev/null || true
+    fi
+' EXIT TERM
 wait

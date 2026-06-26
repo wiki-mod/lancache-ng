@@ -17,3 +17,43 @@ updates:
     groups:
       rust-deps:
         patterns: ["*"]
+
+  # Rust (DNS NATS subscriber)
+  - package-ecosystem: cargo
+    directory: /services/dns/nats-subscriber
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns: ["*"]
+
+  # Docker base images
+  - package-ecosystem: docker
+    directory: /services/proxy
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /services/dns
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /services/watchdog
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /services/dhcp
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /services/dhcp-proxy
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /services/ui
+    schedule:
+      interval: weekly

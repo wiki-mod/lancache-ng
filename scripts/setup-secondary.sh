@@ -74,14 +74,10 @@ fi
 
 # POST to primary server
 echo "Registering secondary '${name}' with primary server..."
-response=$(curl -s -X POST \
+if ! response=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
-  "${primary}/api/secondary/register")
-exit_code=$?
-
-# Check curl exit code
-if [[ $exit_code -ne 0 ]]; then
+  "${primary}/api/secondary/register"); then
   echo "Error: Failed to connect to primary server at ${primary}"
   exit 1
 fi
@@ -136,6 +132,12 @@ services:
     ports:
       - "${LISTEN_IP:-0.0.0.0}:53:53/udp"
       - "${LISTEN_IP:-0.0.0.0}:53:53/tcp"
+    healthcheck:
+      test: ["CMD", "rec_control", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -158,17 +160,10 @@ EOF
 
 # Start containers
 echo "Starting secondary DNS container..."
-cd "$secondary_dir"
-docker compose up -d
-exit_code=$?
-
-if [[ $exit_code -ne 0 ]]; then
+if ! (cd "$secondary_dir" && docker compose up -d); then
   echo "Error: Failed to start docker compose"
-  cd ..
   exit 1
 fi
-
-cd ..
 
 # Success message
 echo "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."

@@ -126,9 +126,8 @@ maybe_purge() {
         esac
     fi
 
-    # Resolve the purge-stamp review conflict by forcing decimal parsing:
-    # digit-only corrupt stamps like "08" must not be interpreted as invalid
-    # octal values by Bash arithmetic under set -e.
+    # Force decimal parsing so digit-only corrupt stamps like "08" are not
+    # interpreted as invalid octal values by Bash arithmetic under set -e.
     local last_epoch=$((10#$last))
     if [ "$last_epoch" -gt "$now" ]; then
         log "PURGE_STAMP=${last} is in the future; forcing purge timestamp reset"
@@ -158,7 +157,6 @@ maybe_purge() {
     mkdir -p "$(dirname "$PURGE_STAMP")"
     echo "$now" > "$PURGE_STAMP"
 }
-
 log "Starting. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 

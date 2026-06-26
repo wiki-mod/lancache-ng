@@ -34,6 +34,7 @@ services:
       - IP_STANDARD=${IP_STANDARD}
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-0}
+      - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
       - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
@@ -101,6 +102,9 @@ services:
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      - PDNS_API_KEY=${PDNS_API_KEY}
+    volumes:
+      - pdns-data-standard:/var/lib/powerdns
     depends_on:
       - nats
     ports:
@@ -129,6 +133,9 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-ssl
+      - PDNS_API_KEY=${PDNS_API_KEY}
+    volumes:
+      - pdns-data-ssl:/var/lib/powerdns
     depends_on:
       - nats
     ports:
@@ -214,6 +221,11 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
+      - PDNS_AUTH_URL=http://dns-standard:8081
+      - PDNS_REC_URL=http://dns-standard:8082
+      - PDNS_API_KEY=${PDNS_API_KEY}
+      - DHCP_API_URL=http://dhcp:8000
+      - DHCP_API_TOKEN=${DHCP_API_TOKEN}
     depends_on:
       - proxy
       - netdata
@@ -273,3 +285,5 @@ volumes:
   netdatacache:
   logs:
   syslog-data:
+  pdns-data-standard:
+  pdns-data-ssl:
