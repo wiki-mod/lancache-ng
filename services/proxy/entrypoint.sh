@@ -151,10 +151,13 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         [ -f "$CERT_DIR/${domain}.crt" ] && continue
 
         echo "[lancache] Generating cert for $domain..."
-        _sign_cert "$domain" \
+        if ! _sign_cert "$domain" \
             "$CERT_DIR/${domain}.key" \
             "$CERT_DIR/${domain}.crt" \
-            "subjectAltName=DNS:${domain},DNS:*.${domain}"
+            "subjectAltName=DNS:${domain},DNS:*.${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for domain $domain" >&2
+            exit 1
+        fi
     done < "$DOMAINS_FILE"
 
     {
