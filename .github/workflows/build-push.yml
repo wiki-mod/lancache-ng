@@ -131,6 +131,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -195,6 +197,7 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
 
       - name: Retry Build and push
+        id: retry-build
         if: steps.build.outcome == 'failure'
         timeout-minutes: 60
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
@@ -206,3 +209,11 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      - name: Attest image build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          push-to-registry: true
