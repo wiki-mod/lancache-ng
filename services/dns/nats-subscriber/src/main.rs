@@ -166,8 +166,7 @@ async fn main() {
 
         match fetch_result {
             Ok(mut messages) => {
-                // Reset backoff on successful fetch
-                backoff_secs = 1;
+                let mut had_stream_error = false;
 
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
@@ -184,8 +183,18 @@ async fn main() {
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
-                        Err(e) => eprintln!("Message error: {}", e),
+                        Err(e) => {
+                            eprintln!("Message error: {}", e);
+                            had_stream_error = true;
+                        }
                     }
+                }
+
+                // Only reset backoff if the message stream completed without errors.
+                // Stream errors surface via messages.next(), not fetch(), so resetting
+                // on fetch() success alone would mask persistent stream failures.
+                if !had_stream_error {
+                    backoff_secs = 1;
                 }
             }
             // #87 fix: exponential backoff on fetch error to prevent busy-spin loop
