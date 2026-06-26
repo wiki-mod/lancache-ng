@@ -154,8 +154,8 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
-  # socket-proxy provides restricted access (containers only) to Docker API
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — allows restart but no exec, no images)
+  # socket-proxy provides restricted access to Docker API for UI and watchdog.
+  # CONTAINERS=1 + POST=1: allows container inspect, restart, exec — but NOT image or volume ops.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
@@ -198,10 +198,11 @@ services:
 
 
   # ── Admin UI ───────────────────────────────────────────────────────────────
-  # SECURITY: UI is bound to localhost (127.0.0.1:8080) by default.
+  # UI is bound to the LAN IP (${IP_STANDARD}:8080) so secondary hosts can
+  # reach the registration endpoint, but it is not exposed on WAN interfaces.
   # Direct Docker socket mount removed. Docker operations are proxied through
-  # docker-socket-proxy (restricted access: containers only, allows restart but no exec/images).
-  # To expose on LAN, override ports in .env AND set UI_AUTH_USER + UI_AUTH_PASSWORD.
+  # docker-socket-proxy (CONTAINERS+POST: allows restart/exec on containers only).
+  # Always set UI_AUTH_USER + UI_AUTH_PASSWORD for password protection.
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
@@ -209,7 +210,7 @@ services:
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
-      - "0.0.0.0:8080:8080"
+      - "${IP_STANDARD}:8080:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
