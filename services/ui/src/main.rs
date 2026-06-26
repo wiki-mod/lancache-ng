@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 mod config;
 mod docker_client;
 mod nginx_client;
@@ -13,6 +15,8 @@ use base64::Engine as _;
 use bollard::Docker;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tera::Tera;
 
 pub struct AppState {
@@ -55,7 +59,17 @@ async fn basic_auth(
         .and_then(|dec| String::from_utf8(dec).ok())
         .and_then(|creds| {
             let mut it = creds.splitn(2, ':');
-            Some(it.next()? == user && it.next()? == pass)
+            let provided_user = it.next()?;
+            let provided_pass = it.next()?;
+            // Hash both sides to fixed-size 32-byte digests before comparing.
+            // subtle's ct_eq on raw slices aborts early on length mismatch,
+            // leaking credential length. Digests are always 32 bytes regardless
+            // of input length, eliminating that timing side-channel.
+            let user_match = Sha256::digest(provided_user.as_bytes())
+                .ct_eq(&Sha256::digest(user.as_bytes()));
+            let pass_match = Sha256::digest(provided_pass.as_bytes())
+                .ct_eq(&Sha256::digest(pass.as_bytes()));
+            Some(bool::from(user_match & pass_match))
         })
         .unwrap_or(false);
 
