@@ -7,6 +7,10 @@ mod routes;
 
 use anyhow::Result;
 use axum::{
+    http::{
+        header::{HeaderName, HeaderValue},
+        Request,
+    },
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -37,6 +41,48 @@ const TEMPLATE_NAMES: &[&str] = &[
     "logs.html",
     "setup.html",
 ];
+
+async fn security_headers(
+    req: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; \
+             base-uri 'self'; \
+             object-src 'none'; \
+             frame-ancestors 'none'; \
+             form-action 'self'; \
+             script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; \
+             connect-src 'self'; \
+             font-src 'self' data:",
+        ),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("strict-transport-security"),
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+
+    response
+}
 
 async fn basic_auth(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -148,8 +194,7 @@ async fn main() -> Result<()> {
     let nats = connect_nats_with_retry(&cfg).await;
 
     let db = {
-        let conn = Connection::open("/data/lancache-ui.db")
-            .expect("Cannot open UI database");
+        let conn = Connection::open("/data/lancache-ui.db").expect("Cannot open UI database");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS secondaries (
                 name TEXT PRIMARY KEY,
@@ -157,8 +202,9 @@ async fn main() -> Result<()> {
                 consumer_name TEXT NOT NULL UNIQUE,
                 registered_at INTEGER NOT NULL,
                 last_seen INTEGER
-            );"
-        ).expect("Cannot init database schema");
+            );",
+        )
+        .expect("Cannot init database schema");
         Mutex::new(conn)
     };
 
@@ -180,7 +226,8 @@ async fn main() -> Result<()> {
             &state.docker,
             &state.config.nats_service,
             vec!["kill", "-HUP", "1"],
-        ).await;
+        )
+        .await;
     }
 
     let app = Router::new()
@@ -190,7 +237,10 @@ async fn main() -> Result<()> {
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
         .route("/dhcp/subnet/remove", post(routes::dhcp::remove_subnet))
         .route("/dhcp/static/add", post(routes::dhcp::add_reservation))
-        .route("/dhcp/static/remove", post(routes::dhcp::remove_reservation))
+        .route(
+            "/dhcp/static/remove",
+            post(routes::dhcp::remove_reservation),
+        )
         .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
@@ -198,18 +248,37 @@ async fn main() -> Result<()> {
         .route("/domains/ssl/add", post(routes::domains::add_ssl))
         .route("/domains/ssl/remove", post(routes::domains::remove_ssl))
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
-        .route("/domains/lan/remove", post(routes::domains::remove_lan_record))
-        .route("/domains/aaaa-filter", post(routes::domains::toggle_aaaa_filter))
+        .route(
+            "/domains/lan/remove",
+            post(routes::domains::remove_lan_record),
+        )
+        .route(
+            "/domains/aaaa-filter",
+            post(routes::domains::toggle_aaaa_filter),
+        )
         .route("/stats", get(routes::stats::stats_page))
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
-        .route("/api/secondary/register", post(routes::secondaries::register_secondary))
-        .route("/api/secondary/{name}", axum::routing::delete(routes::secondaries::remove_secondary))
-        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token))
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
+        .route(
+            "/api/secondary/register",
+            post(routes::secondaries::register_secondary),
+        )
+        .route(
+            "/api/secondary/{name}",
+            axum::routing::delete(routes::secondaries::remove_secondary),
+        )
+        .route(
+            "/api/secondary/{name}/rotate-token",
+            post(routes::secondaries::rotate_token),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            basic_auth,
+        ))
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
