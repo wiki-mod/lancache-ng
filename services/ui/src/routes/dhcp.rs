@@ -98,6 +98,7 @@ pub struct RemoveReservationForm {
 pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
     ctx.insert("active_page", "dhcp");
+    ctx.insert("csrf_token", &state.csrf_token);
     ctx.insert("dhcp_api_url", &state.config.dhcp_api_url);
     crate::routes::insert_csrf_token(&mut ctx, &state);
 
