@@ -155,15 +155,20 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to container inspect + restart only
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  # socket-proxy provides scoped Docker API access for UI and watchdog only.
+  # CONTAINERS=1 + EXEC=1 + POST=1 permits container inspect/restart/exec
+  # without granting image, volume, network, or host-management endpoints.
+  # It is isolated on docker-api so other services cannot reach its EXEC-enabled API.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       CONTAINERS: "1"
+      EXEC: "1"
       POST: "1"
+    networks:
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -190,6 +195,9 @@ services:
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -197,17 +205,22 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+
   # ── Admin UI ───────────────────────────────────────────────────────────────
+  # UI is LAN-reachable by default for the quickstart workflow. Password protection
+  # remains optional, but is recommended on shared or untrusted networks. Set
+  # UI_BIND_IP=127.0.0.1 to restrict access to the host. Direct Docker socket mount
+  # removed; Docker operations are proxied through the isolated docker-api network.
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - proxy-logs:/var/log/nginx:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
-      - "${IP_STANDARD}:8080:8080"
+      - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -230,6 +243,10 @@ services:
       - proxy
       - netdata
       - nats
+      - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -274,6 +291,10 @@ services:
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
+
+networks:
+  docker-api:
+    internal: true
 
 volumes:
   proxy-logs:
