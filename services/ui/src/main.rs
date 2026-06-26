@@ -60,10 +60,10 @@ async fn basic_auth(
             let mut it = creds.splitn(2, ':');
             let provided_user = it.next()?;
             let provided_pass = it.next()?;
-            Some(
-                provided_user.as_bytes().ct_eq(user.as_bytes()).into()
-                    && provided_pass.as_bytes().ct_eq(pass.as_bytes()).into()
-            )
+            Some(bool::from(
+                provided_user.as_bytes().ct_eq(user.as_bytes())
+                    & provided_pass.as_bytes().ct_eq(pass.as_bytes()),
+            ))
         })
         .unwrap_or(false);
 
