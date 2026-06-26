@@ -144,6 +144,16 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::from_env();
 
+    // SECONDARY_REGISTRATION_TOKEN must be non-empty; an empty token allows
+    // unauthenticated registration (empty string matches empty string).
+    if cfg.secondary_registration_token.is_empty() {
+        tracing::error!(
+            "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
+             Generate one with: openssl rand -hex 32"
+        );
+        std::process::exit(1);
+    }
+
     // Auth is optional: only activate if both vars are non-empty.
     let auth_enabled = cfg.auth_user.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
         && cfg.auth_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
