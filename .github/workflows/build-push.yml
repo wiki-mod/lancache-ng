@@ -182,6 +182,9 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Prepare local Buildx cache
+        run: sudo mkdir -p /var/tmp/lancache-ng-buildx-cache
+
       - name: Build and push
         id: build
         timeout-minutes: 60
@@ -193,8 +196,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Retry Build and push
         id: retry-build
@@ -207,8 +210,16 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+
+      - name: Rotate local Buildx cache
+        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        run: |
+          sudo rm -rf /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          if [ -d /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new ]; then
+            sudo mv /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          fi
 
       - name: Attest image build provenance
         if: github.event_name != 'pull_request'
