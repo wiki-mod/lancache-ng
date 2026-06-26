@@ -62,7 +62,7 @@ jobs:
   build:
     needs: [validate-compose, test]
     runs-on: [self-hosted, linux, lancache]
-    timeout-minutes: 90
+    timeout-minutes: 150
     permissions:
       contents: read
       packages: write
