@@ -62,7 +62,7 @@ jobs:
   build:
     needs: [validate-compose, test]
     runs-on: [self-hosted, linux, lancache]
-    timeout-minutes: 90
+    timeout-minutes: 150
     permissions:
       contents: read
       packages: write
@@ -116,6 +116,21 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
+        id: build
+        timeout-minutes: 60
+        continue-on-error: true
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: ${{ matrix.context }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      - name: Retry Build and push
+        if: steps.build.outcome == 'failure'
         timeout-minutes: 60
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
