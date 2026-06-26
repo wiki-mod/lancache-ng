@@ -35,6 +35,8 @@ services:
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-0}
       - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER}
+      - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:-lazy}
+      - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
       - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
