@@ -445,6 +445,7 @@ fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
 fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let mut removed = false;
+    let sep = if content.contains("\r\n") { "\r\n" } else { "\n" };
 
     let new = content
         .lines()
@@ -456,11 +457,11 @@ fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
             keep
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join(sep);
 
     if removed {
         let new = if content.ends_with('\n') && !new.is_empty() {
-            format!("{new}\n")
+            format!("{new}{sep}")
         } else {
             new
         };
