@@ -18,29 +18,45 @@ token=""
 name=""
 proxy_ip=""
 
+usage() {
+  echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
+  echo ""
+  echo "Examples:"
+  echo "  $0 --primary http://192.168.1.5:9090 --token MyToken --name secondary-office --proxy-ip 192.168.1.5"
+}
+
+require_value() {
+  if [[ $# -lt 2 || -z "${2:-}" ]]; then
+    echo "Error: Missing value for $1"
+    usage
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --primary)
+      require_value "$@"
       primary="$2"
       shift 2
       ;;
     --token)
+      require_value "$@"
       token="$2"
       shift 2
       ;;
     --name)
+      require_value "$@"
       name="$2"
       shift 2
       ;;
     --proxy-ip)
+      require_value "$@"
       proxy_ip="$2"
       shift 2
       ;;
     *)
-      echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
-      echo ""
-      echo "Examples:"
-      echo "  $0 --primary http://192.168.1.5:9090 --token MyToken --name secondary-office --proxy-ip 192.168.1.5"
+      usage
       exit 1
       ;;
   esac
@@ -49,7 +65,7 @@ done
 # Validate arguments
 if [[ -z "$primary" || -z "$token" || -z "$name" || -z "$proxy_ip" ]]; then
   echo "Error: Missing required arguments"
-  echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
+  usage
   exit 1
 fi
 
