@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process::Command;
@@ -93,17 +94,26 @@ pub struct LogStats {
 }
 
 pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
+    if limit == 0 {
+        return vec![];
+    }
+
     let Ok(file) = File::open(path) else {
         return vec![];
     };
+
     let reader = BufReader::new(file);
     let re = log_regex();
+    let mut tail = VecDeque::with_capacity(limit);
 
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
-    let start = lines.len().saturating_sub(limit);
+    for line in reader.lines().filter_map(Result::ok) {
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
 
-    lines[start..]
-        .iter()
+    tail.iter()
         .filter_map(|line| parse_log_line(re, line))
         .collect()
 }
