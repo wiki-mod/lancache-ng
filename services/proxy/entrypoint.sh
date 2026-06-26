@@ -122,10 +122,13 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     # Returns 0 (true = needs regen) if the default cert:
     #   - is missing (#72)
+    #   - has no matching key (partial generation state)
     #   - has no SAN at all (CN-only cert from old deployments, #72)
     #   - has an IP SAN that does not match the current IP_SSL (operator changed IP)
     _default_cert_needs_regen() {
-        [ ! -f "$CERT_DIR/default.crt" ] && return 0
+        if [ ! -f "$CERT_DIR/default.crt" ] || [ ! -f "$CERT_DIR/default.key" ]; then
+            return 0
+        fi
         local san
         san=$(openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null)
         echo "$san" | grep -q "DNS:" || return 0
@@ -148,7 +151,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     fi
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
-        [ -f "$CERT_DIR/${domain}.crt" ] && continue
+        [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
 
         echo "[lancache] Generating cert for $domain..."
         if ! _sign_cert "$domain" \
