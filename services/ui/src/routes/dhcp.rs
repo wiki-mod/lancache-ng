@@ -321,7 +321,7 @@ fn kea_result(resp: &Value) -> Result<(), Box<dyn std::error::Error + Send + Syn
     }
 }
 
-// config-get → modify → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
+// config-get → modify → config-test → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
 async fn kea_config_modify<F>(
     state: &AppState,
     modify: F,
@@ -343,6 +343,13 @@ where
         .ok_or("config-get: missing arguments")?;
 
     modify(&mut config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+    let test_resp = kea_post(
+        state,
+        &json!({"command": "config-test", "service": ["dhcp4"], "arguments": config.clone()}),
+    )
+    .await?;
+    kea_result(&test_resp)?;
 
     let set_resp = kea_post(
         state,
