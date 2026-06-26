@@ -159,22 +159,21 @@ This document outlines the security threats that lancache-ng is designed to prot
 
 ---
 
-### Threat 8: Upstream TLS Verification Disabled
+### Threat 8: Upstream TLS Verification Bypass
 
-**Threat**: The proxy has `ssl_verify_off`, allowing a MitM attacker on the LAN to intercept proxy-to-CDN connections.
+**Threat**: If upstream TLS verification is disabled or misconfigured, an attacker who can intercept proxy-to-CDN traffic could impersonate the CDN and poison cached content.
 
-**Likelihood**: Low (requires LAN attacker with network access to proxy)
+**Likelihood**: Low (requires network-level interception between the proxy and CDN)
 
-**Impact**: Medium (upstream traffic could be intercepted)
-
-**Design rationale**: This is intentional. DNS spoofing causes upstream names to resolve to the proxy itself; verification would fail. The security model assumes a trusted LAN.
+**Impact**: High (malicious content could be cached and served to multiple clients)
 
 **Mitigation**:
-- Network segmentation (keep proxy on isolated network)
-- Firewall rules to restrict admin access
-- Monitor upstream traffic logs
+- nginx enables `proxy_ssl_verify on` for origin connections
+- nginx uses public upstream DNS resolvers, not the local spoofing DNS, to avoid resolving CDN origins back to the cache
+- The proxy container includes the Debian CA bundle and configures it with `proxy_ssl_trusted_certificate`
+- Monitor proxy logs for upstream certificate validation failures
 
-**Residual Risk**: Low (acceptable in trusted LAN environment; documented as intentional design)
+**Residual Risk**: Medium (certificate validation reduces MitM risk, but CDN compromise or trusted-CA misissuance remains possible)
 
 ---
 
