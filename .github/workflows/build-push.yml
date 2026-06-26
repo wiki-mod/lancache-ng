@@ -77,10 +77,15 @@ jobs:
         with:
           toolchain: stable
       - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        id: cache-cargo-audit
         with:
-          path: ~/.cargo/bin/cargo-audit
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
           key: ${{ runner.os }}-cargo-audit-0.21
       - name: Install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --version 0.21 --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
