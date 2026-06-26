@@ -31,7 +31,7 @@ Use this when moving to new hardware or when losing cached objects would be expe
 The automated manifest includes these paths when they exist:
 
 - install configuration: `.env`, `docker-compose.yml`, and `certs/`
-- quickstart Docker named volumes discovered from the running compose project, including PowerDNS and NATS volumes
+- quickstart Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state under `/srv/lancache/pdns-standard` and `/srv/lancache/pdns-ssl`
 - Kea data from `KEA_DATA_DIR` and `/srv/lancache/kea`
@@ -67,7 +67,7 @@ If Watchtower caused the update, remove `watchtower` from `COMPOSE_PROFILES` in 
 
 Test restores periodically on a spare host or VM:
 
-1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path.
+1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored `.env` are rewritten for migrations. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped.
 2. Start the stack.
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.

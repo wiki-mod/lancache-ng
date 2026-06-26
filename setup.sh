@@ -41,7 +41,7 @@ is_valid_ipv4() {
 }
 
 get_env_var() {
-    grep "^${1}=" "${2}" 2>/dev/null | head -1 | cut -d= -f2-
+    awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
 
 
@@ -114,7 +114,7 @@ compose_volume_names() {
     while IFS= read -r container; do
         [[ -n "$container" ]] || continue
         docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "$container"
-    done < <(cd "$install_dir" && docker compose ps -q 2>/dev/null) | sort -u
+    done < <(cd "$install_dir" && docker compose ps --all -q 2>/dev/null) | sort -u
 }
 
 backup_compose_volumes() {
@@ -134,7 +134,8 @@ backup_compose_volumes() {
 restore_compose_volumes() {
     local install_dir="$1" volume_root="$2" volume archive
     [[ -d "$volume_root" ]] || return 0
-    compose_stack_available "$install_dir" || return 0
+    compose_stack_available "$install_dir" \
+        || die "Backup contains Docker volume payloads, but Docker/compose is not available for $install_dir. Install Docker and restore again."
     while IFS= read -r archive; do
         volume="$(basename "$archive" .tar)"
         [[ -n "$volume" ]] || continue
@@ -165,6 +166,8 @@ cmd_backup() {
             *) install_dir="$1"; shift ;;
         esac
     done
+    install_dir=$(realpath -m "$install_dir")
+    backup_root=$(realpath -m "$backup_root")
     [[ -f "$install_dir/docker-compose.yml" && -f "$install_dir/.env" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     install_missing_tools tar rsync
@@ -177,7 +180,15 @@ cmd_backup() {
     old_umask=$(umask)
     umask 077
     mkdir -p "$dest/rootfs"
-    trap '[[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"; rm -rf "$dest"; umask "$old_umask"' RETURN
+    backup_cleanup() {
+        local status=$?
+        [[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"
+        rm -rf "$dest"
+        umask "$old_umask"
+        trap - EXIT
+        return "$status"
+    }
+    trap backup_cleanup EXIT
 
     print_step "Creating $mode backup"
     backup_manifest "$install_dir" "$mode" | sort -u > "$dest/manifest.txt"
@@ -218,23 +229,33 @@ EOF
     tar -C "$backup_root" -czf "$archive" "$stamp"
     chmod 600 "$archive"
     print_ok "Backup written: $archive"
+    backup_cleanup
 }
 
 cmd_restore() {
     local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
+    install_dir=$(realpath -m "$install_dir")
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     install_missing_tools tar rsync
 
-    local tmp root backup_dir archived_install rel_install stack_stopped=0
+    local tmp root backup_dir archived_install rel_install stack_stopped=0 path rel target
     tmp=$(mktemp -d)
-    trap '[[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"; rm -rf "$tmp"' RETURN
+    restore_cleanup() {
+        local status=$?
+        [[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"
+        rm -rf "$tmp"
+        trap - EXIT
+        return "$status"
+    }
+    trap restore_cleanup EXIT
     tar -C "$tmp" -xzf "$archive"
     root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs | head -1)
     [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
     backup_dir=$(dirname "$root")
     archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt" 2>/dev/null || true)
     archived_install="${archived_install:-/opt/lancache-ng}"
+    archived_install=$(realpath -m "$archived_install")
     rel_install="${archived_install#/}"
 
     compose_stack_stop "$install_dir"
@@ -244,11 +265,28 @@ cmd_restore() {
     if [[ -d "$root/$rel_install" ]]; then
         mkdir -p "$install_dir"
         rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/"
-        rm -rf "$root/${rel_install:?}"
+        if [[ "$archived_install" != "$install_dir" && -f "$install_dir/.env" ]]; then
+            sed -i "s#${archived_install}#${install_dir}#g" "$install_dir/.env"
+        fi
     fi
-    rsync -aH --numeric-ids "$root/" /
+    while IFS= read -r path; do
+        rel="${path#/}"
+        if [[ "$path" = "$archived_install" || "$path" = "$archived_install"/* ]]; then
+            continue
+        fi
+        [[ -e "$root/$rel" ]] || continue
+        target="/$rel"
+        if [[ -d "$root/$rel" ]]; then
+            mkdir -p "$target"
+            rsync -aH --numeric-ids "$root/$rel/" "$target/"
+        else
+            mkdir -p "$(dirname "$target")"
+            rsync -aH --numeric-ids "$root/$rel" "$(dirname "$target")/"
+        fi
+    done < "$backup_dir/manifest.txt"
     restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
     print_ok "Files restored from $archive"
+    restore_cleanup
 }
 
 # ── update subcommand ─────────────────────────────────────────────────────────
