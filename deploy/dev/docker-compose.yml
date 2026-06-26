@@ -151,7 +151,7 @@ services:
       - DHCP_DNS_SERVER_IP=172.28.0.3
       - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
-      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN:?set KEA_CTRL_TOKEN in .env}
+      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
     volumes:
       - kea-data:/var/lib/kea    # runtime config + leases persist across restarts
     ports:
@@ -244,7 +244,7 @@ services:
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://dhcp:8000
-      - DHCP_API_TOKEN=${KEA_CTRL_TOKEN:?set KEA_CTRL_TOKEN in .env}
+      - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
