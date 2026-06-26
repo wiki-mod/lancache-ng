@@ -17,7 +17,6 @@ updates:
     groups:
       rust-deps:
         patterns: ["*"]
-
   # Rust (DNS NATS subscriber)
   - package-ecosystem: cargo
     directory: /services/dns/nats-subscriber

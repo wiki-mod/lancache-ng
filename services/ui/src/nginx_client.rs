@@ -106,7 +106,10 @@ pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
     let re = log_regex();
     let mut tail = VecDeque::with_capacity(limit);
 
-    for line in reader.lines().filter_map(Result::ok) {
+    for line_result in reader.lines() {
+        let Ok(line) = line_result else {
+            continue;
+        };
         if tail.len() == limit {
             tail.pop_front();
         }
@@ -126,7 +129,10 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     for path in [standard_log, ssl_log] {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);
-        for line in reader.lines().filter_map(|l| l.ok()) {
+        for line_result in reader.lines() {
+            let Ok(line) = line_result else {
+                continue;
+            };
             let Some(caps) = re.captures(&line) else {
                 continue;
             };

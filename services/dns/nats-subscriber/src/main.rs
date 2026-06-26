@@ -115,21 +115,25 @@ async fn main() {
     println!("Stream LANCACHE_DNS ready");
 
     // Create or get durable pull consumer
-    let consumer: async_nats::jetstream::consumer::Consumer<async_nats::jetstream::consumer::pull::Config> =
-        match _stream.get_or_create_consumer(
+    let consumer: async_nats::jetstream::consumer::Consumer<
+        async_nats::jetstream::consumer::pull::Config,
+    > = match _stream
+        .get_or_create_consumer(
             &nats_consumer,
             async_nats::jetstream::consumer::pull::Config {
                 durable_name: Some(nats_consumer.clone()),
                 filter_subject: "lancache.dns.>".to_string(),
                 ..Default::default()
-            }
-        ).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to create consumer: {}", e);
-                std::process::exit(1);
-            }
-        };
+            },
+        )
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to create consumer: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     println!("Created durable subscriber: {}", nats_consumer);
 
@@ -158,7 +162,8 @@ async fn main() {
     const MAX_BACKOFF_SECS: u64 = 30;
 
     loop {
-        let fetch_result = consumer.fetch()
+        let fetch_result = consumer
+            .fetch()
             .max_messages(10)
             .expires(Duration::from_secs(5))
             .messages()
@@ -217,7 +222,11 @@ async fn main() {
     }
 }
 
-async fn handle_message(msg: &async_nats::jetstream::Message, pdns_api_key: &str, http_client: &Arc<Client>) -> bool {
+async fn handle_message(
+    msg: &async_nats::jetstream::Message,
+    pdns_api_key: &str,
+    http_client: &Arc<Client>,
+) -> bool {
     let subject = msg.subject.as_ref();
 
     if subject.starts_with("lancache.dns.heartbeat") {
@@ -237,13 +246,20 @@ async fn handle_message(msg: &async_nats::jetstream::Message, pdns_api_key: &str
     true
 }
 
-async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &str, http_client: &Arc<Client>) -> bool {
+async fn handle_dns_record(
+    msg: &async_nats::jetstream::Message,
+    pdns_api_key: &str,
+    http_client: &Arc<Client>,
+) -> bool {
     let record: DNSRecord = match serde_json::from_slice(&msg.payload) {
         Ok(r) => r,
         Err(e) => {
             // P2 fix: Ack unrecoverable parse failures (e.g., malformed delete events missing ttl/records).
             // Nacking would cause infinite retry of malformed messages.
-            eprintln!("Acking unrecoverable DNS record parse failure (malformed message): {}", e);
+            eprintln!(
+                "Acking unrecoverable DNS record parse failure (malformed message): {}",
+                e
+            );
             return true;
         }
     };
@@ -258,7 +274,10 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         action => {
             // P2 fix: Ack unrecoverable parse failures (unknown action).
             // Nacking would cause infinite retry of malformed messages.
-            eprintln!("Acking unrecoverable DNS record parse failure (unknown action: {})", action);
+            eprintln!(
+                "Acking unrecoverable DNS record parse failure (unknown action: {})",
+                action
+            );
             return true;
         }
     };
@@ -280,7 +299,10 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         Err(e) => {
             // P2 fix: Ack unrecoverable serialization failures.
             // Nacking would cause infinite retry of malformed messages.
-            eprintln!("Acking unrecoverable DNS record serialization failure (malformed message): {}", e);
+            eprintln!(
+                "Acking unrecoverable DNS record serialization failure (malformed message): {}",
+                e
+            );
             return true;
         }
     };
@@ -310,7 +332,8 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
             } else if resp.status().is_client_error() {
                 // P2 fix: Ack on 4xx client errors (invalid data, permanent failure).
                 // Retrying won't help; the record data itself is malformed.
-                eprintln!("PDNS client error (acking, won't retry): {} {} for zone={} name={} type={}",
+                eprintln!(
+                    "PDNS client error (acking, won't retry): {} {} for zone={} name={} type={}",
                     resp.status(),
                     resp.status().canonical_reason().unwrap_or(""),
                     record.zone,
@@ -320,7 +343,8 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
                 true
             } else {
                 // 5xx or other server errors: retry by returning false
-                eprintln!("PDNS server error (will retry): {} {} for zone={} name={} type={}",
+                eprintln!(
+                    "PDNS server error (will retry): {} {} for zone={} name={} type={}",
                     resp.status(),
                     resp.status().canonical_reason().unwrap_or(""),
                     record.zone,
@@ -369,7 +393,11 @@ async fn handle_dns_flush(pdns_api_key: &str, http_client: &Arc<Client>) -> bool
     }
 }
 
-async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http_client: Arc<Client>) {
+async fn reconciler(
+    js: async_nats::jetstream::Context,
+    pdns_api_key: &str,
+    http_client: Arc<Client>,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     loop {
@@ -451,7 +479,14 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
                     }
                 }
 
-                println!("Reconciler: published {} records", zone_info.rrsets.iter().filter(|r| r.record_type != "SOA" && r.record_type != "NS").count());
+                println!(
+                    "Reconciler: published {} records",
+                    zone_info
+                        .rrsets
+                        .iter()
+                        .filter(|r| r.record_type != "SOA" && r.record_type != "NS")
+                        .count()
+                );
             }
             Err(e) => {
                 eprintln!("Reconciler: error fetching zone: {}", e);
@@ -475,7 +510,8 @@ mod tests {
                 {"name": "test.lan.", "type": "SOA", "ttl": 3600, "records": [{"content": "ns1.lan. admin.lan. 1 3600 900 604800 60", "disabled": false}]}
             ]
         }"#;
-        let info: ZoneInfo = serde_json::from_str(json).expect("ZoneInfo must deserialize without changetype");
+        let info: ZoneInfo =
+            serde_json::from_str(json).expect("ZoneInfo must deserialize without changetype");
         assert_eq!(info.rrsets.len(), 2);
         assert!(info.rrsets[0].changetype.is_none());
     }
