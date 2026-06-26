@@ -95,7 +95,7 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-0.21
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --version 0.21 --locked
+        run: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
