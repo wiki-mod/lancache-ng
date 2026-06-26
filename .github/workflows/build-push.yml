@@ -100,6 +100,10 @@ jobs:
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
   container-scan:
+    # Full image vulnerability scans are intentionally limited to trusted refs.
+    # They build every service image and routinely dominate PR runtime on
+    # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
+    if: github.event_name != 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache]
     strategy:
@@ -134,7 +138,7 @@ jobs:
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} || true
 
   build:
-    needs: [validate-compose, test, cargo-audit, container-scan]
+    needs: [validate-compose, test, cargo-audit]
     runs-on: [self-hosted, linux, lancache]
     timeout-minutes: 150
     permissions:
@@ -167,6 +171,7 @@ jobs:
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -197,7 +202,7 @@ jobs:
       - name: Build and push
         id: build
         timeout-minutes: 60
-        continue-on-error: true
+        continue-on-error: ${{ github.event_name != 'pull_request' }}
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: ${{ matrix.context }}
@@ -210,7 +215,7 @@ jobs:
 
       - name: Retry Build and push
         id: retry-build
-        if: steps.build.outcome == 'failure'
+        if: github.event_name != 'pull_request' && steps.build.outcome == 'failure'
         timeout-minutes: 60
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
