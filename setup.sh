@@ -515,6 +515,9 @@ CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
+# Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
+NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+
 # For Admin-UI (GB as number for progress bar)
 STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}

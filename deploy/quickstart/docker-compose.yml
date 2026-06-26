@@ -34,6 +34,7 @@ services:
       - IP_STANDARD=${IP_STANDARD}
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-0}
+      - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
       - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
