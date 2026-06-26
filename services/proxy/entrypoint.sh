@@ -120,13 +120,19 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         rm -f /tmp/lancache-cert.csr
     }
 
-    # Returns 0 (true = needs regen) if the default cert is missing or lacks a SAN (#72).
-    # This ensures existing deployments with a CN-only default.crt get it regenerated.
+    # Returns 0 (true = needs regen) if the default cert:
+    #   - is missing (#72)
+    #   - has no SAN at all (CN-only cert from old deployments, #72)
+    #   - has an IP SAN that does not match the current IP_SSL (operator changed IP)
     _default_cert_needs_regen() {
         [ ! -f "$CERT_DIR/default.crt" ] && return 0
-        openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null \
-            | grep -q "DNS:" && return 1
-        return 0
+        local san
+        san=$(openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null)
+        echo "$san" | grep -q "DNS:" || return 0
+        if [ -n "${IP_SSL}" ]; then
+            echo "$san" | grep -q "IP Address:${IP_SSL}" || return 0
+        fi
+        return 1
     }
 
     if _default_cert_needs_regen; then
