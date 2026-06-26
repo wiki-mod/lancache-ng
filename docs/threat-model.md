@@ -49,7 +49,7 @@ This document outlines the security threats that lancache-ng is designed to prot
 
 **Mitigation**:
 - nginx validates upstream TLS certificates via `proxy_ssl_verify` (enabled for real CDN connections)
-- Use real DNS (`8.8.8.8`) for upstream resolution, not the spoofed DNS
+- Use real DNS (`NGINX_UPSTREAM_RESOLVER`, default `8.8.8.8 8.8.4.4`) for upstream resolution, not the spoofed DNS
 - Monitor cache hit rates for anomalies
 
 **Residual Risk**: Medium (requires external compromise, not a local design flaw)

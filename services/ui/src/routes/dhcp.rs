@@ -11,6 +11,13 @@ use tera::Context;
 
 // ─── Data Structures ───
 
+#[derive(Debug)]
+enum DhcpCheckStatus {
+    Found(String),
+    NotFound,
+    Unavailable(String),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Subnet {
     pub id: u32,
@@ -250,11 +257,20 @@ pub async fn remove_reservation(
 }
 
 pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let conflict_result = check_other_dhcp(&state).await;
-    Json(json!({
-        "dhcp_found": conflict_result.is_some(),
-        "server_ip": conflict_result
-    }))
+    let status = check_other_dhcp(&state).await;
+    match status {
+        DhcpCheckStatus::Found(ip) => Json(json!({
+            "status": "found",
+            "output": ip
+        })),
+        DhcpCheckStatus::NotFound => Json(json!({
+            "status": "not_found"
+        })),
+        DhcpCheckStatus::Unavailable(reason) => Json(json!({
+            "status": "unavailable",
+            "reason": reason
+        })),
+    }
 }
 
 // ─── Kea API Core ───
@@ -294,7 +310,7 @@ fn kea_result(resp: &Value) -> Result<(), Box<dyn std::error::Error + Send + Syn
     }
 }
 
-// config-get → modify → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
+// config-get → modify → config-test → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
 async fn kea_config_modify<F>(
     state: &AppState,
     modify: F,
@@ -302,7 +318,11 @@ async fn kea_config_modify<F>(
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
 {
-    let resp = kea_post(state, &json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let mut config = resp
@@ -313,6 +333,13 @@ where
 
     modify(&mut config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
+    let test_resp = kea_post(
+        state,
+        &json!({"command": "config-test", "service": ["dhcp4"], "arguments": config.clone()}),
+    )
+    .await?;
+    kea_result(&test_resp)?;
+
     let set_resp = kea_post(
         state,
         &json!({"command": "config-set", "service": ["dhcp4"], "arguments": config}),
@@ -320,8 +347,11 @@ where
     .await?;
     kea_result(&set_resp)?;
 
-    let write_resp =
-        kea_post(state, &json!({"command": "config-write", "service": ["dhcp4"]})).await?;
+    let write_resp = kea_post(
+        state,
+        &json!({"command": "config-write", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&write_resp)?;
 
     Ok(())
@@ -332,7 +362,11 @@ where
 async fn fetch_subnets(
     state: &AppState,
 ) -> Result<Vec<Subnet>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp = kea_post(state, &json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let subnets_json = resp
@@ -359,9 +393,8 @@ async fn fetch_subnets(
                 s.get("option-data")
                     .and_then(|od| od.as_array())
                     .and_then(|arr| {
-                        arr.iter().find(|o| {
-                            o.get("name").and_then(|v| v.as_str()) == Some(name)
-                        })
+                        arr.iter()
+                            .find(|o| o.get("name").and_then(|v| v.as_str()) == Some(name))
                     })
                     .and_then(|o| o.get("data"))
                     .and_then(|v| v.as_str())
@@ -398,8 +431,11 @@ async fn fetch_subnets(
 async fn fetch_leases(
     state: &AppState,
 ) -> Result<Vec<Lease>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp =
-        kea_post(state, &json!({"command": "lease4-get-all", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "lease4-get-all", "service": ["dhcp4"]}),
+    )
+    .await?;
 
     let mut leases = Vec::new();
     if let Some(lease_array) = resp
@@ -409,19 +445,10 @@ async fn fetch_leases(
         .and_then(|l| l.as_array())
     {
         for lease in lease_array {
-            let cltt = lease
-                .get("cltt")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let valid_lft = lease
-                .get("valid-lft")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let cltt = lease.get("cltt").and_then(|v| v.as_i64()).unwrap_or(0);
+            let valid_lft = lease.get("valid-lft").and_then(|v| v.as_i64()).unwrap_or(0);
             leases.push(Lease {
-                subnet_id: lease
-                    .get("subnet-id")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
+                subnet_id: lease.get("subnet-id").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 ip: lease
                     .get("ip-address")
                     .and_then(|v| v.as_str())
@@ -538,8 +565,8 @@ async fn call_kea_reservation_del(
     kea_result(&resp)
 }
 
-async fn check_other_dhcp(state: &AppState) -> Option<String> {
-    let output = exec_in_container(
+async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
+    let output = match exec_in_container(
         &state.docker,
         "dhcp",
         vec![
@@ -553,7 +580,17 @@ async fn check_other_dhcp(state: &AppState) -> Option<String> {
         ],
     )
     .await
-    .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            // Check if the error is due to nmap not being found
+            let err_msg = e.to_string();
+            if err_msg.contains("nmap") || err_msg.contains("not found") || err_msg.contains("No such file") {
+                return DhcpCheckStatus::Unavailable("nmap is not installed in the DHCP container".to_string());
+            }
+            return DhcpCheckStatus::Unavailable(format!("Failed to execute DHCP check: {}", err_msg));
+        }
+    };
 
     // Parse "Server Identifier: 192.168.1.1" from nmap output
     for line in output.lines() {
@@ -561,11 +598,11 @@ async fn check_other_dhcp(state: &AppState) -> Option<String> {
         if let Some(rest) = line.strip_prefix("Server Identifier:") {
             let ip = rest.trim().to_string();
             if !ip.is_empty() {
-                return Some(ip);
+                return DhcpCheckStatus::Found(ip);
             }
         }
     }
-    None
+    DhcpCheckStatus::NotFound
 }
 
 // ─── Validators ───
@@ -593,17 +630,14 @@ fn is_valid_cidr(cidr: &str) -> bool {
     if parts.len() != 2 {
         return false;
     }
-    is_valid_ip(parts[0]) && parts[1].parse::<u8>().ok().map_or(false, |n| n <= 32)
+    is_valid_ip(parts[0]) && parts[1].parse::<u8>().ok().is_some_and(|n| n <= 32)
 }
 
 fn is_valid_ip(ip: &str) -> bool {
-    ip.split('.')
-        .filter_map(|o| o.parse::<u8>().ok())
-        .count()
-        == 4
+    ip.split('.').filter_map(|o| o.parse::<u8>().ok()).count() == 4
 }
 
 fn is_valid_mac(mac: &str) -> bool {
-    let cleaned = mac.to_uppercase().replace(':', "").replace('-', "");
+    let cleaned = mac.to_uppercase().replace([':', '-'], "");
     cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit())
 }
