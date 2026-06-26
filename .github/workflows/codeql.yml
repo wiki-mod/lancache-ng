@@ -15,7 +15,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache]  # Deine Runner
     timeout-minutes: 120
     strategy:
       fail-fast: false
