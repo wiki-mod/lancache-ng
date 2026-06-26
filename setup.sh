@@ -535,8 +535,8 @@ fi
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
-printf "  Admin-UI runs on http://127.0.0.1:8080 — accessible from this host (localhost only by default).\n"
-printf "  Without a password, anyone on the LAN can restart containers and change domains.\n\n"
+printf "  Admin-UI runs on http://127.0.0.1:8080 — accessible from this host only by default.\n"
+printf "  To expose it on the LAN for remote access or secondary registration, set UI_BIND_IP=%s in .env and enable password protection.\n\n" "$IP_STANDARD"
 
 ask "Protect Admin-UI with password? [y/N]" "N"
 UI_AUTH_USER=""
@@ -552,7 +552,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
     print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
     printf "\n"
 else
-    print_ok "No password protection — Admin-UI public on LAN"
+    print_ok "No password protection — Admin-UI remains localhost-only by default"
 fi
 
 # ── 8. Writing .env ───────────────────────────────────────────────────────────
@@ -658,6 +658,10 @@ COMPOSE_PROFILES=${COMPOSE_PROFILES}
 # Empty = no password protection
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
+
+# Bind address for Admin-UI. Default 127.0.0.1 keeps it local to this host.
+# For LAN access or secondary registration, set to ${IP_STANDARD} and enable auth.
+UI_BIND_IP=127.0.0.1
 EOF
 print_ok ".env written: $INSTALL_DIR/.env"
 

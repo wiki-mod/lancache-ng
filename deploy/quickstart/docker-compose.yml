@@ -155,14 +155,16 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
-  # socket-proxy provides restricted access to Docker API for UI and watchdog.
-  # CONTAINERS=1 + POST=1: allows container inspect, restart, exec — but NOT image or volume ops.
+  # socket-proxy provides scoped Docker API access for UI and watchdog.
+  # CONTAINERS=1 + EXEC=1 + POST=1 permits container inspect/restart/exec
+  # without granting image, volume, network, or host-management endpoints.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       CONTAINERS: "1"
+      EXEC: "1"
       POST: "1"
     restart: always
     labels:
@@ -199,11 +201,11 @@ services:
 
 
   # ── Admin UI ───────────────────────────────────────────────────────────────
-  # UI is bound to the LAN IP (${IP_STANDARD}:8080) so secondary hosts can
-  # reach the registration endpoint, but it is not exposed on WAN interfaces.
+  # UI is bound to localhost by default to avoid exposing unauthenticated Docker
+  # controls on the LAN. Set UI_BIND_IP=${IP_STANDARD} only when remote access or
+  # secondary registration is needed, and always set UI_AUTH_USER + UI_AUTH_PASSWORD.
   # Direct Docker socket mount removed. Docker operations are proxied through
-  # docker-socket-proxy (CONTAINERS+POST: allows restart/exec on containers only).
-  # Always set UI_AUTH_USER + UI_AUTH_PASSWORD for password protection.
+  # docker-socket-proxy with scoped container/exec permissions.
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
@@ -211,7 +213,7 @@ services:
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
-      - "${IP_STANDARD}:8080:8080"
+      - "${UI_BIND_IP:-127.0.0.1}:8080:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
