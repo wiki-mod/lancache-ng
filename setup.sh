@@ -68,7 +68,6 @@ backup_manifest() {
     kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
 
     printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
-    [[ -d "$install_dir/deploy" ]] && printf '%s\n' "$install_dir/deploy"
     [[ -d /srv/lancache/pdns-standard ]] && printf '%s\n' /srv/lancache/pdns-standard
     [[ -d /srv/lancache/pdns-ssl ]] && printf '%s\n' /srv/lancache/pdns-ssl
     [[ -d /srv/lancache/kea ]] && printf '%s\n' /srv/lancache/kea
@@ -81,6 +80,79 @@ backup_manifest() {
         [[ -d /srv/lancache/cache ]] && printf '%s\n' /srv/lancache/cache
     fi
     true
+}
+
+path_is_inside() {
+    local child="$1" parent="$2"
+    child=$(realpath -m "$child")
+    parent=$(realpath -m "$parent")
+    [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
+}
+
+compose_stack_available() {
+    local install_dir="$1"
+    [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1
+}
+
+compose_stack_stop() {
+    local install_dir="$1"
+    compose_stack_available "$install_dir" || return 0
+    print_step "Stopping stack for consistent backup/restore"
+    (cd "$install_dir" && docker compose stop) || print_warn "docker compose stop failed — continuing"
+}
+
+compose_stack_start() {
+    local install_dir="$1"
+    compose_stack_available "$install_dir" || return 0
+    print_step "Starting stack"
+    (cd "$install_dir" && docker compose up -d) || print_warn "docker compose up failed — start the stack manually"
+}
+
+compose_volume_names() {
+    local install_dir="$1" container
+    compose_stack_available "$install_dir" || return 0
+    while IFS= read -r container; do
+        [[ -n "$container" ]] || continue
+        docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "$container"
+    done < <(cd "$install_dir" && docker compose ps -q 2>/dev/null) | sort -u
+}
+
+backup_compose_volumes() {
+    local install_dir="$1" volume_root="$2" volume
+    compose_stack_available "$install_dir" || return 0
+    mkdir -p "$volume_root"
+    while IFS= read -r volume; do
+        [[ -n "$volume" ]] || continue
+        print_ok "Including Docker volume: $volume"
+        docker run --rm \
+            -v "${volume}:/volume:ro" \
+            -v "${volume_root}:/backup" \
+            alpine sh -c 'cd /volume && tar -cpf "/backup/$1.tar" .' sh "$volume"
+    done < <(compose_volume_names "$install_dir")
+}
+
+restore_compose_volumes() {
+    local install_dir="$1" volume_root="$2" volume archive
+    [[ -d "$volume_root" ]] || return 0
+    compose_stack_available "$install_dir" || return 0
+    while IFS= read -r archive; do
+        volume="$(basename "$archive" .tar)"
+        [[ -n "$volume" ]] || continue
+        print_ok "Restoring Docker volume: $volume"
+        docker volume create "$volume" >/dev/null
+        docker run --rm \
+            -v "${volume}:/volume" \
+            -v "${volume_root}:/backup:ro" \
+            alpine sh -c 'rm -rf /volume/* /volume/..?* /volume/.[!.]* 2>/dev/null || true; cd /volume && tar -xpf "/backup/$1.tar"' sh "$volume"
+    done < <(find "$volume_root" -maxdepth 1 -type f -name '*.tar' | sort)
+}
+
+record_image_revisions() {
+    local install_dir="$1" output="$2"
+    compose_stack_available "$install_dir" || return 0
+    (cd "$install_dir" && docker compose images --format json > "$output") 2>/dev/null \
+        || (cd "$install_dir" && docker compose images > "$output") 2>/dev/null \
+        || print_warn "Could not record current image revisions"
 }
 
 cmd_backup() {
@@ -97,33 +169,53 @@ cmd_backup() {
         || die "No stack found in $install_dir. Run ./setup.sh first."
     install_missing_tools tar rsync
 
-    local stamp dest archive manifest rel
+    local stamp dest archive rel path old_umask stack_stopped=0
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
     archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
+    mkdir -p "$backup_root"
+    old_umask=$(umask)
+    umask 077
     mkdir -p "$dest/rootfs"
+    trap '[[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"; rm -rf "$dest"; umask "$old_umask"' RETURN
 
     print_step "Creating $mode backup"
     backup_manifest "$install_dir" "$mode" | sort -u > "$dest/manifest.txt"
     while IFS= read -r path; do
         [[ -e "$path" ]] || continue
+        if path_is_inside "$backup_root" "$path"; then
+            die "Backup destination must not be inside included path: $path"
+        fi
+    done < "$dest/manifest.txt"
+
+    record_image_revisions "$install_dir" "$dest/image-revisions.txt"
+    compose_stack_stop "$install_dir"
+    stack_stopped=1
+
+    while IFS= read -r path; do
+        [[ -e "$path" ]] || continue
         rel="${path#/}"
-        mkdir -p "$dest/rootfs/$(dirname "$rel")"
-        rsync -aH --numeric-ids "$path" "$dest/rootfs/$rel"
+        if [[ -d "$path" ]]; then
+            mkdir -p "$dest/rootfs/$rel"
+            rsync -aH --numeric-ids "$path/" "$dest/rootfs/$rel/"
+        else
+            mkdir -p "$dest/rootfs/$(dirname "$rel")"
+            rsync -aH --numeric-ids "$path" "$dest/rootfs/$(dirname "$rel")/"
+        fi
         print_ok "Included: $path"
     done < "$dest/manifest.txt"
+    backup_compose_volumes "$install_dir" "$dest/docker-volumes"
 
     cat > "$dest/README.txt" <<EOF
 LanCache-NG backup created at $stamp UTC
 Mode: $mode
 Install directory: $install_dir
 
-Config backups include text/configuration and runtime databases needed for update rollback.
+Config backups include text/configuration, Docker named volumes, and runtime databases needed for update rollback.
 Full backups additionally include cache directories, which can be very large.
 Restore with: ./setup.sh restore $archive $install_dir
 EOF
     tar -C "$backup_root" -czf "$archive" "$stamp"
-    rm -rf "$dest"
     chmod 600 "$archive"
     print_ok "Backup written: $archive"
 }
@@ -134,29 +226,29 @@ cmd_restore() {
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     install_missing_tools tar rsync
 
-    local tmp root
+    local tmp root backup_dir archived_install rel_install stack_stopped=0
     tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' RETURN
+    trap '[[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"; rm -rf "$tmp"' RETURN
     tar -C "$tmp" -xzf "$archive"
     root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs | head -1)
     [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
+    backup_dir=$(dirname "$root")
+    archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt" 2>/dev/null || true)
+    archived_install="${archived_install:-/opt/lancache-ng}"
+    rel_install="${archived_install#/}"
 
-    if [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1; then
-        print_step "Stopping stack before restore"
-        (cd "$install_dir" && docker compose down) || print_warn "docker compose down failed — continuing restore"
-    fi
+    compose_stack_stop "$install_dir"
+    stack_stopped=1
 
     print_step "Restoring backup"
-    rsync -aH --numeric-ids "$root/" /
-    print_ok "Files restored from $archive"
-
-    if [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1; then
-        print_step "Starting stack after restore"
-        (cd "$install_dir" && docker compose up -d)
-        print_ok "Stack started"
-    else
-        print_warn "Docker not available or compose file missing — start the stack manually after restore"
+    if [[ -d "$root/$rel_install" ]]; then
+        mkdir -p "$install_dir"
+        rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/"
+        rm -rf "$root/${rel_install:?}"
     fi
+    rsync -aH --numeric-ids "$root/" /
+    restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
+    print_ok "Files restored from $archive"
 }
 
 # ── update subcommand ─────────────────────────────────────────────────────────

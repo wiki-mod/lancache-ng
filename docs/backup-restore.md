@@ -20,7 +20,7 @@ The script verifies that required archive tools are present before running backu
 
 Use this before updates and for rollback. It is intentionally small and includes configuration, certificates, secrets, and service runtime databases where present. It does **not** include cache payload directories because cache content can be very large and can usually be rebuilt by clients downloading content again.
 
-The `update` command automatically creates this config backup before pulling repository changes or images. This protects users from failed automatic/manual updates without forcing them to archive hundreds of GiB or TiB of cache data.
+The `update` command automatically creates this config backup before pulling repository changes or images. The backup records the currently running image revisions before `docker compose pull` so operators have the information needed to roll back an image regression. This protects users from failed automatic/manual updates without forcing them to archive hundreds of GiB or TiB of cache data.
 
 ### `--full` backup
 
@@ -30,11 +30,15 @@ Use this when moving to new hardware or when losing cached objects would be expe
 
 The automated manifest includes these paths when they exist:
 
-- install configuration: `.env`, `docker-compose.yml`, `certs/`, and an install-local `deploy/` directory
+- install configuration: `.env`, `docker-compose.yml`, and `certs/`
+- quickstart Docker named volumes discovered from the running compose project, including PowerDNS and NATS volumes
+- an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state under `/srv/lancache/pdns-standard` and `/srv/lancache/pdns-ssl`
 - Kea data from `KEA_DATA_DIR` and `/srv/lancache/kea`
 - NATS state and generated config under `/srv/lancache/nats` and `/srv/lancache/nats-conf`
 - in `--full` mode only, cache directories from `CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`, and `/srv/lancache/cache`
+
+The backup command stops the compose stack before copying mutable databases and restarts it afterward. Staging directories are created with restrictive permissions and cleaned up automatically if a copy or archive operation fails. The command rejects backup destinations that sit inside a path being backed up, which prevents recursive copies when using cache disks as backup storage.
 
 ## Example rollback after a failed update
 
@@ -57,13 +61,13 @@ The automated manifest includes these paths when they exist:
    sudo docker compose ps
    ```
 
-If Watchtower caused the update, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same image is not pulled immediately.
+If Watchtower caused the update, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same image is not pulled immediately. If the failure was caused by a bad `latest` image, inspect the restored backup's `image-revisions.txt` and pin or pull the previous image revision before restarting the affected service.
 
 ## Restore testing
 
 Test restores periodically on a spare host or VM:
 
-1. Restore the backup.
+1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path.
 2. Start the stack.
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.
