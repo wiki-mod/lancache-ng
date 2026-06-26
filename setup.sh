@@ -1,6 +1,6 @@
 #!/bin/bash
 # LanCache-NG — Guided setup script
-# Usage: ./setup.sh [update|debug] [install-dir]
+# Usage: ./setup.sh [update|debug|backup|restore] [options]
 set -euo pipefail
 export LANG=C LC_ALL=C
 
@@ -44,12 +44,130 @@ get_env_var() {
     grep "^${1}=" "${2}" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
+
+install_missing_tools() {
+    local -a missing=() tools=("$@")
+    local tool
+    for tool in "${tools[@]}"; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    (( ${#missing[@]} == 0 )) && return 0
+    print_warn "Missing required tool(s): ${missing[*]} — installing now..."
+    command -v apt-get >/dev/null 2>&1 || die "Cannot install missing tools automatically; install: ${missing[*]}"
+    apt-get update -y
+    apt-get install -y --no-install-recommends "${missing[@]}" \
+        || die "Failed to install required tool(s): ${missing[*]}"
+}
+
+backup_manifest() {
+    local install_dir="$1" mode="$2"
+    local env_file="$install_dir/.env"
+    local cache_std cache_ssl kea_dir
+    cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
+    kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+
+    printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
+    [[ -d "$install_dir/deploy" ]] && printf '%s\n' "$install_dir/deploy"
+    [[ -d /srv/lancache/pdns-standard ]] && printf '%s\n' /srv/lancache/pdns-standard
+    [[ -d /srv/lancache/pdns-ssl ]] && printf '%s\n' /srv/lancache/pdns-ssl
+    [[ -d /srv/lancache/kea ]] && printf '%s\n' /srv/lancache/kea
+    [[ -d /srv/lancache/nats ]] && printf '%s\n' /srv/lancache/nats
+    [[ -d /srv/lancache/nats-conf ]] && printf '%s\n' /srv/lancache/nats-conf
+    [[ -n "${kea_dir:-}" && -d "$kea_dir" ]] && printf '%s\n' "$kea_dir"
+    if [[ "$mode" = "full" ]]; then
+        [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
+        [[ -n "${cache_ssl:-}" && "$cache_ssl" != "$cache_std" && -d "$cache_ssl" ]] && printf '%s\n' "$cache_ssl"
+        [[ -d /srv/lancache/cache ]] && printf '%s\n' /srv/lancache/cache
+    fi
+    true
+}
+
+cmd_backup() {
+    local mode="config" install_dir="/opt/lancache-ng" backup_root="/var/backups/lancache-ng"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full) mode="full"; shift ;;
+            --config) mode="config"; shift ;;
+            --dest) backup_root="${2:?Missing value for --dest}"; shift 2 ;;
+            *) install_dir="$1"; shift ;;
+        esac
+    done
+    [[ -f "$install_dir/docker-compose.yml" && -f "$install_dir/.env" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+    install_missing_tools tar rsync
+
+    local stamp dest archive manifest rel
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    dest="$backup_root/$stamp"
+    archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
+    mkdir -p "$dest/rootfs"
+
+    print_step "Creating $mode backup"
+    backup_manifest "$install_dir" "$mode" | sort -u > "$dest/manifest.txt"
+    while IFS= read -r path; do
+        [[ -e "$path" ]] || continue
+        rel="${path#/}"
+        mkdir -p "$dest/rootfs/$(dirname "$rel")"
+        rsync -aH --numeric-ids "$path" "$dest/rootfs/$rel"
+        print_ok "Included: $path"
+    done < "$dest/manifest.txt"
+
+    cat > "$dest/README.txt" <<EOF
+LanCache-NG backup created at $stamp UTC
+Mode: $mode
+Install directory: $install_dir
+
+Config backups include text/configuration and runtime databases needed for update rollback.
+Full backups additionally include cache directories, which can be very large.
+Restore with: ./setup.sh restore $archive $install_dir
+EOF
+    tar -C "$backup_root" -czf "$archive" "$stamp"
+    rm -rf "$dest"
+    chmod 600 "$archive"
+    print_ok "Backup written: $archive"
+}
+
+cmd_restore() {
+    local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
+    [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
+    [[ -f "$archive" ]] || die "Backup archive not found: $archive"
+    install_missing_tools tar rsync
+
+    local tmp root
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' RETURN
+    tar -C "$tmp" -xzf "$archive"
+    root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs | head -1)
+    [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
+
+    if [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1; then
+        print_step "Stopping stack before restore"
+        (cd "$install_dir" && docker compose down) || print_warn "docker compose down failed — continuing restore"
+    fi
+
+    print_step "Restoring backup"
+    rsync -aH --numeric-ids "$root/" /
+    print_ok "Files restored from $archive"
+
+    if [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1; then
+        print_step "Starting stack after restore"
+        (cd "$install_dir" && docker compose up -d)
+        print_ok "Stack started"
+    else
+        print_warn "Docker not available or compose file missing — start the stack manually after restore"
+    fi
+}
+
 # ── update subcommand ─────────────────────────────────────────────────────────
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     cd "$install_dir"
+
+    print_step "Creating pre-update rollback backup"
+    cmd_backup --config "$install_dir"
 
     if [[ -d "$install_dir/.git" ]]; then
         print_step "Updating repo"
@@ -215,11 +333,13 @@ cmd_reconfigure() {
 
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
 case "${1:-}" in
-    update)      cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
+    update)      shift; cmd_update "${1:-/opt/lancache-ng}"; exit 0 ;;
+    backup)      shift; cmd_backup "$@"; exit 0 ;;
+    restore)     shift; cmd_restore "$@"; exit 0 ;;
     debug)       cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
     --reconfigure) cmd_reconfigure; exit 0 ;;
     "")          ;;
-    *)           die "Unknown command: $1\nUsage: $0 [update|debug|--reconfigure] [install-dir]" ;;
+    *)           die "Unknown command: $1\nUsage: $0 [update|debug|backup|restore|--reconfigure] [options]" ;;
 esac
 
 # ══════════════════════════════════════════════════════════════════════════════
