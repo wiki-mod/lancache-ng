@@ -153,7 +153,10 @@ async fn main() {
         });
     }
 
-    // Main fetch loop
+    // Main fetch loop with exponential backoff (#87 fix)
+    let mut backoff_secs = 1u64;
+    const MAX_BACKOFF_SECS: u64 = 30;
+
     loop {
         let fetch_result = consumer.fetch()
             .max_messages(10)
@@ -163,6 +166,8 @@ async fn main() {
 
         match fetch_result {
             Ok(mut messages) => {
+                let mut had_stream_error = false;
+
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
                         Ok(msg) => {
@@ -178,14 +183,35 @@ async fn main() {
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
-                        Err(e) => eprintln!("Message error: {}", e),
+                        Err(e) => {
+                            eprintln!("Message error: {}", e);
+                            had_stream_error = true;
+                            // Break out of the inner loop so the outer backoff fires.
+                            // Continuing to call messages.next() on a broken stream
+                            // would busy-spin inside the Ok(messages) arm.
+                            break;
+                        }
                     }
                 }
+
+                // Apply backoff on stream errors, or reset on a clean batch.
+                // Stream errors surface via messages.next(), not fetch(), so we
+                // must handle them here rather than in the Err(fetch) arm.
+                if had_stream_error {
+                    eprintln!("Stream error(s); backing off for {} second(s)", backoff_secs);
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                } else {
+                    backoff_secs = 1;
+                }
             }
-            // #87 fix: add backoff on fetch error
+            // #87 fix: exponential backoff on fetch error to prevent busy-spin loop
             Err(e) => {
-                eprintln!("Fetch error: {}", e);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                eprintln!("Fetch error: {} (backing off for {} second(s))", e, backoff_secs);
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+
+                // Double backoff for next iteration, capped at MAX_BACKOFF_SECS
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
             }
         }
     }

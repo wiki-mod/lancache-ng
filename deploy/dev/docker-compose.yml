@@ -44,6 +44,7 @@ services:
     env_file:
       - ../../config/dev/dns-standard.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
@@ -81,6 +82,7 @@ services:
     env_file:
       - ../../config/dev/dns-ssl.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
@@ -245,7 +247,7 @@ services:
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN:?set KEA_CTRL_TOKEN in .env}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      - PDNS_API_KEY=lancache-pdns-dev-secret
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-lancache-reg-dev-secret}
