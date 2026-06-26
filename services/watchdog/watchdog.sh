@@ -122,7 +122,11 @@ maybe_purge() {
             ''|*[!0-9]*) last=0 ;;
         esac
     fi
-    [ $(( now - 10#$last )) -lt 86400 ] && return
+
+    # Force decimal parsing so digit-only corrupt stamps like "08" do not
+    # get interpreted as invalid octal values by Bash arithmetic under set -e.
+    local last_epoch=$((10#$last))
+    [ $(( now - last_epoch )) -lt 86400 ] && return
 
     # Validate cache valid days setting
     case "$CACHE_VALID_DAYS" in
