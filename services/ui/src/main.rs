@@ -15,6 +15,8 @@ use base64::Engine as _;
 use bollard::Docker;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tera::Tera;
 
 pub struct AppState {
@@ -43,10 +45,16 @@ async fn basic_auth(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let (user, pass) = match (&state.config.auth_user, &state.config.auth_password) {
-        (Some(u), Some(p)) => (u.as_str(), p.as_str()),
-        _ => return next.run(req).await,
-    };
+    let user = state
+        .config
+        .auth_user
+        .as_deref()
+        .expect("UI_AUTH_USER validated at startup");
+    let pass = state
+        .config
+        .auth_password
+        .as_deref()
+        .expect("UI_AUTH_PASSWORD validated at startup");
 
     let ok = req
         .headers()
@@ -57,7 +65,17 @@ async fn basic_auth(
         .and_then(|dec| String::from_utf8(dec).ok())
         .and_then(|creds| {
             let mut it = creds.splitn(2, ':');
-            Some(it.next()? == user && it.next()? == pass)
+            let provided_user = it.next()?;
+            let provided_pass = it.next()?;
+            // Hash both sides to fixed-size 32-byte digests before comparing.
+            // subtle's ct_eq on raw slices aborts early on length mismatch,
+            // leaking credential length. Digests are always 32 bytes regardless
+            // of input length, eliminating that timing side-channel.
+            let user_match = Sha256::digest(provided_user.as_bytes())
+                .ct_eq(&Sha256::digest(user.as_bytes()));
+            let pass_match = Sha256::digest(provided_pass.as_bytes())
+                .ct_eq(&Sha256::digest(pass.as_bytes()));
+            Some(bool::from(user_match & pass_match))
         })
         .unwrap_or(false);
 
@@ -139,6 +157,26 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = config::Config::from_env();
+
+    // SECONDARY_REGISTRATION_TOKEN must be non-empty; an empty token allows
+    // unauthenticated registration (empty string matches empty string).
+    if cfg.secondary_registration_token.is_empty() {
+        tracing::error!(
+            "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
+             Generate one with: openssl rand -hex 32"
+        );
+        std::process::exit(1);
+    }
+
+    // Auth is optional: only activate if both vars are non-empty.
+    let auth_enabled = cfg.auth_user.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+        && cfg.auth_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    if !auth_enabled {
+        tracing::warn!(
+            "UI_AUTH_USER or UI_AUTH_PASSWORD is not set — starting without authentication"
+        );
+    }
+
     let templates = load_templates(&cfg.template_dir);
     let docker = Docker::connect_with_socket_defaults()?;
     let http_client = reqwest::Client::builder()
@@ -183,7 +221,12 @@ async fn main() -> Result<()> {
         ).await;
     }
 
-    let app = Router::new()
+    // Routes that are always public (protected by their own token).
+    let public_routes = Router::new()
+        .route("/api/secondary/register", post(routes::secondaries::register_secondary));
+
+    // Routes that are protected by Basic Auth when auth is enabled.
+    let protected_routes = Router::new()
         .route("/", get(routes::dashboard::dashboard))
         .route("/dhcp", get(routes::dhcp::dhcp_page))
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
@@ -206,10 +249,19 @@ async fn main() -> Result<()> {
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
-        .route("/api/secondary/register", post(routes::secondaries::register_secondary))
         .route("/api/secondary/{name}", axum::routing::delete(routes::secondaries::remove_secondary))
-        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token))
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
+        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token));
+
+    let protected_routes = if auth_enabled {
+        protected_routes
+            .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
+    } else {
+        protected_routes
+    };
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
