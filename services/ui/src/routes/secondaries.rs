@@ -131,10 +131,15 @@ pub async fn remove_secondary(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    {
+    let rows_affected = {
         let db = state.db.lock().unwrap();
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    // Return 404 if the secondary doesn't exist
+    if rows_affected == 0 {
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // Update NATS conf
