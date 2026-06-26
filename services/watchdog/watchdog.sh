@@ -119,13 +119,21 @@ maybe_purge() {
     if [ -f "$PURGE_STAMP" ]; then
         last=$(cat "$PURGE_STAMP")
         case "$last" in
-            ''|*[!0-9]*) last=0 ;;
+            ''|*[!0-9]*)
+                log "Invalid PURGE_STAMP=${last}; forcing purge timestamp reset"
+                last=0
+                ;;
         esac
     fi
 
-    # Force decimal parsing so digit-only corrupt stamps like "08" do not
-    # get interpreted as invalid octal values by Bash arithmetic under set -e.
+    # Resolve the purge-stamp review conflict by forcing decimal parsing:
+    # digit-only corrupt stamps like "08" must not be interpreted as invalid
+    # octal values by Bash arithmetic under set -e.
     local last_epoch=$((10#$last))
+    if [ "$last_epoch" -gt "$now" ]; then
+        log "PURGE_STAMP=${last} is in the future; forcing purge timestamp reset"
+        last_epoch=0
+    fi
     [ $(( now - last_epoch )) -lt 86400 ] && return
 
     # Validate cache valid days setting
