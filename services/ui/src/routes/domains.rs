@@ -56,6 +56,7 @@ pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("active_page", "domains");
+    ctx.insert("csrf_token", &state.csrf_token);
 
     crate::routes::render(&state.templates, "domains.html", &ctx)
 }
@@ -534,7 +535,10 @@ mod tests {
             normalize_delete_record_type("HTTPS"),
             Some("HTTPS".to_string())
         );
-        assert_eq!(normalize_delete_record_type("SVCB"), Some("SVCB".to_string()));
+        assert_eq!(
+            normalize_delete_record_type("SVCB"),
+            Some("SVCB".to_string())
+        );
         assert_eq!(
             normalize_delete_record_type("TYPE257"),
             Some("TYPE257".to_string())
