@@ -12,7 +12,34 @@ SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
 IP_STANDARD="${IP_STANDARD:?IP_STANDARD is required}"
 IP_SSL="${IP_SSL:-}"
 SSL_ENABLED="${SSL_ENABLED:-0}"
+NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4}"
 
+
+_normalize_resolver_token() {
+    local token="$1"
+
+    # Nginx accepts IPv6 resolvers in brackets and optional ports for IPv4 or
+    # bracketed IPv6. Normalize those forms before comparing against local IPs.
+    if [[ "$token" == \[* ]]; then
+        token="${token#\[}"
+        token="${token%%\]*}"
+    elif [[ "$token" == *:* && "$token" != *:*:* ]]; then
+        token="${token%%:*}"
+    fi
+
+    printf '%s' "$token"
+}
+
+for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
+    resolver="$(_normalize_resolver_token "$resolver")"
+    if [ "$resolver" = "$IP_STANDARD" ] || { [ -n "$IP_SSL" ] && [ "$resolver" = "$IP_SSL" ]; }; then
+        echo "[lancache] ERROR: NGINX_UPSTREAM_RESOLVER must not point to a LanCache DNS/proxy IP ($resolver)." >&2
+        echo "[lancache] Use a real upstream resolver such as 8.8.8.8, 8.8.4.4, 1.1.1.1, or your upstream/corporate DNS." >&2
+        exit 1
+    fi
+done
+
+export NGINX_UPSTREAM_RESOLVER
 # ────────────────────────────────────────────────────────────────────────────
 # 1. SSL mode: Generate CA and certs if needed
 # ────────────────────────────────────────────────────────────────────────────
@@ -149,7 +176,7 @@ fi
 # ────────────────────────────────────────────────────────────────────────────
 # 3. Render nginx.conf and proxy-params from templates
 # ────────────────────────────────────────────────────────────────────────────
-envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_INACTIVE}' \
+envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \
     < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 envsubst '${CACHE_SLICE_SIZE} ${CACHE_VALID_HIT} ${CACHE_VALID_ANY}' \
