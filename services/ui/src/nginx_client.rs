@@ -99,7 +99,7 @@ pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
     let reader = BufReader::new(file);
     let re = log_regex();
 
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     let start = lines.len().saturating_sub(limit);
 
     lines[start..]
@@ -116,7 +116,7 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     for path in [standard_log, ssl_log] {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);
-        for line in reader.lines().filter_map(|l| l.ok()) {
+        for line in reader.lines().map_while(Result::ok) {
             let Some(caps) = re.captures(&line) else { continue };
             let bytes: u64 = caps[6].parse().unwrap_or(0);
             let cache_status = &caps[7];

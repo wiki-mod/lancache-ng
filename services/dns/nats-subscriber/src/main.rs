@@ -39,20 +39,6 @@ struct ZoneUpdate {
     rrsets: Vec<RRset>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ZoneContent {
-    content: String,
-    disabled: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ZoneRecord {
-    name: String,
-    #[serde(rename = "type")]
-    record_type: String,
-    ttl: i32,
-    records: Vec<ZoneContent>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ZoneInfo {
