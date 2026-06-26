@@ -155,8 +155,8 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to container inspect + restart only
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  # socket-proxy limits Docker access to Admin UI/watchdog operations:
+  # container inspect/list, restart, and exec; no image/volume/system access.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
@@ -164,6 +164,7 @@ services:
     environment:
       CONTAINERS: "1"
       POST: "1"
+      EXEC: "1"
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -201,13 +202,13 @@ services:
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - proxy-logs:/var/log/nginx:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
       - "${IP_STANDARD}:8080:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -227,6 +228,7 @@ services:
       - DHCP_API_URL=http://dhcp:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN}
     depends_on:
+      - docker-socket-proxy
       - proxy
       - netdata
       - nats

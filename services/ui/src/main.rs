@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::from_env();
     let templates = load_templates(&cfg.template_dir);
-    let docker = Docker::connect_with_socket_defaults()?;
+    let docker = docker_client::connect_from_env()?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -148,8 +148,7 @@ async fn main() -> Result<()> {
     let nats = connect_nats_with_retry(&cfg).await;
 
     let db = {
-        let conn = Connection::open("/data/lancache-ui.db")
-            .expect("Cannot open UI database");
+        let conn = Connection::open("/data/lancache-ui.db").expect("Cannot open UI database");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS secondaries (
                 name TEXT PRIMARY KEY,
@@ -157,8 +156,9 @@ async fn main() -> Result<()> {
                 consumer_name TEXT NOT NULL UNIQUE,
                 registered_at INTEGER NOT NULL,
                 last_seen INTEGER
-            );"
-        ).expect("Cannot init database schema");
+            );",
+        )
+        .expect("Cannot init database schema");
         Mutex::new(conn)
     };
 
@@ -180,7 +180,8 @@ async fn main() -> Result<()> {
             &state.docker,
             &state.config.nats_service,
             vec!["kill", "-HUP", "1"],
-        ).await;
+        )
+        .await;
     }
 
     let app = Router::new()
@@ -190,7 +191,10 @@ async fn main() -> Result<()> {
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
         .route("/dhcp/subnet/remove", post(routes::dhcp::remove_subnet))
         .route("/dhcp/static/add", post(routes::dhcp::add_reservation))
-        .route("/dhcp/static/remove", post(routes::dhcp::remove_reservation))
+        .route(
+            "/dhcp/static/remove",
+            post(routes::dhcp::remove_reservation),
+        )
         .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
@@ -198,18 +202,36 @@ async fn main() -> Result<()> {
         .route("/domains/ssl/add", post(routes::domains::add_ssl))
         .route("/domains/ssl/remove", post(routes::domains::remove_ssl))
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
-        .route("/domains/lan/remove", post(routes::domains::remove_lan_record))
-        .route("/domains/aaaa-filter", post(routes::domains::toggle_aaaa_filter))
+        .route(
+            "/domains/lan/remove",
+            post(routes::domains::remove_lan_record),
+        )
+        .route(
+            "/domains/aaaa-filter",
+            post(routes::domains::toggle_aaaa_filter),
+        )
         .route("/stats", get(routes::stats::stats_page))
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
-        .route("/api/secondary/register", post(routes::secondaries::register_secondary))
-        .route("/api/secondary/{name}", axum::routing::delete(routes::secondaries::remove_secondary))
-        .route("/api/secondary/{name}/rotate-token", post(routes::secondaries::rotate_token))
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), basic_auth))
+        .route(
+            "/api/secondary/register",
+            post(routes::secondaries::register_secondary),
+        )
+        .route(
+            "/api/secondary/{name}",
+            axum::routing::delete(routes::secondaries::remove_secondary),
+        )
+        .route(
+            "/api/secondary/{name}/rotate-token",
+            post(routes::secondaries::rotate_token),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            basic_auth,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;

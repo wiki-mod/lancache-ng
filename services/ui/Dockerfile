@@ -40,7 +40,12 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
 
-RUN mkdir -p /data
+RUN groupadd --system --gid 10001 lancache \
+    && useradd --system --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
+    && mkdir -p /data /etc/nats \
+    && chown -R lancache:lancache /data /etc/nats
+
+USER lancache
 
 EXPOSE 8080
 

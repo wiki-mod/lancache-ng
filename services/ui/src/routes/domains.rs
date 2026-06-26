@@ -534,7 +534,10 @@ mod tests {
             normalize_delete_record_type("HTTPS"),
             Some("HTTPS".to_string())
         );
-        assert_eq!(normalize_delete_record_type("SVCB"), Some("SVCB".to_string()));
+        assert_eq!(
+            normalize_delete_record_type("SVCB"),
+            Some("SVCB".to_string())
+        );
         assert_eq!(
             normalize_delete_record_type("TYPE257"),
             Some("TYPE257".to_string())

@@ -36,10 +36,7 @@ pub async fn logs_page(
         entry.source = "SSL".to_string();
     }
 
-    let mut all_logs: Vec<_> = standard_logs
-        .into_iter()
-        .chain(ssl_logs)
-        .collect();
+    let mut all_logs: Vec<_> = standard_logs.into_iter().chain(ssl_logs).collect();
 
     // Show most recent first
     all_logs.reverse();
