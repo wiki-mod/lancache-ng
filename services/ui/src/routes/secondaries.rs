@@ -2,7 +2,6 @@ use crate::{docker_client, AppState};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, Json};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
