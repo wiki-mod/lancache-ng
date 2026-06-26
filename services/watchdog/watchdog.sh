@@ -122,7 +122,7 @@ maybe_purge() {
             ''|*[!0-9]*) last=0 ;;
         esac
     fi
-    [ $((now - last)) -lt 86400 ] && return
+    [ $(( now - 10#$last )) -lt 86400 ] && return
 
     # Validate cache valid days setting
     case "$CACHE_VALID_DAYS" in
@@ -137,7 +137,7 @@ maybe_purge() {
         [ -d "$dir" ] || continue
         local count=0
         while IFS= read -r -d '' file; do
-            if rm -f -- "$file"; then
+            if [ -f "$file" ] && rm -- "$file"; then
                 count=$(( count + 1 ))
             fi
         done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 2>/dev/null)
