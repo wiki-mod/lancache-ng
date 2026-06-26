@@ -50,6 +50,7 @@ pub struct Reservation {
 
 #[derive(Deserialize)]
 pub struct AddSubnetForm {
+    pub csrf_token: String,
     pub subnet: String,
     pub pool_start: String,
     pub pool_end: String,
@@ -60,6 +61,7 @@ pub struct AddSubnetForm {
 
 #[derive(Deserialize)]
 pub struct UpdateSubnetForm {
+    pub csrf_token: String,
     pub id: u32,
     pub subnet: String,
     pub pool_start: String,
@@ -71,11 +73,13 @@ pub struct UpdateSubnetForm {
 
 #[derive(Deserialize)]
 pub struct RemoveSubnetForm {
+    pub csrf_token: String,
     pub id: u32,
 }
 
 #[derive(Deserialize)]
 pub struct AddReservationForm {
+    pub csrf_token: String,
     pub subnet_id: u32,
     pub mac: String,
     pub ip: String,
@@ -84,6 +88,7 @@ pub struct AddReservationForm {
 
 #[derive(Deserialize)]
 pub struct RemoveReservationForm {
+    pub csrf_token: String,
     pub subnet_id: u32,
     pub mac: String,
 }
@@ -94,6 +99,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
     ctx.insert("active_page", "dhcp");
     ctx.insert("dhcp_api_url", &state.config.dhcp_api_url);
+    crate::routes::insert_csrf_token(&mut ctx, &state);
 
     if !state.config.dhcp_api_url.is_empty() {
         let subnets = fetch_subnets(&state).await.unwrap_or_default();
@@ -118,6 +124,7 @@ pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_cidr(&form.subnet)
         || !is_valid_ip(&form.pool_start)
         || !is_valid_ip(&form.pool_end)
@@ -167,6 +174,7 @@ pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_cidr(&form.subnet)
         || !is_valid_ip(&form.pool_start)
         || !is_valid_ip(&form.pool_end)
@@ -215,6 +223,7 @@ pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -237,6 +246,7 @@ pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -250,6 +260,7 @@ pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     call_kea_reservation_del(&state, form.subnet_id, &form.mac)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -318,7 +329,11 @@ async fn kea_config_modify<F>(
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
 {
-    let resp = kea_post(state, &json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let mut config = resp
@@ -336,8 +351,11 @@ where
     .await?;
     kea_result(&set_resp)?;
 
-    let write_resp =
-        kea_post(state, &json!({"command": "config-write", "service": ["dhcp4"]})).await?;
+    let write_resp = kea_post(
+        state,
+        &json!({"command": "config-write", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&write_resp)?;
 
     Ok(())
@@ -348,7 +366,11 @@ where
 async fn fetch_subnets(
     state: &AppState,
 ) -> Result<Vec<Subnet>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp = kea_post(state, &json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let subnets_json = resp
@@ -375,9 +397,8 @@ async fn fetch_subnets(
                 s.get("option-data")
                     .and_then(|od| od.as_array())
                     .and_then(|arr| {
-                        arr.iter().find(|o| {
-                            o.get("name").and_then(|v| v.as_str()) == Some(name)
-                        })
+                        arr.iter()
+                            .find(|o| o.get("name").and_then(|v| v.as_str()) == Some(name))
                     })
                     .and_then(|o| o.get("data"))
                     .and_then(|v| v.as_str())
@@ -414,8 +435,11 @@ async fn fetch_subnets(
 async fn fetch_leases(
     state: &AppState,
 ) -> Result<Vec<Lease>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp =
-        kea_post(state, &json!({"command": "lease4-get-all", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "lease4-get-all", "service": ["dhcp4"]}),
+    )
+    .await?;
 
     let mut leases = Vec::new();
     if let Some(lease_array) = resp
@@ -425,19 +449,10 @@ async fn fetch_leases(
         .and_then(|l| l.as_array())
     {
         for lease in lease_array {
-            let cltt = lease
-                .get("cltt")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let valid_lft = lease
-                .get("valid-lft")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let cltt = lease.get("cltt").and_then(|v| v.as_i64()).unwrap_or(0);
+            let valid_lft = lease.get("valid-lft").and_then(|v| v.as_i64()).unwrap_or(0);
             leases.push(Lease {
-                subnet_id: lease
-                    .get("subnet-id")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
+                subnet_id: lease.get("subnet-id").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 ip: lease
                     .get("ip-address")
                     .and_then(|v| v.as_str())
@@ -574,10 +589,18 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
         Err(e) => {
             // Check if the error is due to nmap not being found
             let err_msg = e.to_string();
-            if err_msg.contains("nmap") || err_msg.contains("not found") || err_msg.contains("No such file") {
-                return DhcpCheckStatus::Unavailable("nmap is not installed in the DHCP container".to_string());
+            if err_msg.contains("nmap")
+                || err_msg.contains("not found")
+                || err_msg.contains("No such file")
+            {
+                return DhcpCheckStatus::Unavailable(
+                    "nmap is not installed in the DHCP container".to_string(),
+                );
             }
-            return DhcpCheckStatus::Unavailable(format!("Failed to execute DHCP check: {}", err_msg));
+            return DhcpCheckStatus::Unavailable(format!(
+                "Failed to execute DHCP check: {}",
+                err_msg
+            ));
         }
     };
 
@@ -623,10 +646,7 @@ fn is_valid_cidr(cidr: &str) -> bool {
 }
 
 fn is_valid_ip(ip: &str) -> bool {
-    ip.split('.')
-        .filter_map(|o| o.parse::<u8>().ok())
-        .count()
-        == 4
+    ip.split('.').filter_map(|o| o.parse::<u8>().ok()).count() == 4
 }
 
 fn is_valid_mac(mac: &str) -> bool {

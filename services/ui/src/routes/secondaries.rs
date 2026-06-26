@@ -1,6 +1,6 @@
 use crate::{docker_client, AppState};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -63,6 +63,7 @@ pub async fn secondaries_page(State(state): State<Arc<AppState>>) -> Html<String
     ctx.insert("secondaries", &secondaries);
     ctx.insert("primary_url", &primary_url);
     ctx.insert("registration_token", reg_token);
+    crate::routes::insert_csrf_token(&mut ctx, &state);
 
     crate::routes::render(&state.templates, "secondaries.html", &ctx)
 }
@@ -79,7 +80,10 @@ pub async fn register_secondary(
     // Validate name: alphanumeric + dash, non-empty, ≤32 chars
     if form.name.is_empty()
         || form.name.len() > 32
-        || !form.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || !form
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -130,7 +134,9 @@ pub async fn register_secondary(
 pub async fn remove_secondary(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&state, &headers)?;
     let rows_affected = {
         let db = state.db.lock().unwrap();
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
@@ -161,8 +167,10 @@ pub async fn remove_secondary(
 pub async fn rotate_token(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&state, &headers)?;
     // Validate token
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
@@ -206,7 +214,9 @@ pub async fn rotate_token(
 
 // ─── Helper Functions ───
 
-pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn update_nats_conf(
+    state: &AppState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nats_conf = format!(
         "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  token: \"{}\"\n}}\n",
         state.config.nats_local_token
