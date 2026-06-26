@@ -59,8 +59,68 @@ jobs:
           RUSTC_WRAPPER: ""
         run: cargo test --locked --manifest-path ${{ matrix.path }}/Cargo.toml
 
+  cargo-audit:
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: dns/nats-subscriber
+            path: services/dns/nats-subscriber
+          - service: ui
+            path: services/ui
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-v0
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --locked
+          fi
+      - name: Audit Rust dependencies (${{ matrix.service }})
+        run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
+
+  container-scan:
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: proxy
+            context: services/proxy
+          - service: dns
+            context: services/dns
+          - service: watchdog
+            context: services/watchdog
+          - service: dhcp
+            context: services/dhcp
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
+          - service: ui
+            context: services/ui
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build local scan image
+        run: docker build --pull -t lancache-ng-scan:${{ matrix.service }} ${{ matrix.context }}
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.31.0
+        with:
+          image-ref: lancache-ng-scan:${{ matrix.service }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
   build:
-    needs: [validate-compose, test]
+    needs: [validate-compose, test, cargo-audit, container-scan]
     runs-on: [self-hosted, linux, lancache]
     timeout-minutes: 150
     permissions:
