@@ -535,8 +535,9 @@ fi
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
-printf "  Admin-UI runs on http://127.0.0.1:8080 — accessible from this host only by default.\n"
-printf "  To expose it on the LAN for remote access or secondary registration, set UI_BIND_IP=%s in .env and enable password protection.\n\n" "$IP_STANDARD"
+printf "  Admin-UI runs on http://%s:8080 — reachable from your LAN by default.\n" "$IP_STANDARD"
+printf "  Password protection is optional, but recommended on shared or untrusted networks.\n"
+printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .env.\n\n"
 
 ask "Protect Admin-UI with password? [y/N]" "N"
 UI_AUTH_USER=""
@@ -552,7 +553,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
     print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
     printf "\n"
 else
-    print_ok "No password protection — Admin-UI remains localhost-only by default"
+    print_warn "No password protection — Admin-UI will be reachable on http://$IP_STANDARD:8080"
 fi
 
 # ── 8. Writing .env ───────────────────────────────────────────────────────────
@@ -659,9 +660,9 @@ COMPOSE_PROFILES=${COMPOSE_PROFILES}
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 
-# Bind address for Admin-UI. Default 127.0.0.1 keeps it local to this host.
-# For LAN access or secondary registration, set to ${IP_STANDARD} and enable auth.
-UI_BIND_IP=127.0.0.1
+# Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
+# Set to 127.0.0.1 to restrict access to this host.
+UI_BIND_IP=${IP_STANDARD}
 EOF
 print_ok ".env written: $INSTALL_DIR/.env"
 
@@ -789,9 +790,9 @@ printf "${BOLD}${GREEN}  LanCache-NG is running!${RESET}\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
-    printf "  ${BOLD}Admin-UI:${RESET}    http://127.0.0.1:8080  (User: %s)\n" "$UI_AUTH_USER"
+    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080  (User: %s)\n" "$IP_STANDARD" "$UI_AUTH_USER"
 else
-    printf "  ${BOLD}Admin-UI:${RESET}    http://127.0.0.1:8080\n"
+    printf "  ${BOLD}Admin-UI:${RESET}    http://%s:8080\n" "$IP_STANDARD"
 fi
 printf "\n"
 if [[ "$SSL_ENABLED" = "1" ]]; then
