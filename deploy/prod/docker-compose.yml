@@ -48,7 +48,6 @@ services:
     env_file:
       - ../../config/prod/dns-standard.env
     environment:
-      - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
@@ -86,7 +85,6 @@ services:
     env_file:
       - ../../config/prod/dns-ssl.env
     environment:
-      - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
