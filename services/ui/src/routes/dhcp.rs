@@ -649,7 +649,7 @@ fn is_valid_cidr(cidr: &str) -> bool {
     if parts.len() != 2 {
         return false;
     }
-    is_valid_ip(parts[0]) && parts[1].parse::<u8>().ok().map_or(false, |n| n <= 32)
+    is_valid_ip(parts[0]) && parts[1].parse::<u8>().ok().is_some_and(|n| n <= 32)
 }
 
 fn is_valid_ip(ip: &str) -> bool {
@@ -657,6 +657,6 @@ fn is_valid_ip(ip: &str) -> bool {
 }
 
 fn is_valid_mac(mac: &str) -> bool {
-    let cleaned = mac.to_uppercase().replace(':', "").replace('-', "");
+    let cleaned = mac.to_uppercase().replace([':', '-'], "");
     cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit())
 }
