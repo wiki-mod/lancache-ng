@@ -205,6 +205,15 @@ Because of that, SSL caching is not recommended for consoles.
 Consoles should continue to work normally through standard mode.  
 HTTPS traffic that cannot be cached is passed through to the original CDN.
 
+
+## Docker build performance on local runners
+
+If you build LanCache NG on a self-hosted runner, see the local runner Docker performance guide for practical options such as Docker layer caching, registry mirrors, multi-stage builds, `.dockerignore` files and runner parallelism tuning.
+
+```text
+docs/local-runner-docker-performance.md
+```
+
 ## Requirements
 
 You need:

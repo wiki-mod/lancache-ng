@@ -1,0 +1,12 @@
+name: lancache-ng-codeql
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+paths:
+  - services/dns/nats-subscriber
+  - services/ui
+
+paths-ignore:
+  - '**/target/**'
