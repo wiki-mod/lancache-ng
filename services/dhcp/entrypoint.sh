@@ -54,6 +54,20 @@ for name in kea-dhcp4 kea-ctrl-agent kea-dhcp-ddns; do
     fi
 done
 
+# The Control Agent config is not modified by the UI, but it is persisted on
+# the Kea data volume. Regenerate it when KEA_CTRL_TOKEN or KEA_CTRL_HOST
+# changes so upgrades do not leave the API using stale credentials.
+CTRL_AGENT_TEMPLATE="/etc/kea/kea-ctrl-agent.conf.template"
+CTRL_AGENT_RUNTIME="/var/lib/kea/kea-ctrl-agent.conf"
+CTRL_AGENT_NEXT="$(mktemp)"
+envsubst "$ENVSUBST_VARS" < "$CTRL_AGENT_TEMPLATE" > "$CTRL_AGENT_NEXT"
+if ! cmp -s "$CTRL_AGENT_NEXT" "$CTRL_AGENT_RUNTIME"; then
+    mv "$CTRL_AGENT_NEXT" "$CTRL_AGENT_RUNTIME"
+    echo "Updated $CTRL_AGENT_RUNTIME from current Kea Control Agent settings"
+else
+    rm -f "$CTRL_AGENT_NEXT"
+fi
+
 # Restrict Kea Control Agent API (port 8000) to Docker-internal networks.
 # Without this, network_mode:host exposes the API on all LAN interfaces.
 if command -v iptables >/dev/null 2>&1; then

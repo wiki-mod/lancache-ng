@@ -174,7 +174,15 @@ services:
       - NET_BIND_SERVICE
       - NET_ADMIN       # needed for iptables rules restricting port 8000 to Docker-internal
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -u admin:$${KEA_CTRL_TOKEN} -H 'Content-Type: application/json' -d '{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}' http://127.0.0.1:8000/ >/dev/null"]
+      test:
+        - CMD-SHELL
+        - >-
+          host="$${KEA_CTRL_HOST:-127.0.0.1}";
+          [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
+          curl -sf -u admin:$${KEA_CTRL_TOKEN}
+          -H 'Content-Type: application/json'
+          -d '{"command":"config-get","service":["dhcp4"]}'
+          "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
       interval: 30s
       timeout: 5s
       retries: 3
