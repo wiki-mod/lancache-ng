@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     gettext \
     openssl \
     curl \
+    jq \
     iptables \
     && rm -rf /var/lib/apt/lists/*
 
