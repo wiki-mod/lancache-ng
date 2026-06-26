@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process::Command;
@@ -93,17 +94,26 @@ pub struct LogStats {
 }
 
 pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
+    if limit == 0 {
+        return vec![];
+    }
+
     let Ok(file) = File::open(path) else {
         return vec![];
     };
+
     let reader = BufReader::new(file);
     let re = log_regex();
+    let mut tail = VecDeque::with_capacity(limit);
 
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-    let start = lines.len().saturating_sub(limit);
+    for line in reader.lines().filter_map(Result::ok) {
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
 
-    lines[start..]
-        .iter()
+    tail.iter()
         .filter_map(|line| parse_log_line(re, line))
         .collect()
 }
@@ -116,7 +126,7 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     for path in [standard_log, ssl_log] {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
+        for line in reader.lines().filter_map(|l| l.ok()) {
             let Some(caps) = re.captures(&line) else { continue };
             let bytes: u64 = caps[6].parse().unwrap_or(0);
             let cache_status = &caps[7];

@@ -39,7 +39,6 @@ struct ZoneUpdate {
     rrsets: Vec<RRset>,
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 struct ZoneInfo {
     rrsets: Vec<RRset>,
@@ -135,7 +134,14 @@ async fn main() {
     println!("Created durable subscriber: {}", nats_consumer);
 
     // Create shared HTTP client (#68 fix)
-    let http_client = Arc::new(Client::new());
+    let http_client = Arc::new(
+        Client::builder()
+            .timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .expect("failed to build shared HTTP client"),
+    );
 
     // Start reconciler if enabled
     if nats_reconciler.as_deref() == Some("1") {
@@ -147,7 +153,10 @@ async fn main() {
         });
     }
 
-    // Main fetch loop
+    // Main fetch loop with exponential backoff (#87 fix)
+    let mut backoff_secs = 1u64;
+    const MAX_BACKOFF_SECS: u64 = 30;
+
     loop {
         let fetch_result = consumer.fetch()
             .max_messages(10)
@@ -157,6 +166,8 @@ async fn main() {
 
         match fetch_result {
             Ok(mut messages) => {
+                let mut had_stream_error = false;
+
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
                         Ok(msg) => {
@@ -172,14 +183,35 @@ async fn main() {
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
-                        Err(e) => eprintln!("Message error: {}", e),
+                        Err(e) => {
+                            eprintln!("Message error: {}", e);
+                            had_stream_error = true;
+                            // Break out of the inner loop so the outer backoff fires.
+                            // Continuing to call messages.next() on a broken stream
+                            // would busy-spin inside the Ok(messages) arm.
+                            break;
+                        }
                     }
                 }
+
+                // Apply backoff on stream errors, or reset on a clean batch.
+                // Stream errors surface via messages.next(), not fetch(), so we
+                // must handle them here rather than in the Err(fetch) arm.
+                if had_stream_error {
+                    eprintln!("Stream error(s); backing off for {} second(s)", backoff_secs);
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                } else {
+                    backoff_secs = 1;
+                }
             }
-            // #87 fix: add backoff on fetch error
+            // #87 fix: exponential backoff on fetch error to prevent busy-spin loop
             Err(e) => {
-                eprintln!("Fetch error: {}", e);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                eprintln!("Fetch error: {} (backing off for {} second(s))", e, backoff_secs);
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+
+                // Double backoff for next iteration, capped at MAX_BACKOFF_SECS
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
             }
         }
     }
@@ -264,7 +296,6 @@ async fn handle_dns_record(msg: &async_nats::jetstream::Message, pdns_api_key: &
         .header("X-API-Key", pdns_api_key)
         .header("Content-Type", "application/json")
         .body(payload)
-        .timeout(Duration::from_secs(10))
         .send()
         .await;
 
@@ -314,7 +345,6 @@ async fn handle_dns_flush(pdns_api_key: &str, http_client: &Arc<Client>) -> bool
     let result = http_client
         .put(url)
         .header("X-API-Key", pdns_api_key)
-        .timeout(Duration::from_secs(10))
         .send()
         .await;
 
@@ -351,7 +381,6 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
         let result = http_client
             .get(url)
             .header("X-API-Key", pdns_api_key)
-            .timeout(Duration::from_secs(10))
             .send()
             .await;
 
@@ -410,11 +439,12 @@ async fn reconciler(js: async_nats::jetstream::Context, pdns_api_key: &str, http
                         .publish_with_headers("lancache.dns.record", headers, payload.into())
                         .await
                     {
-                        Ok(publish_ack) => {
-                            if let Err(e) = publish_ack.await {
+                        Ok(publish_ack) => match publish_ack.await {
+                            Ok(_) => {}
+                            Err(e) => {
                                 eprintln!("Reconciler: error waiting for publish ack: {}", e);
                             }
-                        }
+                        },
                         Err(e) => {
                             eprintln!("Reconciler: error publishing record: {}", e);
                         }

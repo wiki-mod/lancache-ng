@@ -40,10 +40,7 @@ pub struct Secondary {
 pub async fn secondaries_page(
     State(state): State<Arc<AppState>>,
 ) -> Result<Html<String>, StatusCode> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
 
     let secondaries = db
         .prepare("SELECT name, consumer_name, registered_at, last_seen FROM secondaries ORDER BY registered_at DESC")
@@ -76,7 +73,11 @@ pub async fn register_secondary(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(form): axum::extract::Json<RegisterForm>,
 ) -> Result<Json<RegisterResponse>, StatusCode> {
-    // Validate token
+    // Validate token — reject if token is unconfigured (empty) to prevent
+    // accidental open registration when SECONDARY_REGISTRATION_TOKEN is unset.
+    if state.config.secondary_registration_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -101,10 +102,7 @@ pub async fn register_secondary(
 
     // INSERT OR REPLACE INTO secondaries
     {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute(
             "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, registered_at, last_seen)
              VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -139,13 +137,15 @@ pub async fn remove_secondary(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows_affected = {
+        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    // Return 404 if the secondary doesn't exist
+    if rows_affected == 0 {
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // Update NATS conf
@@ -169,7 +169,10 @@ pub async fn rotate_token(
     Path(name): Path<String>,
     axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Validate token
+    // Validate token — reject if token is unconfigured (empty).
+    if state.config.secondary_registration_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -181,10 +184,7 @@ pub async fn rotate_token(
 
     // Update the secondary's stored token and verify the secondary exists
     let rows_affected = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute(
             "UPDATE secondaries SET nats_token = ? WHERE name = ?",
             [nats_token.clone(), name.clone()],

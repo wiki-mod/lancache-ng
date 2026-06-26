@@ -1,9 +1,9 @@
-FROM rust:slim@sha256:811d6caab4a84e6148c8722128993c1caf152156868b2b66f3a26af189b0dad8 AS subscriber-builder
+FROM rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS subscriber-builder
 WORKDIR /build
 COPY nats-subscriber/ .
-RUN cargo build --release
+RUN cargo build --release --locked
 
-FROM debian:trixie-slim@sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pdns-recursor \

@@ -64,7 +64,7 @@ by configuring which DNS server IP they point to:
    (generated at startup), and presents a wildcard cert for `steamcontent.com` signed by our CA.
 4. Client accepts because it trusts our CA → TLS handshake succeeds.
 5. nginx decrypts the request, checks `proxy_cache`, fetches from the real CDN if needed
-   (using `8.8.8.8` as resolver, never the LAN cache DNS to avoid loops), caches the response.
+   (using `NGINX_UPSTREAM_RESOLVER` as the real upstream resolver, never the LAN cache DNS to avoid loops), caches the response.
 6. Consoles (PS5, Xbox) are **not** in the DNS list — if their CDN domains were redirected
    here, the TLS handshake would fail and the console could not fall back (our DNS would
    keep returning the proxy IP on every retry). By omitting them from DNS, consoles reach
@@ -80,7 +80,7 @@ by configuring which DNS server IP they point to:
   per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA. nginx selects
   the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
-- **Upstream resolver must be real DNS**: nginx's `resolver` directive is set to `8.8.8.8`,
+- **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`),
   not our PowerDNS recursor. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
   back to the proxy → infinite loop.
 - **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other

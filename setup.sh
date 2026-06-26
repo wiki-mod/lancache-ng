@@ -1,6 +1,6 @@
 #!/bin/bash
 # LanCache-NG — Guided setup script
-# Usage: ./setup.sh [update|debug] [install-dir]
+# Usage: ./setup.sh [install|update|update-ip|debug|backup|restore|help] [options]
 set -euo pipefail
 export LANG=C LC_ALL=C
 
@@ -32,16 +32,353 @@ ask() {
 
 is_valid_ipv4() {
     local ip="$1"
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    local IFS='.' p parts
-    read -ra parts <<< "$ip"
-    for p in "${parts[@]}"; do
-        (( 10#$p >= 0 && 10#$p <= 255 )) || return 1
-    done
+
+    # Keep IPv4 validation as one readable regular expression so every octet
+    # is range-checked before the value is written into Docker or DNS config.
+    # Accepted: 0.0.0.0 through 255.255.255.255. Rejected: partial IPs,
+    # hostnames, negative numbers, and out-of-range octets such as 256.
+    local octet='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+    [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
 get_env_var() {
-    grep "^${1}=" "${2}" 2>/dev/null | head -1 | cut -d= -f2-
+    awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
+}
+
+
+install_missing_tools() {
+    local -a missing=() tools=("$@")
+    local tool
+    for tool in "${tools[@]}"; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    (( ${#missing[@]} == 0 )) && return 0
+    print_warn "Missing required tool(s): ${missing[*]} — installing now..."
+    command -v apt-get >/dev/null 2>&1 || die "Cannot install missing tools automatically; install: ${missing[*]}"
+    apt-get update -y
+    apt-get install -y --no-install-recommends "${missing[@]}" \
+        || die "Failed to install required tool(s): ${missing[*]}"
+}
+
+backup_manifest() {
+    local install_dir="$1" mode="$2"
+    local env_file="$install_dir/.env"
+    local cache_std cache_ssl kea_dir
+    cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
+    kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+
+    printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
+    [[ -d /srv/lancache/pdns-standard ]] && printf '%s\n' /srv/lancache/pdns-standard
+    [[ -d /srv/lancache/pdns-ssl ]] && printf '%s\n' /srv/lancache/pdns-ssl
+    [[ -d /srv/lancache/kea ]] && printf '%s\n' /srv/lancache/kea
+    [[ -d /srv/lancache/nats ]] && printf '%s\n' /srv/lancache/nats
+    [[ -d /srv/lancache/nats-conf ]] && printf '%s\n' /srv/lancache/nats-conf
+    [[ -n "${kea_dir:-}" && -d "$kea_dir" ]] && printf '%s\n' "$kea_dir"
+    if [[ "$mode" = "full" ]]; then
+        [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
+        [[ -n "${cache_ssl:-}" && "$cache_ssl" != "$cache_std" && -d "$cache_ssl" ]] && printf '%s\n' "$cache_ssl"
+        [[ -d /srv/lancache/cache ]] && printf '%s\n' /srv/lancache/cache
+    fi
+    true
+}
+
+path_is_inside() {
+    local child="$1" parent="$2"
+    child=$(realpath -m "$child")
+    parent=$(realpath -m "$parent")
+    [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
+}
+
+compose_stack_available() {
+    local install_dir="$1"
+    [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1
+}
+
+compose_stack_stop() {
+    local install_dir="$1"
+    compose_stack_available "$install_dir" || return 0
+    print_step "Stopping stack for consistent backup/restore"
+    (cd "$install_dir" && docker compose stop) || print_warn "docker compose stop failed — continuing"
+}
+
+compose_stack_start() {
+    local install_dir="$1"
+    compose_stack_available "$install_dir" || return 0
+    print_step "Starting stack"
+    (cd "$install_dir" && docker compose up -d) || print_warn "docker compose up failed — start the stack manually"
+}
+
+compose_volume_names() {
+    local install_dir="$1" container
+    compose_stack_available "$install_dir" || return 0
+    while IFS= read -r container; do
+        [[ -n "$container" ]] || continue
+        docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "$container"
+    done < <(cd "$install_dir" && docker compose ps --all -q 2>/dev/null) | sort -u
+}
+
+backup_compose_volumes() {
+    local install_dir="$1" volume_root="$2" volume
+    compose_stack_available "$install_dir" || return 0
+    mkdir -p "$volume_root"
+    while IFS= read -r volume; do
+        [[ -n "$volume" ]] || continue
+        print_ok "Including Docker volume: $volume"
+        docker run --rm \
+            -v "${volume}:/volume:ro" \
+            -v "${volume_root}:/backup" \
+            alpine sh -c 'cd /volume && tar -cpf "/backup/$1.tar" .' sh "$volume"
+    done < <(compose_volume_names "$install_dir")
+}
+
+restore_compose_volumes() {
+    local install_dir="$1" volume_root="$2" volume archive
+    [[ -d "$volume_root" ]] || return 0
+    compose_stack_available "$install_dir" \
+        || die "Backup contains Docker volume payloads, but Docker/compose is not available for $install_dir. Install Docker and restore again."
+    while IFS= read -r archive; do
+        volume="$(basename "$archive" .tar)"
+        [[ -n "$volume" ]] || continue
+        print_ok "Restoring Docker volume: $volume"
+        docker volume create "$volume" >/dev/null
+        docker run --rm \
+            -v "${volume}:/volume" \
+            -v "${volume_root}:/backup:ro" \
+            alpine sh -c 'rm -rf /volume/* /volume/..?* /volume/.[!.]* 2>/dev/null || true; cd /volume && tar -xpf "/backup/$1.tar"' sh "$volume"
+    done < <(find "$volume_root" -maxdepth 1 -type f -name '*.tar' | sort)
+}
+
+record_image_revisions() {
+    local install_dir="$1" output="$2"
+    compose_stack_available "$install_dir" || return 0
+    (cd "$install_dir" && docker compose images --format json > "$output") 2>/dev/null \
+        || (cd "$install_dir" && docker compose images > "$output") 2>/dev/null \
+        || print_warn "Could not record current image revisions"
+}
+
+cmd_backup() {
+    local mode="config" install_dir="/opt/lancache-ng" backup_root="/var/backups/lancache-ng"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full) mode="full"; shift ;;
+            --config) mode="config"; shift ;;
+            --dest) backup_root="${2:?Missing value for --dest}"; shift 2 ;;
+            *) install_dir="$1"; shift ;;
+        esac
+    done
+    install_dir=$(realpath -m "$install_dir")
+    backup_root=$(realpath -m "$backup_root")
+    [[ -f "$install_dir/docker-compose.yml" && -f "$install_dir/.env" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+    install_missing_tools tar rsync
+
+    local stamp dest archive rel path old_umask stack_stopped=0
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    dest="$backup_root/$stamp"
+    archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
+    mkdir -p "$backup_root"
+    old_umask=$(umask)
+    umask 077
+    mkdir -p "$dest/rootfs"
+    backup_cleanup() {
+        local status=$?
+        [[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"
+        rm -rf "$dest"
+        umask "$old_umask"
+        trap - EXIT
+        return "$status"
+    }
+    trap backup_cleanup EXIT
+
+    print_step "Creating $mode backup"
+    backup_manifest "$install_dir" "$mode" | sort -u > "$dest/manifest.txt"
+    while IFS= read -r path; do
+        [[ -e "$path" ]] || continue
+        if path_is_inside "$backup_root" "$path"; then
+            die "Backup destination must not be inside included path: $path"
+        fi
+    done < "$dest/manifest.txt"
+
+    record_image_revisions "$install_dir" "$dest/image-revisions.txt"
+    compose_stack_stop "$install_dir"
+    stack_stopped=1
+
+    while IFS= read -r path; do
+        [[ -e "$path" ]] || continue
+        rel="${path#/}"
+        if [[ -d "$path" ]]; then
+            mkdir -p "$dest/rootfs/$rel"
+            rsync -aH --numeric-ids "$path/" "$dest/rootfs/$rel/"
+        else
+            mkdir -p "$dest/rootfs/$(dirname "$rel")"
+            rsync -aH --numeric-ids "$path" "$dest/rootfs/$(dirname "$rel")/"
+        fi
+        print_ok "Included: $path"
+    done < "$dest/manifest.txt"
+    backup_compose_volumes "$install_dir" "$dest/docker-volumes"
+
+    cat > "$dest/README.txt" <<EOF
+LanCache-NG backup created at $stamp UTC
+Mode: $mode
+Install directory: $install_dir
+
+Config backups include text/configuration, Docker named volumes, and runtime databases needed for update rollback.
+Full backups additionally include cache directories, which can be very large.
+Restore with: ./setup.sh restore $archive $install_dir
+EOF
+    tar -C "$backup_root" -czf "$archive" "$stamp"
+    chmod 600 "$archive"
+    print_ok "Backup written: $archive"
+    backup_cleanup
+}
+
+cmd_restore() {
+    local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
+    install_dir=$(realpath -m "$install_dir")
+    [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
+    [[ -f "$archive" ]] || die "Backup archive not found: $archive"
+    install_missing_tools tar rsync
+
+    local tmp root backup_dir archived_install rel_install stack_stopped=0 path rel target
+    tmp=$(mktemp -d)
+    restore_cleanup() {
+        local status=$?
+        [[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"
+        rm -rf "$tmp"
+        trap - EXIT
+        return "$status"
+    }
+    trap restore_cleanup EXIT
+    tar -C "$tmp" -xzf "$archive"
+    root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs | head -1)
+    [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
+    backup_dir=$(dirname "$root")
+    archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt" 2>/dev/null || true)
+    archived_install="${archived_install:-/opt/lancache-ng}"
+    archived_install=$(realpath -m "$archived_install")
+    rel_install="${archived_install#/}"
+
+    compose_stack_stop "$install_dir"
+    stack_stopped=1
+
+    print_step "Restoring backup"
+    if [[ -d "$root/$rel_install" ]]; then
+        mkdir -p "$install_dir"
+        rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/"
+        if [[ "$archived_install" != "$install_dir" && -f "$install_dir/.env" ]]; then
+            sed -i "s#${archived_install}#${install_dir}#g" "$install_dir/.env"
+        fi
+    fi
+    while IFS= read -r path; do
+        rel="${path#/}"
+        if [[ "$path" = "$archived_install" || "$path" = "$archived_install"/* ]]; then
+            continue
+        fi
+        [[ -e "$root/$rel" ]] || continue
+        target="/$rel"
+        if [[ -d "$root/$rel" ]]; then
+            mkdir -p "$target"
+            rsync -aH --numeric-ids "$root/$rel/" "$target/"
+        else
+            mkdir -p "$(dirname "$target")"
+            rsync -aH --numeric-ids "$root/$rel" "$(dirname "$target")/"
+        fi
+    done < "$backup_dir/manifest.txt"
+    restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
+    print_ok "Files restored from $archive"
+    restore_cleanup
+}
+
+print_usage() {
+    cat <<EOF
+LanCache-NG setup
+
+Usage:
+  ./setup.sh [command] [install-dir]
+
+Commands:
+  install              Run the guided first-time setup. This is also the
+                       default when no command is given, so this remains safe
+                       for curl | bash installation.
+  update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
+  update-ip           Change the configured standard and SSL listener IPs.
+  debug [install-dir]  Print diagnostic information for an existing stack.
+  backup [options]     Create a config-only or full rollback backup.
+  restore <archive>    Restore a setup-script backup.
+  help, --help         Show this compact command list.
+
+Compatibility aliases:
+  --reconfigure        Same as update-ip, kept for existing documentation and
+                       scripts that already use ./setup.sh --reconfigure.
+
+Tip:
+  Run './setup.sh <command> --help' for command-specific help. The main help
+  intentionally stays short so it does not flood curl | bash users.
+EOF
+}
+
+print_command_help() {
+    local command="$1"
+
+    case "$command" in
+        install)
+            cat <<EOF
+Usage: ./setup.sh install
+
+Runs the guided LanCache-NG installer. This is the default command when no
+argument is provided, which preserves the existing curl | bash setup flow.
+EOF
+            ;;
+        update)
+            cat <<EOF
+Usage: ./setup.sh update [install-dir]
+
+Updates an existing LanCache-NG installation, pulls fresh container images, and
+restarts the stack. If [install-dir] is omitted, /opt/lancache-ng is used.
+EOF
+            ;;
+        update-ip|--reconfigure|reconfigure)
+            cat <<EOF
+Usage: ./setup.sh update-ip
+
+Interactively changes the standard and SSL listener IP addresses in the
+production configuration, then restarts the production stack.
+
+Compatibility: ./setup.sh --reconfigure still works and runs this command.
+EOF
+            ;;
+        debug)
+            cat <<EOF
+Usage: ./setup.sh debug [install-dir]
+
+Prints container status, recent logs, cache usage, LAN addresses, and health
+checks for an existing installation. If [install-dir] is omitted,
+/opt/lancache-ng is used.
+EOF
+            ;;
+        backup)
+            cat <<EOF
+Usage: ./setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
+
+Creates a timestamped backup archive. Config backups include configuration,
+certificates, secrets, runtime databases, Docker named volumes, and image
+revision metadata. Full backups also include cache directories and can be very
+large.
+EOF
+            ;;
+        restore)
+            cat <<EOF
+Usage: ./setup.sh restore <backup.tar.gz> [install-dir]
+
+Restores a setup-script backup. Files from the archived install directory are
+remapped to [install-dir] when it differs from the original path.
+EOF
+            ;;
+        *)
+            die "Unknown command for help: $command"
+            ;;
+    esac
 }
 
 # ── update subcommand ─────────────────────────────────────────────────────────
@@ -50,6 +387,9 @@ cmd_update() {
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     cd "$install_dir"
+
+    print_step "Creating pre-update rollback backup"
+    cmd_backup --config "$install_dir"
 
     if [[ -d "$install_dir/.git" ]]; then
         print_step "Updating repo"
@@ -126,8 +466,8 @@ cmd_debug() {
     fi
 }
 
-# ── reconfigure subcommand ─────────────────────────────────────────────────────
-cmd_reconfigure() {
+# ── update-ip subcommand ───────────────────────────────────────────────────────
+cmd_update_ip() {
     printf "\n"
     printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
     printf "${BOLD}║  LanCache-NG — Reconfigure IPs        ║${RESET}\n"
@@ -135,7 +475,7 @@ cmd_reconfigure() {
     printf "\n"
 
     [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh --reconfigure)."
+        || die "This script must be run as root (sudo ./setup.sh update-ip)."
 
     print_step "Reading current configuration"
 
@@ -148,6 +488,7 @@ cmd_reconfigure() {
     [[ -f "$dns_ssl_env" ]] || die "Configuration not found: $dns_ssl_env"
 
     local current_ip_standard current_ip_ssl
+    local new_ip_standard new_ip_ssl
     current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env")
     current_ip_ssl=$(get_env_var IP_SSL "$deploy_env")
 
@@ -214,12 +555,48 @@ cmd_reconfigure() {
 }
 
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
-case "${1:-}" in
-    update)      cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
-    debug)       cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
-    --reconfigure) cmd_reconfigure; exit 0 ;;
-    "")          ;;
-    *)           die "Unknown command: $1\nUsage: $0 [update|debug|--reconfigure] [install-dir]" ;;
+# Keep this command router in setup.sh rather than splitting files. Operators can
+# read one script, while command names still follow a simple verb / verb-suffix
+# pattern: install, update, update-ip, debug, backup, restore.
+case "${1:-install}" in
+    install|"")
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install
+            exit 0
+        fi
+        ;;
+    update)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help update
+            exit 0
+        fi
+        cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
+    debug)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help debug
+            exit 0
+        fi
+        cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
+    backup)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help backup
+            exit 0
+        fi
+        shift; cmd_backup "$@"; exit 0 ;;
+    restore)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help restore
+            exit 0
+        fi
+        shift; cmd_restore "$@"; exit 0 ;;
+    update-ip|--reconfigure|reconfigure)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help update-ip
+            exit 0
+        fi
+        cmd_update_ip; exit 0 ;;
+    help|--help|-h) print_usage; exit 0 ;;
+    *)           die "Unknown command: $1\nRun './setup.sh --help' for available commands." ;;
 esac
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -232,7 +609,8 @@ printf "${BOLD}║      LanCache-NG — Initial Setup        ║${RESET}\n"
 printf "${BOLD}╚══════════════════════════════════════════╝${RESET}\n"
 printf "\n"
 printf "  This script sets up LanCache-NG and starts all containers.\n"
-printf "  After: ./setup.sh update  |  ./setup.sh debug\n"
+printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip\n"
+printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 print_step "Checking prerequisites"
@@ -437,8 +815,9 @@ fi
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
-printf "  Admin-UI runs on http://%s:8080 — only accessible within the local network.\n" "$IP_STANDARD"
-printf "  Without a password, anyone on the LAN can restart containers and change domains.\n\n"
+printf "  Admin-UI runs on http://%s:8080 — reachable from your LAN by default.\n" "$IP_STANDARD"
+printf "  Password protection is optional, but recommended on shared or untrusted networks.\n"
+printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .env.\n\n"
 
 ask "Protect Admin-UI with password? [y/N]" "N"
 UI_AUTH_USER=""
@@ -454,7 +833,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
     print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
     printf "\n"
 else
-    print_ok "No password protection — Admin-UI public on LAN"
+    print_warn "No password protection — Admin-UI will be reachable on http://$IP_STANDARD:8080"
 fi
 
 # ── 8. Writing .env ───────────────────────────────────────────────────────────
@@ -468,10 +847,22 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets (only preserve non-empty values)
+if ! grep -q "^KEA_CTRL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+    KEA_CTRL_TOKEN=$(openssl rand -hex 32)
+else
+    KEA_CTRL_TOKEN=$(get_env_var KEA_CTRL_TOKEN "$env_file")
+fi
+
 if ! grep -q "^DDNS_TSIG_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
 else
     DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
+fi
+
+if ! grep -q "^PDNS_API_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+    PDNS_API_KEY=$(openssl rand -hex 32)
+else
+    PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
 fi
 
 if ! grep -q "^NATS_LOCAL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
@@ -509,6 +900,9 @@ CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
+# Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
+NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+
 # For Admin-UI (GB as number for progress bar)
 STANDARD_CACHE_MAX_GB=${cache_gb}
 SSL_CACHE_MAX_GB=${cache_gb}
@@ -521,8 +915,15 @@ DHCP_GATEWAY=${DHCP_GATEWAY}
 DHCP_RANGE_START=${DHCP_RANGE_START}
 DHCP_RANGE_END=${DHCP_RANGE_END}
 
+# Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
+KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
+
 # Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+
+# ── PowerDNS API ───────────────────────────────────────────────────────────────
+# API key for PowerDNS Authoritative + Recursor (generated, do not change)
+PDNS_API_KEY=${PDNS_API_KEY}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
 # Token for local DNS containers (generated, do not change)
@@ -538,6 +939,10 @@ COMPOSE_PROFILES=${COMPOSE_PROFILES}
 # Empty = no password protection
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
+
+# Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
+# Set to 127.0.0.1 to restrict access to this host.
+UI_BIND_IP=${IP_STANDARD}
 EOF
 print_ok ".env written: $INSTALL_DIR/.env"
 

@@ -18,45 +18,29 @@ token=""
 name=""
 proxy_ip=""
 
-usage() {
-  echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
-  echo ""
-  echo "Examples:"
-  echo "  $0 --primary http://192.168.1.5:9090 --token MyToken --name secondary-office --proxy-ip 192.168.1.5"
-}
-
-require_value() {
-  if [[ $# -lt 2 || -z "${2:-}" ]]; then
-    echo "Error: Missing value for $1"
-    usage
-    exit 1
-  fi
-}
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --primary)
-      require_value "$@"
       primary="$2"
       shift 2
       ;;
     --token)
-      require_value "$@"
       token="$2"
       shift 2
       ;;
     --name)
-      require_value "$@"
       name="$2"
       shift 2
       ;;
     --proxy-ip)
-      require_value "$@"
       proxy_ip="$2"
       shift 2
       ;;
     *)
-      usage
+      echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
+      echo ""
+      echo "Examples:"
+      echo "  $0 --primary http://192.168.1.5:9090 --token MyToken --name secondary-office --proxy-ip 192.168.1.5"
       exit 1
       ;;
   esac
@@ -65,7 +49,7 @@ done
 # Validate arguments
 if [[ -z "$primary" || -z "$token" || -z "$name" || -z "$proxy_ip" ]]; then
   echo "Error: Missing required arguments"
-  usage
+  echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
   exit 1
 fi
 
@@ -148,6 +132,12 @@ services:
     ports:
       - "${LISTEN_IP:-0.0.0.0}:53:53/udp"
       - "${LISTEN_IP:-0.0.0.0}:53:53/tcp"
+    healthcheck:
+      test: ["CMD", "rec_control", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -170,12 +160,7 @@ EOF
 
 # Start containers
 echo "Starting secondary DNS container..."
-if ! cd "$secondary_dir"; then
-  echo "Error: Failed to enter secondary directory '${secondary_dir}'"
-  exit 1
-fi
-
-if ! docker compose up -d; then
+if ! (cd "$secondary_dir" && docker compose up -d); then
   echo "Error: Failed to start docker compose"
   exit 1
 fi
