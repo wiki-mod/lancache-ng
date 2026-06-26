@@ -1,6 +1,6 @@
 #!/bin/bash
 # LanCache-NG — Guided setup script
-# Usage: ./setup.sh [update|debug] [install-dir]
+# Usage: ./setup.sh [install|update|update-ip|debug|help] [install-dir]
 set -euo pipefail
 export LANG=C LC_ALL=C
 
@@ -32,16 +32,88 @@ ask() {
 
 is_valid_ipv4() {
     local ip="$1"
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    local IFS='.' p parts
-    read -ra parts <<< "$ip"
-    for p in "${parts[@]}"; do
-        (( 10#$p >= 0 && 10#$p <= 255 )) || return 1
-    done
+
+    # Keep IPv4 validation as one readable regular expression so every octet
+    # is range-checked before the value is written into Docker or DNS config.
+    # Accepted: 0.0.0.0 through 255.255.255.255. Rejected: partial IPs,
+    # hostnames, negative numbers, and out-of-range octets such as 256.
+    local octet='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+    [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
 get_env_var() {
     grep "^${1}=" "${2}" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+print_usage() {
+    cat <<EOF
+LanCache-NG setup
+
+Usage:
+  ./setup.sh [command] [install-dir]
+
+Commands:
+  install              Run the guided first-time setup. This is also the
+                       default when no command is given, so this remains safe
+                       for curl | bash installation.
+  update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
+  update-ip           Change the configured standard and SSL listener IPs.
+  debug [install-dir]  Print diagnostic information for an existing stack.
+  help, --help         Show this compact command list.
+
+Compatibility aliases:
+  --reconfigure        Same as update-ip, kept for existing documentation and
+                       scripts that already use ./setup.sh --reconfigure.
+
+Tip:
+  Run './setup.sh <command> --help' for command-specific help. The main help
+  intentionally stays short so it does not flood curl | bash users.
+EOF
+}
+
+print_command_help() {
+    local command="$1"
+
+    case "$command" in
+        install)
+            cat <<EOF
+Usage: ./setup.sh install
+
+Runs the guided LanCache-NG installer. This is the default command when no
+argument is provided, which preserves the existing curl | bash setup flow.
+EOF
+            ;;
+        update)
+            cat <<EOF
+Usage: ./setup.sh update [install-dir]
+
+Updates an existing LanCache-NG installation, pulls fresh container images, and
+restarts the stack. If [install-dir] is omitted, /opt/lancache-ng is used.
+EOF
+            ;;
+        update-ip|--reconfigure|reconfigure)
+            cat <<EOF
+Usage: ./setup.sh update-ip
+
+Interactively changes the standard and SSL listener IP addresses in the
+production configuration, then restarts the production stack.
+
+Compatibility: ./setup.sh --reconfigure still works and runs this command.
+EOF
+            ;;
+        debug)
+            cat <<EOF
+Usage: ./setup.sh debug [install-dir]
+
+Prints container status, recent logs, cache usage, LAN addresses, and health
+checks for an existing installation. If [install-dir] is omitted,
+/opt/lancache-ng is used.
+EOF
+            ;;
+        *)
+            die "Unknown command for help: $command"
+            ;;
+    esac
 }
 
 # ── update subcommand ─────────────────────────────────────────────────────────
@@ -126,8 +198,8 @@ cmd_debug() {
     fi
 }
 
-# ── reconfigure subcommand ─────────────────────────────────────────────────────
-cmd_reconfigure() {
+# ── update-ip subcommand ───────────────────────────────────────────────────────
+cmd_update_ip() {
     printf "\n"
     printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
     printf "${BOLD}║  LanCache-NG — Reconfigure IPs        ║${RESET}\n"
@@ -135,7 +207,7 @@ cmd_reconfigure() {
     printf "\n"
 
     [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh --reconfigure)."
+        || die "This script must be run as root (sudo ./setup.sh update-ip)."
 
     print_step "Reading current configuration"
 
@@ -148,6 +220,7 @@ cmd_reconfigure() {
     [[ -f "$dns_ssl_env" ]] || die "Configuration not found: $dns_ssl_env"
 
     local current_ip_standard current_ip_ssl
+    local new_ip_standard new_ip_ssl
     current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env")
     current_ip_ssl=$(get_env_var IP_SSL "$deploy_env")
 
@@ -214,12 +287,36 @@ cmd_reconfigure() {
 }
 
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
-case "${1:-}" in
-    update)      cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
-    debug)       cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
-    --reconfigure) cmd_reconfigure; exit 0 ;;
-    "")          ;;
-    *)           die "Unknown command: $1\nUsage: $0 [update|debug|--reconfigure] [install-dir]" ;;
+# Keep this command router in setup.sh rather than splitting files. Operators can
+# read one script, while command names still follow a simple verb / verb-suffix
+# pattern: install, update, update-ip, debug.
+case "${1:-install}" in
+    install|"")
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install
+            exit 0
+        fi
+        ;;
+    update)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help update
+            exit 0
+        fi
+        cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
+    debug)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help debug
+            exit 0
+        fi
+        cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
+    update-ip|--reconfigure|reconfigure)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help update-ip
+            exit 0
+        fi
+        cmd_update_ip; exit 0 ;;
+    help|--help|-h) print_usage; exit 0 ;;
+    *)           die "Unknown command: $1\nRun './setup.sh --help' for available commands." ;;
 esac
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -232,7 +329,8 @@ printf "${BOLD}║      LanCache-NG — Initial Setup        ║${RESET}\n"
 printf "${BOLD}╚══════════════════════════════════════════╝${RESET}\n"
 printf "\n"
 printf "  This script sets up LanCache-NG and starts all containers.\n"
-printf "  After: ./setup.sh update  |  ./setup.sh debug\n"
+printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip\n"
+printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 print_step "Checking prerequisites"
@@ -437,8 +535,9 @@ fi
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
-printf "  Admin-UI runs on http://%s:8080 — only accessible within the local network.\n" "$IP_STANDARD"
-printf "  Without a password, anyone on the LAN can restart containers and change domains.\n\n"
+printf "  Admin-UI runs on http://%s:8080 — reachable from your LAN by default.\n" "$IP_STANDARD"
+printf "  Password protection is optional, but recommended on shared or untrusted networks.\n"
+printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .env.\n\n"
 
 ask "Protect Admin-UI with password? [y/N]" "N"
 UI_AUTH_USER=""
@@ -454,7 +553,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
     print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
     printf "\n"
 else
-    print_ok "No password protection — Admin-UI public on LAN"
+    print_warn "No password protection — Admin-UI will be reachable on http://$IP_STANDARD:8080"
 fi
 
 # ── 8. Writing .env ───────────────────────────────────────────────────────────
@@ -490,6 +589,12 @@ if ! grep -q "^SECONDARY_REGISTRATION_TOKEN=[^[:space:]]" "$env_file" 2>/dev/nul
     SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
 else
     SECONDARY_REGISTRATION_TOKEN=$(get_env_var SECONDARY_REGISTRATION_TOKEN "$env_file")
+fi
+
+if ! grep -q "^PDNS_API_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+    PDNS_API_KEY=$(openssl rand -hex 32)
+else
+    PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
 fi
 
 cat > "$INSTALL_DIR/.env" <<EOF
@@ -543,6 +648,9 @@ NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
 # Token for setup-secondary.sh — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
+# Shared PowerDNS API key for DNS containers and Admin UI. Keep secret.
+PDNS_API_KEY=${PDNS_API_KEY}
+
 # ── Profiles ───────────────────────────────────────────────────────────────────
 # ssl = SSL mode active; watchtower = automatic updates; empty = both disabled
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
@@ -551,6 +659,10 @@ COMPOSE_PROFILES=${COMPOSE_PROFILES}
 # Empty = no password protection
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
+
+# Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
+# Set to 127.0.0.1 to restrict access to this host.
+UI_BIND_IP=${IP_STANDARD}
 EOF
 print_ok ".env written: $INSTALL_DIR/.env"
 
