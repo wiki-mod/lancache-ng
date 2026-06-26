@@ -39,11 +39,19 @@ jobs:
         include:
           - service: dns/nats-subscriber
             path: services/dns/nats-subscriber
+            test_command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
           - service: ui
             path: services/ui
+            test_command: cargo test --locked --manifest-path services/ui/Cargo.toml
+          - service: watchdog
+            path: services/watchdog
+            test_command: |
+              bash -n services/watchdog/watchdog.sh
+              test -x services/watchdog/watchdog.sh
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        if: matrix.service != 'watchdog'
         with:
           path: |
             ~/.cargo/registry
@@ -51,13 +59,14 @@ jobs:
             ${{ matrix.path }}/target
           key: ${{ runner.os }}-cargo-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
       - name: Install Rust toolchain
+        if: matrix.service != 'watchdog'
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
-      - name: cargo test (${{ matrix.service }})
+      - name: test (${{ matrix.service }})
         env:
           RUSTC_WRAPPER: ""
-        run: cargo test --locked --manifest-path ${{ matrix.path }}/Cargo.toml
+        run: ${{ matrix.test_command }}
 
   cargo-audit:
     needs: validate-compose
