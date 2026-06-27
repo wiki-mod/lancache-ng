@@ -111,7 +111,7 @@ jobs:
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache]
     env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-audit-home
+      CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
     strategy:
       fail-fast: false
       matrix:
