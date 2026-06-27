@@ -38,7 +38,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          config-file: ./.github/codeql-config.yml
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Build Rust crates for CodeQL
         env:
