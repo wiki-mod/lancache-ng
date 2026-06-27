@@ -119,10 +119,21 @@ maybe_purge() {
     if [ -f "$PURGE_STAMP" ]; then
         last=$(cat "$PURGE_STAMP")
         case "$last" in
-            ''|*[!0-9]*) last=0 ;;
+            ''|*[!0-9]*)
+                log "Invalid PURGE_STAMP=${last}; forcing purge timestamp reset"
+                last=0
+                ;;
         esac
     fi
-    [ $((now - last)) -lt 86400 ] && return
+
+    # Force decimal parsing so digit-only corrupt stamps like "08" are not
+    # interpreted as invalid octal values by Bash arithmetic under set -e.
+    local last_epoch=$((10#$last))
+    if [ "$last_epoch" -gt "$now" ]; then
+        log "PURGE_STAMP=${last} is in the future; forcing purge timestamp reset"
+        last_epoch=0
+    fi
+    [ $(( now - last_epoch )) -lt 86400 ] && return
 
     # Validate cache valid days setting
     case "$CACHE_VALID_DAYS" in
@@ -137,7 +148,7 @@ maybe_purge() {
         [ -d "$dir" ] || continue
         local count=0
         while IFS= read -r -d '' file; do
-            if rm -f -- "$file"; then
+            if [ -f "$file" ] && rm -- "$file"; then
                 count=$(( count + 1 ))
             fi
         done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 2>/dev/null)
@@ -146,7 +157,6 @@ maybe_purge() {
     mkdir -p "$(dirname "$PURGE_STAMP")"
     echo "$now" > "$PURGE_STAMP"
 }
-
 log "Starting. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 

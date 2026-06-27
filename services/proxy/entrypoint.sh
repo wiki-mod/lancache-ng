@@ -5,7 +5,6 @@ CA_DIR="/etc/nginx/ssl/ca"
 CERT_DIR="/etc/nginx/ssl/certs"
 DOMAINS_FILE="/etc/nginx/cdn-ssl-domains.txt"
 SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
-SERIAL_FILE="/tmp/lancache-ca.srl"
 
 # ────────────────────────────────────────────────────────────────────────────
 # 0. Validate required environment variables
@@ -14,6 +13,8 @@ IP_STANDARD="${IP_STANDARD:?IP_STANDARD is required}"
 IP_SSL="${IP_SSL:-}"
 SSL_ENABLED="${SSL_ENABLED:-0}"
 NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4}"
+PROXY_SECURITY_MODE="${PROXY_SECURITY_MODE:-lazy}"
+PROXY_ALLOWED_CLIENT_CIDRS="${PROXY_ALLOWED_CLIENT_CIDRS:-}"
 
 
 _normalize_resolver_token() {
@@ -40,7 +41,15 @@ for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
     fi
 done
 
-export NGINX_UPSTREAM_RESOLVER
+case "$PROXY_SECURITY_MODE" in
+    lazy|strict) ;;
+    *)
+        echo "[lancache] ERROR: PROXY_SECURITY_MODE must be lazy or strict (got: $PROXY_SECURITY_MODE)." >&2
+        exit 1
+        ;;
+esac
+
+export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS
 # ────────────────────────────────────────────────────────────────────────────
 # 1. SSL mode: Generate CA and certs if needed
 # ────────────────────────────────────────────────────────────────────────────
@@ -53,10 +62,13 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     if [ ! -f "$CA_DIR/ca.crt" ] || [ ! -f "$CA_DIR/ca.key" ]; then
         echo "[lancache] Generating CA certificate (first-time setup)..."
         mkdir -p "$CA_DIR"
-        openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+        if ! openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
             -subj "/CN=LanCache-NG CA/O=LanCache-NG/C=DE" \
             -keyout "$CA_DIR/ca.key" \
-            -out    "$CA_DIR/ca.crt" 2>/dev/null
+            -out    "$CA_DIR/ca.crt"; then
+            echo "[lancache] ERROR: Failed to generate CA certificate" >&2
+            exit 1
+        fi
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
         echo "║              ACTION REQUIRED — READ BEFORE CONTINUING            ║"
@@ -77,57 +89,137 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         echo ""
     fi
 
-    echo "01" > "$SERIAL_FILE"
     mkdir -p "$CERT_DIR"
+
+    # Persist the serial counter in the CA volume so it survives container restarts (#71).
+    # Initialized with a nanosecond timestamp on first use to avoid colliding with any
+    # serials that were issued under the old "echo 01" scheme.
+    SERIAL_FILE="$CA_DIR/ca.srl"
+    if [ ! -f "$SERIAL_FILE" ]; then
+        printf '%016x\n' "$(date +%s%N)" > "$SERIAL_FILE"
+    fi
 
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
-        openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
-            -keyout "$key" -out /tmp/lancache-cert.csr 2>/dev/null
+        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
+            -keyout "$key" -out /tmp/lancache-cert.csr; then
+            rm -f /tmp/lancache-cert.csr
+            echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
+            return 1
+        fi
         if [ -n "$ext" ]; then
-            openssl x509 -req -days 3650 \
+            if ! openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -extfile <(printf "%s" "$ext") \
-                -out "$crt" 2>/dev/null
+                -out "$crt"; then
+                rm -f /tmp/lancache-cert.csr
+                echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
+                return 1
+            fi
         else
-            openssl x509 -req -days 3650 \
+            if ! openssl x509 -req -days 3650 \
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
-                -out "$crt" 2>/dev/null
+                -out "$crt"; then
+                rm -f /tmp/lancache-cert.csr
+                echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
+                return 1
+            fi
         fi
         rm -f /tmp/lancache-cert.csr
     }
 
-    [ ! -f "$CERT_DIR/default.crt" ] && \
-        _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt"
+    # Returns 0 (true = needs regen) if the default cert:
+    #   - is missing (#72)
+    #   - has no matching key (partial generation state)
+    #   - has no SAN at all (CN-only cert from old deployments, #72)
+    #   - has an IP SAN that does not match the current IP_SSL (operator changed IP)
+    _default_cert_needs_regen() {
+        if [ ! -f "$CERT_DIR/default.crt" ] || [ ! -f "$CERT_DIR/default.key" ]; then
+            return 0
+        fi
+        local san
+        san=$(openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null)
+        echo "$san" | grep -q "DNS:" || return 0
+        if [ -n "${IP_SSL}" ]; then
+            echo "$san" | grep -q "IP Address:${IP_SSL}" || return 0
+        fi
+        return 1
+    }
 
+    if _default_cert_needs_regen; then
+        # Generate or regenerate the fallback cert with a proper SAN (#72).
+        # Include IP_SSL in the SAN so clients connecting to that IP also pass validation.
+        _default_san="DNS:lancache-default"
+        [ -n "${IP_SSL}" ] && _default_san="${_default_san},IP:${IP_SSL}"
+        if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \
+            "subjectAltName=${_default_san}"; then
+            echo "[lancache] ERROR: Failed to generate default certificate" >&2
+            exit 1
+        fi
+    fi
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
-        [ -f "$CERT_DIR/${domain}.crt" ] && continue
+        [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
 
         echo "[lancache] Generating cert for $domain..."
-        _sign_cert "$domain" \
+        if ! _sign_cert "$domain" \
             "$CERT_DIR/${domain}.key" \
             "$CERT_DIR/${domain}.crt" \
-            "subjectAltName=DNS:${domain},DNS:*.${domain}"
+            "subjectAltName=DNS:${domain},DNS:*.${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for domain $domain" >&2
+            exit 1
+        fi
     done < "$DOMAINS_FILE"
 
-    {
-        echo "# Auto-generated by entrypoint — do not edit"
-        echo "map \$ssl_server_name \$ssl_cert_name {"
-        echo "    hostnames;"
-        while IFS= read -r domain || [ -n "$domain" ]; do
-            [[ -z "$domain" || "$domain" == \#* ]] && continue
-            printf "    %-45s %s;\n" ".$domain"  "$domain"
-        done < "$DOMAINS_FILE"
-        echo "    default default;"
-        echo "}"
-    } > "$SSL_MAP_FILE"
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 2. Remove https.conf when SSL mode is disabled
+# 2. Generate request-time access policy maps
+#    lazy  = keep historical behavior and allow any requested upstream host
+#    strict = only proxy hosts listed in cdn-ssl-domains.txt
+# ────────────────────────────────────────────────────────────────────────────
+{
+    echo "# Auto-generated by entrypoint — do not edit"
+    echo "map \$ssl_server_name \$ssl_cert_name {"
+    echo "    hostnames;"
+    while IFS= read -r domain || [ -n "$domain" ]; do
+        [[ -z "$domain" || "$domain" == \#* ]] && continue
+        printf "    %-45s %s;\n" ".$domain"  "$domain"
+    done < "$DOMAINS_FILE"
+    echo "    default default;"
+    echo "}"
+
+    echo ""
+    echo "map \$host \$cdn_host_allowed {"
+    echo "    hostnames;"
+    if [ "$PROXY_SECURITY_MODE" = "strict" ]; then
+        echo "    default 0;"
+        while IFS= read -r domain || [ -n "$domain" ]; do
+            [[ -z "$domain" || "$domain" == \#* ]] && continue
+            printf "    %-45s 1;\n" ".$domain"
+        done < "$DOMAINS_FILE"
+    else
+        echo "    default 1;"
+    fi
+    echo "}"
+
+    echo ""
+    echo "geo \$lancache_client_allowed {"
+    if [ -n "$PROXY_ALLOWED_CLIENT_CIDRS" ]; then
+        echo "    default 0;"
+        for cidr in $PROXY_ALLOWED_CLIENT_CIDRS; do
+            printf "    %-45s 1;\n" "$cidr"
+        done
+    else
+        echo "    default 1;"
+    fi
+    echo "}"
+} > "$SSL_MAP_FILE"
+
+# ────────────────────────────────────────────────────────────────────────────
+# 3. Remove https.conf when SSL mode is disabled
 #    (Docker routes IP_SSL:443→container:443 and IP_STANDARD:443→container:8443,
 #    so https.conf can safely listen on 0.0.0.0:443 — only SSL clients reach it)
 # ────────────────────────────────────────────────────────────────────────────
@@ -136,7 +228,7 @@ if [ "${SSL_ENABLED}" = "0" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 3. Render nginx.conf and proxy-params from templates
+# 4. Render nginx.conf and proxy-params from templates
 # ────────────────────────────────────────────────────────────────────────────
 envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \
     < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
@@ -145,7 +237,7 @@ envsubst '${CACHE_SLICE_SIZE} ${CACHE_VALID_HIT} ${CACHE_VALID_ANY}' \
     < /etc/nginx/proxy-params.conf.template > /etc/nginx/proxy-params.conf
 
 # ────────────────────────────────────────────────────────────────────────────
-# 4. Validate config and start nginx
+# 5. Validate config and start nginx
 # ────────────────────────────────────────────────────────────────────────────
 echo "[lancache] Validating nginx config..."
 nginx -t
