@@ -57,6 +57,9 @@ It can:
 - optionally enable SSL caching with a second IP
 - ask for cache directory and cache size
 - optionally enable automatic updates
+- create pre-update rollback backups
+- create config-only or full backups
+- restore setup-script backups
 - optionally enable DHCP
 - optionally protect the Admin UI with a password
 - write the `.env` file
@@ -205,6 +208,15 @@ Because of that, SSL caching is not recommended for consoles.
 Consoles should continue to work normally through standard mode.  
 HTTPS traffic that cannot be cached is passed through to the original CDN.
 
+
+## Docker build performance on local runners
+
+If you build LanCache NG on a self-hosted runner, see the local runner Docker performance guide for practical options such as Docker layer caching, registry mirrors, multi-stage builds, `.dockerignore` files and runner parallelism tuning.
+
+```text
+docs/local-runner-docker-performance.md
+```
+
 ## Requirements
 
 You need:
@@ -276,10 +288,26 @@ sudo /opt/lancache-ng/setup.sh update
 
 The update command can:
 
+- create a config-only rollback backup before changing the stack
 - pull the current repository state
 - update the compose file
 - pull newer images
 - restart the stack
+
+Create a manual backup with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh backup --config
+sudo /opt/lancache-ng/setup.sh backup --full
+```
+
+Use `--config` for small update rollback backups. Use `--full` only when you also need cache objects, because full backups can be very large. Restore a backup with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+```
+
+See `docs/backup-restore.md` for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.
 
 ## Debug information
 
@@ -410,6 +438,7 @@ See:
 
 ```text
 docs/install-ca-cert.md
+docs/backup-restore.md
 ```
 
 ### Firefox note
@@ -541,12 +570,21 @@ CACHE_DIR_SSL=/srv/lancache/cache
 CACHE_MAX_SIZE=500g
 CACHE_MEM_MB=512
 NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+PROXY_SECURITY_MODE=lazy
+PROXY_ALLOWED_CLIENT_CIDRS=
 
 STANDARD_CACHE_MAX_GB=500
 SSL_CACHE_MAX_GB=500
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
+
+`PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
+
+- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is simple and avoids surprising breakage when a launcher uses a new CDN hostname.
+- `strict` only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can break downloads until missing CDN root domains are added.
+
+`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 

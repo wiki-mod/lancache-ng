@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 
 pub struct Config {
     pub template_dir: String,
@@ -30,6 +31,49 @@ pub struct Config {
     pub secondary_registration_token: String,
     pub nats_conf_path: String,
     pub nats_service: String,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("template_dir", &self.template_dir)
+            .field("cdn_domains_file", &self.cdn_domains_file)
+            .field("ssl_domains_file", &self.ssl_domains_file)
+            .field("standard_log", &self.standard_log)
+            .field("ssl_log", &self.ssl_log)
+            .field("standard_cache_dir", &self.standard_cache_dir)
+            .field("ssl_cache_dir", &self.ssl_cache_dir)
+            .field("proxy_standard_url", &self.proxy_standard_url)
+            .field("proxy_ssl_url", &self.proxy_ssl_url)
+            .field("netdata_url", &self.netdata_url)
+            .field("dns_standard_service", &self.dns_standard_service)
+            .field("dns_ssl_service", &self.dns_ssl_service)
+            .field("proxy_ssl_service", &self.proxy_ssl_service)
+            .field("standard_cache_max_gb", &self.standard_cache_max_gb)
+            .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
+            .field("standard_ip", &self.standard_ip)
+            .field("ssl_ip", &self.ssl_ip)
+            .field("dhcp_api_url", &self.dhcp_api_url)
+            .field("dhcp_api_token", &"***REDACTED***")
+            .field("auth_user", &self.auth_user.as_ref().map(|_| "***REDACTED***"))
+            .field("auth_password", &self.auth_password.as_ref().map(|_| "***REDACTED***"))
+            .field("pdns_auth_url", &self.pdns_auth_url)
+            .field("pdns_rec_url", &self.pdns_rec_url)
+            .field("pdns_api_key", &"***REDACTED***")
+            .field("nats_url", &self.nats_url)
+            .field("nats_local_token", &"***REDACTED***")
+            .field("secondary_registration_token", &"***REDACTED***")
+            .field("nats_conf_path", &self.nats_conf_path)
+            .field("nats_service", &self.nats_service)
+            .finish()
+    }
+}
+
+impl fmt::Display for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Config {{ template_dir: {:?}, cdn_domains_file: {:?}, ... }}", 
+               self.template_dir, self.cdn_domains_file)
+    }
 }
 
 impl Config {
