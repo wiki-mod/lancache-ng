@@ -7,14 +7,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     | tar xz --strip-components=1 -C /usr/local/bin sccache-v0.7.4-x86_64-unknown-linux-musl/sccache \
     && chmod +x /usr/local/bin/sccache
 
-ARG SCCACHE_REDIS_URL=
 ARG DISTCC_POTENTIAL_HOSTS=
-
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-# Pre-cache dependencies (sccache used only when SCCACHE_REDIS_URL build arg is provided)
-RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
-      export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+# Pre-cache dependencies; sccache is enabled only when the BuildKit secret exists.
+RUN --mount=type=secret,id=sccache_redis_url \
+    if [ -s /run/secrets/sccache_redis_url ]; then \
+      export RUSTC_WRAPPER=sccache \
+        SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)" \
+        SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
     && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
       export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
@@ -26,8 +27,11 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
     && rm -rf src
 
 COPY src ./src
-RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
-      export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+RUN --mount=type=secret,id=sccache_redis_url \
+    if [ -s /run/secrets/sccache_redis_url ]; then \
+      export RUSTC_WRAPPER=sccache \
+        SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)" \
+        SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
     && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
       export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \

@@ -302,6 +302,8 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-args: ${{ matrix.service == 'ui' && format('DISTCC_POTENTIAL_HOSTS={0}', vars.DISTCC_POTENTIAL_HOSTS) || '' }}
+          secrets: |
+            sccache_redis_url=${{ secrets.SCCACHE_REDIS_URL }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -318,6 +320,8 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-args: ${{ matrix.service == 'ui' && format('DISTCC_POTENTIAL_HOSTS={0}', vars.DISTCC_POTENTIAL_HOSTS) || '' }}
+          secrets: |
+            sccache_redis_url=${{ secrets.SCCACHE_REDIS_URL }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
