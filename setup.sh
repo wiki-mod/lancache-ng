@@ -186,17 +186,17 @@ cmd_reconfigure() {
 
     print_step "Updating configuration files"
 
-    sed -i "s|^IP_STANDARD=.*|IP_STANDARD=$new_ip_standard|" "$deploy_env" \
-        && print_ok "Updated: $deploy_env"
+    sed -i "s|^IP_STANDARD=.*|IP_STANDARD=$new_ip_standard|" "$deploy_env"
+    print_ok "Updated: $deploy_env"
 
-    sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env" \
-        && print_ok "Updated: $deploy_env"
+    sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
+    print_ok "Updated: $deploy_env"
 
-    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env" \
-        && print_ok "Updated: $dns_standard_env"
+    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env"
+    print_ok "Updated: $dns_standard_env"
 
-    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env" \
-        && print_ok "Updated: $dns_ssl_env"
+    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env"
+    print_ok "Updated: $dns_ssl_env"
 
     print_step "Restarting containers"
 
@@ -311,7 +311,7 @@ SSL_ENABLED=0
 IP_SSL=""
 if [[ "${REPLY,,}" = "y" ]]; then
     SSL_ENABLED=1
-    suggested_ssl="${IP_STANDARD%.*}.$((${IP_STANDARD##*.} + 1))"
+    suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
     while true; do
         ask "SSL mode IP (second LAN IP)" "$suggested_ssl"
         IP_SSL="$REPLY"
