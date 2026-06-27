@@ -25,5 +25,6 @@ async-nats = "0.49"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rand = "0.10"
 hex = "0.4"
+form_urlencoded = "1"
 subtle = "2"
 sha2 = "0.11"

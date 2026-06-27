@@ -1,6 +1,6 @@
 use crate::{docker_client, AppState};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -65,6 +65,7 @@ pub async fn secondaries_page(
     ctx.insert("secondaries", &secondaries);
     ctx.insert("primary_url", &primary_url);
     ctx.insert("registration_token", reg_token);
+    crate::routes::insert_csrf_token(&mut ctx, &state);
 
     Ok(crate::routes::render(
         &state.templates,
@@ -143,7 +144,9 @@ pub async fn register_secondary(
 pub async fn remove_secondary(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&state, &headers)?;
     let rows_affected = {
         let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
@@ -174,8 +177,10 @@ pub async fn remove_secondary(
 pub async fn rotate_token(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&state, &headers)?;
     // Validate token — reject if token is unconfigured (empty).
     if state.config.secondary_registration_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
