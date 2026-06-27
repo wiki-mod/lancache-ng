@@ -37,8 +37,10 @@ pub struct Secondary {
 
 // ─── Handlers ───
 
-pub async fn secondaries_page(State(state): State<Arc<AppState>>) -> Html<String> {
-    let db = state.db.lock().unwrap();
+pub async fn secondaries_page(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, StatusCode> {
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
 
     let secondaries = db
         .prepare("SELECT name, consumer_name, registered_at, last_seen FROM secondaries ORDER BY registered_at DESC")
@@ -64,14 +66,22 @@ pub async fn secondaries_page(State(state): State<Arc<AppState>>) -> Html<String
     ctx.insert("primary_url", &primary_url);
     ctx.insert("registration_token", reg_token);
 
-    crate::routes::render(&state.templates, "secondaries.html", &ctx)
+    Ok(crate::routes::render(
+        &state.templates,
+        "secondaries.html",
+        &ctx,
+    ))
 }
 
 pub async fn register_secondary(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(form): axum::extract::Json<RegisterForm>,
 ) -> Result<Json<RegisterResponse>, StatusCode> {
-    // Validate token
+    // Validate token — reject if token is unconfigured (empty) to prevent
+    // accidental open registration when SECONDARY_REGISTRATION_TOKEN is unset.
+    if state.config.secondary_registration_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -79,7 +89,10 @@ pub async fn register_secondary(
     // Validate name: alphanumeric + dash, non-empty, ≤32 chars
     if form.name.is_empty()
         || form.name.len() > 32
-        || !form.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || !form
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -96,7 +109,7 @@ pub async fn register_secondary(
 
     // INSERT OR REPLACE INTO secondaries
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute(
             "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, registered_at, last_seen)
              VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -132,7 +145,7 @@ pub async fn remove_secondary(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let rows_affected = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
@@ -163,7 +176,10 @@ pub async fn rotate_token(
     Path(name): Path<String>,
     axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Validate token
+    // Validate token — reject if token is unconfigured (empty).
+    if state.config.secondary_registration_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if form.token != state.config.secondary_registration_token {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -175,7 +191,7 @@ pub async fn rotate_token(
 
     // Update the secondary's stored token and verify the secondary exists
     let rows_affected = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db.execute(
             "UPDATE secondaries SET nats_token = ? WHERE name = ?",
             [nats_token.clone(), name.clone()],
@@ -206,7 +222,9 @@ pub async fn rotate_token(
 
 // ─── Helper Functions ───
 
-pub async fn update_nats_conf(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn update_nats_conf(
+    state: &AppState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nats_conf = format!(
         "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  token: \"{}\"\n}}\n",
         state.config.nats_local_token
