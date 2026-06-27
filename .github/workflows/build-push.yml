@@ -131,7 +131,7 @@ jobs:
             ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/bin/cargo-audit
             ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/.crates.toml
             ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/.crates2.json
-          key: ${{ runner.os }}-cargo-audit-0.21
+          key: ${{ runner.os }}-cargo-audit-0.21-${{ matrix.service }}
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
         env:
@@ -189,8 +189,6 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    env:
-      BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
     strategy:
       fail-fast: false
       matrix:
@@ -242,6 +240,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Prepare local Buildx cache
+        env:
+          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
         run: |
           mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
@@ -257,8 +257,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=${{ env.BUILDX_CACHE_ROOT }}/${{ matrix.service }}
-          cache-to: type=local,dest=${{ env.BUILDX_CACHE_ROOT }}/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Retry Build and push
         id: retry-build
@@ -271,11 +271,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=${{ env.BUILDX_CACHE_ROOT }}/${{ matrix.service }}
-          cache-to: type=local,dest=${{ env.BUILDX_CACHE_ROOT }}/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Rotate local Buildx cache
         if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        env:
+          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
         run: |
           rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           if [ -d "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" ]; then
