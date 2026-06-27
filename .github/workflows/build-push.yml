@@ -85,11 +85,14 @@ jobs:
             path: services/dns/nats-subscriber
           - service: ui
             path: services/ui
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-home/${{ matrix.service }}
-      RUSTUP_HOME: ${{ runner.temp }}/rustup-home/${{ matrix.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/${{ matrix.service }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/${{ matrix.service }}'
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
@@ -125,11 +128,15 @@ jobs:
             test_command: |
               bash -n services/watchdog/watchdog.sh
               test -x services/watchdog/watchdog.sh
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-home/${{ matrix.service }}
-      RUSTUP_HOME: ${{ runner.temp }}/rustup-home/${{ matrix.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Isolate Rust toolchain paths
+        if: matrix.service != 'watchdog'
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/${{ matrix.service }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/${{ matrix.service }}'
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         if: matrix.service != 'watchdog'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -151,11 +158,14 @@ jobs:
             path: services/dns/nats-subscriber
           - service: ui
             path: services/ui
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-home/${{ matrix.service }}
-      RUSTUP_HOME: ${{ runner.temp }}/rustup-home/${{ matrix.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/${{ matrix.service }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/${{ matrix.service }}'
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
