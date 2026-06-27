@@ -236,9 +236,11 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Prepare local Buildx cache
+        env:
+          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
         run: |
-          sudo install -d -m 1777 /var/tmp/lancache-ng-buildx-cache
-          sudo rm -rf /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new
+          mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
 
       - name: Build and push
         id: build
@@ -251,8 +253,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
-          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Retry Build and push
         id: retry-build
@@ -265,15 +267,17 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
-          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Rotate local Buildx cache
         if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        env:
+          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
         run: |
-          sudo rm -rf /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
-          if [ -d /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new ]; then
-            sudo mv /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          if [ -d "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" ]; then
+            mv "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           fi
 
       - name: Attest image build provenance
