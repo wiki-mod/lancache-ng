@@ -110,6 +110,8 @@ jobs:
   cargo-audit:
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache]
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-audit-home
     strategy:
       fail-fast: false
       matrix:
@@ -128,9 +130,9 @@ jobs:
         id: cache-cargo-audit
         with:
           path: |
-            ~/.cargo/bin/cargo-audit
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
+            ${{ env.CARGO_HOME }}/bin/cargo-audit
+            ${{ env.CARGO_HOME }}/.crates.toml
+            ${{ env.CARGO_HOME }}/.crates2.json
           key: ${{ runner.os }}-cargo-audit-0.21
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
