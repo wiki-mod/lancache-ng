@@ -34,7 +34,7 @@ jobs:
         with:
           toolchain: stable
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -48,6 +48,6 @@ jobs:
           cargo build --locked --manifest-path services/ui/Cargo.toml
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         with:
           category: "/language:${{ matrix.language }}"
