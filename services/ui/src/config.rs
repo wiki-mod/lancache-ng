@@ -126,3 +126,60 @@ fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
         })
         .unwrap_or(default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsts_auto_only_sends_for_https_requests() {
+        assert!(HstsMode::Auto.should_send(true));
+        assert!(!HstsMode::Auto.should_send(false));
+    }
+
+    #[test]
+    fn hsts_always_and_never_ignore_request_scheme() {
+        assert!(HstsMode::Always.should_send(true));
+        assert!(HstsMode::Always.should_send(false));
+        assert!(!HstsMode::Never.should_send(true));
+        assert!(!HstsMode::Never.should_send(false));
+    }
+
+    #[test]
+    fn hsts_mode_parser_accepts_documented_values() {
+        let key = "LANCACHE_TEST_UI_HSTS_MODE_DOCUMENTED";
+
+        env::set_var(key, "auto");
+        assert_eq!(env_hsts_mode(key, HstsMode::Never), HstsMode::Auto);
+
+        env::set_var(key, "always");
+        assert_eq!(env_hsts_mode(key, HstsMode::Never), HstsMode::Always);
+
+        env::set_var(key, "never");
+        assert_eq!(env_hsts_mode(key, HstsMode::Always), HstsMode::Never);
+
+        env::set_var(key, "unexpected");
+        assert_eq!(env_hsts_mode(key, HstsMode::Always), HstsMode::Always);
+
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn security_header_toggle_parser_accepts_documented_values() {
+        let key = "LANCACHE_TEST_UI_SECURITY_HEADERS_DOCUMENTED";
+
+        env::set_var(key, "true");
+        assert!(env_bool(key, false));
+
+        env::set_var(key, "off");
+        assert!(!env_bool(key, true));
+
+        env::set_var(key, "no");
+        assert!(!env_bool(key, true));
+
+        env::set_var(key, "invalid");
+        assert!(env_bool(key, true));
+
+        env::remove_var(key);
+    }
+}
