@@ -136,7 +136,7 @@ trap '
             :
         done
 
-        # Flush and delete the custom chain
+        # Flush and delete the managed chain
         iptables -F LANCACHE_KEA_CTRL 2>/dev/null || true
         iptables -X LANCACHE_KEA_CTRL 2>/dev/null || true
     fi

@@ -46,12 +46,12 @@ Run this on a Linux machine inside your network:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-The setup script guides you through the installation.
+The setup script guides you through the installation. If required tools are missing, it asks before installing packages, installs missing requirements such as Docker, curl and git through the host package manager, and prints the package names to install manually if you abort.
 
 It can:
 
 - check the required tools
-- install Docker if needed
+- ask before installing missing dependencies such as Docker, curl or git
 - clone the repository to `/opt/lancache-ng`
 - ask for the cache server IP
 - optionally enable SSL caching with a second IP
@@ -251,7 +251,7 @@ Recommended installation:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-During setup you will be asked for the important values.
+During setup you will be asked for the important values. If required tools are missing, setup asks before installing packages and prints the package names to install manually if you abort.
 
 Example values:
 
@@ -570,12 +570,21 @@ CACHE_DIR_SSL=/srv/lancache/cache
 CACHE_MAX_SIZE=500g
 CACHE_MEM_MB=512
 NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+PROXY_SECURITY_MODE=lazy
+PROXY_ALLOWED_CLIENT_CIDRS=
 
 STANDARD_CACHE_MAX_GB=500
 SSL_CACHE_MAX_GB=500
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
+
+`PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
+
+- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is simple and avoids surprising breakage when a launcher uses a new CDN hostname.
+- `strict` only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can break downloads until missing CDN root domains are added.
+
+`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 

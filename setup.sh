@@ -41,6 +41,73 @@ is_valid_ipv4() {
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+confirm() {
+    local prompt="$1" default="${2:-N}"
+    ask "$prompt" "$default"
+    [[ "${REPLY,,}" = "y" || "${REPLY,,}" = "yes" ]]
+}
+
+install_packages() {
+    local reason="$1"
+    shift
+    local packages=("$@")
+
+    print_warn "$reason"
+    printf "  Required packages: %s\n" "${packages[*]}"
+    if ! confirm "Install these packages now? [y/N]" "N"; then
+        die "Aborted. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y \
+            && apt-get install -y --no-install-recommends "${packages[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y "${packages[@]}"
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y "${packages[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm "${packages[@]}"
+    else
+        die "No supported package manager found. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
+    fi
+}
+
+install_required_command() {
+    local command_name="$1" reason="$2"
+    shift 2
+
+    install_packages "$reason" "$@" \
+        || die "Failed to install required package(s): $*"
+
+    command -v "$command_name" >/dev/null 2>&1 \
+        || die "$command_name is still missing after installing package(s): $*"
+}
+
+install_curl() {
+    install_required_command curl "curl is missing." curl
+}
+
+install_git() {
+    install_required_command git "git is missing." git
+}
+
+install_docker() {
+    local packages=()
+
+    if command -v apt-get >/dev/null 2>&1; then
+        packages=(docker.io docker-compose-plugin)
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        packages=(docker docker-compose-plugin)
+    elif command -v pacman >/dev/null 2>&1; then
+        packages=(docker docker-compose)
+    else
+        die "No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
+    fi
+
+    install_packages "Docker is missing." "${packages[@]}" \
+        || die "Failed to install Docker."
+}
+
 get_env_var() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
@@ -619,16 +686,11 @@ print_step "Checking prerequisites"
     || die "This script must be run as root (sudo ./setup.sh)."
 
 if ! command -v curl >/dev/null 2>&1; then
-    print_warn "curl missing — installing now..."
-    apt-get update -y
-    apt-get install -y --no-install-recommends curl \
-        || die "Failed to install curl."
+    install_curl
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-    print_warn "Docker not found — installing now (get.docker.com)..."
-    curl -fsSL https://get.docker.com | sh \
-        || die "Docker installation failed."
+    install_docker
     print_ok "Docker installed"
 fi
 
@@ -638,15 +700,18 @@ if ! docker info >/dev/null 2>&1; then
         || die "Failed to start Docker daemon."
 fi
 
+if ! docker compose version >/dev/null 2>&1; then
+    print_warn "Docker Compose plugin missing — installing Docker requirements now..."
+    install_docker
+fi
+
 docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose plugin missing — please reinstall Docker."
+    || die "Docker Compose plugin still missing after installing Docker requirements."
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
     if ! command -v git >/dev/null 2>&1; then
-        apt-get update -y
-        apt-get install -y --no-install-recommends git \
-            || die "Failed to install git."
+        install_git
     fi
     if [[ -d "/opt/lancache-ng/.git" ]]; then
         git -C /opt/lancache-ng pull --ff-only
@@ -902,6 +967,8 @@ CACHE_INACTIVE=365d
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
 NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+PROXY_SECURITY_MODE=lazy
+PROXY_ALLOWED_CLIENT_CIDRS=
 
 # For Admin-UI (GB as number for progress bar)
 STANDARD_CACHE_MAX_GB=${cache_gb}
