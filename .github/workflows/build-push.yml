@@ -110,8 +110,6 @@ jobs:
   cargo-audit:
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache]
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
     strategy:
       fail-fast: false
       matrix:
@@ -130,14 +128,18 @@ jobs:
         id: cache-cargo-audit
         with:
           path: |
-            ${{ env.CARGO_HOME }}/bin/cargo-audit
-            ${{ env.CARGO_HOME }}/.crates.toml
-            ${{ env.CARGO_HOME }}/.crates2.json
+            ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/bin/cargo-audit
+            ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/.crates.toml
+            ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/.crates2.json
           key: ${{ runner.os }}-cargo-audit-0.21
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
         run: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
   container-scan:
