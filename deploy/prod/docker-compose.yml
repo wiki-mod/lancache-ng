@@ -49,6 +49,7 @@ services:
       - ../../config/prod/dns-standard.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-standard
@@ -86,6 +87,7 @@ services:
       - ../../config/prod/dns-ssl.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-ssl
@@ -114,8 +116,8 @@ services:
         max-file: "2"
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to container inspect + restart only
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  # socket-proxy limits Docker access to Admin UI/watchdog operations:
+  # container inspect/list, restart, and exec; no image/volume/system access.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
@@ -123,6 +125,9 @@ services:
     environment:
       CONTAINERS: "1"
       POST: "1"
+      EXEC: "1"
+    networks:
+      - docker-api
     restart: always
     logging:
       driver: json-file
@@ -141,6 +146,9 @@ services:
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     logging:
       driver: json-file
@@ -164,12 +172,27 @@ services:
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
       - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
     volumes:
       - /srv/lancache/kea:/var/lib/kea    # runtime config + leases; create with: mkdir -p /srv/lancache/kea
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
       - NET_ADMIN       # needed for iptables rules restricting port 8000 to Docker-internal
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          host="$${KEA_CTRL_HOST:-127.0.0.1}";
+          [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
+          curl -sf -u admin:$${KEA_CTRL_TOKEN}
+          -H 'Content-Type: application/json'
+          -d '{"command":"config-get","service":["dhcp4"]}'
+          "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -215,8 +238,8 @@ services:
       - ../../services/nats/nats.conf:/nats-default.conf:ro
     environment:
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-    ports:
-      - "4222:4222"
+    expose:
+      - "4222"
     restart: always
     logging:
       driver: json-file
@@ -230,7 +253,6 @@ services:
     build:
       context: ../../services/ui
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
@@ -239,6 +261,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -248,16 +271,20 @@ services:
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://host.docker.internal:8000
-      - DHCP_API_TOKEN=lancache-dhcp-prod-secret
+      - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      - PDNS_API_KEY=lancache-pdns-prod-secret
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - docker-api
     depends_on:
+      - docker-socket-proxy
       - proxy
       - netdata
       - nats
@@ -289,6 +316,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  docker-api:
+    internal: true
 
 volumes:
   proxy-cache:

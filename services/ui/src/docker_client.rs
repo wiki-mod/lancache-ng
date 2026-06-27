@@ -1,11 +1,30 @@
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::query_parameters::{
-    ListContainersOptionsBuilder, RestartContainerOptionsBuilder,
-};
+use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};
+use bollard::Docker;
 use futures_util::StreamExt;
 use std::collections::HashMap;
+
+pub fn connect_from_env() -> Result<Docker> {
+    if let Ok(proxy_url) = std::env::var("DOCKER_PROXY_URL") {
+        let proxy_url = proxy_url.trim();
+        if !proxy_url.is_empty() {
+            return Docker::connect_with_http(proxy_url, 120, bollard::API_DEFAULT_VERSION)
+                .context("Failed to connect to Docker proxy");
+        }
+    }
+
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if let Some(tcp_url) = host.trim().strip_prefix("tcp://") {
+            if !tcp_url.is_empty() {
+                return Docker::connect_with_http(tcp_url, 120, bollard::API_DEFAULT_VERSION)
+                    .context("Failed to connect to Docker host");
+            }
+        }
+    }
+
+    Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")
+}
 
 pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> {
     let id = find_container_id(docker, service_name, true).await?;
@@ -18,7 +37,11 @@ pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&str>) -> Result<String> {
+pub async fn exec_in_container(
+    docker: &Docker,
+    service_name: &str,
+    cmd: Vec<&str>,
+) -> Result<String> {
     let id = find_container_id(docker, service_name, false).await?;
 
     let exec = docker
@@ -35,7 +58,9 @@ pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&st
         .context("Failed to create exec")?;
 
     let mut output = String::new();
-    if let StartExecResults::Attached { output: mut stream, .. } = docker
+    if let StartExecResults::Attached {
+        output: mut stream, ..
+    } = docker
         .start_exec(&exec.id, None)
         .await
         .context("Failed to start exec")?
@@ -66,7 +91,11 @@ pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&st
     Ok(output)
 }
 
-async fn find_container_id(docker: &Docker, service_name: &str, include_stopped: bool) -> Result<String> {
+async fn find_container_id(
+    docker: &Docker,
+    service_name: &str,
+    include_stopped: bool,
+) -> Result<String> {
     let mut filters: HashMap<String, Vec<String>> = HashMap::new();
     filters.insert(
         "label".to_string(),

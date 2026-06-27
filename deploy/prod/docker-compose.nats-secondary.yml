@@ -1,0 +1,19 @@
+# Optional NATS host binding for remote secondary DNS nodes.
+#
+# This file is intentionally separate from docker-compose.yml so the primary
+# deployment does not publish the NATS control plane by default. Enable it only
+# when remote secondaries need to connect directly to NATS:
+#
+#   ENABLE_SECONDARY=1 NATS_BIND_IP=<trusted-lan-ip> \
+#     docker compose -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d
+#
+# Compatibility options:
+# - Existing deployments that use ENABLE_SECONDARY can include this override
+#   whenever ENABLE_SECONDARY=1.
+# - Operators who want an explicit binding switch can include this file only when
+#   needed and must set NATS_BIND_IP to the trusted interface that secondaries use.
+
+services:
+  nats:
+    ports:
+      - "${NATS_BIND_IP:?Set NATS_BIND_IP to the trusted LAN/VPN interface for secondary NATS access}:4222:4222"

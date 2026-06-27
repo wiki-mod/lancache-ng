@@ -1,4 +1,4 @@
-FROM debian:trixie-slim@sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y \
     kea-dhcp4-server \
@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     gettext \
     openssl \
     curl \
+    jq \
     iptables \
     && rm -rf /var/lib/apt/lists/*
 

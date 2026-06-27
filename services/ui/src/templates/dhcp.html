@@ -29,6 +29,7 @@
     <div id="add-subnet-form" class="hidden mb-6 p-4 bg-slate-700 rounded border border-slate-600">
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="/dhcp/subnet/add" class="space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs text-slate-400 mb-1">Subnet (CIDR)</label>
@@ -90,6 +91,7 @@
           </button>
           <form method="POST" action="/dhcp/subnet/remove" class="inline"
             onsubmit="return confirm('Subnet {{ subnet.subnet }} löschen?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ subnet.id }}">
             <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
               Löschen
@@ -101,6 +103,7 @@
       <!-- Edit Subnet Form (hidden by default) -->
       <div id="edit-subnet-{{ subnet.id }}" class="hidden p-4 bg-slate-750 border-t border-slate-600">
         <form method="POST" action="/dhcp/subnet/update" class="space-y-3">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
           <div class="grid grid-cols-2 gap-3">
             <div>
@@ -154,6 +157,7 @@
 
     {% if subnets | length > 0 %}
     <form method="POST" action="/dhcp/static/add" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="grid grid-cols-4 gap-3">
         <div>
           <label class="block text-xs text-slate-400 mb-1">Subnet</label>
@@ -195,6 +199,7 @@
           </div>
         </div>
         <form method="POST" action="/dhcp/static/remove" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ res.subnet_id }}">
           <input type="hidden" name="mac" value="{{ res.mac }}">
           <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
@@ -263,9 +268,11 @@ async function checkDhcpConflict() {
     const res = await fetch('/api/dhcp/check');
     const data = await res.json();
     if (data.dhcp_found) {
-      statusEl.innerHTML = `<span class="text-yellow-400">&#9888; DHCP-Server gefunden: ${data.server_ip}</span>`;
+      statusEl.className = 'text-sm text-yellow-400';
+      statusEl.textContent = `⚠ DHCP-Server gefunden: ${data.server_ip ?? ''}`;
     } else {
-      statusEl.innerHTML = '<span class="text-green-400">&#10003; Kein fremder DHCP-Server gefunden</span>';
+      statusEl.className = 'text-sm text-green-400';
+      statusEl.textContent = '✓ Kein fremder DHCP-Server gefunden';
     }
   } catch (e) {
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;

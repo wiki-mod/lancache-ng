@@ -12,6 +12,35 @@ set -euo pipefail
 #     --name secondary-office \
 #     --proxy-ip 192.168.1.5
 
+usage() {
+  cat <<EOF_USAGE
+Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>
+
+Required arguments:
+  --primary <url>    Primary lancache UI/API URL, for example http://192.168.1.5:9090
+  --token <token>    Secondary registration token from the primary server
+  --name <name>      Secondary node name, using letters, numbers, and dashes only
+  --proxy-ip <ip>    Primary proxy IP address clients should use for cached traffic
+
+Example:
+  $0 --primary http://192.168.1.5:9090 --token MyToken --name secondary-office --proxy-ip 192.168.1.5
+EOF_USAGE
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+require_value() {
+  local option="$1"
+  local value="${2:-}"
+
+  if [[ -z "$value" || "$value" == --* ]]; then
+    fail "${option} requires a value"
+  fi
+}
+
 # Argument parsing
 primary=""
 token=""
@@ -21,75 +50,86 @@ proxy_ip=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --primary)
+      require_value "$1" "${2:-}"
       primary="$2"
       shift 2
       ;;
     --token)
+      require_value "$1" "${2:-}"
       token="$2"
       shift 2
       ;;
     --name)
+      require_value "$1" "${2:-}"
       name="$2"
       shift 2
       ;;
     --proxy-ip)
+      require_value "$1" "${2:-}"
       proxy_ip="$2"
       shift 2
       ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
     *)
-      echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
-      echo ""
-      echo "Examples:"
-      echo "  $0 --primary http://192.168.1.5:9090 --token MyToken --name secondary-office --proxy-ip 192.168.1.5"
-      exit 1
+      usage >&2
+      fail "Unknown argument: $1"
       ;;
   esac
 done
 
 # Validate arguments
-if [[ -z "$primary" || -z "$token" || -z "$name" || -z "$proxy_ip" ]]; then
-  echo "Error: Missing required arguments"
-  echo "Usage: $0 --primary <url> --token <token> --name <name> --proxy-ip <ip>"
-  exit 1
+missing_args=()
+[[ -n "$primary" ]] || missing_args+=("--primary")
+[[ -n "$token" ]] || missing_args+=("--token")
+[[ -n "$name" ]] || missing_args+=("--name")
+[[ -n "$proxy_ip" ]] || missing_args+=("--proxy-ip")
+
+if [[ ${#missing_args[@]} -gt 0 ]]; then
+  usage >&2
+  fail "Missing required argument(s): ${missing_args[*]}"
 fi
 
 # Check required tools
 for cmd in curl docker; do
   if ! command -v "$cmd" &> /dev/null; then
-    echo "Error: $cmd is not installed"
-    exit 1
+    fail "$cmd is not installed or is not in PATH"
   fi
 done
 
 if ! docker compose version &> /dev/null; then
-  echo "Error: 'docker compose' is not available"
-  exit 1
+  fail "'docker compose' is not available; install Docker Compose v2 before continuing"
 fi
 
 # Validate name (alphanumeric + dash only)
 if ! [[ "$name" =~ ^[a-zA-Z0-9-]+$ ]]; then
-  echo "Error: name must contain only alphanumeric characters and dashes"
-  exit 1
+  fail "--name must contain only alphanumeric characters and dashes"
 fi
 
 # POST to primary server
 echo "Registering secondary '${name}' with primary server..."
-response=$(curl -s -X POST \
+response_file=$(mktemp)
+trap 'rm -f "$response_file"' EXIT
+
+http_status=""
+if ! http_status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
-  "${primary}/api/secondary/register")
-exit_code=$?
+  "${primary}/api/secondary/register"); then
+  fail "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running."
+fi
 
-# Check curl exit code
-if [[ $exit_code -ne 0 ]]; then
-  echo "Error: Failed to connect to primary server at ${primary}"
-  exit 1
+response=$(cat "$response_file")
+
+if [[ ! "$http_status" =~ ^2 ]]; then
+  fail "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
 fi
 
 # Validate response is not empty
 if [[ -z "$response" ]]; then
-  echo "Error: Empty response from primary server"
-  exit 1
+  fail "Empty response from primary server after successful HTTP ${http_status} registration request"
 fi
 
 # Extract fields from JSON response using grep
@@ -100,23 +140,26 @@ consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || 
 pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
 
 # Validate we got all required fields
-if [[ -z "$nats_url" || -z "$nats_token" || -z "$consumer_name" || -z "$pdns_api_key" ]]; then
-  echo "Error: Invalid response from primary server"
-  echo "Response: $response"
-  exit 1
+missing_fields=()
+[[ -n "$nats_url" ]] || missing_fields+=("nats_url")
+[[ -n "$nats_token" ]] || missing_fields+=("nats_token")
+[[ -n "$consumer_name" ]] || missing_fields+=("consumer_name")
+[[ -n "$pdns_api_key" ]] || missing_fields+=("pdns_api_key")
+
+if [[ ${#missing_fields[@]} -gt 0 ]]; then
+  fail "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
 fi
 
 # Create secondary directory
 secondary_dir="${name}"
 if [[ -d "$secondary_dir" ]]; then
-  echo "Error: Directory '${secondary_dir}' already exists"
-  exit 1
+  fail "Directory '${secondary_dir}' already exists; choose a different --name or remove the existing directory"
 fi
 
 mkdir -p "$secondary_dir"
 
 # Write docker-compose.yml
-cat > "${secondary_dir}/docker-compose.yml" << 'EOF'
+cat > "${secondary_dir}/docker-compose.yml" << 'EOF_COMPOSE'
 # Secondary DNS node — run on a remote host.
 # Generated by scripts/setup-secondary.sh — do not edit manually.
 # To update tokens, re-run setup-secondary.sh with --rotate.
@@ -151,30 +194,22 @@ services:
 
 volumes:
   pdns-data:
-EOF
+EOF_COMPOSE
 
 # Write .env file
-cat > "${secondary_dir}/.env" << EOF
+cat > "${secondary_dir}/.env" << EOF_ENV
 PROXY_IP=${proxy_ip}
 PDNS_API_KEY=${pdns_api_key}
 NATS_URL=${nats_url}
 NATS_TOKEN=${nats_token}
 NATS_CONSUMER=${consumer_name}
-EOF
+EOF_ENV
 
 # Start containers
 echo "Starting secondary DNS container..."
-cd "$secondary_dir"
-docker compose up -d
-exit_code=$?
-
-if [[ $exit_code -ne 0 ]]; then
-  echo "Error: Failed to start docker compose"
-  cd ..
-  exit 1
+if ! (cd "$secondary_dir" && docker compose up -d); then
+  fail "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 fi
-
-cd ..
 
 # Success message
 echo "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
