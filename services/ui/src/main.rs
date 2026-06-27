@@ -44,23 +44,32 @@ const TEMPLATE_NAMES: &[&str] = &[
     "setup.html",
 ];
 
+const ADMIN_UI_CSP: &str = "default-src 'self'; \
+             base-uri 'self'; \
+             object-src 'none'; \
+             frame-ancestors 'none'; \
+             form-action 'self'; \
+             script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; \
+             connect-src 'self'; \
+             font-src 'self' data:";
+
+fn forwarded_proto_is_https(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .is_some_and(|proto| proto.eq_ignore_ascii_case("https"))
+}
+
 async fn security_headers(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let is_https = req
-        .headers()
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value
-                .split(',')
-                .next()
-                .map(str::trim)
-                .is_some_and(|proto| proto.eq_ignore_ascii_case("https"))
-        })
-        .unwrap_or(false);
+    let is_https = forwarded_proto_is_https(req.headers());
 
     let mut response = next.run(req).await;
     if !state.config.security_headers_enabled {
@@ -71,18 +80,7 @@ async fn security_headers(
 
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; \
-             base-uri 'self'; \
-             object-src 'none'; \
-             frame-ancestors 'none'; \
-             form-action 'self'; \
-             script-src 'self' 'unsafe-inline'; \
-             style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data:; \
-             connect-src 'self'; \
-             font-src 'self' data:",
-        ),
+        HeaderValue::from_static(ADMIN_UI_CSP),
     );
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
@@ -397,4 +395,32 @@ async fn main() -> Result<()> {
     tracing::info!("LanCache Admin UI running on http://0.0.0.0:8080");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarded_proto_https_detection_uses_first_proxy_value() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!forwarded_proto_is_https(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(forwarded_proto_is_https(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("HTTPS, http"));
+        assert!(forwarded_proto_is_https(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http, https"));
+        assert!(!forwarded_proto_is_https(&headers));
+    }
+
+    #[test]
+    fn csp_keeps_scripts_self_hosted_without_external_cdn_allowances() {
+        assert!(ADMIN_UI_CSP.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(!ADMIN_UI_CSP.contains("cdn.tailwindcss.com"));
+        assert!(!ADMIN_UI_CSP.contains("cdn.jsdelivr.net"));
+        assert!(!ADMIN_UI_CSP.contains("'unsafe-eval'"));
+    }
 }
