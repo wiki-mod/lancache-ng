@@ -35,6 +35,8 @@ services:
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-0}
       - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER}
+      - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:-lazy}
+      - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
       - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
@@ -66,7 +68,7 @@ services:
         printf 'jetstream { store_dir: /data }\nauthorization { token: "%s" }\n' "$NATS_LOCAL_TOKEN" > /etc/nats/nats.conf
         exec nats-server -c /etc/nats/nats.conf
     environment:
-      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-}
     volumes:
       - nats-data:/data
       - nats-conf:/etc/nats
@@ -99,10 +101,10 @@ services:
       - PROXY_IP=${IP_STANDARD}
       - LOG_QUERIES=0
       - NATS_URL=nats://nats:4222
-      - NATS_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_TOKEN=${NATS_LOCAL_TOKEN:-}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
-      - PDNS_API_KEY=${PDNS_API_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY:-}
     volumes:
       - pdns-data-standard:/var/lib/powerdns
     depends_on:
@@ -131,9 +133,9 @@ services:
       - PROXY_IP=${IP_SSL}
       - LOG_QUERIES=0
       - NATS_URL=nats://nats:4222
-      - NATS_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_TOKEN=${NATS_LOCAL_TOKEN:-}
       - NATS_CONSUMER=dns-ssl
-      - PDNS_API_KEY=${PDNS_API_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY:-}
     volumes:
       - pdns-data-ssl:/var/lib/powerdns
     depends_on:
@@ -155,15 +157,20 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to container inspect + restart only
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  # socket-proxy provides scoped Docker API access for UI and watchdog only.
+  # CONTAINERS=1 + EXEC=1 + POST=1 permits container inspect/restart/exec
+  # without granting image, volume, network, or host-management endpoints.
+  # It is isolated on docker-api so other services cannot reach its EXEC-enabled API.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       CONTAINERS: "1"
+      EXEC: "1"
       POST: "1"
+    networks:
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -190,6 +197,9 @@ services:
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -197,17 +207,22 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+
   # ── Admin UI ───────────────────────────────────────────────────────────────
+  # UI is LAN-reachable by default for the quickstart workflow. Password protection
+  # remains optional, but is recommended on shared or untrusted networks. Set
+  # UI_BIND_IP=127.0.0.1 to restrict access to the host. Direct Docker socket mount
+  # removed; Docker operations are proxied through the isolated docker-api network.
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - proxy-logs:/var/log/nginx:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
       - nats-conf:/etc/nats
     ports:
-      - "${IP_STANDARD}:8080:8080"
+      - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -219,17 +234,21 @@ services:
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - NATS_URL=nats://nats:4222
-      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-      - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
+      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-}
+      - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      - PDNS_API_KEY=${PDNS_API_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DHCP_API_URL=http://dhcp:8000
-      - DHCP_API_TOKEN=${DHCP_API_TOKEN}
+      - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
     depends_on:
+      - docker-socket-proxy
       - proxy
       - netdata
       - nats
+    networks:
+      - default
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -274,6 +293,10 @@ services:
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
+
+networks:
+  docker-api:
+    internal: true
 
 volumes:
   proxy-logs:

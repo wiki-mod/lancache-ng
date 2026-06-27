@@ -50,6 +50,7 @@ pub struct Reservation {
 
 #[derive(Deserialize)]
 pub struct AddSubnetForm {
+    pub csrf_token: String,
     pub subnet: String,
     pub pool_start: String,
     pub pool_end: String,
@@ -60,6 +61,7 @@ pub struct AddSubnetForm {
 
 #[derive(Deserialize)]
 pub struct UpdateSubnetForm {
+    pub csrf_token: String,
     pub id: u32,
     pub subnet: String,
     pub pool_start: String,
@@ -71,11 +73,13 @@ pub struct UpdateSubnetForm {
 
 #[derive(Deserialize)]
 pub struct RemoveSubnetForm {
+    pub csrf_token: String,
     pub id: u32,
 }
 
 #[derive(Deserialize)]
 pub struct AddReservationForm {
+    pub csrf_token: String,
     pub subnet_id: u32,
     pub mac: String,
     pub ip: String,
@@ -84,6 +88,7 @@ pub struct AddReservationForm {
 
 #[derive(Deserialize)]
 pub struct RemoveReservationForm {
+    pub csrf_token: String,
     pub subnet_id: u32,
     pub mac: String,
 }
@@ -93,7 +98,9 @@ pub struct RemoveReservationForm {
 pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
     ctx.insert("active_page", "dhcp");
+    ctx.insert("csrf_token", &state.csrf_token);
     ctx.insert("dhcp_api_url", &state.config.dhcp_api_url);
+    crate::routes::insert_csrf_token(&mut ctx, &state);
 
     if !state.config.dhcp_api_url.is_empty() {
         let subnets = fetch_subnets(&state).await.unwrap_or_default();
@@ -118,6 +125,7 @@ pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_cidr(&form.subnet)
         || !is_valid_ip(&form.pool_start)
         || !is_valid_ip(&form.pool_end)
@@ -167,6 +175,7 @@ pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_cidr(&form.subnet)
         || !is_valid_ip(&form.pool_start)
         || !is_valid_ip(&form.pool_end)
@@ -215,6 +224,7 @@ pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -237,6 +247,7 @@ pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -250,6 +261,7 @@ pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     call_kea_reservation_del(&state, form.subnet_id, &form.mac)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -310,7 +322,7 @@ fn kea_result(resp: &Value) -> Result<(), Box<dyn std::error::Error + Send + Syn
     }
 }
 
-// config-get → modify → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
+// config-get → modify → config-test → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
 async fn kea_config_modify<F>(
     state: &AppState,
     modify: F,
@@ -332,6 +344,13 @@ where
         .ok_or("config-get: missing arguments")?;
 
     modify(&mut config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+    let test_resp = kea_post(
+        state,
+        &json!({"command": "config-test", "service": ["dhcp4"], "arguments": config.clone()}),
+    )
+    .await?;
+    kea_result(&test_resp)?;
 
     let set_resp = kea_post(
         state,

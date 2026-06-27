@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [master]
   schedule:
-    - cron: "34 3 * * 1"
+    - cron: "24 3 * * *"
 
 permissions:
   contents: read
@@ -14,18 +14,41 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze Rust
-    runs-on: [self-hosted, linux, lancache]
-    timeout-minutes: 30
+    name: Analyze (${{ matrix.language }})
+    # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
+    # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
+    runs-on: [self-hosted, linux, lancache, codeql]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: manual
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
-          languages: rust
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+
+      - name: Build Rust crates for CodeQL
+        env:
+          RUSTC_WRAPPER: ""
+        run: |
+          cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+          cargo build --locked --manifest-path services/ui/Cargo.toml
+
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+

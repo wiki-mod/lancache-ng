@@ -44,6 +44,7 @@ services:
     env_file:
       - ../../config/dev/dns-standard.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
@@ -81,6 +82,7 @@ services:
     env_file:
       - ../../config/dev/dns-ssl.env
     environment:
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
@@ -108,8 +110,8 @@ services:
     restart: unless-stopped
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to container inspect + restart only
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  # socket-proxy limits Docker access to Admin UI/watchdog operations:
+  # container inspect/list, restart, and exec; no image/volume/system access.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
@@ -117,8 +119,9 @@ services:
     environment:
       CONTAINERS: "1"
       POST: "1"
+      EXEC: "1"
     networks:
-      - lancache
+      - docker-api
     restart: unless-stopped
 
   watchdog:
@@ -133,6 +136,7 @@ services:
       - docker-socket-proxy
     networks:
       - lancache
+      - docker-api
     restart: unless-stopped
 
   # ── DHCP Server (Kea) ─────────────────────────────────────────────────────
@@ -149,6 +153,7 @@ services:
       - DHCP_DNS_SERVER_IP=172.28.0.3
       - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
     volumes:
       - kea-data:/var/lib/kea    # runtime config + leases persist across restarts
     ports:
@@ -159,6 +164,20 @@ services:
     networks:
       lancache:
         ipv4_address: 172.28.0.6
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          host="$${KEA_CTRL_HOST:-127.0.0.1}";
+          [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
+          curl -sf -u admin:$${KEA_CTRL_TOKEN}
+          -H 'Content-Type: application/json'
+          -d '{"command":"config-get","service":["dhcp4"]}'
+          "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
 
@@ -218,7 +237,6 @@ services:
     build:
       context: ../../services/ui
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
@@ -227,6 +245,7 @@ services:
     ports:
       - "9090:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -235,16 +254,18 @@ services:
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://dhcp:8000
-      - DHCP_API_TOKEN=lancache-dhcp-dev-secret
+      - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      - PDNS_API_KEY=lancache-pdns-dev-secret
+      - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-lancache-nats-dev-secret}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-lancache-reg-dev-secret}
     networks:
       - lancache
+      - docker-api
     depends_on:
+      - docker-socket-proxy
       - proxy
       - netdata
       - dhcp
@@ -280,6 +301,8 @@ networks:
       config:
         - subnet: 172.28.0.0/16
           gateway: 172.28.0.1
+  docker-api:
+    internal: true
 
 volumes:
   proxy-cache:

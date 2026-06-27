@@ -5,8 +5,8 @@ queries:
   - uses: security-and-quality
 
 paths:
-  - services/dns/nats-subscriber/src
-  - services/ui/src
+  - services/dns/nats-subscriber
+  - services/ui
 
 paths-ignore:
-  - "**/target/**"
+  - '**/target/**'
