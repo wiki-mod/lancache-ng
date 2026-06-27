@@ -165,6 +165,8 @@ services:
       CONTAINERS: "1"
       POST: "1"
       EXEC: "1"
+    networks:
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -191,6 +193,9 @@ services:
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -232,6 +237,9 @@ services:
       - proxy
       - netdata
       - nats
+    networks:
+      - default
+      - docker-api
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -276,6 +284,10 @@ services:
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
+
+networks:
+  docker-api:
+    internal: true
 
 volumes:
   proxy-logs:

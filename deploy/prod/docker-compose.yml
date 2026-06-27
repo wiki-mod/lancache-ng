@@ -124,6 +124,8 @@ services:
       CONTAINERS: "1"
       POST: "1"
       EXEC: "1"
+    networks:
+      - docker-api
     restart: always
     logging:
       driver: json-file
@@ -142,6 +144,9 @@ services:
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     logging:
       driver: json-file
@@ -258,6 +263,9 @@ services:
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - docker-api
     depends_on:
       - docker-socket-proxy
       - proxy
@@ -291,6 +299,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  docker-api:
+    internal: true
 
 volumes:
   proxy-cache:
