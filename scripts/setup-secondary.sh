@@ -160,10 +160,7 @@ EOF
 
 # Start containers
 echo "Starting secondary DNS container..."
-if ! (
-  cd "$secondary_dir"
-  docker compose up -d
-); then
+if ! (cd "$secondary_dir" && docker compose up -d); then
   echo "Error: Failed to start docker compose"
   exit 1
 fi

@@ -11,11 +11,13 @@ use tera::Context;
 
 #[derive(Deserialize)]
 pub struct AddForm {
+    pub csrf_token: String,
     pub domain: String,
 }
 
 #[derive(Deserialize)]
 pub struct LanRecordForm {
+    pub csrf_token: String,
     pub name: String,
     pub record_type: String,
     pub content: String,
@@ -24,6 +26,7 @@ pub struct LanRecordForm {
 
 #[derive(Deserialize)]
 pub struct AaaaFilterForm {
+    pub csrf_token: String,
     #[serde(default)]
     pub enabled: Option<String>,
 }
@@ -56,11 +59,16 @@ pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("active_page", "domains");
+    crate::routes::insert_csrf_token(&mut ctx, &state);
 
     crate::routes::render(&state.templates, "domains.html", &ctx)
 }
 
-pub async fn add_dns(State(state): State<Arc<AppState>>, Form(form): Form<AddForm>) -> Redirect {
+pub async fn add_dns(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<AddForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let domain = form.domain.trim().to_lowercase();
     if is_valid_domain(&domain) {
         let wrote = {
@@ -73,10 +81,14 @@ pub async fn add_dns(State(state): State<Arc<AppState>>, Form(form): Form<AddFor
             flush_recursor_cache(&state).await;
         }
     }
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
-pub async fn remove_dns(State(state): State<Arc<AppState>>, Form(form): Form<AddForm>) -> Redirect {
+pub async fn remove_dns(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<AddForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let domain = form.domain.trim().to_string();
     let removed = {
         let _guard = state.file_lock.lock().expect("file lock poisoned");
@@ -87,10 +99,14 @@ pub async fn remove_dns(State(state): State<Arc<AppState>>, Form(form): Form<Add
     } else {
         flush_recursor_cache(&state).await;
     }
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
-pub async fn add_ssl(State(state): State<Arc<AppState>>, Form(form): Form<AddForm>) -> Redirect {
+pub async fn add_ssl(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<AddForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let domain = form.domain.trim().to_lowercase();
     if is_valid_domain(&domain) {
         let wrote = {
@@ -103,10 +119,14 @@ pub async fn add_ssl(State(state): State<Arc<AppState>>, Form(form): Form<AddFor
             restart_ssl(&state).await;
         }
     }
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
-pub async fn remove_ssl(State(state): State<Arc<AppState>>, Form(form): Form<AddForm>) -> Redirect {
+pub async fn remove_ssl(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<AddForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let domain = form.domain.trim().to_string();
     let removed = {
         let _guard = state.file_lock.lock().expect("file lock poisoned");
@@ -117,13 +137,14 @@ pub async fn remove_ssl(State(state): State<Arc<AppState>>, Form(form): Form<Add
     } else {
         restart_ssl(&state).await;
     }
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
 pub async fn add_lan_record(
     State(state): State<Arc<AppState>>,
     Form(form): Form<LanRecordForm>,
-) -> Redirect {
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let name = normalize_lan_name(&form.name);
     let ttl = form.ttl.unwrap_or(300);
 
@@ -135,7 +156,7 @@ pub async fn add_lan_record(
             record_type = %form.record_type,
             "Rejected invalid LAN record"
         );
-        return Redirect::to("/domains");
+        return Ok(Redirect::to("/domains"));
     };
 
     let msg = json!({
@@ -158,13 +179,14 @@ pub async fn add_lan_record(
     }
     flush_recursor_cache(&state).await;
 
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
 pub async fn remove_lan_record(
     State(state): State<Arc<AppState>>,
     Form(form): Form<LanRecordForm>,
-) -> Redirect {
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let name = normalize_lan_name(&form.name);
 
     let Some(record_type) = normalize_delete_record_type(&form.record_type) else {
@@ -173,7 +195,7 @@ pub async fn remove_lan_record(
             record_type = %form.record_type,
             "Rejected invalid LAN record delete"
         );
-        return Redirect::to("/domains");
+        return Ok(Redirect::to("/domains"));
     };
 
     let name_ok = is_valid_lan_name_for_delete(&name);
@@ -182,7 +204,7 @@ pub async fn remove_lan_record(
             name = %form.name,
             "Rejected invalid LAN name for delete"
         );
-        return Redirect::to("/domains");
+        return Ok(Redirect::to("/domains"));
     }
 
     let msg = json!({
@@ -203,13 +225,14 @@ pub async fn remove_lan_record(
     }
     flush_recursor_cache(&state).await;
 
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
 pub async fn toggle_aaaa_filter(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AaaaFilterForm>,
-) -> Redirect {
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let enable = form.enabled.as_deref() == Some("1");
     let cmd = if enable {
         vec!["touch", "/var/lib/powerdns/aaaa-filter-enabled"]
@@ -224,7 +247,7 @@ pub async fn toggle_aaaa_filter(
             tracing::error!("AAAA filter toggle on {}: {}", svc, e);
         }
     }
-    Redirect::to("/domains")
+    Ok(Redirect::to("/domains"))
 }
 
 async fn flush_recursor_cache(state: &AppState) {
@@ -423,7 +446,7 @@ fn read_domain_file(path: &str) -> Vec<String> {
     };
     BufReader::new(file)
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(Result::ok)
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect()
@@ -444,12 +467,34 @@ fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
 
 fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
-    let new: String = content
+    let mut removed = false;
+    let sep = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    let new = content
         .lines()
-        .filter(|l| !l.trim().is_empty() && l.trim() != domain)
-        .map(|l| format!("{}\n", l))
-        .collect();
-    fs::write(path, new)?;
+        .filter(|line| {
+            let keep = line.trim() != domain;
+            if !keep {
+                removed = true;
+            }
+            keep
+        })
+        .collect::<Vec<_>>()
+        .join(sep);
+
+    if removed {
+        let new = if content.ends_with('\n') && !new.is_empty() {
+            format!("{new}{sep}")
+        } else {
+            new
+        };
+        fs::write(path, new)?;
+    }
+
     Ok(())
 }
 
@@ -534,7 +579,10 @@ mod tests {
             normalize_delete_record_type("HTTPS"),
             Some("HTTPS".to_string())
         );
-        assert_eq!(normalize_delete_record_type("SVCB"), Some("SVCB".to_string()));
+        assert_eq!(
+            normalize_delete_record_type("SVCB"),
+            Some("SVCB".to_string())
+        );
         assert_eq!(
             normalize_delete_record_type("TYPE257"),
             Some("TYPE257".to_string())

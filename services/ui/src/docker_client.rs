@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::query_parameters::{
-    ListContainersOptionsBuilder, RestartContainerOptionsBuilder,
-};
+use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};
+use bollard::Docker;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
@@ -18,7 +16,11 @@ pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&str>) -> Result<String> {
+pub async fn exec_in_container(
+    docker: &Docker,
+    service_name: &str,
+    cmd: Vec<&str>,
+) -> Result<String> {
     let id = find_container_id(docker, service_name, false).await?;
 
     let exec = docker
@@ -35,7 +37,9 @@ pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&st
         .context("Failed to create exec")?;
 
     let mut output = String::new();
-    if let StartExecResults::Attached { output: mut stream, .. } = docker
+    if let StartExecResults::Attached {
+        output: mut stream, ..
+    } = docker
         .start_exec(&exec.id, None)
         .await
         .context("Failed to start exec")?
@@ -66,7 +70,11 @@ pub async fn exec_in_container(docker: &Docker, service_name: &str, cmd: Vec<&st
     Ok(output)
 }
 
-async fn find_container_id(docker: &Docker, service_name: &str, include_stopped: bool) -> Result<String> {
+async fn find_container_id(
+    docker: &Docker,
+    service_name: &str,
+    include_stopped: bool,
+) -> Result<String> {
     let mut filters: HashMap<String, Vec<String>> = HashMap::new();
     filters.insert(
         "label".to_string(),
