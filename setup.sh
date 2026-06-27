@@ -66,7 +66,7 @@ install_packages() {
     elif command -v yum >/dev/null 2>&1; then
         yum install -y "${packages[@]}"
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm "${packages[@]}"
+        pacman -Syu --noconfirm "${packages[@]}"
     else
         die "No supported package manager found. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
     fi
@@ -95,12 +95,24 @@ apt_package_available() {
     apt-cache show "$1" >/dev/null 2>&1
 }
 
+apt_package_candidate_version() {
+    apt-cache policy "$1" 2>/dev/null \
+        | awk '/^[[:space:]]*Candidate:/ {print $2; exit}'
+}
+
+apt_docker_compose_is_v2() {
+    local version=""
+
+    version=$(apt_package_candidate_version docker-compose)
+    [[ "$version" =~ ^2[.:-] ]]
+}
+
 apt_compose_package() {
     if apt_package_available docker-compose-plugin; then
         printf '%s\n' docker-compose-plugin
     elif apt_package_available docker-compose-v2; then
         printf '%s\n' docker-compose-v2
-    elif apt_package_available docker-compose; then
+    elif apt_package_available docker-compose && apt_docker_compose_is_v2; then
         # Debian Trixie packages Compose v2 under the historical docker-compose
         # package name while still providing the `docker compose` CLI plugin.
         printf '%s\n' docker-compose
@@ -109,22 +121,69 @@ apt_compose_package() {
     fi
 }
 
+install_docker_apt_repo() {
+    local os_id="" codename="" repo_file=""
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_id="${ID:-}"
+        codename="${VERSION_CODENAME:-}"
+    fi
+
+    case "$os_id" in
+        debian|ubuntu) ;;
+        *)
+            die "Docker's apt repository is only configured automatically on Debian and Ubuntu. Please install Docker and Docker Compose manually, then rerun setup.sh."
+            ;;
+    esac
+
+    if [[ -z "$codename" ]]; then
+        codename=$(lsb_release -cs 2>/dev/null || true)
+    fi
+    [[ -n "$codename" ]] \
+        || die "Could not determine the apt distribution codename. Please install Docker and Docker Compose manually, then rerun setup.sh."
+
+    repo_file="/etc/apt/sources.list.d/docker.list"
+    apt-get update -y
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' \
+        "$(dpkg --print-architecture)" "$os_id" "$codename" > "$repo_file"
+    apt-get update -y
+}
+
 install_docker_apt() {
     local compose_package=""
 
     apt-get update -y
-    compose_package=$(apt_compose_package) \
-        || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
+    if ! compose_package=$(apt_compose_package); then
+        print_warn "No Compose v2 package was found in the configured apt repositories. Adding Docker's official apt repository."
+        install_docker_apt_repo
+        compose_package=$(apt_compose_package) \
+            || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
+    fi
 
-    apt-get install -y --no-install-recommends docker.io "$compose_package"
+    if [[ "$compose_package" = docker-compose-plugin ]]; then
+        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin "$compose_package"
+    else
+        apt-get install -y --no-install-recommends docker.io "$compose_package"
+    fi
 }
 
 install_docker_compose_apt() {
     local compose_package=""
 
     apt-get update -y
-    compose_package=$(apt_compose_package) \
-        || die "No Docker Compose v2 package found. Please install the Docker Compose plugin manually, then rerun setup.sh."
+    if ! compose_package=$(apt_compose_package); then
+        print_warn "No Compose v2 package was found in the configured apt repositories. Adding Docker's official apt repository."
+        install_docker_apt_repo
+        compose_package=$(apt_compose_package) \
+            || die "No Docker Compose v2 package found. Please install the Docker Compose plugin manually, then rerun setup.sh."
+    fi
 
     apt-get install -y --no-install-recommends "$compose_package"
 }
