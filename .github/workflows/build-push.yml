@@ -236,7 +236,9 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Prepare local Buildx cache
-        run: sudo mkdir -p /var/tmp/lancache-ng-buildx-cache
+        run: |
+          sudo install -d -m 1777 /var/tmp/lancache-ng-buildx-cache
+          sudo rm -rf /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new
 
       - name: Build and push
         id: build
