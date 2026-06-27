@@ -321,7 +321,7 @@ env_key_has_value() {
 secret_value_is_placeholder() {
     local value="$1"
     case "$value" in
-        ""|CHANGE_ME_*|changeme*|lancache-*-secret|lancache-*-dev-secret|lancache-*-prod-secret)
+        ""|CHANGE_ME_*|changeme*|lancache-*-secret)
             return 0
             ;;
     esac
