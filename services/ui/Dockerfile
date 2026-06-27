@@ -1,4 +1,4 @@
-FROM rust:slim@sha256:811d6caab4a84e6148c8722128993c1caf152156868b2b66f3a26af189b0dad8 AS builder
+FROM rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev curl \
@@ -10,27 +10,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG SCCACHE_REDIS_URL=
 
 WORKDIR /build
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 # Pre-cache dependencies (sccache used only when SCCACHE_REDIS_URL build arg is provided)
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
     && mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && cargo build --release 2>&1; rm -rf src
+    && cargo build --release --locked 2>&1; rm -rf src
 
 COPY src ./src
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
-    && touch src/main.rs && cargo build --release
+    && touch src/main.rs && cargo build --release --locked
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
-FROM debian:trixie-slim@sha256:a617c1cdde36a7e0194b2f07dff669e1753c03c3205356b94f9f350b0f9a57d1
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     coreutils \
     locales \
+    util-linux \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
@@ -39,8 +40,14 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN mkdir -p /data
+RUN groupadd --system --gid 10001 lancache \
+    && useradd --system --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
+    && mkdir -p /data /etc/nats \
+    && chown -R lancache:lancache /data /etc/nats \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
+
 
 EXPOSE 8080
 
@@ -60,4 +67,5 @@ ENV TEMPLATE_DIR=/templates \
     STANDARD_CACHE_MAX_GB=10 \
     SSL_CACHE_MAX_GB=10
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["lancache-ui"]

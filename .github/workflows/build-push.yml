@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   shellcheck:
@@ -40,11 +39,19 @@ jobs:
         include:
           - service: dns/nats-subscriber
             path: services/dns/nats-subscriber
+            test_command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
           - service: ui
             path: services/ui
+            test_command: cargo test --locked --manifest-path services/ui/Cargo.toml
+          - service: watchdog
+            path: services/watchdog
+            test_command: |
+              bash -n services/watchdog/watchdog.sh
+              test -x services/watchdog/watchdog.sh
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        if: matrix.service != 'watchdog'
         with:
           path: |
             ~/.cargo/registry
@@ -52,14 +59,52 @@ jobs:
             ${{ matrix.path }}/target
           key: ${{ runner.os }}-cargo-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: cargo test (${{ matrix.service }})
+        if: matrix.service != 'watchdog'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+      - name: test (${{ matrix.service }})
         env:
           RUSTC_WRAPPER: ""
-        run: cargo test --locked --manifest-path ${{ matrix.path }}/Cargo.toml
+        run: ${{ matrix.test_command }}
 
-  build:
-    needs: [validate-compose, test]
+  cargo-audit:
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: dns/nats-subscriber
+            path: services/dns/nats-subscriber
+          - service: ui
+            path: services/ui
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        id: cache-cargo-audit
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: ${{ runner.os }}-cargo-audit-0.21
+      - name: Install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version ">=0.21" --locked
+      - name: Audit Rust dependencies (${{ matrix.service }})
+        run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
+
+  container-scan:
+    # Full image vulnerability scans are intentionally limited to trusted refs.
+    # They build every service image and routinely dominate PR runtime on
+    # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
+    if: github.event_name != 'pull_request'
+    needs: validate-compose
     runs-on: [self-hosted, linux, lancache]
     strategy:
       fail-fast: false
@@ -71,6 +116,50 @@ jobs:
             context: services/dns
           - service: watchdog
             context: services/watchdog
+          - service: dhcp
+            context: services/dhcp
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
+          - service: ui
+            context: services/ui
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build local scan image
+        run: docker build --pull --platform linux/amd64 -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} ${{ matrix.context }}
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Remove scan image
+        if: always()
+        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} || true
+
+  build:
+    needs: [validate-compose, test, cargo-audit]
+    runs-on: [self-hosted, linux, lancache]
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: proxy
+            context: services/proxy
+          - service: dns
+            context: services/dns
+          - service: watchdog
+            context: services/watchdog
+          - service: dhcp
+            context: services/dhcp
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
           - service: ui
             context: services/ui
 
@@ -82,6 +171,7 @@ jobs:
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -106,7 +196,13 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Prepare local Buildx cache
+        run: sudo mkdir -p /var/tmp/lancache-ng-buildx-cache
+
       - name: Build and push
+        id: build
+        timeout-minutes: 60
+        continue-on-error: ${{ github.event_name != 'pull_request' }}
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: ${{ matrix.context }}
@@ -114,5 +210,35 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+
+      - name: Retry Build and push
+        id: retry-build
+        if: github.event_name != 'pull_request' && steps.build.outcome == 'failure'
+        timeout-minutes: 60
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: ${{ matrix.context }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+
+      - name: Rotate local Buildx cache
+        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        run: |
+          sudo rm -rf /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          if [ -d /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new ]; then
+            sudo mv /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          fi
+
+      - name: Attest image build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          push-to-registry: true
