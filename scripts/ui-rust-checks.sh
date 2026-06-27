@@ -1,0 +1,225 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
+UI_MANIFEST="services/ui/Cargo.toml"
+RUST_IMAGE="rust:latest"
+SCCACHE_VERSION="${SCCACHE_VERSION:-0.16.0}"
+NETWORK_NAME=""
+REDIS_CONTAINER=""
+REDIS_URL="${SCCACHE_REDIS_URL:-}"
+RUN_FMT_CHECK=0
+RUN_TEST=1
+RUN_BUILD=1
+ENABLE_SCCACHE=0
+START_REDIS=0
+
+usage() {
+  cat <<EOF
+Usage: $0 [options]
+
+Run local Docker-based Rust checks for the Admin UI without requiring host rustc.
+
+Options:
+  --manifest <path>         Cargo manifest path (default: services/ui/Cargo.toml)
+  --rust-image <image>      Rust Docker image to use (default: rust:latest)
+  --fmt                     Also run cargo fmt --all -- --check
+  --no-fmt                  Keep cargo fmt disabled (default)
+  --no-test                 Skip cargo test
+  --no-build                Skip cargo build --locked --release
+  --sccache                 Enable sccache for rustc invocation
+  --sccache-redis <url>     Set SCCACHE_REDIS URL for cache sharing
+  --with-redis              Start a temporary Redis container for sccache
+  -h, --help                Show this help
+
+Examples:
+  $0
+  $0 --sccache --sccache-redis redis://127.0.0.1:6379/0
+  $0 --with-redis --sccache
+EOF
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ -n "${REDIS_CONTAINER}" ]]; then
+    docker rm -f "${REDIS_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${NETWORK_NAME}" ]]; then
+    docker network rm "${NETWORK_NAME}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --manifest)
+      shift
+      if [[ $# -eq 0 || "$1" == --* ]]; then
+        fail "--manifest requires a value"
+      fi
+      UI_MANIFEST="${1}"
+      shift
+      ;;
+    --rust-image)
+      shift
+      if [[ $# -eq 0 || "$1" == --* ]]; then
+        fail "--rust-image requires a value"
+      fi
+      RUST_IMAGE="${1}"
+      shift
+      ;;
+    --fmt)
+      RUN_FMT_CHECK=1
+      shift
+      ;;
+    --no-fmt)
+      RUN_FMT_CHECK=0
+      shift
+      ;;
+    --no-test)
+      RUN_TEST=0
+      shift
+      ;;
+    --no-build)
+      RUN_BUILD=0
+      shift
+      ;;
+    --sccache)
+      ENABLE_SCCACHE=1
+      shift
+      ;;
+    --sccache-redis)
+      shift
+      if [[ $# -eq 0 || "$1" == --* ]]; then
+        fail "--sccache-redis requires a value"
+      fi
+      REDIS_URL="${1:-}"
+      shift
+      ;;
+    --with-redis)
+      START_REDIS=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "Unknown argument: $1"
+      ;;
+  esac
+done
+
+if ! command -v docker >/dev/null 2>&1; then
+  fail "docker is not installed or not on PATH"
+fi
+
+UI_MANIFEST_ABS="${UI_MANIFEST}"
+if [[ "${UI_MANIFEST}" != /* ]]; then
+  UI_MANIFEST_ABS="${ROOT_DIR}/${UI_MANIFEST}"
+fi
+
+if [[ ! -f "${UI_MANIFEST_ABS}" ]]; then
+  fail "Cannot find manifest at ${UI_MANIFEST}"
+fi
+
+if [[ ${RUN_FMT_CHECK} -eq 0 && ${RUN_TEST} -eq 0 && ${RUN_BUILD} -eq 0 ]]; then
+  fail "No checks selected. Enable at least one with --no- flags removed"
+fi
+
+if [[ ${ENABLE_SCCACHE} -eq 0 && "${REDIS_URL}" != "" ]]; then
+  fail "--sccache-redis requires --sccache"
+fi
+
+if [[ ${START_REDIS} -eq 1 && ${ENABLE_SCCACHE} -eq 0 ]]; then
+  fail "--with-redis requires --sccache"
+fi
+
+if [[ ${ENABLE_SCCACHE} -eq 1 && ${START_REDIS} -eq 0 && -z "${REDIS_URL}" ]]; then
+  fail "--sccache requires Redis. Use --sccache-redis <url> or --with-redis"
+fi
+
+if [[ ${ENABLE_SCCACHE} -eq 1 && ${START_REDIS} -eq 1 ]]; then
+  SUFFIX="${RANDOM}"
+  NETWORK_NAME="lancache-ui-rust-sccache-${SUFFIX}"
+  REDIS_CONTAINER="lancache-ui-rust-sccache-${SUFFIX}"
+  docker network create "${NETWORK_NAME}" >/dev/null
+  REDIS_URL="redis://$REDIS_CONTAINER:6379/0"
+  docker run -d --name "${REDIS_CONTAINER}" --network "${NETWORK_NAME}" redis:7-alpine \
+    --save "" --appendonly no >/dev/null
+fi
+
+if [[ "${UI_MANIFEST_ABS}" == "${ROOT_DIR}"/* ]]; then
+  UI_MANIFEST="${UI_MANIFEST_ABS#${ROOT_DIR}/}"
+else
+  fail "Manifest path ${UI_MANIFEST} is outside the current repository root"
+fi
+
+DOCKER_ENVS=(
+  -e CARGO_HOME=/tmp/cargo
+  -e CARGO_TARGET_DIR=/tmp/target
+  -e PATH=/tmp/cargo-tools/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+)
+
+if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
+  DOCKER_ENVS+=( -e RUSTC_WRAPPER=sccache )
+  DOCKER_ENVS+=( -e SCCACHE_DIR=/tmp/sccache )
+  DOCKER_ENVS+=( -e SCCACHE_REDIS_KEY_PREFIX=lancache-ui )
+  DOCKER_ENVS+=( -e CARGO_INSTALL_ROOT=/tmp/cargo-tools )
+  if [[ -n "${REDIS_URL}" ]]; then
+    DOCKER_ENVS+=( -e SCCACHE_REDIS="${REDIS_URL}" )
+  fi
+fi
+
+DOCKER_RUN_ARGS=(
+  run --rm
+  -v "${ROOT_DIR}:/workspace:ro"
+  -w /workspace
+  "${DOCKER_ENVS[@]}"
+  -e "UI_MANIFEST=${UI_MANIFEST}"
+)
+
+if [[ -n "${NETWORK_NAME}" ]]; then
+  DOCKER_RUN_ARGS+=( --network "${NETWORK_NAME}" )
+fi
+
+CONTAINER_CMD=$'set -euo pipefail\n'
+if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
+  CONTAINER_CMD+=$'if ! command -v sccache >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+="  cargo install --locked sccache --version ${SCCACHE_VERSION} >/dev/null\n"
+  CONTAINER_CMD+=$'fi\n'
+fi
+if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
+  CONTAINER_CMD+=$'if command -v rustup >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+=$'  rustup component add rustfmt >/dev/null\n'
+  CONTAINER_CMD+=$'elif ! command -v rustfmt >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+=$'  echo "rustfmt is missing in the selected Rust image. Use an image with rustfmt or rustup." >&2\n'
+  CONTAINER_CMD+=$'  exit 1\n'
+  CONTAINER_CMD+=$'fi\n'
+fi
+CONTAINER_CMD+=$'\n'
+
+if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
+  CONTAINER_CMD+="cargo fmt --all --manifest-path ${UI_MANIFEST} -- --check"$'\n'
+fi
+if [[ ${RUN_TEST} -eq 1 ]]; then
+  CONTAINER_CMD+="cargo test --locked --manifest-path ${UI_MANIFEST}"$'\n'
+fi
+if [[ ${RUN_BUILD} -eq 1 ]]; then
+  CONTAINER_CMD+="cargo build --locked --release --manifest-path ${UI_MANIFEST}"$'\n'
+fi
+
+echo "Running local Rust UI checks in ${RUST_IMAGE} ..."
+if [[ ${ENABLE_SCCACHE} -eq 1 && -n "${REDIS_URL}" ]]; then
+  echo "SCCACHE_REDIS=${REDIS_URL}"
+fi
+
+docker "${DOCKER_RUN_ARGS[@]}" "${RUST_IMAGE}" bash -c "${CONTAINER_CMD}"
+echo "Rust UI checks completed."
