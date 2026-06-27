@@ -307,6 +307,84 @@ get_env_var() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
 
+env_key_exists() {
+    local key="$1" env_file="$2"
+    grep -q "^${key}=" "$env_file" 2>/dev/null
+}
+
+env_key_has_value() {
+    local key="$1" env_file="$2" value
+    value=$(get_env_var "$key" "$env_file")
+    [[ -n "$value" ]]
+}
+
+set_env_key() {
+    local key="$1" value="$2" env_file="$3"
+    if env_key_exists "$key" "$env_file"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    fi
+}
+
+append_env_key_if_missing() {
+    local key="$1" value="$2" env_file="$3"
+    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+}
+
+ensure_secret_env_key() {
+    local key="$1" env_file="$2" generator="$3" value
+    if env_key_has_value "$key" "$env_file"; then
+        return 0
+    fi
+
+    value=$(eval "$generator")
+    set_env_key "$key" "$value" "$env_file"
+    print_ok "Generated missing secret: $key"
+}
+
+cache_size_gb_from_env() {
+    local cache_max_size="$1"
+    cache_max_size="${cache_max_size,,}"
+    cache_max_size="${cache_max_size%g}"
+    [[ "$cache_max_size" =~ ^[0-9]+$ ]] || cache_max_size="500"
+    printf '%s\n' "$cache_max_size"
+}
+
+migrate_env_for_update() {
+    local install_dir="$1" env_file
+    local cache_max_size cache_gb ui_user
+    env_file="$install_dir/.env"
+
+    [[ -f "$env_file" ]] \
+        || die "Missing $env_file. Cannot update safely because local runtime configuration is not available."
+
+    print_step "Checking local .env"
+
+    ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" "openssl rand -hex 32"
+    ensure_secret_env_key DDNS_TSIG_KEY "$env_file" "openssl rand -base64 32 | tr -d '\n'"
+    ensure_secret_env_key PDNS_API_KEY "$env_file" "openssl rand -hex 32"
+    ensure_secret_env_key NATS_LOCAL_TOKEN "$env_file" "openssl rand -hex 32"
+    ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" "openssl rand -hex 32"
+
+    cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
+    cache_gb=$(cache_size_gb_from_env "${cache_max_size:-500g}")
+
+    append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
+    append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
+    append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
+    append_env_key_if_missing STANDARD_CACHE_MAX_GB "$cache_gb" "$env_file"
+    append_env_key_if_missing SSL_CACHE_MAX_GB "$cache_gb" "$env_file"
+    append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
+
+    ui_user=$(get_env_var UI_AUTH_USER "$env_file")
+    if [[ -n "$ui_user" ]] && ! env_key_has_value UI_AUTH_PASSWORD "$env_file"; then
+        set_env_key UI_AUTH_PASSWORD "$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)" "$env_file"
+        print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
+    fi
+
+    print_ok ".env is complete for the current quickstart template"
+}
 
 install_missing_tools() {
     local -a missing=() tools=("$@")
@@ -369,6 +447,14 @@ compose_stack_start() {
     compose_stack_available "$install_dir" || return 0
     print_step "Starting stack"
     (cd "$install_dir" && docker compose up -d) || print_warn "docker compose up failed — start the stack manually"
+}
+
+validate_compose_config() {
+    local install_dir="$1"
+    print_step "Validating Docker Compose configuration"
+    (cd "$install_dir" && docker compose --env-file "$install_dir/.env" -f "$install_dir/docker-compose.yml" config --quiet) \
+        || die "Docker Compose configuration is not valid. The stack was not pulled or restarted."
+    print_ok "Docker Compose configuration is valid"
 }
 
 compose_volume_names() {
@@ -662,8 +748,13 @@ cmd_update() {
         print_ok "docker-compose.yml updated"
     fi
 
+    migrate_env_for_update "$install_dir"
+    validate_compose_config "$install_dir"
+
     print_step "Pulling latest images"
     docker compose pull || print_warn "Pull partially failed — continuing with cached images"
+
+    validate_compose_config "$install_dir"
 
     print_step "Restarting containers"
     docker compose up -d --remove-orphans
