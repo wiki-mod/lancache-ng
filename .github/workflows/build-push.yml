@@ -136,10 +136,12 @@ jobs:
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
         env:
           CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
+          RUSTC_WRAPPER: ""
         run: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
         env:
           CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
+          RUSTC_WRAPPER: ""
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
   container-scan:
