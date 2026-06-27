@@ -791,6 +791,8 @@ cmd_update_ip() {
     print_step "Updating configuration files"
 
     sed -i "s|^IP_STANDARD=.*|IP_STANDARD=$new_ip_standard|" "$deploy_env"
+    print_ok "Updated: $deploy_env"
+
     sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
     print_ok "Updated: $deploy_env"
 
