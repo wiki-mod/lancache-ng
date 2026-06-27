@@ -293,6 +293,13 @@ jobs:
           mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
 
+      - name: Prepare optional sccache Redis secret
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/sccache-redis-url"
+          printf '%s' "$SCCACHE_REDIS_URL" > "$RUNNER_TEMP/sccache-redis-url"
+        env:
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+
       - name: Build and push
         id: build
         timeout-minutes: 60
@@ -303,7 +310,7 @@ jobs:
           context: ${{ matrix.context }}
           build-args: ${{ matrix.service == 'ui' && format('DISTCC_POTENTIAL_HOSTS={0}', vars.DISTCC_POTENTIAL_HOSTS) || '' }}
           secrets: |
-            sccache_redis_url=${{ secrets.SCCACHE_REDIS_URL }}
+            id=sccache_redis_url,src=${{ runner.temp }}/sccache-redis-url
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -321,7 +328,7 @@ jobs:
           context: ${{ matrix.context }}
           build-args: ${{ matrix.service == 'ui' && format('DISTCC_POTENTIAL_HOSTS={0}', vars.DISTCC_POTENTIAL_HOSTS) || '' }}
           secrets: |
-            sccache_redis_url=${{ secrets.SCCACHE_REDIS_URL }}
+            id=sccache_redis_url,src=${{ runner.temp }}/sccache-redis-url
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
