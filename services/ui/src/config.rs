@@ -1,5 +1,22 @@
 use std::env;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HstsMode {
+    Auto,
+    Always,
+    Never,
+}
+
+impl HstsMode {
+    pub fn should_send(self, is_https: bool) -> bool {
+        match self {
+            Self::Auto => is_https,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
 pub struct Config {
     pub template_dir: String,
     pub cdn_domains_file: String,
@@ -22,6 +39,8 @@ pub struct Config {
     pub dhcp_api_token: String,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
+    pub security_headers_enabled: bool,
+    pub hsts_mode: HstsMode,
     pub pdns_auth_url: String,
     pub pdns_rec_url: String,
     pub pdns_api_key: String,
@@ -56,6 +75,8 @@ impl Config {
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
+            security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
+            hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
@@ -80,5 +101,28 @@ fn env_f64(key: &str, default: f64) -> f64 {
     env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
+    env::var(key)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "https" | "forwarded" => Some(HstsMode::Auto),
+            "always" | "true" | "1" | "on" => Some(HstsMode::Always),
+            "never" | "false" | "0" | "off" => Some(HstsMode::Never),
+            _ => None,
+        })
         .unwrap_or(default)
 }

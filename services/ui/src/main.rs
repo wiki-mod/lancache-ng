@@ -45,6 +45,7 @@ const TEMPLATE_NAMES: &[&str] = &[
 ];
 
 async fn security_headers(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -62,6 +63,10 @@ async fn security_headers(
         .unwrap_or(false);
 
     let mut response = next.run(req).await;
+    if !state.config.security_headers_enabled {
+        return response;
+    }
+
     let headers = response.headers_mut();
 
     headers.insert(
@@ -91,7 +96,7 @@ async fn security_headers(
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("no-referrer"),
     );
-    if is_https {
+    if state.config.hsts_mode.should_send(is_https) {
         headers.insert(
             HeaderName::from_static("strict-transport-security"),
             HeaderValue::from_static("max-age=31536000; includeSubDomains"),
@@ -382,7 +387,10 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            security_headers,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
