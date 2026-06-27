@@ -40,7 +40,10 @@ pub struct Secondary {
 pub async fn secondaries_page(
     State(state): State<Arc<AppState>>,
 ) -> Result<Html<String>, StatusCode> {
-    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let secondaries = db
         .prepare("SELECT name, consumer_name, registered_at, last_seen FROM secondaries ORDER BY registered_at DESC")
@@ -110,7 +113,10 @@ pub async fn register_secondary(
 
     // INSERT OR REPLACE INTO secondaries
     {
-        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         db.execute(
             "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, registered_at, last_seen)
              VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -148,7 +154,10 @@ pub async fn remove_secondary(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     crate::routes::verify_csrf_header(&state, &headers)?;
     let rows_affected = {
-        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         db.execute("DELETE FROM secondaries WHERE name = ?", [name])
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
@@ -196,7 +205,10 @@ pub async fn rotate_token(
 
     // Update the secondary's stored token and verify the secondary exists
     let rows_affected = {
-        let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         db.execute(
             "UPDATE secondaries SET nats_token = ? WHERE name = ?",
             [nats_token.clone(), name.clone()],
