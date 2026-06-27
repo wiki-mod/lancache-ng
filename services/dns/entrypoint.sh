@@ -13,11 +13,20 @@ NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
 
-# Fail if PDNS_API_KEY is still the default placeholder
-if [ "$PDNS_API_KEY" = "CHANGE_ME_PDNS_API_KEY" ]; then
-    echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to the default placeholder 'CHANGE_ME_PDNS_API_KEY'"
-    echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
-    echo "[lancache-dns] Set PDNS_API_KEY in your config files or docker-compose environment."
+# Fail if PDNS_API_KEY is a known placeholder value
+case "$PDNS_API_KEY" in
+    CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*)
+        echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to a default placeholder ('$PDNS_API_KEY')"
+        echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
+        echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
+        exit 1
+        ;;
+esac
+
+# Fail if PDNS_API_KEY is too short (weak) — checked for all values, not just placeholders
+if [ ${#PDNS_API_KEY} -lt 16 ]; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is too short (${#PDNS_API_KEY} characters, minimum 16 required)"
+    echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
     exit 1
 fi
 
@@ -176,7 +185,7 @@ run_nats_subscriber &
 NATS_PID=$!
 
 # Handle termination
-trap "kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true" EXIT TERM INT
+trap 'kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true' EXIT TERM INT
 
 # Wait indefinitely
 wait
