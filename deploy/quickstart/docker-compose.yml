@@ -65,7 +65,7 @@ services:
     command:
       - |
         mkdir -p /etc/nats
-        printf 'jetstream { store_dir: /data }\nauthorization { token: "%s" }\n' "$NATS_LOCAL_TOKEN" > /etc/nats/nats.conf
+        printf 'jetstream { store_dir: /data }\nauthorization { token: "%s" }\n' "$${NATS_LOCAL_TOKEN}" > /etc/nats/nats.conf
         exec nats-server -c /etc/nats/nats.conf
     environment:
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN:-}

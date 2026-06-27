@@ -27,11 +27,53 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Validate compose files
+        env:
+          CACHE_DIR_STANDARD: /tmp/lancache-standard
+          CACHE_INACTIVE: 365d
+          CACHE_MAX_SIZE: 10g
+          CACHE_MEM_MB: "256"
+          CACHE_SLICE_SIZE: 1m
+          CACHE_VALID_ANY: 1h
+          CACHE_VALID_HIT: 30d
+          DDNS_TSIG_KEY: ci-ddns-tsig-key
+          IP_SSL: 127.0.0.2
+          IP_STANDARD: 127.0.0.1
+          KEA_CTRL_TOKEN: ci-kea-token
+          NATS_CONSUMER: ci-secondary
+          NATS_LOCAL_TOKEN: ci-nats-local-token
+          NATS_TOKEN: ci-nats-token
+          NATS_URL: nats://127.0.0.1:4222
+          NGINX_UPSTREAM_RESOLVER: 1.1.1.1
+          PDNS_API_KEY: ci-pdns-api-key
+          PROXY_IP: 127.0.0.1
+          SECONDARY_REGISTRATION_TOKEN: ci-secondary-registration-token
+          SSL_CACHE_MAX_GB: "10"
+          STANDARD_CACHE_MAX_GB: "10"
         run: |
-          docker compose -f deploy/quickstart/docker-compose.yml --profile ssl config --quiet
-          docker compose -f deploy/dev/docker-compose.yml config --quiet
-          docker compose -f deploy/prod/docker-compose.yml config --quiet
-          docker compose -f deploy/secondary/docker-compose.yml config --quiet
+          set -euo pipefail
+
+          validate_compose() {
+            local output
+
+            if ! output="$(docker compose "$@" config --quiet 2>&1)"; then
+              printf '%s\n' "$output"
+              return 1
+            fi
+
+            if printf '%s\n' "$output" | grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)'; then
+              printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
+              return 1
+            fi
+
+            if [ -n "$output" ]; then
+              printf '%s\n' "$output"
+            fi
+          }
+
+          validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
+          validate_compose -f deploy/dev/docker-compose.yml
+          validate_compose -f deploy/prod/docker-compose.yml
+          validate_compose -f deploy/secondary/docker-compose.yml
 
   rust-quality:
     runs-on: [self-hosted, linux, lancache]
