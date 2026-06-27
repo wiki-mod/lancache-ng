@@ -18,7 +18,7 @@ jobs:
     name: Analyze (${{ matrix.language }})
     # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
     # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
-    runs-on: [self-hosted, linux, lancache, codeql]
+    runs-on: [self-hosted, linux, lancache]
     timeout-minutes: 120
     strategy:
       fail-fast: false
