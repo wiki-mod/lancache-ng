@@ -103,6 +103,10 @@ install_docker_apt() {
         compose_package=docker-compose-plugin
     elif apt_package_available docker-compose-v2; then
         compose_package=docker-compose-v2
+    elif apt_package_available docker-compose; then
+        # Debian Trixie packages Compose v2 under the historical docker-compose
+        # package name while still providing the `docker compose` CLI plugin.
+        compose_package=docker-compose
     else
         die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
     fi
@@ -149,7 +153,7 @@ install_docker() {
 
     if command -v apt-get >/dev/null 2>&1; then
         print_warn "Docker is missing."
-        printf "  Required packages: docker.io and an available Compose v2 package (docker-compose-plugin or docker-compose-v2)\n"
+        printf "  Required packages: docker.io and an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)\n"
         if ! confirm "Install these packages now? [y/N]" "N"; then
             die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
         fi
