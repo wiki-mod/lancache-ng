@@ -247,9 +247,7 @@ async fn basic_auth(
         .and_then(|enc| base64::engine::general_purpose::STANDARD.decode(enc).ok())
         .and_then(|dec| String::from_utf8(dec).ok())
         .and_then(|creds| {
-            let mut it = creds.splitn(2, ':');
-            let provided_user = it.next()?;
-            let provided_pass = it.next()?;
+            let (provided_user, provided_pass) = creds.split_once(':')?;
             // Hash both sides to fixed-size 32-byte digests before comparing.
             // subtle's ct_eq on raw slices aborts early on length mismatch,
             // leaking credential length. Digests are always 32 bytes regardless

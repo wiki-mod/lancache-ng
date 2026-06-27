@@ -30,6 +30,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/codeql-${{ matrix.language }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/codeql-${{ matrix.language }}'
+          } >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:

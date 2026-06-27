@@ -208,7 +208,7 @@ services:
     command:
       - |
         mkdir -p /etc/nats
-        sed "s/__NATS_LOCAL_TOKEN__/$NATS_LOCAL_TOKEN/" /nats-default.conf > /etc/nats/nats.conf
+        sed "s/__NATS_LOCAL_TOKEN__/$${NATS_LOCAL_TOKEN}/" /nats-default.conf > /etc/nats/nats.conf
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - nats-data:/data

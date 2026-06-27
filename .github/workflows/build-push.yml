@@ -27,11 +27,53 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Validate compose files
+        env:
+          CACHE_DIR_STANDARD: /tmp/lancache-standard
+          CACHE_INACTIVE: 365d
+          CACHE_MAX_SIZE: 10g
+          CACHE_MEM_MB: "256"
+          CACHE_SLICE_SIZE: 1m
+          CACHE_VALID_ANY: 1h
+          CACHE_VALID_HIT: 30d
+          DDNS_TSIG_KEY: ci-ddns-tsig-key
+          IP_SSL: 127.0.0.2
+          IP_STANDARD: 127.0.0.1
+          KEA_CTRL_TOKEN: ci-kea-token
+          NATS_CONSUMER: ci-secondary
+          NATS_LOCAL_TOKEN: ci-nats-local-token
+          NATS_TOKEN: ci-nats-token
+          NATS_URL: nats://127.0.0.1:4222
+          NGINX_UPSTREAM_RESOLVER: 1.1.1.1
+          PDNS_API_KEY: ci-pdns-api-key
+          PROXY_IP: 127.0.0.1
+          SECONDARY_REGISTRATION_TOKEN: ci-secondary-registration-token
+          SSL_CACHE_MAX_GB: "10"
+          STANDARD_CACHE_MAX_GB: "10"
         run: |
-          docker compose -f deploy/quickstart/docker-compose.yml --profile ssl config --quiet
-          docker compose -f deploy/dev/docker-compose.yml config --quiet
-          docker compose -f deploy/prod/docker-compose.yml config --quiet
-          docker compose -f deploy/secondary/docker-compose.yml config --quiet
+          set -euo pipefail
+
+          validate_compose() {
+            local output
+
+            if ! output="$(docker compose "$@" config --quiet 2>&1)"; then
+              printf '%s\n' "$output"
+              return 1
+            fi
+
+            if printf '%s\n' "$output" | grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)'; then
+              printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
+              return 1
+            fi
+
+            if [ -n "$output" ]; then
+              printf '%s\n' "$output"
+            fi
+          }
+
+          validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
+          validate_compose -f deploy/dev/docker-compose.yml
+          validate_compose -f deploy/prod/docker-compose.yml
+          validate_compose -f deploy/secondary/docker-compose.yml
 
   rust-quality:
     runs-on: [self-hosted, linux, lancache]
@@ -41,25 +83,16 @@ jobs:
         include:
           - service: dns/nats-subscriber
             path: services/dns/nats-subscriber
-            test_command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
           - service: ui
             path: services/ui
-            test_command: cargo test --locked --manifest-path services/ui/Cargo.toml
-          - service: watchdog
-            path: services/watchdog
-            test_command: |
-              bash -n services/watchdog/watchdog.sh
-              test -x services/watchdog/watchdog.sh
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        if: matrix.service != 'watchdog'
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ matrix.path }}/target
-          key: ${{ runner.os }}-cargo-quality-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/${{ matrix.service }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/${{ matrix.service }}'
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
@@ -86,17 +119,24 @@ jobs:
         include:
           - service: dns/nats-subscriber
             path: services/dns/nats-subscriber
+            test_command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
           - service: ui
             path: services/ui
+            test_command: cargo test --locked --manifest-path services/ui/Cargo.toml
+          - service: watchdog
+            path: services/watchdog
+            test_command: |
+              bash -n services/watchdog/watchdog.sh
+              test -x services/watchdog/watchdog.sh
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ matrix.path }}/target
-          key: ${{ runner.os }}-cargo-test-${{ matrix.service }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.path)) }}
+      - name: Isolate Rust toolchain paths
+        if: matrix.service != 'watchdog'
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/${{ matrix.service }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/${{ matrix.service }}'
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         if: matrix.service != 'watchdog'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -120,6 +160,12 @@ jobs:
             path: services/ui
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/${{ matrix.service }}'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/${{ matrix.service }}'
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -128,14 +174,18 @@ jobs:
         id: cache-cargo-audit
         with:
           path: |
-            ~/.cargo/bin/cargo-audit
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: ${{ runner.os }}-cargo-audit-0.21
+            ${{ runner.temp }}/cargo-home/${{ matrix.service }}/bin/cargo-audit
+            ${{ runner.temp }}/cargo-home/${{ matrix.service }}/.crates.toml
+            ${{ runner.temp }}/cargo-home/${{ matrix.service }}/.crates2.json
+          key: ${{ runner.os }}-cargo-audit-0.21-${{ matrix.service }}
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        env:
+          RUSTC_WRAPPER: ""
         run: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
+        env:
+          RUSTC_WRAPPER: ""
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
   container-scan:
@@ -207,6 +257,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Log in to Docker Hub
@@ -236,42 +287,50 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Prepare local Buildx cache
-        run: sudo mkdir -p /var/tmp/lancache-ng-buildx-cache
+        env:
+          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
+        run: |
+          mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
 
       - name: Build and push
         id: build
         timeout-minutes: 60
-        continue-on-error: ${{ github.event_name != 'pull_request' }}
+        continue-on-error: true
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
-          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Retry Build and push
         id: retry-build
-        if: github.event_name != 'pull_request' && steps.build.outcome == 'failure'
+        if: steps.build.outcome == 'failure'
         timeout-minutes: 60
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
-          cache-to: type=local,dest=/var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
+          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
 
       - name: Rotate local Buildx cache
         if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        env:
+          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
         run: |
-          sudo rm -rf /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
-          if [ -d /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new ]; then
-            sudo mv /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}-new /var/tmp/lancache-ng-buildx-cache/${{ matrix.service }}
+          rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          if [ -d "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" ]; then
+            mv "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           fi
 
       - name: Attest image build provenance
