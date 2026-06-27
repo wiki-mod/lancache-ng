@@ -318,6 +318,22 @@ env_key_has_value() {
     [[ -n "$value" ]]
 }
 
+secret_value_is_placeholder() {
+    local value="$1"
+    case "$value" in
+        ""|CHANGE_ME_*|changeme*|lancache-*-secret|lancache-*-dev-secret|lancache-*-prod-secret)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+env_key_has_usable_secret() {
+    local key="$1" env_file="$2" value
+    value=$(get_env_var "$key" "$env_file")
+    ! secret_value_is_placeholder "$value"
+}
+
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
     if env_key_exists "$key" "$env_file"; then
@@ -334,13 +350,13 @@ append_env_key_if_missing() {
 
 ensure_secret_env_key() {
     local key="$1" env_file="$2" generator="$3" value
-    if env_key_has_value "$key" "$env_file"; then
+    if env_key_has_usable_secret "$key" "$env_file"; then
         return 0
     fi
 
     value=$(eval "$generator")
     set_env_key "$key" "$value" "$env_file"
-    print_ok "Generated missing secret: $key"
+    print_ok "Generated missing or placeholder secret: $key"
 }
 
 cache_size_gb_from_env() {
@@ -1198,32 +1214,32 @@ if [[ -f "$env_file" ]]; then
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
-# Generate or preserve secrets (only preserve non-empty values)
-if ! grep -q "^KEA_CTRL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+# Generate or preserve secrets. Empty values and known placeholders are regenerated.
+if ! env_key_has_usable_secret KEA_CTRL_TOKEN "$env_file"; then
     KEA_CTRL_TOKEN=$(openssl rand -hex 32)
 else
     KEA_CTRL_TOKEN=$(get_env_var KEA_CTRL_TOKEN "$env_file")
 fi
 
-if ! grep -q "^DDNS_TSIG_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+if ! env_key_has_usable_secret DDNS_TSIG_KEY "$env_file"; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
 else
     DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
 fi
 
-if ! grep -q "^PDNS_API_KEY=[^[:space:]]" "$env_file" 2>/dev/null; then
+if ! env_key_has_usable_secret PDNS_API_KEY "$env_file"; then
     PDNS_API_KEY=$(openssl rand -hex 32)
 else
     PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
 fi
 
-if ! grep -q "^NATS_LOCAL_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+if ! env_key_has_usable_secret NATS_LOCAL_TOKEN "$env_file"; then
     NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
 else
     NATS_LOCAL_TOKEN=$(get_env_var NATS_LOCAL_TOKEN "$env_file")
 fi
 
-if ! grep -q "^SECONDARY_REGISTRATION_TOKEN=[^[:space:]]" "$env_file" 2>/dev/null; then
+if ! env_key_has_usable_secret SECONDARY_REGISTRATION_TOKEN "$env_file"; then
     SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
 else
     SECONDARY_REGISTRATION_TOKEN=$(get_env_var SECONDARY_REGISTRATION_TOKEN "$env_file")
