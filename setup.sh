@@ -95,19 +95,38 @@ apt_package_available() {
     apt-cache show "$1" >/dev/null 2>&1
 }
 
+apt_compose_package() {
+    if apt_package_available docker-compose-plugin; then
+        printf '%s\n' docker-compose-plugin
+    elif apt_package_available docker-compose-v2; then
+        printf '%s\n' docker-compose-v2
+    elif apt_package_available docker-compose; then
+        # Debian Trixie packages Compose v2 under the historical docker-compose
+        # package name while still providing the `docker compose` CLI plugin.
+        printf '%s\n' docker-compose
+    else
+        return 1
+    fi
+}
+
 install_docker_apt() {
     local compose_package=""
 
     apt-get update -y
-    if apt_package_available docker-compose-plugin; then
-        compose_package=docker-compose-plugin
-    elif apt_package_available docker-compose-v2; then
-        compose_package=docker-compose-v2
-    else
-        die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
-    fi
+    compose_package=$(apt_compose_package) \
+        || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
 
     apt-get install -y --no-install-recommends docker.io "$compose_package"
+}
+
+install_docker_compose_apt() {
+    local compose_package=""
+
+    apt-get update -y
+    compose_package=$(apt_compose_package) \
+        || die "No Docker Compose v2 package found. Please install the Docker Compose plugin manually, then rerun setup.sh."
+
+    apt-get install -y --no-install-recommends "$compose_package"
 }
 
 docker_rpm_repo_url() {
@@ -121,6 +140,8 @@ docker_rpm_repo_url() {
 
     if [[ "$os_id" = fedora ]]; then
         printf '%s\n' "https://download.docker.com/linux/fedora/docker-ce.repo"
+    elif [[ "$os_id" = rhel ]]; then
+        printf '%s\n' "https://download.docker.com/linux/rhel/docker-ce.repo"
     else
         printf '%s\n' "https://download.docker.com/linux/centos/docker-ce.repo"
     fi
@@ -128,8 +149,13 @@ docker_rpm_repo_url() {
 
 install_docker_rpm() {
     local manager="$1"
+    shift
     local repo_url
-    local packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+    local packages=("$@")
+
+    if (( ${#packages[@]} == 0 )); then
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+    fi
 
     repo_url=$(docker_rpm_repo_url)
     if [[ "$manager" = dnf ]]; then
@@ -144,12 +170,49 @@ install_docker_rpm() {
     fi
 }
 
+install_docker_compose() {
+    local packages=()
+
+    if command -v apt-get >/dev/null 2>&1; then
+        print_warn "Docker Compose plugin missing."
+        printf "  Required package: an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)\n"
+        if ! confirm "Install this package now? [y/N]" "N"; then
+            die "Aborted. Please install a Docker Compose v2 package manually, then rerun setup.sh."
+        fi
+        install_docker_compose_apt || die "Failed to install Docker Compose."
+    elif command -v dnf >/dev/null 2>&1; then
+        packages=(docker-compose-plugin)
+        print_warn "Docker Compose plugin missing."
+        printf "  Required packages: %s\n" "${packages[*]}"
+        printf "  Docker's RPM repository will be configured before installation.\n"
+        if ! confirm "Install this package now? [y/N]" "N"; then
+            die "Aborted. Please install Docker Compose from Docker's RPM repository manually, then rerun setup.sh: ${packages[*]}"
+        fi
+        install_docker_rpm dnf "${packages[@]}" || die "Failed to install Docker Compose."
+    elif command -v yum >/dev/null 2>&1; then
+        packages=(docker-compose-plugin)
+        print_warn "Docker Compose plugin missing."
+        printf "  Required packages: %s\n" "${packages[*]}"
+        printf "  Docker's RPM repository will be configured before installation.\n"
+        if ! confirm "Install this package now? [y/N]" "N"; then
+            die "Aborted. Please install Docker Compose from Docker's RPM repository manually, then rerun setup.sh: ${packages[*]}"
+        fi
+        install_docker_rpm yum "${packages[@]}" || die "Failed to install Docker Compose."
+    elif command -v pacman >/dev/null 2>&1; then
+        packages=(docker-compose)
+        install_packages "Docker Compose plugin missing." "${packages[@]}" \
+            || die "Failed to install Docker Compose."
+    else
+        die "No supported package manager found. Please install the Docker Compose plugin manually, then rerun setup.sh."
+    fi
+}
+
 install_docker() {
     local packages=()
 
     if command -v apt-get >/dev/null 2>&1; then
         print_warn "Docker is missing."
-        printf "  Required packages: docker.io and an available Compose v2 package (docker-compose-plugin or docker-compose-v2)\n"
+        printf "  Required packages: docker.io and an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)\n"
         if ! confirm "Install these packages now? [y/N]" "N"; then
             die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
         fi
@@ -774,8 +837,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 if ! docker compose version >/dev/null 2>&1; then
-    print_warn "Docker Compose plugin missing — installing Docker requirements now..."
-    install_docker
+    install_docker_compose
 fi
 
 docker compose version >/dev/null 2>&1 \
