@@ -46,12 +46,12 @@ Run this on a Linux machine inside your network:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-The setup script guides you through the installation.
+The setup script guides you through the installation. If required tools are missing, it asks before installing packages, installs missing requirements such as Docker, curl and git through the host package manager, and prints the package names to install manually if you abort.
 
 It can:
 
 - check the required tools
-- install Docker if needed
+- ask before installing missing dependencies such as Docker, curl or git
 - clone the repository to `/opt/lancache-ng`
 - ask for the cache server IP
 - optionally enable SSL caching with a second IP
@@ -251,7 +251,7 @@ Recommended installation:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-During setup you will be asked for the important values.
+During setup you will be asked for the important values. If required tools are missing, setup asks before installing packages and prints the package names to install manually if you abort.
 
 Example values:
 
