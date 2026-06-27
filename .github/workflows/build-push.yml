@@ -236,7 +236,7 @@ jobs:
       - name: Build and push
         id: build
         timeout-minutes: 60
-        continue-on-error: ${{ github.event_name != 'pull_request' }}
+        continue-on-error: true
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: ${{ matrix.context }}
@@ -249,7 +249,7 @@ jobs:
 
       - name: Retry Build and push
         id: retry-build
-        if: github.event_name != 'pull_request' && steps.build.outcome == 'failure'
+        if: steps.build.outcome == 'failure'
         timeout-minutes: 60
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
