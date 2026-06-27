@@ -444,12 +444,18 @@ fn read_domain_file(path: &str) -> Vec<String> {
     let Ok(file) = fs::File::open(path) else {
         return vec![];
     };
-    BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
+    let reader = BufReader::new(file);
+    let mut domains = Vec::new();
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let line = line.trim().to_string();
+        if !line.is_empty() && !line.starts_with('#') {
+            domains.push(line);
+        }
+    }
+    domains
 }
 
 fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
