@@ -116,9 +116,11 @@ This document outlines the security threats that lancache-ng is designed to prot
 **Impact**: Medium (service disruption, information disclosure)
 
 **Mitigation**:
-- NATS must be restricted to LAN-only via firewall rules
-- Enable NATS authentication (username/password) in production
-- Use network policies to prevent internet-facing access
+- Production Compose does not publish NATS port `4222` by default; it is exposed only on the internal Docker network.
+- Remote secondary deployments must opt in with `deploy/prod/docker-compose.nats-secondary.yml` and set `NATS_BIND_IP` to a trusted LAN/VPN interface.
+- NATS must be restricted to LAN-only via firewall rules when the optional secondary binding is enabled.
+- Enable NATS authentication (username/password) in production.
+- Use network policies to prevent internet-facing access.
 
 **Residual Risk**: Medium (requires user to configure firewall correctly)
 
