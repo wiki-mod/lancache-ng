@@ -85,6 +85,9 @@ jobs:
             path: services/dns/nats-subscriber
           - service: ui
             path: services/ui
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home/${{ matrix.service }}
+      RUSTUP_HOME: ${{ runner.temp }}/rustup-home/${{ matrix.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust toolchain
@@ -122,6 +125,9 @@ jobs:
             test_command: |
               bash -n services/watchdog/watchdog.sh
               test -x services/watchdog/watchdog.sh
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home/${{ matrix.service }}
+      RUSTUP_HOME: ${{ runner.temp }}/rustup-home/${{ matrix.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust toolchain
@@ -145,6 +151,9 @@ jobs:
             path: services/dns/nats-subscriber
           - service: ui
             path: services/ui
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home/${{ matrix.service }}
+      RUSTUP_HOME: ${{ runner.temp }}/rustup-home/${{ matrix.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust toolchain
@@ -155,19 +164,17 @@ jobs:
         id: cache-cargo-audit
         with:
           path: |
-            ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/bin/cargo-audit
-            ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/.crates.toml
-            ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}/.crates2.json
+            ${{ runner.temp }}/cargo-home/${{ matrix.service }}/bin/cargo-audit
+            ${{ runner.temp }}/cargo-home/${{ matrix.service }}/.crates.toml
+            ${{ runner.temp }}/cargo-home/${{ matrix.service }}/.crates2.json
           key: ${{ runner.os }}-cargo-audit-0.21-${{ matrix.service }}
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
         env:
-          CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
           RUSTC_WRAPPER: ""
         run: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (${{ matrix.service }})
         env:
-          CARGO_HOME: ${{ runner.temp }}/cargo-audit-home/${{ matrix.service }}
           RUSTC_WRAPPER: ""
         run: cargo audit --deny warnings --file ${{ matrix.path }}/Cargo.lock
 
