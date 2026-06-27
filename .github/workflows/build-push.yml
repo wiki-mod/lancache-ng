@@ -41,15 +41,8 @@ jobs:
         include:
           - service: dns/nats-subscriber
             path: services/dns/nats-subscriber
-            test_command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
           - service: ui
             path: services/ui
-            test_command: cargo test --locked --manifest-path services/ui/Cargo.toml
-          - service: watchdog
-            path: services/watchdog
-            test_command: |
-              bash -n services/watchdog/watchdog.sh
-              test -x services/watchdog/watchdog.sh
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -86,11 +79,19 @@ jobs:
         include:
           - service: dns/nats-subscriber
             path: services/dns/nats-subscriber
+            test_command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
           - service: ui
             path: services/ui
+            test_command: cargo test --locked --manifest-path services/ui/Cargo.toml
+          - service: watchdog
+            path: services/watchdog
+            test_command: |
+              bash -n services/watchdog/watchdog.sh
+              test -x services/watchdog/watchdog.sh
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        if: matrix.service != 'watchdog'
         with:
           path: |
             ~/.cargo/registry

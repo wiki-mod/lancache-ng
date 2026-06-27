@@ -203,7 +203,10 @@ async fn main() {
                 // Stream errors surface via messages.next(), not fetch(), so we
                 // must handle them here rather than in the Err(fetch) arm.
                 if had_stream_error {
-                    eprintln!("Stream error(s); backing off for {} second(s)", backoff_secs);
+                    eprintln!(
+                        "Stream error(s); backing off for {} second(s)",
+                        backoff_secs
+                    );
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
                 } else {
@@ -212,7 +215,10 @@ async fn main() {
             }
             // #87 fix: exponential backoff on fetch error to prevent busy-spin loop
             Err(e) => {
-                eprintln!("Fetch error: {} (backing off for {} second(s))", e, backoff_secs);
+                eprintln!(
+                    "Fetch error: {} (backing off for {} second(s))",
+                    e, backoff_secs
+                );
                 tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
 
                 // Double backoff for next iteration, capped at MAX_BACKOFF_SECS
