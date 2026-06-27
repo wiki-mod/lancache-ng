@@ -286,13 +286,7 @@ async fn main() -> Result<()> {
     }
 
     let templates = load_templates(&cfg.template_dir);
-    let docker = match std::env::var("DOCKER_PROXY_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
-        Some(url) => Docker::connect_with_http(&url, 120, &bollard::API_DEFAULT_VERSION)?,
-        None => Docker::connect_with_socket_defaults()?,
-    };
+    let docker = docker_client::connect_from_env()?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;

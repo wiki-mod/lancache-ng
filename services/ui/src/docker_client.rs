@@ -5,6 +5,27 @@ use bollard::Docker;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
+pub fn connect_from_env() -> Result<Docker> {
+    if let Ok(proxy_url) = std::env::var("DOCKER_PROXY_URL") {
+        let proxy_url = proxy_url.trim();
+        if !proxy_url.is_empty() {
+            return Docker::connect_with_http(proxy_url, 120, bollard::API_DEFAULT_VERSION)
+                .context("Failed to connect to Docker proxy");
+        }
+    }
+
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if let Some(tcp_url) = host.trim().strip_prefix("tcp://") {
+            if !tcp_url.is_empty() {
+                return Docker::connect_with_http(tcp_url, 120, bollard::API_DEFAULT_VERSION)
+                    .context("Failed to connect to Docker host");
+            }
+        }
+    }
+
+    Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")
+}
+
 pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> {
     let id = find_container_id(docker, service_name, true).await?;
     let options = RestartContainerOptionsBuilder::default().t(5).build();

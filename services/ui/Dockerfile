@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     coreutils \
     locales \
+    util-linux \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
@@ -39,8 +40,14 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN mkdir -p /data
+RUN groupadd --system --gid 10001 lancache \
+    && useradd --system --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
+    && mkdir -p /data /etc/nats \
+    && chown -R lancache:lancache /data /etc/nats \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
+
 
 EXPOSE 8080
 
@@ -60,4 +67,5 @@ ENV TEMPLATE_DIR=/templates \
     STANDARD_CACHE_MAX_GB=10 \
     SSL_CACHE_MAX_GB=10
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["lancache-ui"]

@@ -242,10 +242,10 @@ services:
       - DHCP_API_URL=http://dhcp:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
     depends_on:
+      - docker-socket-proxy
       - proxy
       - netdata
       - nats
-      - docker-socket-proxy
     networks:
       - default
       - docker-api

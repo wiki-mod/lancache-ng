@@ -55,8 +55,14 @@ impl fmt::Debug for Config {
             .field("ssl_ip", &self.ssl_ip)
             .field("dhcp_api_url", &self.dhcp_api_url)
             .field("dhcp_api_token", &"***REDACTED***")
-            .field("auth_user", &self.auth_user.as_ref().map(|_| "***REDACTED***"))
-            .field("auth_password", &self.auth_password.as_ref().map(|_| "***REDACTED***"))
+            .field(
+                "auth_user",
+                &self.auth_user.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field(
+                "auth_password",
+                &self.auth_password.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("pdns_auth_url", &self.pdns_auth_url)
             .field("pdns_rec_url", &self.pdns_rec_url)
             .field("pdns_api_key", &"***REDACTED***")
@@ -71,8 +77,11 @@ impl fmt::Debug for Config {
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Config {{ template_dir: {:?}, cdn_domains_file: {:?}, ... }}", 
-               self.template_dir, self.cdn_domains_file)
+        write!(
+            f,
+            "Config {{ template_dir: {:?}, cdn_domains_file: {:?}, ... }}",
+            self.template_dir, self.cdn_domains_file
+        )
     }
 }
 
