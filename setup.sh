@@ -58,8 +58,8 @@ install_packages() {
     fi
 
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y
-        apt-get install -y --no-install-recommends "${packages[@]}"
+        apt-get update -y \
+            && apt-get install -y --no-install-recommends "${packages[@]}"
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y "${packages[@]}"
     elif command -v yum >/dev/null 2>&1; then
@@ -71,14 +71,23 @@ install_packages() {
     fi
 }
 
+install_required_command() {
+    local command_name="$1" reason="$2"
+    shift 2
+
+    install_packages "$reason" "$@" \
+        || die "Failed to install required package(s): $*"
+
+    command -v "$command_name" >/dev/null 2>&1 \
+        || die "$command_name is still missing after installing package(s): $*"
+}
+
 install_curl() {
-    install_packages "curl is missing." curl \
-        || die "Failed to install curl."
+    install_required_command curl "curl is missing." curl
 }
 
 install_git() {
-    install_packages "git is missing." git \
-        || die "Failed to install git."
+    install_required_command git "git is missing." git
 }
 
 install_docker() {
@@ -313,8 +322,13 @@ if ! docker info >/dev/null 2>&1; then
         || die "Failed to start Docker daemon."
 fi
 
+if ! docker compose version >/dev/null 2>&1; then
+    print_warn "Docker Compose plugin missing — installing Docker requirements now..."
+    install_docker
+fi
+
 docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose plugin missing — please reinstall Docker."
+    || die "Docker Compose plugin still missing after installing Docker requirements."
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
