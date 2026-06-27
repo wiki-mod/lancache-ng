@@ -48,6 +48,19 @@ async fn security_headers(
     req: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let is_https = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .next()
+                .map(str::trim)
+                .is_some_and(|proto| proto.eq_ignore_ascii_case("https"))
+        })
+        .unwrap_or(false);
+
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
@@ -59,7 +72,7 @@ async fn security_headers(
              object-src 'none'; \
              frame-ancestors 'none'; \
              form-action 'self'; \
-             script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; \
+             script-src 'self' 'unsafe-inline'; \
              style-src 'self' 'unsafe-inline'; \
              img-src 'self' data:; \
              connect-src 'self'; \
@@ -78,12 +91,37 @@ async fn security_headers(
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("no-referrer"),
     );
-    headers.insert(
-        HeaderName::from_static("strict-transport-security"),
-        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-    );
+    if is_https {
+        headers.insert(
+            HeaderName::from_static("strict-transport-security"),
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
 
     response
+}
+
+async fn admin_css() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("static/admin.css"),
+    )
+}
+
+async fn chart_js() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_str!("static/chart.umd.min.js"),
+    )
 }
 
 async fn basic_auth(
@@ -320,6 +358,8 @@ async fn main() -> Result<()> {
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
+        .route("/static/admin.css", get(admin_css))
+        .route("/static/chart.umd.min.js", get(chart_js))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
         .route(
             "/api/secondary/{name}",
