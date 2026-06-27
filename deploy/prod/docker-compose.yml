@@ -232,8 +232,8 @@ services:
       - ../../services/nats/nats.conf:/nats-default.conf:ro
     environment:
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-    ports:
-      - "4222:4222"
+    expose:
+      - "4222"
     restart: always
     logging:
       driver: json-file

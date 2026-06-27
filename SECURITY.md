@@ -99,19 +99,19 @@ This section documents intentional security design decisions and known tradeoffs
 - Enable NATS authentication (username/password or client certificates) in production
 - Use network policies (e.g., `UFW`, `iptables`) to limit access
 
-### 6. Upstream TLS Verification Disabled in nginx
+### 6. Upstream TLS Verification in nginx
 
-**Design**: nginx's `proxy_pass` for HTTPS CDN requests has TLS verification disabled (`ssl_verify_off`).
+**Design**: nginx proxies cached HTTP and SSL-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
 
-**Reason**: The proxy uses DNS spoofing to intercept traffic. Verification would fail because the upstream hostname resolves to the proxy's own IP (not the real CDN).
+**Reason**: The proxy resolves upstream CDN hostnames with public DNS resolvers configured in nginx, not the local DNS-spoofing recursor, so certificate verification can validate the real origin.
 
-**Risk**: In a MITM scenario, the proxy could be compromised by a LAN attacker.
+**Risk**: If certificate validation is disabled or the trusted CA bundle is misconfigured, a network attacker could impersonate an upstream CDN and poison cached content.
 
 **Mitigation**:
-- This configuration is intentional and necessary for DNS-spoofed MITM caching
+- Keep `proxy_ssl_verify on` and `proxy_ssl_trusted_certificate` pointed at the system CA bundle
 - Network isolation: keep the cache host on a trusted, restricted network
-- Monitor proxy logs for unexpected upstream errors
-- This is **not a vulnerability** in isolated LAN environments
+- Monitor proxy logs for upstream certificate validation failures
+- Keep the proxy image updated so CA certificates receive security updates
 
 ## Deployment Scope
 
