@@ -9,7 +9,7 @@ use anyhow::Result;
 use axum::{
     body::{to_bytes, Body},
     extract::Request,
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -139,6 +139,89 @@ const TEMPLATE_NAMES: &[&str] = &[
     "logs.html",
     "setup.html",
 ];
+
+const ADMIN_UI_CSP: &str = "default-src 'self'; \
+             base-uri 'self'; \
+             object-src 'none'; \
+             frame-ancestors 'none'; \
+             form-action 'self'; \
+             script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; \
+             connect-src 'self'; \
+             font-src 'self' data:";
+
+fn forwarded_proto_is_https(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .is_some_and(|proto| proto.eq_ignore_ascii_case("https"))
+}
+
+async fn security_headers(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_https = forwarded_proto_is_https(req.headers());
+
+    let mut response = next.run(req).await;
+    if !state.config.security_headers_enabled {
+        return response;
+    }
+
+    let headers = response.headers_mut();
+
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(ADMIN_UI_CSP),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    if state.config.hsts_mode.should_send(is_https) {
+        headers.insert(
+            HeaderName::from_static("strict-transport-security"),
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
+
+    response
+}
+
+async fn admin_css() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("static/admin.css"),
+    )
+}
+
+async fn chart_js() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_str!("static/chart.umd.min.js"),
+    )
+}
 
 async fn basic_auth(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -369,6 +452,8 @@ async fn main() -> Result<()> {
         .route("/setup", get(routes::setup::setup_page))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
+        .route("/static/admin.css", get(admin_css))
+        .route("/static/chart.umd.min.js", get(chart_js))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
         .route(
             "/api/secondary/{name}",
@@ -395,10 +480,42 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            security_headers,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("LanCache Admin UI running on http://0.0.0.0:8080");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarded_proto_https_detection_uses_first_proxy_value() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!forwarded_proto_is_https(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(forwarded_proto_is_https(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("HTTPS, http"));
+        assert!(forwarded_proto_is_https(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http, https"));
+        assert!(!forwarded_proto_is_https(&headers));
+    }
+
+    #[test]
+    fn csp_keeps_scripts_self_hosted_without_external_cdn_allowances() {
+        assert!(ADMIN_UI_CSP.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(!ADMIN_UI_CSP.contains("cdn.tailwindcss.com"));
+        assert!(!ADMIN_UI_CSP.contains("cdn.jsdelivr.net"));
+        assert!(!ADMIN_UI_CSP.contains("'unsafe-eval'"));
+    }
 }

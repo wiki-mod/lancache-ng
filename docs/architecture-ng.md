@@ -117,6 +117,17 @@ Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restrict
 - DDNS → PowerDNS: lease = automatically A + PTR in `local.lan` via nsupdate (RFC 2136)
 - REST API (Kea Control Agent) for Admin UI
 
+## Admin UI security headers
+
+The Admin UI sends security response headers by default. The policy is compatible with the current self-hosted frontend assets and does not require external CDN JavaScript. Operators can tune the behavior with environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `UI_SECURITY_HEADERS` | `true` | Set to `false`, `0`, `off`, or `no` to disable the Admin UI security header middleware. |
+| `UI_HSTS_MODE` | `auto` | Controls `Strict-Transport-Security`: `auto` only sends HSTS when `X-Forwarded-Proto: https` is present, `always` sends it on every response, and `never` disables it. |
+
+Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse proxies that also leave `http://<host>:8080` reachable. Use `always` only when the UI hostname is intended to be HTTPS-only.
+
 ## Watchdog
 
 Lightweight container with Docker socket access (restart permission).
