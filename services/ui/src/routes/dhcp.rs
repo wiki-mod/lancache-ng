@@ -90,18 +90,17 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
 
     if !state.config.dhcp_api_url.is_empty() {
         let subnets = fetch_subnets(&state).await.unwrap_or_default();
-        let (leases, reservations) = tokio::join!(
-            fetch_leases(&state),
-            fetch_all_reservations(&state, &subnets)
-        );
+        let leases = fetch_leases(&state).await;
         ctx.insert("subnets", &subnets);
         ctx.insert("leases", &leases.unwrap_or_default());
-        ctx.insert("reservations", &reservations.unwrap_or_default());
+        ctx.insert("reservations", &Vec::<Reservation>::new());
+        ctx.insert("reservations_enabled", &false);
     } else {
         let empty: Vec<Subnet> = Vec::new();
         ctx.insert("subnets", &empty);
         ctx.insert("leases", &Vec::<Lease>::new());
         ctx.insert("reservations", &Vec::<Reservation>::new());
+        ctx.insert("reservations_enabled", &false);
     }
 
     crate::routes::render(&state.templates, "dhcp.html", &ctx)
@@ -230,23 +229,23 @@ pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, StatusCode> {
-    if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    call_kea_reservation_add(&state, form.subnet_id, &form.mac, &form.ip, &form.hostname)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Redirect::to("/dhcp"))
+    let AddReservationForm {
+        subnet_id,
+        mac,
+        ip,
+        hostname,
+    } = form;
+    let _ = (state, subnet_id, mac, ip, hostname);
+    Err(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, StatusCode> {
-    call_kea_reservation_del(&state, form.subnet_id, &form.mac)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Redirect::to("/dhcp"))
+    let RemoveReservationForm { subnet_id, mac } = form;
+    let _ = (state, subnet_id, mac);
+    Err(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -302,7 +301,11 @@ async fn kea_config_modify<F>(
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
 {
-    let resp = kea_post(state, &json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let mut config = resp
@@ -320,8 +323,11 @@ where
     .await?;
     kea_result(&set_resp)?;
 
-    let write_resp =
-        kea_post(state, &json!({"command": "config-write", "service": ["dhcp4"]})).await?;
+    let write_resp = kea_post(
+        state,
+        &json!({"command": "config-write", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&write_resp)?;
 
     Ok(())
@@ -332,7 +338,11 @@ where
 async fn fetch_subnets(
     state: &AppState,
 ) -> Result<Vec<Subnet>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp = kea_post(state, &json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let subnets_json = resp
@@ -359,9 +369,8 @@ async fn fetch_subnets(
                 s.get("option-data")
                     .and_then(|od| od.as_array())
                     .and_then(|arr| {
-                        arr.iter().find(|o| {
-                            o.get("name").and_then(|v| v.as_str()) == Some(name)
-                        })
+                        arr.iter()
+                            .find(|o| o.get("name").and_then(|v| v.as_str()) == Some(name))
                     })
                     .and_then(|o| o.get("data"))
                     .and_then(|v| v.as_str())
@@ -398,8 +407,11 @@ async fn fetch_subnets(
 async fn fetch_leases(
     state: &AppState,
 ) -> Result<Vec<Lease>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp =
-        kea_post(state, &json!({"command": "lease4-get-all", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "lease4-get-all", "service": ["dhcp4"]}),
+    )
+    .await?;
 
     let mut leases = Vec::new();
     if let Some(lease_array) = resp
@@ -409,19 +421,10 @@ async fn fetch_leases(
         .and_then(|l| l.as_array())
     {
         for lease in lease_array {
-            let cltt = lease
-                .get("cltt")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let valid_lft = lease
-                .get("valid-lft")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let cltt = lease.get("cltt").and_then(|v| v.as_i64()).unwrap_or(0);
+            let valid_lft = lease.get("valid-lft").and_then(|v| v.as_i64()).unwrap_or(0);
             leases.push(Lease {
-                subnet_id: lease
-                    .get("subnet-id")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
+                subnet_id: lease.get("subnet-id").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 ip: lease
                     .get("ip-address")
                     .and_then(|v| v.as_str())
@@ -442,100 +445,6 @@ async fn fetch_leases(
         }
     }
     Ok(leases)
-}
-
-async fn fetch_all_reservations(
-    state: &AppState,
-    subnets: &[Subnet],
-) -> Result<Vec<Reservation>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut all = Vec::new();
-    for subnet in subnets {
-        let resp = kea_post(
-            state,
-            &json!({
-                "command": "reservation-get-all",
-                "service": ["dhcp4"],
-                "arguments": {"subnet-id": subnet.id}
-            }),
-        )
-        .await?;
-
-        if let Some(res_array) = resp
-            .get(0)
-            .and_then(|r| r.get("arguments"))
-            .and_then(|a| a.get("reservations"))
-            .and_then(|r| r.as_array())
-        {
-            for res in res_array {
-                all.push(Reservation {
-                    subnet_id: subnet.id,
-                    ip: res
-                        .get("ip-address")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?")
-                        .to_string(),
-                    mac: res
-                        .get("hw-address")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?")
-                        .to_string(),
-                    hostname: res
-                        .get("hostname")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                });
-            }
-        }
-    }
-    Ok(all)
-}
-
-async fn call_kea_reservation_add(
-    state: &AppState,
-    subnet_id: u32,
-    mac: &str,
-    ip: &str,
-    hostname: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let resp = kea_post(
-        state,
-        &json!({
-            "command": "reservation-add",
-            "service": ["dhcp4"],
-            "arguments": {
-                "reservation": {
-                    "subnet-id": subnet_id,
-                    "hw-address": mac,
-                    "ip-address": ip,
-                    "hostname": hostname
-                }
-            }
-        }),
-    )
-    .await?;
-    kea_result(&resp)
-}
-
-async fn call_kea_reservation_del(
-    state: &AppState,
-    subnet_id: u32,
-    mac: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let resp = kea_post(
-        state,
-        &json!({
-            "command": "reservation-del",
-            "service": ["dhcp4"],
-            "arguments": {
-                "subnet-id": subnet_id,
-                "identifier-type": "hw-address",
-                "identifier": normalize_mac(mac)
-            }
-        }),
-    )
-    .await?;
-    kea_result(&resp)
 }
 
 async fn check_other_dhcp(state: &AppState) -> Option<String> {
@@ -570,24 +479,6 @@ async fn check_other_dhcp(state: &AppState) -> Option<String> {
 
 // ─── Validators ───
 
-fn normalize_mac(mac: &str) -> String {
-    let hex: String = mac
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
-    hex.chars()
-        .enumerate()
-        .flat_map(|(i, c)| {
-            if i > 0 && i % 2 == 0 {
-                vec![':', c]
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
-}
-
 fn is_valid_cidr(cidr: &str) -> bool {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
@@ -597,13 +488,5 @@ fn is_valid_cidr(cidr: &str) -> bool {
 }
 
 fn is_valid_ip(ip: &str) -> bool {
-    ip.split('.')
-        .filter_map(|o| o.parse::<u8>().ok())
-        .count()
-        == 4
-}
-
-fn is_valid_mac(mac: &str) -> bool {
-    let cleaned = mac.to_uppercase().replace(':', "").replace('-', "");
-    cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit())
+    ip.split('.').filter_map(|o| o.parse::<u8>().ok()).count() == 4
 }
