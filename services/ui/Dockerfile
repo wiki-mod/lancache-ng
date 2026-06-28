@@ -1,20 +1,20 @@
 FROM rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev curl distcc distcc-pump procps \
+    ca-certificates pkg-config libssl-dev distcc distcc-pump procps \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -L https://github.com/mozilla/sccache/releases/download/v0.7.4/sccache-v0.7.4-x86_64-unknown-linux-musl.tar.gz \
-    | tar xz --strip-components=1 -C /usr/local/bin sccache-v0.7.4-x86_64-unknown-linux-musl/sccache \
-    && chmod +x /usr/local/bin/sccache
+    && cargo install sccache --locked --version 0.16.0 --root /usr/local
 
 ARG SCCACHE_REDIS_URL=
 ARG DISTCC_POTENTIAL_HOSTS=
 ARG SCCACHE_DIST_SCHEDULER_URL=
+ENV CARGO_BUILD_JOBS=6
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 # Pre-cache dependencies (sccache used only when Redis or scheduler build args are provided)
 RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+      unset CARGO_MAKEFLAGS MAKEFLAGS; \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
       if [ -n "${SCCACHE_REDIS_URL}" ]; then \
         export SCCACHE_REDIS=${SCCACHE_REDIS_URL}; \
@@ -34,6 +34,7 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; 
 
 COPY src ./src
 RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+      unset CARGO_MAKEFLAGS MAKEFLAGS; \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
       if [ -n "${SCCACHE_REDIS_URL}" ]; then \
         export SCCACHE_REDIS=${SCCACHE_REDIS_URL}; \
