@@ -1,7 +1,7 @@
 # Local Admin UI Rust Checks
 
-This repository can run all required local Rust checks for `services/ui` in a
-Docker container, so contributors do not need `rustc` on the host machine.
+This repository provides local Docker-based Rust checks for `services/ui`, so
+contributors do not need `rustc` on the host machine.
 
 Run from the repository root:
 
@@ -13,6 +13,9 @@ The script runs, in this order:
 
 - `cargo test --locked --manifest-path services/ui/Cargo.toml`
 - `cargo build --locked --release --manifest-path services/ui/Cargo.toml`
+
+The CI workflow still runs the stricter `cargo fmt`, `cargo check`, and
+`cargo clippy` jobs separately.
 
 You can also add a format check:
 
@@ -28,7 +31,7 @@ The script installs `sccache` from source inside the Rust container with `cargo 
 ```bash
 ./scripts/ui-rust-checks.sh \
   --sccache \
-  --sccache-redis redis://127.0.0.1:6379/0
+  --sccache-redis redis://192.168.1.230:6379/0
 ```
 
 If you do not already have Redis, the script can start a temporary Redis sidecar:
@@ -38,6 +41,7 @@ If you do not already have Redis, the script can start a temporary Redis sidecar
 ```
 
 Plain `--sccache` without Redis fails on purpose, because cache results should be shareable and predictable.
+If you pass a Redis URL directly, make sure it is reachable from inside the Docker container.
 
 ### Useful options
 

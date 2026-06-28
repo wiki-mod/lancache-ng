@@ -9,6 +9,7 @@ SCCACHE_VERSION="${SCCACHE_VERSION:-0.16.0}"
 NETWORK_NAME=""
 REDIS_CONTAINER=""
 REDIS_URL="${SCCACHE_REDIS_URL:-}"
+REDIS_URL_EXPLICIT=0
 RUN_FMT_CHECK=0
 RUN_TEST=1
 RUN_BUILD=1
@@ -35,7 +36,7 @@ Options:
 
 Examples:
   $0
-  $0 --sccache --sccache-redis redis://127.0.0.1:6379/0
+  $0 --sccache --sccache-redis redis://192.168.1.230:6379/0
   $0 --with-redis --sccache
 EOF
 }
@@ -100,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         fail "--sccache-redis requires a value"
       fi
       REDIS_URL="${1:-}"
+      REDIS_URL_EXPLICIT=1
       shift
       ;;
     --with-redis)
@@ -134,7 +136,7 @@ if [[ ${RUN_FMT_CHECK} -eq 0 && ${RUN_TEST} -eq 0 && ${RUN_BUILD} -eq 0 ]]; then
   fail "No checks selected. Enable at least one with --no- flags removed"
 fi
 
-if [[ ${ENABLE_SCCACHE} -eq 0 && "${REDIS_URL}" != "" ]]; then
+if [[ ${ENABLE_SCCACHE} -eq 0 && ${REDIS_URL_EXPLICIT} -eq 1 ]]; then
   fail "--sccache-redis requires --sccache"
 fi
 
