@@ -10,7 +10,7 @@ mkdir -p /var/run/kea /var/lib/kea
 : "${DHCP_GATEWAY:=10.0.0.1}"
 : "${DHCP_DOMAIN:=lan}"
 : "${DHCP_LEASE_TIME:=86400}"
-: "${DHCP_NTP_SERVERS:=time.nist.gov}"
+: "${DHCP_NTP_SERVERS:=}"
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
 : "${KEA_CTRL_TOKEN:=}"
@@ -28,6 +28,36 @@ case "$KEA_CTRL_TOKEN" in
         ;;
 esac
 
+is_ipv4() {
+    local ip="$1" octet a b c d extra
+
+    IFS=. read -r a b c d extra <<< "$ip"
+    [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] && [ -z "$extra" ] || return 1
+    for octet in "$a" "$b" "$c" "$d"; do
+        case "$octet" in
+            ""|*[!0-9]*) return 1 ;;
+        esac
+        [ "$octet" -le 255 ] || return 1
+    done
+}
+
+DHCP_NTP_OPTION=""
+if [ -n "$DHCP_NTP_SERVERS" ]; then
+    for ntp_server in ${DHCP_NTP_SERVERS//,/ }; do
+        if ! is_ipv4 "$ntp_server"; then
+            echo "ERROR: DHCP_NTP_SERVERS must contain IPv4 addresses only, separated by commas or spaces."
+            echo "Invalid NTP server: $ntp_server"
+            exit 1
+        fi
+    done
+    # shellcheck disable=SC2089 # This JSON fragment is consumed by envsubst, not eval/shell expansion.
+    printf -v DHCP_NTP_OPTION ',
+          {
+            "name": "ntp-servers",
+            "data": "%s"
+          }' "$DHCP_NTP_SERVERS"
+fi
+
 # Generate TSIG key if not set (for DDNS) — stored in the runtime config on first boot
 if [ -z "$DDNS_TSIG_KEY" ]; then
     DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n' | tr '+/' '-_')
@@ -35,12 +65,14 @@ if [ -z "$DDNS_TSIG_KEY" ]; then
 fi
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
+# shellcheck disable=SC2090 # DHCP_NTP_OPTION is intentionally passed as literal replacement text to envsubst.
 export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN \
        DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY \
        KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL \
-       DHCP_DDNS_PORT KEA_CTRL_HOST
+       DHCP_DDNS_PORT KEA_CTRL_HOST DHCP_NTP_OPTION
 
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_SERVERS}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
+# shellcheck disable=SC2016 # envsubst needs the literal variable list.
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
 
 # Generate runtime configs from templates on first boot only.
 # Once generated, the files live on the mounted volume and survive restarts.
