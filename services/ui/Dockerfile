@@ -18,13 +18,11 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
     fi \
     && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
       export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
+      eval `distcc-pump --startup`; \
+      trap 'distcc-pump --shutdown' EXIT; \
     fi \
     && mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
-      PYTHONWARNINGS=ignore::SyntaxWarning distcc-pump cargo build --release --locked 2>&1; \
-    else \
-      cargo build --release --locked 2>&1; \
-    fi \
+    && cargo build --release --locked 2>&1 \
     && rm -rf src
 
 COPY src ./src
@@ -33,13 +31,11 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
     fi \
     && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
       export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
+      eval `distcc-pump --startup`; \
+      trap 'distcc-pump --shutdown' EXIT; \
     fi \
     && touch src/main.rs \
-    && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
-      PYTHONWARNINGS=ignore::SyntaxWarning distcc-pump cargo build --release --locked; \
-    else \
-      cargo build --release --locked; \
-    fi
+    && cargo build --release --locked
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2

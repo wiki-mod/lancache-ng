@@ -135,7 +135,8 @@ Use this as an opt-in setting:
 - keep `pump` enabled so header preprocessing stays correct
 
 The UI builder image accepts `DISTCC_POTENTIAL_HOSTS` when present and
-switches to `distcc-pump cargo build` with `CC=distcc` and `CXX=distcc`.
+starts with `eval \`distcc-pump --startup\`` before `cargo build`, then
+shuts it down after the build with `distcc-pump --shutdown`.
 
 Important:
 
