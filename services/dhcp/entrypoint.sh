@@ -10,7 +10,7 @@ mkdir -p /var/run/kea /var/lib/kea
 : "${DHCP_GATEWAY:=10.0.0.1}"
 : "${DHCP_DOMAIN:=lan}"
 : "${DHCP_LEASE_TIME:=86400}"
-: "${DHCP_NTP_SERVERS:=}"
+: "${DHCP_NTP_SERVERS:=debian.pool.ntp.org time.nist.gov}"
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
 : "${KEA_CTRL_TOKEN:=}"
@@ -41,11 +41,29 @@ is_ipv4() {
     done
 }
 
+is_hostname() {
+    local host="$1" label
+
+    [ -n "$host" ] || return 1
+    case "$host" in
+        *[!a-zA-Z0-9.-]*|.*|*.-*|*-.*|*..*|*-) return 1 ;;
+    esac
+
+    IFS=. read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+        [ -n "$label" ] || return 1
+        case "$label" in
+            -*|*-) return 1 ;;
+            *[!a-zA-Z0-9-]* ) return 1 ;;
+        esac
+    done
+}
+
 DHCP_NTP_OPTION=""
 if [ -n "$DHCP_NTP_SERVERS" ]; then
     for ntp_server in ${DHCP_NTP_SERVERS//,/ }; do
-        if ! is_ipv4 "$ntp_server"; then
-            echo "ERROR: DHCP_NTP_SERVERS must contain IPv4 addresses only, separated by commas or spaces."
+        if ! is_ipv4 "$ntp_server" && ! is_hostname "$ntp_server"; then
+            echo "ERROR: DHCP_NTP_SERVERS must contain IPv4 addresses or hostnames, separated by commas or spaces."
             echo "Invalid NTP server: $ntp_server"
             exit 1
         fi
