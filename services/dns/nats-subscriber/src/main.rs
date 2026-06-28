@@ -47,7 +47,8 @@ struct ZoneInfo {
 #[tokio::main]
 async fn main() {
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://nats:4222".to_string());
-    let nats_token = env::var("NATS_TOKEN").ok();
+    let nats_user = env::var("NATS_USER").ok();
+    let nats_password = env::var("NATS_PASSWORD").ok();
     let nats_consumer = match env::var("NATS_CONSUMER") {
         Ok(val) => val,
         Err(_) => {
@@ -71,8 +72,8 @@ async fn main() {
         .max_reconnects(None)
         .reconnect_delay_callback(|_| Duration::from_secs(3));
 
-    if let Some(token) = nats_token {
-        opts = opts.token(token);
+    if let (Some(user), Some(password)) = (nats_user, nats_password) {
+        opts = opts.user_and_password(user, password);
     }
 
     let client = match opts.connect(&nats_url).await {

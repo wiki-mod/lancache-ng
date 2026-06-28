@@ -9,7 +9,8 @@ services:
       - PROXY_IP=${PROXY_IP}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=${NATS_URL}
-      - NATS_TOKEN=${NATS_TOKEN}
+      - NATS_USER=${NATS_USER}
+      - NATS_PASSWORD=${NATS_PASSWORD}
       - NATS_CONSUMER=${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
     volumes:

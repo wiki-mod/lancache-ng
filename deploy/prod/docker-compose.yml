@@ -51,7 +51,8 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
-      - NATS_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_USER=${NATS_DNS_WRITER_USER}
+      - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
@@ -89,7 +90,8 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
-      - NATS_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_USER=${NATS_DNS_READER_USER}
+      - NATS_PASSWORD=${NATS_DNS_READER_PASSWORD}
       - NATS_CONSUMER=dns-ssl
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
@@ -230,14 +232,49 @@ services:
     command:
       - |
         mkdir -p /etc/nats
-        sed "s/__NATS_LOCAL_TOKEN__/$${NATS_LOCAL_TOKEN}/" /nats-default.conf > /etc/nats/nats.conf
+        cat > /etc/nats/nats.conf <<EOF
+        jetstream {
+          store_dir: /data
+        }
+        authorization {
+          users = [
+            {
+              user: "$${NATS_UI_USER}"
+              password: "$${NATS_UI_PASSWORD}"
+              permissions = {
+                publish = ["lancache.dns.record", "lancache.dns.flush"]
+              }
+            }
+            {
+              user: "$${NATS_DNS_WRITER_USER}"
+              password: "$${NATS_DNS_WRITER_PASSWORD}"
+              permissions = {
+                publish = ["lancache.dns.record", "$JS.API.>"]
+                subscribe = ["lancache.dns.>", "_INBOX.>", "$JS.API.>"]
+              }
+            }
+            {
+              user: "$${NATS_DNS_READER_USER}"
+              password: "$${NATS_DNS_READER_PASSWORD}"
+              permissions = {
+                publish = ["$JS.API.>"]
+                subscribe = ["lancache.dns.>", "_INBOX.>", "$JS.API.>"]
+              }
+            }
+          ]
+        }
+        EOF
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - /srv/lancache/nats:/data
       - /srv/lancache/nats-conf:/etc/nats
-      - ../../services/nats/nats.conf:/nats-default.conf:ro
     environment:
-      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_UI_USER=${NATS_UI_USER}
+      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
+      - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}
+      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
+      - NATS_DNS_READER_USER=${NATS_DNS_READER_USER}
+      - NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}
     expose:
       - "4222"
     restart: always
@@ -286,7 +323,12 @@ services:
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
-      - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
+      - NATS_UI_USER=${NATS_UI_USER}
+      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
+      - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}
+      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
+      - NATS_DNS_READER_USER=${NATS_DNS_READER_USER}
+      - NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -21,6 +21,8 @@ pub struct RotateForm {
 #[derive(Serialize)]
 pub struct RegisterResponse {
     pub nats_url: String,
+    pub nats_user: String,
+    pub nats_password: String,
     pub nats_token: String,
     pub consumer_name: String,
     pub proxy_ip: String,
@@ -101,10 +103,9 @@ pub async fn register_secondary(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // All secondaries share the local NATS token.
-    // NOTE: Full per-secondary token isolation requires NATS JetStream user management,
-    // which is out of scope. The current shared token approach is a known limitation.
-    let nats_token = state.config.nats_local_token.clone();
+    // Secondaries use the read-only NATS role credential.
+    let nats_user = state.config.nats_dns_reader_user.clone();
+    let nats_token = state.config.nats_dns_reader_password.clone();
     let consumer_name = form.name.clone();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -140,6 +141,8 @@ pub async fn register_secondary(
 
     Ok(Json(RegisterResponse {
         nats_url: state.config.nats_url.clone(),
+        nats_user,
+        nats_password: nats_token.clone(),
         nats_token,
         consumer_name,
         proxy_ip: state.config.standard_ip.clone(),
@@ -198,10 +201,9 @@ pub async fn rotate_token(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // All secondaries share the local NATS token, so return the current token.
-    // NOTE: Full per-secondary token isolation requires NATS JetStream user management,
-    // which is out of scope. The current shared token approach is a known limitation.
-    let nats_token = state.config.nats_local_token.clone();
+    // Secondaries use the read-only NATS role credential.
+    let nats_user = state.config.nats_dns_reader_user.clone();
+    let nats_token = state.config.nats_dns_reader_password.clone();
 
     // Update the secondary's stored token and verify the secondary exists
     let rows_affected = {
@@ -234,7 +236,11 @@ pub async fn rotate_token(
     )
     .await;
 
-    Ok(Json(serde_json::json!({"nats_token": nats_token})))
+    Ok(Json(serde_json::json!({
+        "nats_user": nats_user,
+        "nats_password": nats_token.clone(),
+        "nats_token": nats_token
+    })))
 }
 
 // ─── Helper Functions ───
@@ -243,8 +249,13 @@ pub async fn update_nats_conf(
     state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nats_conf = format!(
-        "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  token: \"{}\"\n}}\n",
-        state.config.nats_local_token
+        "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  users = [\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\"lancache.dns.record\", \"lancache.dns.flush\"]\n      }}\n    }}\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\"lancache.dns.record\", \"$JS.API.>\"]\n        subscribe = [\"lancache.dns.>\", \"_INBOX.>\", \"$JS.API.>\"]\n      }}\n    }}\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\"$JS.API.>\"]\n        subscribe = [\"lancache.dns.>\", \"_INBOX.>\", \"$JS.API.>\"]\n      }}\n    }}\n  ]\n}}\n",
+        state.config.nats_ui_user,
+        state.config.nats_ui_password,
+        state.config.nats_dns_writer_user,
+        state.config.nats_dns_writer_password,
+        state.config.nats_dns_reader_user,
+        state.config.nats_dns_reader_password
     );
 
     std::fs::write(&state.config.nats_conf_path, nats_conf)

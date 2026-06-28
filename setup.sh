@@ -516,7 +516,12 @@ migrate_env_for_update() {
     ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
     ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
     ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
-    ensure_secret_env_key NATS_LOCAL_TOKEN "$env_file" hex32
+    append_env_key_if_missing NATS_UI_USER "lancache-ui" "$env_file"
+    ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
+    append_env_key_if_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
+    ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
+    append_env_key_if_missing NATS_DNS_READER_USER "lancache-dns-reader" "$env_file"
+    ensure_secret_env_key NATS_DNS_READER_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
     if ! env_key_exists COMPOSE_PROFILES "$env_file"; then
@@ -1574,7 +1579,15 @@ fi
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
-NATS_LOCAL_TOKEN=$(get_or_generate_secret NATS_LOCAL_TOKEN "$env_file" hex32)
+NATS_UI_USER=$(get_env_var NATS_UI_USER "$env_file")
+NATS_UI_USER="${NATS_UI_USER:-lancache-ui}"
+NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
+NATS_DNS_WRITER_USER=$(get_env_var NATS_DNS_WRITER_USER "$env_file")
+NATS_DNS_WRITER_USER="${NATS_DNS_WRITER_USER:-lancache-dns-writer}"
+NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env_file" hex32)
+NATS_DNS_READER_USER=$(get_env_var NATS_DNS_READER_USER "$env_file")
+NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
+NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
 write_env_file "$INSTALL_DIR/.env" <<EOF
@@ -1629,9 +1642,16 @@ DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
 PDNS_API_KEY=${PDNS_API_KEY}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
-# Token for local DNS containers (generated, do not change)
-NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-# Token for secondary registration — anyone who knows this can register a secondary
+# UI NATS role (generated, do not change)
+NATS_UI_USER=${NATS_UI_USER}
+NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
+# DNS writer role for primary DNS containers (generated, do not change)
+NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}
+NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
+# DNS reader role for secondary DNS containers (generated, do not change)
+NATS_DNS_READER_USER=${NATS_DNS_READER_USER}
+NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}
+# Token for setup-secondary.sh — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────
