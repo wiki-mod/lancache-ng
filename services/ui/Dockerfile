@@ -1,13 +1,14 @@
 FROM rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev curl \
+    pkg-config libssl-dev curl distcc distcc-pump procps \
     && rm -rf /var/lib/apt/lists/* \
     && curl -L https://github.com/mozilla/sccache/releases/download/v0.7.4/sccache-v0.7.4-x86_64-unknown-linux-musl.tar.gz \
     | tar xz --strip-components=1 -C /usr/local/bin sccache-v0.7.4-x86_64-unknown-linux-musl/sccache \
     && chmod +x /usr/local/bin/sccache
 
 ARG SCCACHE_REDIS_URL=
+ARG DISTCC_POTENTIAL_HOSTS=
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -15,14 +16,30 @@ COPY Cargo.toml Cargo.lock ./
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
+    && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
+      export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
+    fi \
     && mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && cargo build --release --locked 2>&1; rm -rf src
+    && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
+      PYTHONWARNINGS=ignore::SyntaxWarning distcc-pump cargo build --release --locked 2>&1; \
+    else \
+      cargo build --release --locked 2>&1; \
+    fi \
+    && rm -rf src
 
 COPY src ./src
 RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
     fi \
-    && touch src/main.rs && cargo build --release --locked
+    && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
+      export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
+    fi \
+    && touch src/main.rs \
+    && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
+      PYTHONWARNINGS=ignore::SyntaxWarning distcc-pump cargo build --release --locked; \
+    else \
+      cargo build --release --locked; \
+    fi
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2

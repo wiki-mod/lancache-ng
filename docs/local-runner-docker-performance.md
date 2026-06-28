@@ -121,6 +121,28 @@ Important rules:
 The goal is faster builds without leaking secrets into image history, logs or
 repository files.
 
+## Rust builds and distcc/pump
+
+Some Rust crates still compile C or C++ helper code through build scripts.
+For those cases, `distcc` with `pump` can offload part of the work to remote
+compiler hosts.
+
+Use this as an opt-in setting:
+
+- store the host list in a GitHub repository variable named `DISTCC_POTENTIAL_HOSTS`
+- do not commit LAN IP addresses into Dockerfiles, workflows or docs
+- use a host list format such as `build-a/6 build-b/6`
+- keep `pump` enabled so header preprocessing stays correct
+
+The UI builder image accepts `DISTCC_POTENTIAL_HOSTS` when present and
+switches to `distcc-pump cargo build` with `CC=distcc` and `CXX=distcc`.
+
+Important:
+
+- distcc helps the C/C++ parts of the build, not Rust codegen itself
+- if the remote compiler hosts are unreachable, builds should fail fast
+- keep the variable separate from `SCCACHE_REDIS_URL`
+
 ## Parallel jobs
 
 Parallel CI jobs can reduce wall-clock time, but they also increase load.
