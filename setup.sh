@@ -1087,7 +1087,7 @@ cmd_update_ip() {
 cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
-    local nats_url nats_token consumer_name pdns_api_key
+    local nats_url nats_user nats_password consumer_name pdns_api_key
 
     usage_secondary() {
         cat <<EOF
@@ -1192,13 +1192,15 @@ EOF
     [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"
 
     nats_url=$(echo "$response" | grep -oP '"nats_url"\s*:\s*"\K[^"]*' || true)
-    nats_token=$(echo "$response" | grep -oP '"nats_token"\s*:\s*"\K[^"]*' || true)
+    nats_user=$(echo "$response" | grep -oP '"nats_user"\s*:\s*"\K[^"]*' || true)
+    nats_password=$(echo "$response" | grep -oP '"nats_password"\s*:\s*"\K[^"]*' || true)
     consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || true)
     pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
 
     missing_fields=()
     [[ -n "$nats_url" ]] || missing_fields+=("nats_url")
-    [[ -n "$nats_token" ]] || missing_fields+=("nats_token")
+    [[ -n "$nats_user" ]] || missing_fields+=("nats_user")
+    [[ -n "$nats_password" ]] || missing_fields+=("nats_password")
     [[ -n "$consumer_name" ]] || missing_fields+=("consumer_name")
     [[ -n "$pdns_api_key" ]] || missing_fields+=("pdns_api_key")
     if [[ ${#missing_fields[@]} -gt 0 ]]; then
@@ -1223,7 +1225,8 @@ services:
       - PROXY_IP=\${PROXY_IP}
       - PDNS_API_KEY=\${PDNS_API_KEY}
       - NATS_URL=\${NATS_URL}
-      - NATS_TOKEN=\${NATS_TOKEN}
+      - NATS_USER=\${NATS_USER}
+      - NATS_PASSWORD=\${NATS_PASSWORD}
       - NATS_CONSUMER=\${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
     volumes:
@@ -1247,7 +1250,8 @@ PROXY_IP=${proxy_ip}
 LISTEN_IP=${listen_ip}
 PDNS_API_KEY=${pdns_api_key}
 NATS_URL=${nats_url}
-NATS_TOKEN=${nats_token}
+NATS_USER=${nats_user}
+NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
 EOF
 
