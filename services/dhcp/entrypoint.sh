@@ -61,11 +61,17 @@ is_hostname() {
 
 DHCP_NTP_OPTION=""
 if [ -n "$DHCP_NTP_SERVERS" ]; then
+    ntp_servers_csv=""
     for ntp_server in ${DHCP_NTP_SERVERS//,/ }; do
         if ! is_ipv4 "$ntp_server" && ! is_hostname "$ntp_server"; then
             echo "ERROR: DHCP_NTP_SERVERS must contain IPv4 addresses or hostnames, separated by commas or spaces."
             echo "Invalid NTP server: $ntp_server"
             exit 1
+        fi
+        if [ -z "$ntp_servers_csv" ]; then
+            ntp_servers_csv="$ntp_server"
+        else
+            ntp_servers_csv="$ntp_servers_csv,$ntp_server"
         fi
     done
     # shellcheck disable=SC2089 # This JSON fragment is consumed by envsubst, not eval/shell expansion.
@@ -73,7 +79,7 @@ if [ -n "$DHCP_NTP_SERVERS" ]; then
           {
             "name": "ntp-servers",
             "data": "%s"
-          }' "$DHCP_NTP_SERVERS"
+          }' "$ntp_servers_csv"
 fi
 
 # Generate TSIG key if not set (for DDNS) — stored in the runtime config on first boot
