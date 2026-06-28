@@ -294,11 +294,14 @@ jobs:
           rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
 
       - name: Prepare sccache Redis secret file
+        if: matrix.service == 'ui' && github.event_name != 'pull_request'
+        id: sccache-secret
         env:
           SCCACHE_REDIS_URL: ${{ vars.SCCACHE_REDIS_URL }}
         run: |
           umask 077
           printf '%s' "$SCCACHE_REDIS_URL" > "${{ runner.temp }}/sccache-redis-url"
+          echo "secret-files=sccache_redis_url=${{ runner.temp }}/sccache-redis-url" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         id: build
@@ -308,8 +311,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
-          secret-files: |
-            sccache_redis_url=${{ runner.temp }}/sccache-redis-url
+          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -325,8 +327,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
-          secret-files: |
-            sccache_redis_url=${{ runner.temp }}/sccache-redis-url
+          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
