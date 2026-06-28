@@ -1,4 +1,4 @@
-FROM rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
+FROM mirror.gcr.io/library/rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates pkg-config libssl-dev distcc distcc-pump procps \
@@ -53,7 +53,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     && cargo build --release --locked
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
-FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
