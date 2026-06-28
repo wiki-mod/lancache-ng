@@ -5,19 +5,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install sccache --locked --version 0.16.0 --root /usr/local
 
-ARG SCCACHE_REDIS_URL=
 ARG DISTCC_POTENTIAL_HOSTS=
 ARG SCCACHE_DIST_SCHEDULER_URL=
 ENV CARGO_BUILD_JOBS=6
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-# Pre-cache dependencies (sccache used only when Redis or scheduler build args are provided)
-RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+# Pre-cache dependencies (sccache used only when the secret or scheduler build arg is provided)
+RUN --mount=type=secret,id=sccache_redis_url \
+    if [ -s /run/secrets/sccache_redis_url ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
       unset CARGO_MAKEFLAGS MAKEFLAGS; \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
-      if [ -n "${SCCACHE_REDIS_URL}" ]; then \
-        export SCCACHE_REDIS=${SCCACHE_REDIS_URL}; \
+      if [ -s /run/secrets/sccache_redis_url ]; then \
+        export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
       fi; \
       if [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
         export SCCACHE_DIST_SCHEDULER_URL=${SCCACHE_DIST_SCHEDULER_URL}; \
@@ -33,11 +33,12 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; 
     && rm -rf src
 
 COPY src ./src
-RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+RUN --mount=type=secret,id=sccache_redis_url \
+    if [ -s /run/secrets/sccache_redis_url ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
       unset CARGO_MAKEFLAGS MAKEFLAGS; \
       export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
-      if [ -n "${SCCACHE_REDIS_URL}" ]; then \
-        export SCCACHE_REDIS=${SCCACHE_REDIS_URL}; \
+      if [ -s /run/secrets/sccache_redis_url ]; then \
+        export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
       fi; \
       if [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
         export SCCACHE_DIST_SCHEDULER_URL=${SCCACHE_DIST_SCHEDULER_URL}; \
