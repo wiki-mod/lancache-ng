@@ -11,7 +11,9 @@ mkdir -p /var/lib/kea
 : "${DHCP_GATEWAY:=10.0.0.1}"
 : "${DHCP_DOMAIN:=lan}"
 : "${DHCP_LEASE_TIME:=86400}"
-: "${DHCP_NTP_SERVERS:=debian.pool.ntp.org time.nist.gov}"
+if [ -z "${DHCP_NTP_SERVERS+x}" ]; then
+    DHCP_NTP_SERVERS="debian.pool.ntp.org time.nist.gov"
+fi
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
 : "${KEA_CTRL_TOKEN:=}"
@@ -43,46 +45,78 @@ is_ipv4() {
     done
 }
 
-is_hostname() {
-    local host="$1" label
+resolve_ntp_server() {
+    local host="$1" resolved
 
     [ -n "$host" ] || return 1
-    case "$host" in
-        *[!a-zA-Z0-9.-]*|.*|*.-*|*-.*|*..*|*-) return 1 ;;
-    esac
+    if is_ipv4 "$host"; then
+        printf '%s' "$host"
+        return 0
+    fi
 
-    IFS=. read -r -a labels <<< "$host"
-    for label in "${labels[@]}"; do
-        [ -n "$label" ] || return 1
-        case "$label" in
-            -*|*-) return 1 ;;
-            *[!a-zA-Z0-9-]* ) return 1 ;;
-        esac
-    done
+    if ! command -v getent >/dev/null 2>&1; then
+        >&2 echo "ERROR: getent is required to resolve DHCP NTP hostnames, but it is not available."
+        >&2 echo "Set DHCP_NTP_SERVERS to IPv4 addresses when getent is unavailable."
+        return 1
+    fi
+
+    resolved=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')
+    if ! is_ipv4 "$resolved"; then
+        resolved=$(getent hosts "$host" 2>/dev/null | awk '$1 ~ /^[0-9]+\./ {print $1; exit}')
+    fi
+    if is_ipv4 "$resolved"; then
+        printf '%s' "$resolved"
+        return 0
+    fi
+
+    >&2 echo "ERROR: DHCP_NTP_SERVERS contains an entry that is not IPv4 and cannot be resolved: $host"
+    return 1
 }
 
-DHCP_NTP_OPTION=""
-if [ -n "$DHCP_NTP_SERVERS" ]; then
-    ntp_servers_csv=""
-    for ntp_server in ${DHCP_NTP_SERVERS//,/ }; do
-        if ! is_ipv4 "$ntp_server" && ! is_hostname "$ntp_server"; then
-            echo "ERROR: DHCP_NTP_SERVERS must contain IPv4 addresses or hostnames, separated by commas or spaces."
-            echo "Invalid NTP server: $ntp_server"
-            exit 1
-        fi
+is_ipv4_csv() {
+    local csv="$1" entry seen=0
+
+    [ -n "$csv" ] || return 1
+    for entry in ${csv//,/ }; do
+        [ -n "$entry" ] || continue
+        is_ipv4 "$entry" || return 1
+        seen=1
+    done
+    [ "$seen" = "1" ]
+}
+
+resolve_ntp_csv() {
+    local ntp_servers="$1" ntp_server ntp_server_ip ntp_servers_csv=""
+
+    if [ -z "$ntp_servers" ]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    for ntp_server in ${ntp_servers//,/ }; do
+        ntp_server_ip="$(resolve_ntp_server "$ntp_server")" || return 1
         if [ -z "$ntp_servers_csv" ]; then
-            ntp_servers_csv="$ntp_server"
+            ntp_servers_csv="$ntp_server_ip"
         else
-            ntp_servers_csv="$ntp_servers_csv,$ntp_server"
+            ntp_servers_csv="$ntp_servers_csv,$ntp_server_ip"
         fi
     done
-    # shellcheck disable=SC2089 # This JSON fragment is consumed by envsubst, not eval/shell expansion.
-    printf -v DHCP_NTP_OPTION ',
-          {
-            "name": "ntp-servers",
-            "data": "%s"
-          }' "$ntp_servers_csv"
-fi
+
+    printf '%s' "$ntp_servers_csv"
+}
+
+build_ntp_option() {
+    local ntp_servers_csv
+
+    ntp_servers_csv="$(resolve_ntp_csv "$DHCP_NTP_SERVERS")" || return 1
+    if [ -z "$ntp_servers_csv" ]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    # shellcheck disable=SC2089,SC2016 # JSON fragment is consumed by envsubst.
+    printf ',\n          {\n            "name": "ntp-servers",\n            "data": "%s"\n          }' "$ntp_servers_csv"
+}
 
 case "$DDNS_TSIG_KEY" in
     ""|CHANGE_ME*|changeme*)
@@ -93,14 +127,23 @@ case "$DDNS_TSIG_KEY" in
 esac
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
-# shellcheck disable=SC2090 # DHCP_NTP_OPTION is intentionally passed as literal replacement text to envsubst.
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN \
-       DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY \
-       KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL \
-       DHCP_DDNS_PORT KEA_CTRL_HOST DHCP_NTP_OPTION
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST
 
-# shellcheck disable=SC2016 # envsubst needs the literal variable list.
+# shellcheck disable=SC2016
 ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
+
+render_kea_config() {
+    local template=$1 target=$2
+
+    envsubst "$ENVSUBST_VARS" < "$template" > "$target"
+}
+
+render_kea_dhcp4_config() {
+    local template=$1 target=$2 dhcp_ntp_option
+
+    dhcp_ntp_option="$(build_ntp_option)" || return 1
+    DHCP_NTP_OPTION="$dhcp_ntp_option" envsubst "$ENVSUBST_VARS" < "$template" > "$target"
+}
 
 # Generate runtime configs from templates on first boot only.
 # Once generated, the files live on the mounted volume and survive restarts.
@@ -109,20 +152,87 @@ for name in kea-dhcp4 kea-ctrl-agent kea-dhcp-ddns; do
     TEMPLATE="/etc/kea/${name}.conf.template"
     RUNTIME="/var/lib/kea/${name}.conf"
     if [ ! -f "$RUNTIME" ]; then
-        envsubst "$ENVSUBST_VARS" < "$TEMPLATE" > "$RUNTIME"
+        if [ "$name" = "kea-dhcp4" ]; then
+            render_kea_dhcp4_config "$TEMPLATE" "$RUNTIME"
+        else
+            render_kea_config "$TEMPLATE" "$RUNTIME"
+        fi
         echo "First boot: generated $RUNTIME"
     fi
 done
 
-migrate_dhcp4_config() {
-    local runtime="$1" next
+build_ntp_migration_map() {
+    local runtime="$1" data resolved map_file map_next
 
+    map_file="$(mktemp)"
+    printf '{}\n' > "$map_file"
+
+    while IFS= read -r data; do
+        [ -n "$data" ] || continue
+        is_ipv4_csv "$data" && continue
+
+        resolved="$(resolve_ntp_csv "$data")" || {
+            rm -f "$map_file"
+            return 1
+        }
+
+        map_next="$(mktemp)"
+        if ! jq --arg key "$data" --arg value "$resolved" '. + {($key): $value}' "$map_file" > "$map_next"; then
+            rm -f "$map_file" "$map_next"
+            return 1
+        fi
+        mv "$map_next" "$map_file"
+    done < <(
+        jq -r '
+          [
+            ((.Dhcp4["option-data"] // [])[]?),
+            ((.Dhcp4.subnet4 // [])[]?["option-data"][]?)
+          ]
+          | .[]
+          | select(.name == "ntp-servers")
+          | .data // empty
+        ' "$runtime" | sort -u
+    )
+
+    cat "$map_file"
+    rm -f "$map_file"
+}
+
+migrate_dhcp4_config() {
+    local runtime="$1" next ntp_migration_map
+
+    if ! ntp_migration_map="$(build_ntp_migration_map "$runtime")"; then
+        echo "ERROR: failed to resolve legacy NTP server values in $runtime."
+        exit 1
+    fi
     next="$(mktemp)"
     if ! jq \
         --arg domain "$DHCP_DOMAIN" \
         --argjson lease_time "$DHCP_LEASE_TIME" \
         --argjson max_lease_time "$DHCP_MAX_LEASE_TIME" \
+        --argjson ntp_migration_map "$ntp_migration_map" \
         '
+        def is_ipv4:
+          type == "string"
+          and test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
+          and (
+            split(".")
+            | length == 4
+            and all(.[]; test("^[0-9]+$") and (tonumber <= 255))
+          );
+
+        def is_ipv4_csv:
+          type == "string"
+          and length > 0
+          and (split(",") | all(.[]; (gsub("^\\s+|\\s+$"; "") | is_ipv4)));
+
+        def migrate_ntp_option:
+          if .name == "ntp-servers" and ((.data // "") | is_ipv4_csv | not) then
+            .data = ($ntp_migration_map[.data] // .data)
+          else
+            .
+          end;
+
         .Dhcp4["control-socket"]["socket-name"] = "/run/kea/kea4.sock"
         |
         .Dhcp4["multi-threading"] = ({"enable-multi-threading": false} + (.Dhcp4["multi-threading"] // {}))
@@ -141,10 +251,20 @@ migrate_dhcp4_config() {
         | .Dhcp4["ddns-replace-client-name"] = (.Dhcp4["ddns-replace-client-name"] // "when-present")
         | .Dhcp4["ddns-generated-prefix"] = (.Dhcp4["ddns-generated-prefix"] // "dhcp")
         | .Dhcp4["ddns-qualifying-suffix"] = (.Dhcp4["ddns-qualifying-suffix"] // $domain)
+        | if .Dhcp4["option-data"] then
+            .Dhcp4["option-data"] = (.Dhcp4["option-data"] | map(migrate_ntp_option))
+          else
+            .
+          end
         | .Dhcp4.subnet4 = ((.Dhcp4.subnet4 // []) | map(
             .["valid-lifetime"] = (.["valid-lifetime"] // .["default-lease-time"] // $lease_time)
             | .["max-valid-lifetime"] = (.["max-valid-lifetime"] // .["max-lease-time"] // $max_lease_time)
             | del(.["default-lease-time"], .["max-lease-time"])
+            | if .["option-data"] then
+                .["option-data"] = (.["option-data"] | map(migrate_ntp_option))
+              else
+                .
+              end
           ))
         | .Dhcp4.loggers = ((.Dhcp4.loggers // []) as $loggers
           | if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
@@ -160,13 +280,13 @@ migrate_dhcp4_config() {
         ' \
         "$runtime" > "$next"; then
         rm -f "$next"
-        echo "ERROR: failed to migrate $runtime for Kea DDNS settings."
+        echo "ERROR: failed to migrate $runtime for Kea DDNS, lease lifetime, or NTP settings."
         exit 1
     fi
 
     if ! cmp -s "$next" "$runtime"; then
         mv "$next" "$runtime"
-        echo "Updated $runtime with Kea DDNS and lease lifetime settings"
+        echo "Updated $runtime with Kea DDNS, lease lifetime, and NTP settings"
     else
         rm -f "$next"
     fi
@@ -180,7 +300,7 @@ migrate_dhcp4_config /var/lib/kea/kea-dhcp4.conf
 CTRL_AGENT_TEMPLATE="/etc/kea/kea-ctrl-agent.conf.template"
 CTRL_AGENT_RUNTIME="/var/lib/kea/kea-ctrl-agent.conf"
 CTRL_AGENT_NEXT="$(mktemp)"
-envsubst "$ENVSUBST_VARS" < "$CTRL_AGENT_TEMPLATE" > "$CTRL_AGENT_NEXT"
+render_kea_config "$CTRL_AGENT_TEMPLATE" "$CTRL_AGENT_NEXT"
 if ! cmp -s "$CTRL_AGENT_NEXT" "$CTRL_AGENT_RUNTIME"; then
     mv "$CTRL_AGENT_NEXT" "$CTRL_AGENT_RUNTIME"
     echo "Updated $CTRL_AGENT_RUNTIME from current Kea Control Agent settings"
