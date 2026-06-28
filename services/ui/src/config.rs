@@ -40,6 +40,7 @@ pub struct Config {
     pub dhcp_api_token: String,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
+    pub allow_insecure_ui: bool,
     pub security_headers_enabled: bool,
     pub hsts_mode: HstsMode,
     pub pdns_auth_url: String,
@@ -82,6 +83,7 @@ impl fmt::Debug for Config {
                 "auth_password",
                 &self.auth_password.as_ref().map(|_| "***REDACTED***"),
             )
+            .field("allow_insecure_ui", &self.allow_insecure_ui)
             .field("pdns_auth_url", &self.pdns_auth_url)
             .field("pdns_rec_url", &self.pdns_rec_url)
             .field("pdns_api_key", &"***REDACTED***")
@@ -128,6 +130,7 @@ impl Config {
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
+            allow_insecure_ui: env_bool("ALLOW_INSECURE_UI", false),
             security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
             hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
