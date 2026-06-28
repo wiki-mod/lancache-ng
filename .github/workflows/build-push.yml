@@ -293,6 +293,18 @@ jobs:
           mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
 
+      - name: Pre-pull base images
+        run: |
+          set -euo pipefail
+          while IFS= read -r image; do
+            [ -n "$image" ] || continue
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              echo "Already present: $image"
+            else
+              docker pull "$image"
+            fi
+          done < <(sed -n 's/^FROM[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "${{ matrix.context }}/Dockerfile" | sort -u)
+
       - name: Prepare sccache Redis secret file
         if: matrix.service == 'ui' && github.event_name != 'pull_request'
         id: sccache-secret
