@@ -76,14 +76,15 @@ This section documents intentional security design decisions and known tradeoffs
 - Restrict network access to the Admin UI (do not expose to untrusted networks)
 - Use network policies or firewall rules to limit Admin UI access to trusted IPs
 
-### 4. Admin UI Has No Authentication by Default
+### 4. Admin UI Authentication Must Be Explicit
 
-**Design**: The quickstart configuration does not enable authentication on the Admin UI.
+**Design**: The setup flow now requires either UI credentials or an explicit `ALLOW_INSECURE_UI=true` opt-in before the Admin UI can start without authentication.
 
-**Status**: This is intended for local development and testing only.
+**Status**: Unauthenticated access is still possible, but only after an explicit operator decision.
 
 **Required before production**:
-- Configure authentication (reverse proxy with auth, or UI-level auth if implemented)
+- Configure authentication for the Admin UI
+- Avoid `ALLOW_INSECURE_UI=true` on untrusted or shared networks
 - Restrict Admin UI access to trusted network segments
 - Do not expose the Admin UI directly to the internet
 

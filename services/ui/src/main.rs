@@ -328,6 +328,23 @@ async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
     }
 }
 
+fn resolve_admin_ui_auth_mode(
+    auth_user: Option<&str>,
+    auth_password: Option<&str>,
+    allow_insecure_ui: bool,
+) -> Result<bool, &'static str> {
+    match (auth_user, auth_password) {
+        (Some(_), Some(_)) => Ok(true),
+        (None, None) if allow_insecure_ui => Ok(false),
+        (None, None) => Err(
+            "Admin-UI authentication is required. Set UI_AUTH_USER and UI_AUTH_PASSWORD, or explicitly set ALLOW_INSECURE_UI=true if you understand the risk.",
+        ),
+        _ => Err(
+            "UI_AUTH_USER and UI_AUTH_PASSWORD must either both be set or both be empty. Refusing to start with a partial Admin-UI auth configuration.",
+        ),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -349,22 +366,27 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Auth is optional: only activate if both vars are non-empty.
-    let auth_enabled = cfg
-        .auth_user
+    let auth_user = cfg.auth_user.as_deref().filter(|value| !value.is_empty());
+    let auth_password = cfg
+        .auth_password
         .as_deref()
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
-        && cfg
-            .auth_password
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-    if !auth_enabled {
-        tracing::warn!(
-            "UI_AUTH_USER or UI_AUTH_PASSWORD is not set — starting without authentication"
-        );
-    }
+        .filter(|value| !value.is_empty());
+
+    let auth_enabled =
+        match resolve_admin_ui_auth_mode(auth_user, auth_password, cfg.allow_insecure_ui) {
+            Ok(enabled) => {
+                if !enabled {
+                    tracing::warn!(
+                        "ALLOW_INSECURE_UI=true — starting Admin-UI without authentication"
+                    );
+                }
+                enabled
+            }
+            Err(message) => {
+                tracing::error!("{message}");
+                std::process::exit(1);
+            }
+        };
 
     let templates = load_templates(&cfg.template_dir);
     let docker = docker_client::connect_from_env()?;
@@ -515,5 +537,17 @@ mod tests {
         assert!(!ADMIN_UI_CSP.contains("cdn.tailwindcss.com"));
         assert!(!ADMIN_UI_CSP.contains("cdn.jsdelivr.net"));
         assert!(!ADMIN_UI_CSP.contains("'unsafe-eval'"));
+    }
+
+    #[test]
+    fn admin_ui_auth_requires_explicit_opt_in_for_insecure_mode() {
+        assert_eq!(
+            resolve_admin_ui_auth_mode(Some("admin"), Some("secret"), false),
+            Ok(true)
+        );
+        assert_eq!(resolve_admin_ui_auth_mode(None, None, true), Ok(false));
+        assert!(resolve_admin_ui_auth_mode(None, None, false).is_err());
+        assert!(resolve_admin_ui_auth_mode(Some("admin"), None, true).is_err());
+        assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
     }
 }

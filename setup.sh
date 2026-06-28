@@ -1187,9 +1187,10 @@ printf "  Admin-UI runs on http://%s:8080 — reachable from your LAN by default
 printf "  Password protection is optional, but recommended on shared or untrusted networks.\n"
 printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .env.\n\n"
 
-ask "Protect Admin-UI with password? [y/N]" "N"
+ask "Protect Admin-UI with password? [Y/n]" "Y"
 UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
+ALLOW_INSECURE_UI=false
 if [[ "${REPLY,,}" = "y" ]]; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
@@ -1201,7 +1202,14 @@ if [[ "${REPLY,,}" = "y" ]]; then
     print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
     printf "\n"
 else
-    print_warn "No password protection — Admin-UI will be reachable on http://$IP_STANDARD:8080"
+    ask "Allow Admin-UI without authentication? [y/N]" "N"
+    if [[ "${REPLY,,}" = "y" ]]; then
+        ALLOW_INSECURE_UI=true
+        print_warn "No password protection — Admin-UI will be reachable on http://$IP_STANDARD:8080"
+        print_warn "This is explicitly allowed by ALLOW_INSECURE_UI=true"
+    else
+        die "Admin-UI authentication is required. Re-run setup and enable password protection, or explicitly allow insecure access."
+    fi
 fi
 
 # ── 8. Writing .env ───────────────────────────────────────────────────────────
@@ -1306,9 +1314,10 @@ SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
 # ── Admin-UI ───────────────────────────────────────────────────────────────────
-# Empty = no password protection
+# Empty auth values are only allowed when ALLOW_INSECURE_UI=true is set explicitly.
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
+ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
 # Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
 # Set to 127.0.0.1 to restrict access to this host.
@@ -1416,7 +1425,11 @@ fi
 if [[ -n "$UI_AUTH_USER" ]]; then
     printf "  %-26s %s\n" "Admin-UI auth:"           "enabled (user: $UI_AUTH_USER)"
 else
-    printf "  %-26s %s\n" "Admin-UI auth:"           "disabled"
+    if [[ "$ALLOW_INSECURE_UI" = "true" ]]; then
+        printf "  %-26s %s\n" "Admin-UI auth:"           "disabled (explicitly allowed)"
+    else
+        printf "  %-26s %s\n" "Admin-UI auth:"           "disabled"
+    fi
 fi
 printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
 
