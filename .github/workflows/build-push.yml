@@ -318,6 +318,8 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          build-args: |
+            SCCACHE_DIST_SCHEDULER_URL=${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -9,12 +9,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG SCCACHE_REDIS_URL=
 ARG DISTCC_POTENTIAL_HOSTS=
+ARG SCCACHE_DIST_SCHEDULER_URL=
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-# Pre-cache dependencies (sccache used only when SCCACHE_REDIS_URL build arg is provided)
-RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
-      export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+# Pre-cache dependencies (sccache used only when Redis or scheduler build args are provided)
+RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+      export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+      if [ -n "${SCCACHE_REDIS_URL}" ]; then \
+        export SCCACHE_REDIS=${SCCACHE_REDIS_URL}; \
+      fi; \
+      if [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+        export SCCACHE_DIST_SCHEDULER_URL=${SCCACHE_DIST_SCHEDULER_URL}; \
+      fi; \
     fi \
     && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
       export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
@@ -26,8 +33,14 @@ RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
     && rm -rf src
 
 COPY src ./src
-RUN if [ -n "${SCCACHE_REDIS_URL}" ]; then \
-      export RUSTC_WRAPPER=sccache SCCACHE_REDIS=${SCCACHE_REDIS_URL} SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+RUN if [ -n "${SCCACHE_REDIS_URL}" ] || [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+      export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+      if [ -n "${SCCACHE_REDIS_URL}" ]; then \
+        export SCCACHE_REDIS=${SCCACHE_REDIS_URL}; \
+      fi; \
+      if [ -n "${SCCACHE_DIST_SCHEDULER_URL}" ]; then \
+        export SCCACHE_DIST_SCHEDULER_URL=${SCCACHE_DIST_SCHEDULER_URL}; \
+      fi; \
     fi \
     && if [ -n "${DISTCC_POTENTIAL_HOSTS}" ]; then \
       export DISTCC_POTENTIAL_HOSTS=${DISTCC_POTENTIAL_HOSTS} CC=distcc CXX=distcc; \
