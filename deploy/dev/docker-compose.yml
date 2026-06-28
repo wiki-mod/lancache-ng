@@ -227,16 +227,16 @@ services:
               user: "$${NATS_DNS_WRITER_USER}"
               password: "$${NATS_DNS_WRITER_PASSWORD}"
               permissions = {
-                publish = ["lancache.dns.record", "$JS.API.>"]
-                subscribe = ["lancache.dns.>", "_INBOX.>", "$JS.API.>"]
+                publish = ["lancache.dns.record", "$$JS.API.>"]
+                subscribe = ["lancache.dns.>", "_INBOX.>", "$$JS.API.>"]
               }
             }
             {
               user: "$${NATS_DNS_READER_USER}"
               password: "$${NATS_DNS_READER_PASSWORD}"
               permissions = {
-                publish = ["$JS.API.>"]
-                subscribe = ["lancache.dns.>", "_INBOX.>", "$JS.API.>"]
+                publish = ["$$JS.API.>"]
+                subscribe = ["lancache.dns.>", "_INBOX.>", "$$JS.API.>"]
               }
             }
           ]
