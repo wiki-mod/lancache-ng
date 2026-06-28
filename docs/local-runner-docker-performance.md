@@ -1,120 +1,201 @@
-# Local runner Docker performance
+# Local Runner Docker Performance
 
-This project already uses GitHub Actions Docker layer caching for image builds. The build workflow stores and restores BuildKit cache layers per service with `cache-from: type=gha,scope=<service>` and `cache-to: type=gha,scope=<service>,mode=max`. That means unchanged Dockerfile layers can be reused between workflow runs, which is most helpful for slow package installs and Rust dependency builds.
+This guide is for contributors and maintainers who run GitHub Actions or other
+CI jobs on their own Linux machine.
 
-This document explains the practical performance options for a self-hosted runner.
+You do not need a local runner to use lancache-ng. It is only useful if you
+want to test pull requests, build images locally or reduce hosted CI usage.
 
-## What changed in this PR
+## When a local runner helps
 
-- Added `.dockerignore` files for every Docker build context under `services/`.
-- These files keep local `target/` directories, editor files, logs, environment files and temporary data out of the Docker build context.
-- Smaller build contexts reduce the amount of data sent to BuildKit before every build and make cache keys less likely to change because of local-only files.
+A local runner can help when you:
 
-## Docker layer caching
+- build Docker images often
+- test changes before opening a pull request
+- maintain your own fork
+- want faster rebuilds through local Docker layer cache
+- have enough CPU, memory and disk space for repeated builds
 
-Docker layer caching reuses previous build steps when the Dockerfile instruction and the files used by that instruction have not changed.
+A local runner is not required for normal installation.
 
-The existing workflow already enables this through BuildKit's GitHub Actions cache backend. The biggest improvements come from keeping dependency installation steps before frequently changing application source files and keeping build contexts small.
+## Host requirements
 
-Expected benefit:
+Use a machine that can safely spend CPU, memory and disk I/O on builds.
 
-- faster rebuilds after small source changes
-- fewer repeated package downloads during image builds
-- better reuse between pull request runs on the same repository
+Recommended baseline:
 
-Limits:
+- Linux host
+- Docker Engine with the Docker Compose plugin
+- Docker BuildKit enabled
+- at least 4 CPU cores
+- at least 8 GB RAM
+- enough free disk space for Docker images and build cache
 
-- the first run is still cold and must download everything
-- changes to package lists, lock files or copied source files can invalidate later layers
-- cache size and eviction are controlled by the GitHub Actions cache backend
+For frequent Rust and UI image builds, more memory and faster storage make a
+large difference.
 
-## Registry mirror
+## Keep the runner isolated
 
-A Docker registry mirror helps when the runner repeatedly pulls the same public images from Docker Hub, such as Debian or Rust base images.
+Do not run untrusted pull requests on a privileged machine that also stores
+important secrets.
 
-Example `/etc/docker/daemon.json` on the self-hosted runner:
+Practical isolation rules:
+
+- use a dedicated user for the runner
+- avoid running the runner as root
+- keep Docker and runner state separate from production data
+- do not store production `.env` files, certificates or API keys in the runner
+  workspace
+- only expose Docker credentials and registry tokens when the workflow really
+  needs to push images
+
+For public pull requests, prefer read-only validation unless you fully trust
+the code being built.
+
+## Docker storage
+
+Docker builds are faster when the host uses a native and stable storage driver.
+
+Check the current driver:
+
+```bash
+docker info --format '{{.Driver}}'
+```
+
+Common results:
+
+| Driver | Meaning |
+|---|---|
+| `overlay2` | normal fast Linux Docker storage driver |
+| `fuse-overlayfs` | often used by rootless Docker; can be slower |
+| `vfs` | very slow fallback; avoid for regular builds |
+
+Do not change Docker storage on a production host without a backup and a
+maintenance window. Changing the storage driver can make existing local images
+and containers unavailable until Docker is migrated correctly.
+
+## BuildKit and layer cache
+
+BuildKit should be enabled for modern Docker builds.
+
+For one shell:
+
+```bash
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+```
+
+For GitHub Actions, prefer `docker/setup-buildx-action` and
+`docker/build-push-action` with a cache location that belongs to the current
+runner job.
+
+Avoid shared world-writable cache directories. A safe pattern is to use a
+runner-owned temporary path and keep one cache folder per service.
+
+Example cache shape:
+
+```text
+$RUNNER_TEMP/lancache-ng-buildx-cache/proxy
+$RUNNER_TEMP/lancache-ng-buildx-cache/dns
+$RUNNER_TEMP/lancache-ng-buildx-cache/ui
+```
+
+This keeps parallel matrix jobs from fighting over the same cache path.
+
+## Rust builds and sccache
+
+Rust services can benefit from `sccache`.
+
+If you enable `sccache`, use a cache backend that is reachable from the build
+environment. Redis is a common choice for self-hosted runners.
+
+Important rules:
+
+- do not hardcode Redis URLs in Dockerfiles or workflow files
+- do not pass secret Redis URLs through Docker build arguments
+- prefer BuildKit secrets for Docker builds
+- keep cache keys separated between unrelated services
+- keep `CARGO_HOME` separate when multiple jobs install command-line tools in
+  parallel
+
+The goal is faster builds without leaking secrets into image history, logs or
+repository files.
+
+## Parallel jobs
+
+Parallel CI jobs can reduce wall-clock time, but they also increase load.
+
+Watch these host resources:
+
+- CPU saturation
+- memory pressure
+- disk I/O wait
+- Docker cache size
+- network bandwidth for base image pulls
+
+If the runner becomes unstable, reduce parallelism before adding more cache
+layers. A slower reliable runner is better than a fast runner that fails with
+random Docker or network errors.
+
+## Registry mirrors
+
+If base image pulls are slow or rate-limited, a registry mirror can help.
+
+This is a host-level Docker setting and should be managed by the operator. Do
+not require a mirror for contributors.
+
+Example daemon configuration shape:
 
 ```json
 {
-  "registry-mirrors": ["http://<lancache-or-mirror-host>:5000"]
+  "registry-mirrors": ["https://mirror.example.local"]
 }
 ```
 
-After changing the daemon config, restart Docker:
+Restarting Docker can interrupt running containers. Only change this during a
+safe maintenance window.
+
+## Cleanup
+
+Local runners need regular cleanup. Docker caches and images can grow quickly.
+
+Useful read-only checks:
 
 ```bash
-sudo systemctl restart docker
+docker system df
+docker buildx du
 ```
 
-Expected benefit:
-
-- faster repeated pulls of the same public image layers
-- less external internet traffic from the runner
-- fewer slow Docker Hub downloads during cold builds
-
-Limits:
-
-- this helps image pulls, not application downloads inside running clients
-- the mirror must be reachable and reliable from the runner
-- private registries usually need separate authentication and should not be blindly mirrored
-
-## Multi-stage builds
-
-The Rust services already use multi-stage Dockerfiles where useful. For example, the DNS and UI images build Rust binaries in a `rust:slim` builder image and copy only the compiled binary into a smaller Debian runtime image.
-
-Expected benefit:
-
-- smaller runtime images
-- fewer build tools in production images
-- better separation between build dependencies and runtime dependencies
-
-Limits:
-
-- services that only install system packages and copy shell scripts do not gain much from multi-stage builds
-- multi-stage builds improve image size and cleanliness more than raw network pull speed
-
-## Parallelism and Docker daemon tuning on the local runner
-
-The build job uses a matrix so services can build independently. On a self-hosted runner, too much parallelism can overload disk I/O, CPU or network.
-
-For slow image pulls, tune Docker's pull and push concurrency together with the registry mirror in `/etc/docker/daemon.json`:
-
-```json
-{
-  "registry-mirrors": ["http://<lancache-or-mirror-host>:5000"],
-  "max-concurrent-downloads": 10,
-  "max-concurrent-uploads": 5
-}
-```
-
-After changing the daemon config, restart Docker:
+Cleanup examples:
 
 ```bash
-sudo systemctl restart docker
+docker builder prune
+docker image prune
 ```
 
-For build steps that overload the runner, limit BuildKit worker parallelism in the Buildx builder configuration rather than in the Docker daemon file:
+Do not run broad prune commands on a production Docker host unless you know
+which images, containers and volumes are safe to remove.
 
-```toml
-[worker.oci]
-  max-parallelism = 4
+## Troubleshooting
 
-[worker.containerd]
-  max-parallelism = 4
-```
+If builds are slow:
 
-Also consider limiting the GitHub Actions runner concurrency at the runner or workflow level if disk usage, CPU steal or network saturation is visible during builds.
+- check whether Docker uses `overlay2`
+- check whether base images are being pulled repeatedly
+- check whether BuildKit cache paths are stable for the job
+- check CPU, memory and disk I/O during the build
+- check whether Rust dependencies are recompiling from scratch every time
 
-## Simple German explanation
+If builds fail randomly:
 
-Diese Änderung macht die Docker-Builds nicht komplett neu, sondern räumt vor allem den Weg für schnellere Wiederholungen frei.
+- reduce parallelism
+- isolate cache paths per job and service
+- check available disk space
+- check Docker daemon logs
+- retry without remote cache to separate cache corruption from code failures
 
-Die neuen `.dockerignore` Dateien sagen Docker: Bitte schicke keine lokalen Build-Ordner, Log-Dateien, Editor-Dateien oder geheimen `.env` Dateien in den Build. Dadurch muss Docker vor dem Bauen weniger Daten vorbereiten. Das kann besonders auf einem lokalen Runner Zeit sparen.
+If a build contains secrets:
 
-Der vorhandene Workflow nutzt bereits Docker Layer Cache. Das bedeutet: Wenn sich ein Schritt im Dockerfile nicht geändert hat, kann Docker alte Ergebnisse wiederverwenden. Der erste Lauf bleibt langsam, aber spätere Läufe können schneller werden.
-
-Ein Registry Mirror ist zusätzlich sinnvoll, wenn dein Runner oft dieselben Basis-Images wie Debian oder Rust herunterladen muss. Dann werden diese Images lokal zwischengespeichert und müssen nicht jedes Mal langsam aus dem Internet kommen.
-
-Multi-Stage Builds werden bei den Rust-Diensten bereits genutzt. Das hält die fertigen Images kleiner, weil nur das fertige Programm in das Laufzeit-Image kopiert wird und nicht die ganzen Build-Werkzeuge.
-
-Wenn mehrere Builds gleichzeitig laufen und der Runner dadurch langsam wird, liegt das oft an zu viel Last auf CPU, Festplatte oder Netzwerk. Dann kann es helfen, weniger Builds gleichzeitig laufen zu lassen oder die BuildKit-Parallelität zu begrenzen. Bei langsamen Image-Downloads können ein Registry Mirror und mehr gleichzeitige Docker-Downloads helfen.
+- stop using build arguments for secret values
+- use BuildKit secret mounts instead
+- rotate any secret that may have been written to logs or image layers
