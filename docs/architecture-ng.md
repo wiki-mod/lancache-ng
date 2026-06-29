@@ -107,14 +107,14 @@ ENABLE_SECONDARY=1 NATS_BIND_IP=192.168.1.5 \
 
 Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restricts access to trusted secondary nodes.
 
-**nsupdate (RFC 2136):** TSIG-secured channel for Admin UI → PowerDNS authoritative
+**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns`; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`.
 
 ## Kea DHCP
 
 - DHCPv4 + DHCPv6 (dual-stack)
 - IP ranges as start–end (no CIDR required)
 - Static assignments: MAC → IP, editable via UI
-- DDNS → PowerDNS: lease = automatically A + PTR in `local.lan` via nsupdate (RFC 2136)
+- DDNS → PowerDNS: lease = automatically A + PTR in the configured DHCP domain via TSIG-secured nsupdate (RFC 2136)
 - REST API (Kea Control Agent) for Admin UI
 
 ## Admin UI security headers

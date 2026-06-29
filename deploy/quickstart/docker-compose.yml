@@ -105,6 +105,7 @@ services:
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
       - PDNS_API_KEY=${PDNS_API_KEY:-}
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
     volumes:
       - pdns-data-standard:/var/lib/powerdns
     depends_on:
@@ -135,6 +136,7 @@ services:
       - NATS_TOKEN=${NATS_LOCAL_TOKEN:-}
       - NATS_CONSUMER=dns-ssl
       - PDNS_API_KEY=${PDNS_API_KEY:-}
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
     volumes:
       - pdns-data-ssl:/var/lib/powerdns
     depends_on:

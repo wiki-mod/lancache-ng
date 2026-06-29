@@ -159,8 +159,8 @@ pub async fn add_subnet(
                 {"name": "domain-name", "data": form.domain},
                 {"name": "domain-search", "data": form.domain}
             ],
-            "default-lease-time": lease_time,
-            "max-lease-time": lease_time * 2,
+            "valid-lifetime": lease_time,
+            "max-valid-lifetime": lease_time * 2,
             "host-reservation-identifiers": ["hw-address"]
         }));
         Ok(())
@@ -208,8 +208,8 @@ pub async fn update_subnet(
                 {"name": "domain-name", "data": form.domain},
                 {"name": "domain-search", "data": form.domain}
             ],
-            "default-lease-time": lease_time,
-            "max-lease-time": lease_time * 2,
+            "valid-lifetime": lease_time,
+            "max-valid-lifetime": lease_time * 2,
             "host-reservation-identifiers": ["hw-address"]
         });
         Ok(())
@@ -431,7 +431,7 @@ async fn fetch_subnets(
                     .unwrap_or_default(),
                 gateway: opt("routers"),
                 lease_time: s
-                    .get("default-lease-time")
+                    .get("valid-lifetime")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(86400) as u32,
                 domain: opt("domain-name"),
