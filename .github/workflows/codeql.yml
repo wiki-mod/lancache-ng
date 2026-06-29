@@ -54,7 +54,7 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-codeql-${{ matrix.language }}
       - name: Initialize CodeQL
         uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
@@ -63,10 +63,15 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
 
-      - name: Build Rust crates for CodeQL
-        run: |
-          cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
-          cargo build --locked --manifest-path services/ui/Cargo.toml
+      - name: Build DNS Rust crate for CodeQL
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+
+      - name: Build UI Rust crate for CodeQL
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo build --locked --manifest-path services/ui/Cargo.toml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4

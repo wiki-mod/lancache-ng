@@ -66,10 +66,16 @@ runs:
           exit 1
         fi
 
+        sccache_config="$(mktemp)"
+        printf '[cache.redis]\nurl = "%s"\n' "$SCCACHE_REDIS_URL" > "$sccache_config"
+
         {
           echo "RUSTC_WRAPPER=sccache"
           echo "SCCACHE_REDIS=$SCCACHE_REDIS_URL"
           echo "SCCACHE_REDIS_KEY_PREFIX=$SCCACHE_REDIS_KEY_PREFIX"
+          echo "SCCACHE_CONF=$sccache_config"
+          echo "SCCACHE_NO_DAEMON=1"
+          echo "LANCACHE_SCCACHE_ENABLED=1"
         } >> "$GITHUB_ENV"
 
         sccache --version

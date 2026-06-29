@@ -100,16 +100,20 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
       - name: cargo fmt --check (dns/nats-subscriber)
         run: cargo fmt --manifest-path services/dns/nats-subscriber/Cargo.toml -- --check
       - name: cargo check with warnings denied (dns/nats-subscriber)
+        uses: ./.github/actions/cargo-with-sccache-fallback
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
+        with:
+          command: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
-        run: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
   ui_rust_quality:
     name: rust-quality (ui)
@@ -136,16 +140,20 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
       - name: cargo fmt --check (ui)
         run: cargo fmt --manifest-path services/ui/Cargo.toml -- --check
       - name: cargo check with warnings denied (ui)
+        uses: ./.github/actions/cargo-with-sccache-fallback
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
+        with:
+          command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
-        run: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   dns_test:
     name: test (dns/nats-subscriber)
@@ -172,10 +180,12 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
       - name: test (dns/nats-subscriber)
-        run: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
   ui_test:
     name: test (ui)
@@ -202,10 +212,12 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
       - name: test (ui)
-        run: cargo test --locked --manifest-path services/ui/Cargo.toml
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   watchdog_test:
     name: test (watchdog)
@@ -243,7 +255,7 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache-cargo-audit
@@ -255,7 +267,9 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-0.21-dns-nats-subscriber
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --version ">=0.21" --locked
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (dns/nats-subscriber)
         run: cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock
 
@@ -284,7 +298,7 @@ jobs:
         uses: ./.github/actions/configure-rust-sccache
         with:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ vars.SCCACHE_REDIS_URL }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache-cargo-audit
@@ -296,7 +310,9 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-0.21-ui
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --version ">=0.21" --locked
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (ui)
         run: cargo audit --deny warnings --file services/ui/Cargo.lock
 
@@ -333,7 +349,7 @@ jobs:
         id: sccache-secret
         env:
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ vars.SCCACHE_REDIS_URL }}
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
         run: |
           set -euo pipefail
 
@@ -359,7 +375,7 @@ jobs:
               exit 0
             fi
 
-            echo "::error::SCCACHE_REDIS_URL repository variable is required for trusted Rust image scans so sccache can use Redis."
+            echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image scans so sccache can use Redis."
             exit 1
           fi
 
@@ -502,7 +518,7 @@ jobs:
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPOSITORY: ${{ github.repository }}
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ vars.SCCACHE_REDIS_URL }}
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
         run: |
           set -euo pipefail
 
@@ -533,7 +549,7 @@ jobs:
               exit 0
             fi
 
-            echo "::error::SCCACHE_REDIS_URL repository variable is required for trusted Rust image builds so sccache can use Redis."
+            echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image builds so sccache can use Redis."
             exit 1
           fi
 

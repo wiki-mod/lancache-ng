@@ -63,10 +63,13 @@ to create and replace service-specific cache directories below this path.
 Rust checks and Rust image builds use Redis-backed `sccache` when the repository
 is configured for it.
 
-Configure these repository variables:
+Configure this repository variable:
+
+- `SCCACHE_REDIS_MODE`: `required`, `optional` or `off`.
+
+Configure this GitHub Actions secret:
 
 - `SCCACHE_REDIS_URL`: Redis URL used by sccache.
-- `SCCACHE_REDIS_MODE`: `required`, `optional` or `off`.
 
 Use `required` for trusted self-hosted LAN runners where Redis is expected to
 be reachable. Use `optional` or `off` when moving jobs to runners that do not

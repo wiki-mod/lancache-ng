@@ -143,7 +143,7 @@ Important:
 
 - distcc helps the C/C++ parts of the build, not Rust codegen itself
 - if the remote compiler hosts are unreachable, builds should fail fast
-- keep the variable separate from `SCCACHE_REDIS_URL`
+- keep the variable separate from the `SCCACHE_REDIS_URL` secret
 
 ## Parallel jobs
 

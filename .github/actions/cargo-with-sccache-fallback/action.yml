@@ -1,0 +1,47 @@
+name: Run cargo with sccache fallback
+description: Run one cargo command and retry without sccache if the cache wrapper fails.
+
+inputs:
+  command:
+    description: Cargo command to run.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run cargo command
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+      run: |
+        set -euo pipefail
+
+        output_file="$(mktemp)"
+
+        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ]; then
+          unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
+        fi
+
+        if bash -euo pipefail -c "$COMMAND" >"$output_file" 2>&1; then
+          cat "$output_file"
+          exit 0
+        fi
+
+        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ]; then
+          cat "$output_file"
+          exit 1
+        fi
+
+        echo "::notice::Cargo command failed while sccache was enabled; retrying once without RUSTC_WRAPPER."
+        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
+        fallback_output="$(mktemp)"
+        if bash -euo pipefail -c "$COMMAND" >"$fallback_output" 2>&1; then
+          cat "$fallback_output"
+          exit 0
+        fi
+
+        echo "sccache-enabled command output:"
+        cat "$output_file"
+        echo "fallback command output:"
+        cat "$fallback_output"
+        exit 1
