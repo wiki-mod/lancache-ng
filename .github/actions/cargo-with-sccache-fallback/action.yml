@@ -5,8 +5,12 @@ inputs:
   command:
     description: Cargo command to run.
     required: true
-  timeout-seconds:
-    description: Maximum runtime for each cargo attempt.
+  sccache-timeout-seconds:
+    description: Maximum runtime for the sccache-backed cargo attempt.
+    required: false
+    default: "120"
+  fallback-timeout-seconds:
+    description: Maximum runtime for the fallback cargo attempt without sccache.
     required: false
     default: "1800"
 
@@ -17,7 +21,8 @@ runs:
       shell: bash
       env:
         COMMAND: ${{ inputs.command }}
-        COMMAND_TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        SCCACHE_TIMEOUT_SECONDS: ${{ inputs.sccache-timeout-seconds }}
+        FALLBACK_TIMEOUT_SECONDS: ${{ inputs.fallback-timeout-seconds }}
       run: |
         set -euo pipefail
 
@@ -25,24 +30,33 @@ runs:
           unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
         fi
 
-        case "$COMMAND_TIMEOUT_SECONDS" in
-          ''|*[!0-9]*)
-            echo "::error::timeout-seconds must be a positive integer."
-            exit 1
-            ;;
-        esac
+        validate_timeout() {
+          local name="$1"
+          local value="$2"
 
-        if [ "$COMMAND_TIMEOUT_SECONDS" -le 0 ]; then
-          echo "::error::timeout-seconds must be greater than zero."
-          exit 1
-        fi
+          case "$value" in
+            ''|*[!0-9]*)
+              echo "::error::$name must be a positive integer."
+              exit 1
+              ;;
+          esac
+
+          if [ "$value" -le 0 ]; then
+            echo "::error::$name must be greater than zero."
+            exit 1
+          fi
+        }
+
+        validate_timeout "sccache-timeout-seconds" "$SCCACHE_TIMEOUT_SECONDS"
+        validate_timeout "fallback-timeout-seconds" "$FALLBACK_TIMEOUT_SECONDS"
 
         run_with_log() {
           local output_file="$1"
+          local timeout_seconds="$2"
           local status
 
           set +e
-          timeout --foreground "${COMMAND_TIMEOUT_SECONDS}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
+          timeout --foreground "${timeout_seconds}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
           status="${PIPESTATUS[0]}"
           set -e
 
@@ -62,7 +76,7 @@ runs:
 
         output_file="$(mktemp)"
 
-        if run_with_log "$output_file"; then
+        if run_with_log "$output_file" "$SCCACHE_TIMEOUT_SECONDS"; then
           exit 0
         fi
 
@@ -76,4 +90,4 @@ runs:
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
 
         fallback_output="$(mktemp)"
-        run_with_log "$fallback_output"
+        run_with_log "$fallback_output" "$FALLBACK_TIMEOUT_SECONDS"
