@@ -257,8 +257,7 @@ services:
       - STANDARD_CACHE_DIR=/var/cache/proxy
       - SSL_CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
-      - STANDARD_CACHE_MAX_GB=10
-      - SSL_CACHE_MAX_GB=10
+      - CACHE_MAX_GB=10
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://dhcp:8000

@@ -93,8 +93,7 @@ ENV TEMPLATE_DIR=/templates \
     DNS_STANDARD_SERVICE=dns-standard \
     DNS_SSL_SERVICE=dns-ssl \
     PROXY_SSL_SERVICE=proxy \
-    STANDARD_CACHE_MAX_GB=10 \
-    SSL_CACHE_MAX_GB=10
+    CACHE_MAX_GB=10
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["lancache-ui"]
