@@ -29,9 +29,7 @@ To speed up repeated builds in containers, pass `--sccache` together with Redis.
 The script installs `sccache` from source inside the Rust container with `cargo install`.
 
 ```bash
-./scripts/ui-rust-checks.sh \
-  --sccache \
-  --sccache-redis redis://192.168.1.230:6379/0
+SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/ui-rust-checks.sh --sccache
 ```
 
 If you do not already have Redis, the script can start a temporary Redis sidecar:
@@ -42,6 +40,7 @@ If you do not already have Redis, the script can start a temporary Redis sidecar
 
 Plain `--sccache` without Redis fails on purpose, because cache results should be shareable and predictable.
 If you pass a Redis URL directly, make sure it is reachable from inside the Docker container.
+Do not commit internal Redis URLs or credentials to the repository.
 
 ### Useful options
 

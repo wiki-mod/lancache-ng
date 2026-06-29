@@ -36,7 +36,7 @@ Options:
 
 Examples:
   $0
-  $0 --sccache --sccache-redis redis://192.168.1.230:6379/0
+  SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 $0 --sccache
   $0 --with-redis --sccache
 EOF
 }
@@ -220,7 +220,7 @@ fi
 
 echo "Running local Rust UI checks in ${RUST_IMAGE} ..."
 if [[ ${ENABLE_SCCACHE} -eq 1 && -n "${REDIS_URL}" ]]; then
-  echo "SCCACHE_REDIS=${REDIS_URL}"
+  echo "SCCACHE_REDIS is configured for this run."
 fi
 
 docker "${DOCKER_RUN_ARGS[@]}" "${RUST_IMAGE}" bash -c "${CONTAINER_CMD}"
