@@ -108,22 +108,32 @@ impl fmt::Display for Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        let proxy_service = env_or("PROXY_SERVICE", "proxy".to_string());
+        let standard_log = env_or("STANDARD_LOG", "/var/log/nginx/access.log".to_string());
+        let ssl_log = env_or("SSL_LOG", standard_log.clone());
+        let standard_cache_dir = env_or("STANDARD_CACHE_DIR", "/var/cache/proxy".to_string());
+        let ssl_cache_dir = env_or("SSL_CACHE_DIR", standard_cache_dir.clone());
+        let proxy_standard_url = env_or("PROXY_STANDARD_URL", format!("http://{proxy_service}"));
+        let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
+        let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
+        let shared_cache_max_gb = env_f64("CACHE_MAX_GB", 10.0);
+
         Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
             cdn_domains_file: env_str("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
             ssl_domains_file: env_str("SSL_DOMAINS_FILE", "/data/cdn-ssl-domains.txt"),
-            standard_log: env_str("STANDARD_LOG", "/var/log/nginx/standard/access.log"),
-            ssl_log: env_str("SSL_LOG", "/var/log/nginx/ssl/access.log"),
-            standard_cache_dir: env_str("STANDARD_CACHE_DIR", "/var/cache/standard"),
-            ssl_cache_dir: env_str("SSL_CACHE_DIR", "/var/cache/ssl"),
-            proxy_standard_url: env_str("PROXY_STANDARD_URL", "http://proxy-standard"),
-            proxy_ssl_url: env_str("PROXY_SSL_URL", "http://proxy-ssl"),
+            standard_log,
+            ssl_log,
+            standard_cache_dir,
+            ssl_cache_dir,
+            proxy_standard_url,
+            proxy_ssl_url,
             netdata_url: env_str("NETDATA_URL", "http://netdata:19999"),
             dns_standard_service: env_str("DNS_STANDARD_SERVICE", "dns-standard"),
             dns_ssl_service: env_str("DNS_SSL_SERVICE", "dns-ssl"),
-            proxy_ssl_service: env_str("PROXY_SSL_SERVICE", "proxy-ssl"),
-            standard_cache_max_gb: env_f64("STANDARD_CACHE_MAX_GB", 10.0),
-            ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", 10.0),
+            proxy_ssl_service,
+            standard_cache_max_gb: env_f64("STANDARD_CACHE_MAX_GB", shared_cache_max_gb),
+            ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb),
             standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
             ssl_ip: env_str("SSL_IP", "192.168.234.11"),
             dhcp_api_url: env_str("DHCP_API_URL", "http://localhost:8000"),
@@ -147,6 +157,13 @@ impl Config {
 
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_or(key: &str, default: String) -> String {
+    env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or(default)
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -186,6 +203,12 @@ fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn hsts_auto_only_sends_for_https_requests() {
@@ -237,5 +260,64 @@ mod tests {
         assert!(env_bool(key, true));
 
         env::remove_var(key);
+    }
+
+    #[test]
+    fn single_proxy_fallbacks_match_current_runtime_layout() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        for key in [
+            "PROXY_SERVICE",
+            "PROXY_STANDARD_URL",
+            "PROXY_SSL_URL",
+            "PROXY_SSL_SERVICE",
+            "STANDARD_LOG",
+            "SSL_LOG",
+            "STANDARD_CACHE_DIR",
+            "SSL_CACHE_DIR",
+        ] {
+            env::remove_var(key);
+        }
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.proxy_standard_url, "http://proxy");
+        assert_eq!(cfg.proxy_ssl_url, "http://proxy");
+        assert_eq!(cfg.proxy_ssl_service, "proxy");
+        assert_eq!(cfg.standard_log, "/var/log/nginx/access.log");
+        assert_eq!(cfg.ssl_log, "/var/log/nginx/access.log");
+        assert_eq!(cfg.standard_cache_dir, "/var/cache/proxy");
+        assert_eq!(cfg.ssl_cache_dir, "/var/cache/proxy");
+    }
+
+    #[test]
+    fn legacy_proxy_service_env_still_drives_runtime_fallbacks() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("PROXY_SERVICE", "legacy-proxy");
+        env::remove_var("PROXY_STANDARD_URL");
+        env::remove_var("PROXY_SSL_URL");
+        env::remove_var("PROXY_SSL_SERVICE");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.proxy_standard_url, "http://legacy-proxy");
+        assert_eq!(cfg.proxy_ssl_url, "http://legacy-proxy");
+        assert_eq!(cfg.proxy_ssl_service, "legacy-proxy");
+
+        env::remove_var("PROXY_SERVICE");
+    }
+
+    #[test]
+    fn shared_cache_limit_fallback_drives_both_modes() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("CACHE_MAX_GB", "42.5");
+        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::remove_var("SSL_CACHE_MAX_GB");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.standard_cache_max_gb, 42.5);
+        assert_eq!(cfg.ssl_cache_max_gb, 42.5);
+
+        env::remove_var("CACHE_MAX_GB");
     }
 }

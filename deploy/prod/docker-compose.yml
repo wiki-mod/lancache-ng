@@ -265,6 +265,13 @@ services:
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
+      - PROXY_STANDARD_URL=http://proxy
+      - PROXY_SSL_URL=http://proxy
+      - PROXY_SSL_SERVICE=proxy
+      - STANDARD_LOG=/var/log/nginx/access.log
+      - SSL_LOG=/var/log/nginx/access.log
+      - STANDARD_CACHE_DIR=/var/cache/proxy
+      - SSL_CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
       - STANDARD_CACHE_MAX_GB=500
       - SSL_CACHE_MAX_GB=500

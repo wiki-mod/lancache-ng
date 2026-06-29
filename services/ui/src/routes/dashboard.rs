@@ -8,30 +8,44 @@ use tera::Context;
 pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let cfg = &state.config;
 
-    let (standard_status, ssl_status, standard_used_gb, ssl_used_gb, log_stats) = tokio::join!(
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url),
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url),
-        tokio::task::spawn_blocking({
-            let d = cfg.standard_cache_dir.clone();
-            move || nginx_client::get_cache_size_gb(&d)
-        }),
+    let standard_status =
+        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
+    let ssl_status = if cfg.proxy_standard_url == cfg.proxy_ssl_url {
+        standard_status.clone()
+    } else {
+        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
+    };
+
+    let standard_used_gb = tokio::task::spawn_blocking({
+        let d = cfg.standard_cache_dir.clone();
+        move || nginx_client::get_cache_size_gb(&d)
+    })
+    .await
+    .unwrap_or(0.0);
+    let ssl_used_gb = if cfg.standard_cache_dir == cfg.ssl_cache_dir {
+        standard_used_gb
+    } else {
         tokio::task::spawn_blocking({
             let d = cfg.ssl_cache_dir.clone();
             move || nginx_client::get_cache_size_gb(&d)
-        }),
-        tokio::task::spawn_blocking({
-            let sl = cfg.standard_log.clone();
-            let xl = cfg.ssl_log.clone();
-            move || nginx_client::get_log_stats(&sl, &xl)
-        }),
-    );
-
-    let standard_used_gb = standard_used_gb.unwrap_or(0.0);
-    let ssl_used_gb = ssl_used_gb.unwrap_or(0.0);
-    let log_stats = log_stats.unwrap_or_default();
+        })
+        .await
+        .unwrap_or(0.0)
+    };
+    let log_stats = tokio::task::spawn_blocking({
+        let sl = cfg.standard_log.clone();
+        let xl = cfg.ssl_log.clone();
+        move || nginx_client::get_log_stats(&sl, &xl)
+    })
+    .await
+    .unwrap_or_default();
 
     let recent_logs = tokio::task::spawn_blocking({
-        let path = cfg.ssl_log.clone();
+        let path = if cfg.standard_log == cfg.ssl_log {
+            cfg.standard_log.clone()
+        } else {
+            cfg.ssl_log.clone()
+        };
         move || nginx_client::parse_log_tail(&path, 10)
     })
     .await
@@ -58,10 +72,13 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
 
 pub async fn metrics_api(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = &state.config;
-    let (standard_status, ssl_status) = tokio::join!(
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url),
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url),
-    );
+    let standard_status =
+        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
+    let ssl_status = if cfg.proxy_standard_url == cfg.proxy_ssl_url {
+        standard_status.clone()
+    } else {
+        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
+    };
     Json(json!({
         "standard": standard_status,
         "ssl": ssl_status,

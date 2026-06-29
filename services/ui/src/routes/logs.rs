@@ -14,29 +14,43 @@ pub async fn logs_page(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogFilter>,
 ) -> Html<String> {
-    let (standard_logs, ssl_logs) = tokio::join!(
-        tokio::task::spawn_blocking({
-            let p = state.config.standard_log.clone();
-            move || nginx_client::parse_log_tail(&p, 100)
-        }),
-        tokio::task::spawn_blocking({
-            let p = state.config.ssl_log.clone();
-            move || nginx_client::parse_log_tail(&p, 100)
-        }),
-    );
+    let mut all_logs = if state.config.standard_log == state.config.ssl_log {
+        let mut shared_logs = tokio::task::spawn_blocking({
+            let path = state.config.standard_log.clone();
+            move || nginx_client::parse_log_tail(&path, 200)
+        })
+        .await
+        .unwrap_or_default();
 
-    // Tag logs with their source
-    let mut standard_logs = standard_logs.unwrap_or_default();
-    for entry in standard_logs.iter_mut() {
-        entry.source = "Standard".to_string();
-    }
+        for entry in &mut shared_logs {
+            entry.source = "Shared".to_string();
+        }
 
-    let mut ssl_logs = ssl_logs.unwrap_or_default();
-    for entry in ssl_logs.iter_mut() {
-        entry.source = "SSL".to_string();
-    }
+        shared_logs
+    } else {
+        let (standard_logs, ssl_logs) = tokio::join!(
+            tokio::task::spawn_blocking({
+                let p = state.config.standard_log.clone();
+                move || nginx_client::parse_log_tail(&p, 100)
+            }),
+            tokio::task::spawn_blocking({
+                let p = state.config.ssl_log.clone();
+                move || nginx_client::parse_log_tail(&p, 100)
+            }),
+        );
 
-    let mut all_logs: Vec<_> = standard_logs.into_iter().chain(ssl_logs).collect();
+        let mut standard_logs = standard_logs.unwrap_or_default();
+        for entry in &mut standard_logs {
+            entry.source = "Standard".to_string();
+        }
+
+        let mut ssl_logs = ssl_logs.unwrap_or_default();
+        for entry in &mut ssl_logs {
+            entry.source = "SSL".to_string();
+        }
+
+        standard_logs.into_iter().chain(ssl_logs).collect()
+    };
 
     // Show most recent first
     all_logs.reverse();

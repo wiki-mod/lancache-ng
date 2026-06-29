@@ -285,7 +285,7 @@ async fn restart_ssl(state: &AppState) {
     if let Err(e) =
         docker_client::restart_service(&state.docker, &state.config.proxy_ssl_service).await
     {
-        tracing::error!("Restart proxy-ssl failed: {}", e);
+        tracing::error!("Restart proxy service failed: {}", e);
     }
 }
 

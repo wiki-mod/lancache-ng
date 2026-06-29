@@ -82,16 +82,17 @@ EXPOSE 8080
 ENV TEMPLATE_DIR=/templates \
     CDN_DOMAINS_FILE=/data/cdn-domains.txt \
     SSL_DOMAINS_FILE=/data/cdn-ssl-domains.txt \
-    STANDARD_LOG=/var/log/nginx/standard/access.log \
-    SSL_LOG=/var/log/nginx/ssl/access.log \
-    STANDARD_CACHE_DIR=/var/cache/standard \
-    SSL_CACHE_DIR=/var/cache/ssl \
-    PROXY_STANDARD_URL=http://proxy-standard \
-    PROXY_SSL_URL=http://proxy-ssl \
+    STANDARD_LOG=/var/log/nginx/access.log \
+    SSL_LOG=/var/log/nginx/access.log \
+    STANDARD_CACHE_DIR=/var/cache/proxy \
+    SSL_CACHE_DIR=/var/cache/proxy \
+    PROXY_SERVICE=proxy \
+    PROXY_STANDARD_URL=http://proxy \
+    PROXY_SSL_URL=http://proxy \
     NETDATA_URL=http://netdata:19999 \
     DNS_STANDARD_SERVICE=dns-standard \
     DNS_SSL_SERVICE=dns-ssl \
-    PROXY_SSL_SERVICE=proxy-ssl \
+    PROXY_SSL_SERVICE=proxy \
     STANDARD_CACHE_MAX_GB=10 \
     SSL_CACHE_MAX_GB=10
 

@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process::Command;
@@ -123,7 +123,7 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     let mut stats = LogStats::default();
     let mut total_bytes: u64 = 0;
 
-    for path in [standard_log, ssl_log] {
+    for path in unique_paths([standard_log, ssl_log]) {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);
         for line in reader.lines().map_while(Result::ok) {
@@ -175,6 +175,7 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         "/srv/lancache/ssl",
         "/var/cache/standard",
         "/var/cache/ssl",
+        "/var/cache/proxy",
         "/data/lancache",
     ];
     if !allowed_prefixes
@@ -196,6 +197,19 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         }
         Err(_) => 0.0,
     }
+}
+
+fn unique_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+
+    for path in paths {
+        if seen.insert(path) {
+            unique.push(path);
+        }
+    }
+
+    unique
 }
 
 fn log_regex() -> &'static Regex {
@@ -239,5 +253,37 @@ fn format_bytes(b: u64) -> String {
         format!("{:.1} KB", b as f64 / KB as f64)
     } else {
         format!("{} B", b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn shared_log_path_is_counted_once() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("lancache-ui-shared-log-{unique}.log"));
+        let mut file = File::create(&path).expect("create temp log");
+        writeln!(
+            file,
+            r#"127.0.0.1 - [29/Jun/2026:00:00:00 +0000] "GET /foo HTTP/1.1" 200 1024 "HIT" "example.com""#
+        )
+        .expect("write temp log");
+        drop(file);
+
+        let path = path.to_string_lossy().to_string();
+        let stats = get_log_stats(&path, &path);
+        assert_eq!(stats.total_requests, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 0);
+
+        fs::remove_file(path).expect("remove temp log");
     }
 }
