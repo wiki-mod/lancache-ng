@@ -3,8 +3,18 @@ name: CodeQL
 on:
   push:
     branches: [master]
+    paths:
+      - ".github/workflows/codeql.yml"
+      - ".github/codeql/**"
+      - "services/dns/nats-subscriber/**"
+      - "services/ui/**"
   pull_request:
     branches: [master]
+    paths:
+      - ".github/workflows/codeql.yml"
+      - ".github/codeql/**"
+      - "services/dns/nats-subscriber/**"
+      - "services/ui/**"
   schedule:
     - cron: "24 3 * * *"
   workflow_dispatch:  
