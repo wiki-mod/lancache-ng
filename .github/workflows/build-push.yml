@@ -94,8 +94,11 @@ jobs:
       - name: Configure Redis-backed sccache
         if: >-
           ${{
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
@@ -135,8 +138,11 @@ jobs:
       - name: Configure Redis-backed sccache
         if: >-
           ${{
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
@@ -176,8 +182,11 @@ jobs:
       - name: Configure Redis-backed sccache
         if: >-
           ${{
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
@@ -208,8 +217,11 @@ jobs:
       - name: Configure Redis-backed sccache
         if: >-
           ${{
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
@@ -251,8 +263,11 @@ jobs:
       - name: Configure Redis-backed sccache
         if: >-
           ${{
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
@@ -294,8 +309,11 @@ jobs:
       - name: Configure Redis-backed sccache
         if: >-
           ${{
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
@@ -347,7 +365,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Prepare sccache Redis secret file
-        if: matrix.rust == true
+        if: matrix.rust == true && github.actor != 'dependabot[bot]'
         id: sccache-secret
         env:
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
@@ -492,16 +510,31 @@ jobs:
         id: buildx-cache
         env:
           BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_READ: ${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-read
           BUILDX_CACHE_DEST: ${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new
         run: |
           set -euo pipefail
 
-          mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
-          rm -rf "$BUILDX_CACHE_DEST"
-          mkdir -p "$(dirname "$BUILDX_CACHE_DEST")"
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is required for safe local Buildx cache locking."
+            exit 1
+          fi
+
+          cache_dir="$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          lock_file="$BUILDX_CACHE_ROOT/${{ matrix.service }}.lock"
+
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          rm -rf "$BUILDX_CACHE_READ" "$BUILDX_CACHE_DEST"
+          mkdir -p "$BUILDX_CACHE_READ" "$(dirname "$BUILDX_CACHE_DEST")"
+
+          (
+            flock -x 9
+            mkdir -p "$cache_dir"
+            cp -a "$cache_dir/." "$BUILDX_CACHE_READ/"
+          ) 9>"$lock_file"
 
           {
-            echo "cache-from=$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+            echo "cache-from=$BUILDX_CACHE_READ"
             echo "cache-to=$BUILDX_CACHE_DEST"
           } >> "$GITHUB_OUTPUT"
 
@@ -509,6 +542,7 @@ jobs:
         if: >-
           ${{
             matrix.rust == true &&
+            github.actor != 'dependabot[bot]' &&
             (
               github.event_name != 'pull_request' ||
               github.event.pull_request.head.repo.full_name == github.repository
@@ -606,31 +640,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          lock_dir="$BUILDX_CACHE_ROOT/${{ matrix.service }}.lock"
-          locked=0
-
-          for _ in $(seq 1 60); do
-            if mkdir "$lock_dir" 2>/dev/null; then
-              locked=1
-              break
-            fi
-            sleep 2
-          done
-
-          if [ "$locked" -ne 1 ]; then
-            echo "::error::Timed out waiting for Buildx cache lock: $lock_dir"
-            exit 1
+          if [ ! -d "$BUILDX_CACHE_DEST" ]; then
+            exit 0
           fi
 
-          cleanup_lock() {
-            rmdir "$lock_dir"
-          }
-          trap cleanup_lock EXIT
+          cache_dir="$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          lock_file="$BUILDX_CACHE_ROOT/${{ matrix.service }}.lock"
 
-          if [ -d "$BUILDX_CACHE_DEST" ]; then
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          (
+            flock -x 9
             rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
-            mv "$BUILDX_CACHE_DEST" "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
-          fi
+            mv "$BUILDX_CACHE_DEST" "$cache_dir"
+          ) 9>"$lock_file"
 
       - name: Attest image build provenance
         if: github.event_name != 'pull_request'

@@ -14,7 +14,7 @@ On a Debian runner, install the baseline tools used by the workflows:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl git jq shellcheck sudo
+sudo apt-get install -y ca-certificates curl git jq shellcheck sudo util-linux
 ```
 
 Install Docker Engine and the Compose plugin from Docker's Debian repository, then add the GitHub Actions runner user to the `docker` group:
@@ -57,6 +57,8 @@ sudo chown -R actions-runner:actions-runner /var/tmp/lancache-ng-buildx-cache
 Replace `actions-runner:actions-runner` with the runner account and group. The
 workflow does not use `sudo` for cache rotation; the runner account must be able
 to create and replace service-specific cache directories below this path.
+The workflow uses `flock` from `util-linux` so concurrent runs cannot rotate the
+same service cache while another run is importing it.
 
 ## Rust compiler cache
 
