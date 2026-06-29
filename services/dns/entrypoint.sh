@@ -6,6 +6,9 @@ PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
 PDNS_API_KEY="${PDNS_API_KEY:-CHANGE_ME_PDNS_API_KEY}"
 DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
+DDNS_TSIG_KEY="${DDNS_TSIG_KEY:-}"
+DDNS_TSIG_NAME="${DDNS_TSIG_NAME:-lancache-ddns-key}"
+DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
@@ -32,11 +35,65 @@ fi
 
 export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 
+LAN_ZONES=(
+    lan.
+    local.lan.
+)
+
+PRIVATE_REVERSE_ZONES=(
+    10.in-addr.arpa.
+    168.192.in-addr.arpa.
+    16.172.in-addr.arpa.
+    17.172.in-addr.arpa.
+    18.172.in-addr.arpa.
+    19.172.in-addr.arpa.
+    20.172.in-addr.arpa.
+    21.172.in-addr.arpa.
+    22.172.in-addr.arpa.
+    23.172.in-addr.arpa.
+    24.172.in-addr.arpa.
+    25.172.in-addr.arpa.
+    26.172.in-addr.arpa.
+    27.172.in-addr.arpa.
+    28.172.in-addr.arpa.
+    29.172.in-addr.arpa.
+    30.172.in-addr.arpa.
+    31.172.in-addr.arpa.
+    c.f.ip6.arpa.
+    d.f.ip6.arpa.
+)
+
+DDNS_UPDATE_ZONES=("${LAN_ZONES[@]}" "${PRIVATE_REVERSE_ZONES[@]}")
+
+configure_ddns_tsig() {
+    case "$DDNS_TSIG_KEY" in
+        "")
+            echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured."
+            return
+            ;;
+        CHANGE_ME*|changeme*)
+            echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is still set to a default placeholder."
+            printf '%s\n' "[lancache-dns] Generate a shared key with: openssl rand -base64 32 | tr -d '\\n'"
+            exit 1
+            ;;
+    esac
+
+    pdnsutil --config-dir=/etc/pdns/auth import-tsig-key \
+        "$DDNS_TSIG_NAME" "$DDNS_TSIG_ALGORITHM" "$DDNS_TSIG_KEY" >/dev/null
+
+    for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+        pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" TSIG-ALLOW-DNSUPDATE "$DDNS_TSIG_NAME" >/dev/null
+    done
+
+    echo "[lancache-dns] Configured TSIG-authenticated DDNS updates for LAN zones."
+}
+
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
 
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
 echo "[lancache-dns] Generating recursor.conf..."
+# shellcheck disable=SC2016 # envsubst needs the literal variable name.
 envsubst '${PDNS_API_KEY}' < /etc/pdns/recursor.conf.template > /tmp/recursor.conf && \
     mv /tmp/recursor.conf /etc/pdns/recursor.conf
 
@@ -47,6 +104,7 @@ fi
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
+# shellcheck disable=SC2016 # envsubst needs the literal variable names.
 envsubst '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' < /etc/pdns/auth/pdns.conf.template > /tmp/pdns.conf && \
     mv /tmp/pdns.conf /etc/pdns/auth/pdns.conf
 
@@ -67,33 +125,16 @@ fi
 echo "[lancache-dns] Creating LAN zones in authoritative database..."
 
 # Create LAN zones (will not error if already exist)
-pdnsutil --config-dir=/etc/pdns/auth create-zone lan. || true
-pdnsutil --config-dir=/etc/pdns/auth create-zone local.lan. || true
+for zone in "${LAN_ZONES[@]}"; do
+    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" || true
+done
 
 # Create empty reverse zones for privacy (prevent external PTR leakage)
-for zone in \
-    10.in-addr.arpa \
-    168.192.in-addr.arpa \
-    16.172.in-addr.arpa \
-    17.172.in-addr.arpa \
-    18.172.in-addr.arpa \
-    19.172.in-addr.arpa \
-    20.172.in-addr.arpa \
-    21.172.in-addr.arpa \
-    22.172.in-addr.arpa \
-    23.172.in-addr.arpa \
-    24.172.in-addr.arpa \
-    25.172.in-addr.arpa \
-    26.172.in-addr.arpa \
-    27.172.in-addr.arpa \
-    28.172.in-addr.arpa \
-    29.172.in-addr.arpa \
-    30.172.in-addr.arpa \
-    31.172.in-addr.arpa \
-    c.f.ip6.arpa \
-    d.f.ip6.arpa; do
-    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone." || true
+for zone in "${PRIVATE_REVERSE_ZONES[@]}"; do
+    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" || true
 done
+
+configure_ddns_tsig
 
 # ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
