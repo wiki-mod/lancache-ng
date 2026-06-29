@@ -88,6 +88,7 @@
   </div>
 
 </div>
+{% endblock %}
 
 {% block scripts %}
 <script>
@@ -105,8 +106,12 @@
       const response = await fetch(`/api/secondary/${name}/rotate-token`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
-        }
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': '{{ csrf_token }}'
+        },
+        body: JSON.stringify({
+          token: "{{ registration_token }}"
+        })
       });
 
       if (response.ok) {
@@ -127,7 +132,10 @@
 
     try {
       const response = await fetch(`/api/secondary/${name}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: {
+          'X-CSRF-Token': '{{ csrf_token }}'
+        }
       });
 
       if (response.ok) {
@@ -141,5 +149,4 @@
     }
   }
 </script>
-{% endblock %}
 {% endblock %}

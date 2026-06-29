@@ -16,12 +16,20 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 - The user is not a programmer. Make all technical decisions independently; only ask when a choice has real operational impact (hardware, cost, network topology).
 - Chat language: German. Code language: English.
 
+## Governance
+
+See `.github/AGENTS.md` for the full coding standards and architecture reference.
+
+- **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
+- **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
+- **No direct pushes to master**: all changes go through pull requests.
+
 ## Architecture
 
 ```
 services/proxy/          # nginx: HTTP + HTTPS caching (SSL mode, CA cert required)
 services/proxy-standard/ # nginx: HTTP caching + HTTPS passthrough (no CA cert needed)
-services/dns/            # BIND9 DNS server with chroot (shared by both modes)
+services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (shared by both modes)
 config/dev/              # Settings for local development
 config/prod/             # Settings for production deployment
 certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
@@ -50,13 +58,13 @@ by configuring which DNS server IP they point to:
 
 ## How SSL Interception Works (ssl mode)
 
-1. **DNS spoofing**: BIND9 resolves CDN hostnames (e.g. `steamcontent.com`) to the proxy's IP via RPZ (Response Policy Zone).
+1. **DNS spoofing**: PowerDNS authoritative resolves CDN hostnames (e.g. `steamcontent.com`) to the proxy's IP via zone files generated from `cdn-domains.txt`.
 2. **Client connects** to proxy IP:443, sending SNI `steamcontent.com` in the TLS ClientHello.
 3. **nginx** reads the SNI via `$ssl_server_name`, looks up the matching cert in `ssl-map.conf`
    (generated at startup), and presents a wildcard cert for `steamcontent.com` signed by our CA.
 4. Client accepts because it trusts our CA → TLS handshake succeeds.
 5. nginx decrypts the request, checks `proxy_cache`, fetches from the real CDN if needed
-   (using `8.8.8.8` as resolver, never the LAN cache DNS to avoid loops), caches the response.
+   (using `NGINX_UPSTREAM_RESOLVER` as the real upstream resolver, never the LAN cache DNS to avoid loops), caches the response.
 6. Consoles (PS5, Xbox) are **not** in the DNS list — if their CDN domains were redirected
    here, the TLS handshake would fail and the console could not fall back (our DNS would
    keep returning the proxy IP on every retry). By omitting them from DNS, consoles reach
@@ -72,8 +80,8 @@ by configuring which DNS server IP they point to:
   per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA. nginx selects
   the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
-- **Upstream resolver must be real DNS**: nginx's `resolver` directive is set to `8.8.8.8`,
-  not our BIND9. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
+- **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`),
+  not our PowerDNS recursor. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
   back to the proxy → infinite loop.
 - **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
   workers wait. Critical for large game files that multiple clients might request simultaneously.
@@ -84,16 +92,16 @@ by configuring which DNS server IP they point to:
 - **`libnginx-mod-stream`**: The standard proxy needs nginx's stream module for SNI passthrough.
   This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
   at the top of `nginx.conf` (before the `events {}` block).
-- **Serial file in `/tmp`**: The CA key is in a `:ro` mounted volume in prod. OpenSSL's
-  `-CAcreateserial` would try to write `ca.srl` to the same directory — that fails. Instead
-  we write the serial file to `/tmp/lancache-ca.srl` and pass it with `-CAserial`.
+- **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
+  serial file is always written to `/tmp/lancache-ca.srl` rather than the certs directory,
+  and passed with `-CAserial`.
 
 ## Dev vs Prod Split
 
 | | dev | prod |
 |---|---|---|
 | Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `/srv/lancache/{standard,ssl}` on host |
+| Cache volume | Docker named volume | `/srv/lancache/cache` on host |
 | CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
 | DNS query logging | On | Off |
 | Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
@@ -123,7 +131,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
    Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
    Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
    Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directories: `mkdir -p /srv/lancache/standard /srv/lancache/ssl`
+   Create cache directory: `mkdir -p /srv/lancache/cache`
 
 ## Adding More CDN Domains
 
@@ -136,11 +144,3 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
 
 Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
 fully. The Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` on the host.
-
-## Governance
-
-See `.github/agents.md` for the full coding standards and architecture reference.
-
-- **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
-- **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
-- **No direct pushes to master**: all changes go through pull requests.

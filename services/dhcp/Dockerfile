@@ -1,4 +1,4 @@
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y \
     kea-dhcp4-server \
@@ -8,10 +8,9 @@ RUN apt-get update && apt-get install -y \
     gettext \
     openssl \
     curl \
-    nmap \
+    jq \
     iptables \
-    && rm -rf /var/lib/apt/lists/* \
-    && test -f /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_host_cmds.so
+    && rm -rf /var/lib/apt/lists/*
 
 # Config templates — expanded once into /var/lib/kea/ on first boot
 COPY kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.template

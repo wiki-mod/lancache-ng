@@ -4,7 +4,7 @@ set -euo pipefail
 # ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
-PDNS_API_KEY="${PDNS_API_KEY:-lancache-pdns-secret}"
+PDNS_API_KEY="${PDNS_API_KEY:-CHANGE_ME_PDNS_API_KEY}"
 DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
@@ -12,6 +12,23 @@ NATS_URL="${NATS_URL:-nats://nats:4222}"
 NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
+
+# Fail if PDNS_API_KEY is a known placeholder value
+case "$PDNS_API_KEY" in
+    CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*)
+        echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to a default placeholder ('$PDNS_API_KEY')"
+        echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
+        echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
+        exit 1
+        ;;
+esac
+
+# Fail if PDNS_API_KEY is too short (weak) — checked for all values, not just placeholders
+if [ ${#PDNS_API_KEY} -lt 16 ]; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is too short (${#PDNS_API_KEY} characters, minimum 16 required)"
+    echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
+    exit 1
+fi
 
 export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 
@@ -36,7 +53,7 @@ envsubst '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' < /etc/pdns/auth/pdns.conf.templat
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     echo "[lancache-dns] Initializing SQLite database..."
-    SCHEMA=$(find /usr/share -name 'schema.sqlite3.sql' 2>/dev/null | head -1)
+    SCHEMA=$(find /usr/share -name 'schema.sqlite3.sql' -print -quit 2>/dev/null)
     if [ -z "$SCHEMA" ]; then
         echo "[lancache-dns] FATAL: sqlite schema not found in /usr/share"
         exit 1
@@ -80,8 +97,17 @@ done
 
 # ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
-SERIAL=$(date +%Y%m%d01)
+SERIAL=$(date +%s | tail -c 11)
 RPZ_FILE="/var/lib/powerdns/rpz.zone"
+
+# Preserve monotonic RPZ SOA serials: ensure SERIAL doesn't go backwards
+if [ -f "$RPZ_FILE" ]; then
+    OLD_SERIAL=$(grep -oP '^\s*@\s+SOA\s+[^\s]+\s+[^\s]+\s+\K\d+' "$RPZ_FILE" 2>/dev/null || echo 0)
+    if [ "$SERIAL" -le "$OLD_SERIAL" ]; then
+        SERIAL=$(( OLD_SERIAL + 1 ))
+        echo "[lancache-dns] Monotonic serial: new=$SERIAL (was $OLD_SERIAL)"
+    fi
+fi
 
 {
     echo "\$ORIGIN rpz."
@@ -128,8 +154,19 @@ run_recursor() {
 run_auth &
 AUTH_PID=$!
 
-# Give auth time to come up before recursor starts
-sleep 2
+# Wait for pdns_server to be ready before starting recursor (polling with timeout)
+READY=0
+for i in {1..10}; do
+    if pdns_control rping >/dev/null 2>&1; then
+        echo "[lancache-dns] pdns_server is ready (attempt $i)"
+        READY=1
+        break
+    fi
+    sleep 0.5
+done
+if [ $READY -eq 0 ]; then
+    echo "[lancache-dns] WARNING: pdns_server did not respond to ping; recursor will start anyway"
+fi
 
 # Start recursor
 run_recursor &
@@ -148,7 +185,7 @@ run_nats_subscriber &
 NATS_PID=$!
 
 # Handle termination
-trap "kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true" EXIT TERM
+trap 'kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true' EXIT TERM INT
 
 # Wait indefinitely
 wait

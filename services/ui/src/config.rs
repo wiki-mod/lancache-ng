@@ -1,4 +1,22 @@
 use std::env;
+use std::fmt;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HstsMode {
+    Auto,
+    Always,
+    Never,
+}
+
+impl HstsMode {
+    pub fn should_send(self, is_https: bool) -> bool {
+        match self {
+            Self::Auto => is_https,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
 
 pub struct Config {
     pub template_dir: String,
@@ -22,6 +40,9 @@ pub struct Config {
     pub dhcp_api_token: String,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
+    pub allow_insecure_ui: bool,
+    pub security_headers_enabled: bool,
+    pub hsts_mode: HstsMode,
     pub pdns_auth_url: String,
     pub pdns_rec_url: String,
     pub pdns_api_key: String,
@@ -30,6 +51,59 @@ pub struct Config {
     pub secondary_registration_token: String,
     pub nats_conf_path: String,
     pub nats_service: String,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("template_dir", &self.template_dir)
+            .field("cdn_domains_file", &self.cdn_domains_file)
+            .field("ssl_domains_file", &self.ssl_domains_file)
+            .field("standard_log", &self.standard_log)
+            .field("ssl_log", &self.ssl_log)
+            .field("standard_cache_dir", &self.standard_cache_dir)
+            .field("ssl_cache_dir", &self.ssl_cache_dir)
+            .field("proxy_standard_url", &self.proxy_standard_url)
+            .field("proxy_ssl_url", &self.proxy_ssl_url)
+            .field("netdata_url", &self.netdata_url)
+            .field("dns_standard_service", &self.dns_standard_service)
+            .field("dns_ssl_service", &self.dns_ssl_service)
+            .field("proxy_ssl_service", &self.proxy_ssl_service)
+            .field("standard_cache_max_gb", &self.standard_cache_max_gb)
+            .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
+            .field("standard_ip", &self.standard_ip)
+            .field("ssl_ip", &self.ssl_ip)
+            .field("dhcp_api_url", &self.dhcp_api_url)
+            .field("dhcp_api_token", &"***REDACTED***")
+            .field(
+                "auth_user",
+                &self.auth_user.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field(
+                "auth_password",
+                &self.auth_password.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("allow_insecure_ui", &self.allow_insecure_ui)
+            .field("pdns_auth_url", &self.pdns_auth_url)
+            .field("pdns_rec_url", &self.pdns_rec_url)
+            .field("pdns_api_key", &"***REDACTED***")
+            .field("nats_url", &self.nats_url)
+            .field("nats_local_token", &"***REDACTED***")
+            .field("secondary_registration_token", &"***REDACTED***")
+            .field("nats_conf_path", &self.nats_conf_path)
+            .field("nats_service", &self.nats_service)
+            .finish()
+    }
+}
+
+impl fmt::Display for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Config {{ template_dir: {:?}, cdn_domains_file: {:?}, ... }}",
+            self.template_dir, self.cdn_domains_file
+        )
+    }
 }
 
 impl Config {
@@ -56,6 +130,9 @@ impl Config {
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
+            allow_insecure_ui: env_bool("ALLOW_INSECURE_UI", false),
+            security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
+            hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
@@ -81,4 +158,84 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
+    env::var(key)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "https" | "forwarded" => Some(HstsMode::Auto),
+            "always" | "true" | "1" | "on" => Some(HstsMode::Always),
+            "never" | "false" | "0" | "off" => Some(HstsMode::Never),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsts_auto_only_sends_for_https_requests() {
+        assert!(HstsMode::Auto.should_send(true));
+        assert!(!HstsMode::Auto.should_send(false));
+    }
+
+    #[test]
+    fn hsts_always_and_never_ignore_request_scheme() {
+        assert!(HstsMode::Always.should_send(true));
+        assert!(HstsMode::Always.should_send(false));
+        assert!(!HstsMode::Never.should_send(true));
+        assert!(!HstsMode::Never.should_send(false));
+    }
+
+    #[test]
+    fn hsts_mode_parser_accepts_documented_values() {
+        let key = "LANCACHE_TEST_UI_HSTS_MODE_DOCUMENTED";
+
+        env::set_var(key, "auto");
+        assert_eq!(env_hsts_mode(key, HstsMode::Never), HstsMode::Auto);
+
+        env::set_var(key, "always");
+        assert_eq!(env_hsts_mode(key, HstsMode::Never), HstsMode::Always);
+
+        env::set_var(key, "never");
+        assert_eq!(env_hsts_mode(key, HstsMode::Always), HstsMode::Never);
+
+        env::set_var(key, "unexpected");
+        assert_eq!(env_hsts_mode(key, HstsMode::Always), HstsMode::Always);
+
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn security_header_toggle_parser_accepts_documented_values() {
+        let key = "LANCACHE_TEST_UI_SECURITY_HEADERS_DOCUMENTED";
+
+        env::set_var(key, "true");
+        assert!(env_bool(key, false));
+
+        env::set_var(key, "off");
+        assert!(!env_bool(key, true));
+
+        env::set_var(key, "no");
+        assert!(!env_bool(key, true));
+
+        env::set_var(key, "invalid");
+        assert!(env_bool(key, true));
+
+        env::remove_var(key);
+    }
 }

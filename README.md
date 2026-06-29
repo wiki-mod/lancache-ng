@@ -46,17 +46,20 @@ Run this on a Linux machine inside your network:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-The setup script guides you through the installation.
+The setup script guides you through the installation. If required tools are missing, it asks before installing packages, installs missing requirements such as Docker, curl and git through the host package manager, and prints the package names to install manually if you abort.
 
 It can:
 
 - check the required tools
-- install Docker if needed
+- ask before installing missing dependencies such as Docker, curl or git
 - clone the repository to `/opt/lancache-ng`
 - ask for the cache server IP
 - optionally enable SSL caching with a second IP
 - ask for cache directory and cache size
 - optionally enable automatic updates
+- create pre-update rollback backups
+- create config-only or full backups
+- restore setup-script backups
 - optionally enable DHCP
 - optionally protect the Admin UI with a password
 - write the `.env` file
@@ -179,6 +182,22 @@ Some clients may bypass the cache completely.
 The first download is normally a cache miss.  
 The second identical download is where the cache should help.
 
+### Cache policy
+
+LanCache NG is not a generic forward proxy. It is designed to force caching for known game,
+software and update CDN downloads that you intentionally route through the cache.
+
+The nginx cache key intentionally uses the host and path, not the full request URI with the
+query string. Many CDN download URLs include per-request signatures or expiry tokens in the
+query string. Including those values in the cache key would make each signed URL look like a
+different object and would greatly reduce cache hits. The full request URI is still forwarded
+to the upstream CDN for validation; only the local cache key ignores the query string.
+
+For the same reason, LanCache NG intentionally ignores selected upstream cache headers such as
+`Cache-Control`, `Expires`, `Vary` and `Set-Cookie` for cached download responses. Do not use
+LanCache NG as a general-purpose proxy, and only add CDN domains that you understand and want
+to cache.
+
 ## Console support
 
 Xbox, PlayStation and similar consoles should usually use standard mode.
@@ -188,6 +207,13 @@ Because of that, SSL caching is not recommended for consoles.
 
 Consoles should continue to work normally through standard mode.  
 HTTPS traffic that cannot be cached is passed through to the original CDN.
+
+
+## Docker build performance on local runners
+
+If you build LanCache NG on a self-hosted runner or want to speed up repeated local builds, see the local runner Docker performance guide for practical options such as Docker layer caching, registry mirrors, multi-stage builds, `.dockerignore` files and runner parallelism tuning.
+
+[docs/local-runner-docker-performance.md](docs/local-runner-docker-performance.md)
 
 ## Requirements
 
@@ -223,7 +249,7 @@ Recommended installation:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-During setup you will be asked for the important values.
+During setup you will be asked for the important values. If required tools are missing, setup asks before installing packages and prints the package names to install manually if you abort.
 
 Example values:
 
@@ -260,10 +286,26 @@ sudo /opt/lancache-ng/setup.sh update
 
 The update command can:
 
+- create a config-only rollback backup before changing the stack
 - pull the current repository state
 - update the compose file
 - pull newer images
 - restart the stack
+
+Create a manual backup with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh backup --config
+sudo /opt/lancache-ng/setup.sh backup --full
+```
+
+Use `--config` for small update rollback backups. Use `--full` only when you also need cache objects, because full backups can be very large. Restore a backup with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+```
+
+See `docs/backup-restore.md` for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.
 
 ## Debug information
 
@@ -394,6 +436,7 @@ See:
 
 ```text
 docs/install-ca-cert.md
+docs/backup-restore.md
 ```
 
 ### Firefox note
@@ -519,15 +562,27 @@ IP_SSL=192.168.1.11
 
 SSL_ENABLED=1
 
-CACHE_DIR_STANDARD=/srv/lancache/standard
-CACHE_DIR_SSL=/srv/lancache/ssl
+CACHE_DIR_STANDARD=/srv/lancache/cache
+CACHE_DIR_SSL=/srv/lancache/cache
 
 CACHE_MAX_SIZE=500g
 CACHE_MEM_MB=512
+NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+PROXY_SECURITY_MODE=lazy
+PROXY_ALLOWED_CLIENT_CIDRS=
 
 STANDARD_CACHE_MAX_GB=500
 SSL_CACHE_MAX_GB=500
 ```
+
+Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
+
+`PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
+
+- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is simple and avoids surprising breakage when a launcher uses a new CDN hostname.
+- `strict` only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can break downloads until missing CDN root domains are added.
+
+`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
@@ -540,8 +595,7 @@ SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 Create directories:
 
 ```bash
-mkdir -p /srv/lancache/standard
-mkdir -p /srv/lancache/ssl
+mkdir -p /srv/lancache/cache
 mkdir -p /srv/lancache/kea
 ```
 

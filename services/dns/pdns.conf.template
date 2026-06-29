@@ -7,9 +7,9 @@ dnsupdate=yes
 allow-dnsupdate-from=${DDNS_ALLOW_FROM}
 
 webserver=yes
-webserver-address=127.0.0.1
+webserver-address=0.0.0.0
 webserver-port=8081
-webserver-allow-from=127.0.0.1
+webserver-allow-from=127.0.0.1,172.16.0.0/12
 api=yes
 api-key=${PDNS_API_KEY}
 

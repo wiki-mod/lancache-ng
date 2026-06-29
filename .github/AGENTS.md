@@ -27,7 +27,7 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 - **TLS in Rust**: use `reqwest` with `default-features = false, features = ["rustls-tls"]`. Never add `openssl-sys` as a dependency — `rust:slim` has no OpenSSL headers.
 - **sccache**: only activated via opt-in `SCCACHE_REDIS_URL` build arg. Never hardcode a Redis URL.
 - **Cache key**: nginx uses `$host$uri` (not `$request_uri`) — CDN query-string signatures must not bust the cache.
-- **DNS resolver in nginx**: must point to `8.8.8.8`, never to the local BIND9/PowerDNS — that would cause an infinite loop.
+- **DNS resolver in nginx**: must point to `8.8.8.8`, never to the local PowerDNS recursor — that would cause an infinite loop.
 
 ## What Not To Do
 

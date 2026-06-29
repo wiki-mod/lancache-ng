@@ -2,21 +2,31 @@ name: lancache-ng
 
 services:
 
-  # ── Standard mode (no CA cert required) ──────────────────────────────────
-  # HTTP: cached. HTTPS: SNI passthrough to real CDN (not cached).
-  proxy-standard:
-    container_name: lancache-proxy-standard
-    image: ghcr.io/wiki-mod/lancache-ng/proxy-standard:latest
+  # ── Unified proxy (standard + SSL mode in one container) ─────────────────
+  # Port 80: HTTP caching (shared cache for both modes)
+  # Port 8443 (standard): SNI passthrough to real CDN (no client cert needed)
+  # Port 443 (SSL): HTTPS caching via TLS interception (CA cert required)
+  proxy:
+    container_name: lancache-proxy
+    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
     build:
-      context: ../../services/proxy-standard
+      context: ../../services/proxy
     env_file:
       - ../../config/prod/proxy.env
+    environment:
+      - IP_STANDARD=${IP_STANDARD}
+      - IP_SSL=${IP_SSL}
+      - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
-      - proxy-standard-cache:/var/cache/nginx/lancache
-      - proxy-standard-logs:/var/log/nginx
+      - ../../certs:/etc/nginx/ssl/ca
+      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
+      - proxy-cache:/var/cache/nginx/lancache
+      - proxy-logs:/var/log/nginx
     ports:
       - "${IP_STANDARD}:80:80"
-      - "${IP_STANDARD}:443:443"
+      - "${IP_STANDARD}:443:8443"
+      - "${IP_SSL}:80:80"
+      - "${IP_SSL}:443:443"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
       interval: 30s
@@ -39,6 +49,7 @@ services:
       - ../../config/prod/dns-standard.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-standard
@@ -53,7 +64,7 @@ services:
       - "8081"
       - "8082"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -67,36 +78,6 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── SSL mode (CA cert must be installed on clients) ───────────────────────
-  # HTTP + HTTPS: both cached via TLS interception.
-  proxy-ssl:
-    container_name: lancache-proxy-ssl
-    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
-    build:
-      context: ../../services/proxy
-    env_file:
-      - ../../config/prod/proxy.env
-    volumes:
-      - ../../certs:/etc/nginx/ssl/ca:ro
-      - proxy-ssl-cache:/var/cache/nginx/lancache
-      - proxy-ssl-logs:/var/log/nginx
-      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
-    ports:
-      - "${IP_SSL}:80:80"
-      - "${IP_SSL}:443:443"
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    restart: always
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   dns-ssl:
     container_name: lancache-dns-ssl
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
@@ -106,6 +87,7 @@ services:
       - ../../config/prod/dns-ssl.env
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_TOKEN=${NATS_LOCAL_TOKEN}
       - NATS_CONSUMER=dns-ssl
@@ -119,7 +101,7 @@ services:
       - "8081"
       - "8082"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -134,8 +116,8 @@ services:
         max-file: "2"
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to container inspect + restart only
-  # (tecnativa/docker-socket-proxy: CONTAINERS=1 + POST=1 — no exec, no images)
+  # socket-proxy limits Docker access to Admin UI/watchdog operations:
+  # container inspect/list, restart, and exec; no image/volume/system access.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
     volumes:
@@ -143,6 +125,9 @@ services:
     environment:
       CONTAINERS: "1"
       POST: "1"
+      EXEC: "1"
+    networks:
+      - docker-api
     restart: always
     logging:
       driver: json-file
@@ -157,11 +142,13 @@ services:
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
-      - /srv/lancache/standard:/cache/standard
-      - /srv/lancache/ssl:/cache/ssl
+      - proxy-cache:/cache/standard
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
+    networks:
+      - default
+      - docker-api
     restart: always
     logging:
       driver: json-file
@@ -185,12 +172,27 @@ services:
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
       - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
     volumes:
       - /srv/lancache/kea:/var/lib/kea    # runtime config + leases; create with: mkdir -p /srv/lancache/kea
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
       - NET_ADMIN       # needed for iptables rules restricting port 8000 to Docker-internal
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          host="$${KEA_CTRL_HOST:-127.0.0.1}";
+          [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
+          curl -sf -u admin:$${KEA_CTRL_TOKEN}
+          -H 'Content-Type: application/json'
+          -d '{"command":"config-get","service":["dhcp4"]}'
+          "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -228,7 +230,7 @@ services:
     command:
       - |
         mkdir -p /etc/nats
-        sed "s/__NATS_LOCAL_TOKEN__/$NATS_LOCAL_TOKEN/" /nats-default.conf > /etc/nats/nats.conf
+        sed "s/__NATS_LOCAL_TOKEN__/$${NATS_LOCAL_TOKEN}/" /nats-default.conf > /etc/nats/nats.conf
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - /srv/lancache/nats:/data
@@ -236,8 +238,8 @@ services:
       - ../../services/nats/nats.conf:/nats-default.conf:ro
     environment:
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-    ports:
-      - "4222:4222"
+    expose:
+      - "4222"
     restart: always
     logging:
       driver: json-file
@@ -251,39 +253,41 @@ services:
     build:
       context: ../../services/ui
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
-      - proxy-standard-logs:/var/log/nginx/standard:ro
-      - proxy-ssl-logs:/var/log/nginx/ssl:ro
-      - /srv/lancache/standard:/var/cache/standard:ro
-      - /srv/lancache/ssl:/var/cache/ssl:ro
+      - proxy-logs:/var/log/nginx:ro
+      - proxy-cache:/var/cache/proxy:ro
       - /srv/lancache/nats-conf:/etc/nats   # shared with NATS: UI writes nats.conf here
     ports:
       - "127.0.0.1:8080:8080"
     environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
-      - PROXY_SSL_SERVICE=proxy-ssl
+      - PROXY_SERVICE=proxy
       - NETDATA_URL=http://netdata:19999
       - STANDARD_CACHE_MAX_GB=500
       - SSL_CACHE_MAX_GB=500
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://host.docker.internal:8000
-      - DHCP_API_TOKEN=lancache-dhcp-prod-secret
+      - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      - PDNS_API_KEY=lancache-pdns-prod-secret
+      - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - docker-api
     depends_on:
-      - proxy-standard
-      - proxy-ssl
+      - docker-socket-proxy
+      - proxy
       - netdata
+      - nats
     restart: always
     logging:
       driver: json-file
@@ -313,21 +317,18 @@ services:
         max-size: "10m"
         max-file: "3"
 
+networks:
+  docker-api:
+    internal: true
+
 volumes:
-  proxy-standard-cache:
+  proxy-cache:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /srv/lancache/standard
-  proxy-ssl-cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /srv/lancache/ssl
-  proxy-standard-logs:
-  proxy-ssl-logs:
+      device: /srv/lancache/cache
+  proxy-logs:
   watchdog-status:
   netdataconfig:
   netdatalib:

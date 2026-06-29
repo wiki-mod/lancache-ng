@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process::Command;
@@ -93,17 +94,26 @@ pub struct LogStats {
 }
 
 pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
+    if limit == 0 {
+        return vec![];
+    }
+
     let Ok(file) = File::open(path) else {
         return vec![];
     };
+
     let reader = BufReader::new(file);
     let re = log_regex();
+    let mut tail = VecDeque::with_capacity(limit);
 
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
-    let start = lines.len().saturating_sub(limit);
+    for line in reader.lines().map_while(Result::ok) {
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
 
-    lines[start..]
-        .iter()
+    tail.iter()
         .filter_map(|line| parse_log_line(re, line))
         .collect()
 }
@@ -116,8 +126,10 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     for path in [standard_log, ssl_log] {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);
-        for line in reader.lines().filter_map(|l| l.ok()) {
-            let Some(caps) = re.captures(&line) else { continue };
+        for line in reader.lines().map_while(Result::ok) {
+            let Some(caps) = re.captures(&line) else {
+                continue;
+            };
             let bytes: u64 = caps[6].parse().unwrap_or(0);
             let cache_status = &caps[7];
             stats.total_requests += 1;
@@ -141,6 +153,37 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
 }
 
 pub fn get_cache_size_gb(path: &str) -> f64 {
+    // Validate path: must be absolute and within allowed directories
+    use std::path::Path;
+    let path_obj = Path::new(path);
+
+    // Must be an absolute path
+    if !path_obj.is_absolute() {
+        return 0.0;
+    }
+
+    // Normalize the path to prevent traversal attacks (e.g., /srv/lancache/standard/../evil)
+    // Reject any path containing ".." components
+    if path.contains("..") {
+        return 0.0;
+    }
+
+    // Only allow specific cache directories
+    // Expanded to include both /srv/lancache and /var/cache prefixes (dev and prod defaults)
+    let allowed_prefixes = [
+        "/srv/lancache/standard",
+        "/srv/lancache/ssl",
+        "/var/cache/standard",
+        "/var/cache/ssl",
+        "/data/lancache",
+    ];
+    if !allowed_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
+        return 0.0;
+    }
+
     let output = Command::new("du").args(["-sb", path]).output();
     match output {
         Ok(out) => {
@@ -157,10 +200,8 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
 
 fn log_regex() -> &'static Regex {
     LOG_REGEX.get_or_init(|| {
-        Regex::new(
-            r#"^(\S+) - \[([^\]]+)\] "(\S+) (\S+) [^"]+" (\d+) (\d+) "([^"]*)" "([^"]*)""#,
-        )
-        .expect("log regex is valid")
+        Regex::new(r#"^(\S+) - \[([^\]]+)\] "(\S+) (\S+) [^"]+" (\d+) (\d+) "([^"]*)" "([^"]*)""#)
+            .expect("log regex is valid")
     })
 }
 

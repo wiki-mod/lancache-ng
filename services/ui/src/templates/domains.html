@@ -22,6 +22,7 @@
 
       <!-- Add form -->
       <form action="/domains/dns/add" method="post" class="flex gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="text" name="domain" placeholder="z.B. steamcontent.com"
                required
                class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -38,6 +39,7 @@
         <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
           <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
           <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="domain" value="{{ domain }}">
             <button type="submit"
                     onclick="return confirm('{{ domain }} aus der DNS-Liste entfernen?')"
@@ -64,6 +66,7 @@
 
       <!-- Add form -->
       <form action="/domains/ssl/add" method="post" class="flex gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="text" name="domain" placeholder="z.B. steampowered.com"
                required
                class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500">
@@ -80,6 +83,7 @@
         <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
           <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
           <form action="/domains/ssl/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="domain" value="{{ domain }}">
             <button type="submit"
                     onclick="return confirm('{{ domain }} aus der SSL-Liste entfernen?\nDer SSL-Proxy wird neu gestartet.')"
@@ -108,6 +112,7 @@
 
     <!-- Add form -->
     <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="flex gap-2">
         <input type="text" name="name" placeholder="z.B. myserver.lan."
                required
@@ -150,11 +155,14 @@
           <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
         </div>
         <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="name" value="{{ record.name }}">
           <input type="hidden" name="record_type" value="{{ record.type }}">
           <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
           <button type="submit"
-                  onclick="return confirm('{{ record.name }} ({{ record.type }}) entfernen?')"
+                  data-record-name="{{ record.name }}"
+                  data-record-type="{{ record.type }}"
+                  onclick="return confirmRemoveRecord(this)"
                   class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
             Entfernen
           </button>
@@ -188,6 +196,7 @@
     </div>
 
     <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="flex items-center gap-2">
         <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
                {% if aaaa_filter_enabled %}checked{% endif %}
@@ -212,4 +221,13 @@
   </div>
 
 </div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function confirmRemoveRecord(btn) {
+    return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
+  }
+</script>
 {% endblock %}

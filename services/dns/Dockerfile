@@ -1,9 +1,9 @@
-FROM rust:slim AS subscriber-builder
+FROM rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS subscriber-builder
 WORKDIR /build
 COPY nats-subscriber/ .
-RUN cargo build --release
+RUN cargo build --release --locked
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pdns-recursor \
@@ -11,7 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pdns-backend-sqlite3 \
     sqlite3 \
     gettext-base \
+    iproute2 \
     locales \
+    iproute2 \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*

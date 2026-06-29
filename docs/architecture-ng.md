@@ -5,8 +5,8 @@
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
 | nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
-| BIND9 | on | dnsmasq | Chroot in container |
-| Kea DHCP | off | — | Requires BIND9 (DDNS) |
+| PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
+| Kea DHCP | off | — | Requires PowerDNS (DDNS via nsupdate) |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog-ng | on | — | Central logging for all containers |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
@@ -57,10 +57,10 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 
 **Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage.
 
-## BIND9
+## PowerDNS
 
-- Chroot under `/var/lib/named` in container
-- RPZ replaces `cdn-domains.txt` / `cdn-ssl-domains.txt`
+- Runs in two processes: authoritative (answering CDN zones) + recursor (recursive queries for clients)
+- Zone data from `/etc/pdns` directory: `cdn-domains.txt` compiled into PowerDNS zones
 - IPv4 + IPv6 everywhere (dual-stack)
 
 **Zones:**
@@ -81,21 +81,52 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 | `ENABLE_ROOT_MIRROR` | `false` | Root zone mirror (AXFR from root servers) |
 | `FILTER_AAAA_V4` | `false` | Filter AAAA records for IPv4 clients |
 | `FILTER_AAAA_V6` | `false` | Filter AAAA records for IPv6 clients |
-| `ENABLE_SECONDARY` | `false` | Enable secondary zones |
+| `ENABLE_SECONDARY` | `false` | Enable secondary zones. When set to `true` for remote secondaries, also include `deploy/prod/docker-compose.nats-secondary.yml` so NATS is bound only to the trusted interface specified by `NATS_BIND_IP`. |
+| `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. |
 | `SECONDARY_MASTERS` | — | Primary DNS IP |
 | `SECONDARY_ZONES` | — | Comma-separated zone list |
 
 **allow-query / allow-recursion:** open to all RFC-1918 + IPv6 ULA by default
 
-**nsupdate (RFC 2136):** TSIG-secured channel for Admin UI → BIND9
+### Remote secondary NATS access
+
+The production Compose file keeps NATS on the Docker network by default and does not publish port `4222` on the host. This keeps the event bus closed for installations that do not use remote secondaries.
+
+There are two compatible ways to enable host binding for secondary DNS nodes:
+
+1. **Reuse the existing secondary switch**: when `ENABLE_SECONDARY=true`, include `deploy/prod/docker-compose.nats-secondary.yml` and set `NATS_BIND_IP` to the trusted LAN or VPN interface that secondary nodes use.
+2. **Use a separate explicit binding switch**: leave `ENABLE_SECONDARY` for DNS behavior, and include `deploy/prod/docker-compose.nats-secondary.yml` only when you intentionally want to publish NATS for remote secondary synchronization.
+
+Example:
+
+```sh
+ENABLE_SECONDARY=1 NATS_BIND_IP=192.168.1.5 \
+  docker compose -f deploy/prod/docker-compose.yml \
+  -f deploy/prod/docker-compose.nats-secondary.yml up -d
+```
+
+Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restricts access to trusted secondary nodes.
+
+**nsupdate (RFC 2136):** TSIG-secured channel for Admin UI → PowerDNS authoritative
 
 ## Kea DHCP
 
 - DHCPv4 + DHCPv6 (dual-stack)
 - IP ranges as start–end (no CIDR required)
 - Static assignments: MAC → IP, editable via UI
-- DDNS → BIND9: lease = automatically A + PTR in `local.lan`
+- DDNS → PowerDNS: lease = automatically A + PTR in `local.lan` via nsupdate (RFC 2136)
 - REST API (Kea Control Agent) for Admin UI
+
+## Admin UI security headers
+
+The Admin UI sends security response headers by default. The policy is compatible with the current self-hosted frontend assets and does not require external CDN JavaScript. Operators can tune the behavior with environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `UI_SECURITY_HEADERS` | `true` | Set to `false`, `0`, `off`, or `no` to disable the Admin UI security header middleware. |
+| `UI_HSTS_MODE` | `auto` | Controls `Strict-Transport-Security`: `auto` only sends HSTS when `X-Forwarded-Proto: https` is present, `always` sends it on every response, and `never` disables it. |
+
+Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse proxies that also leave `http://<host>:8080` reachable. Use `always` only when the UI hostname is intended to be HTTPS-only.
 
 ## Watchdog
 
@@ -103,7 +134,7 @@ Lightweight container with Docker socket access (restart permission).
 
 **Health checks:**
 - nginx: HTTP request on `/health`
-- BIND9: DNS query test
+- PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
 - syslog-ng: Process check
 
@@ -131,7 +162,7 @@ Central logging for all containers. All services send to syslog-ng.
 | Service | Level options |
 |---|---|
 | nginx | `emerg / error / warn / info / debug` |
-| BIND9 | `critical / error / warning / notice / info / dynamic` |
+| PowerDNS | `critical / error / warning / notice / info / debug` |
 | Kea | `fatal / error / warn / info / debug` |
 | Watchdog | `error / info / debug` |
 
@@ -196,7 +227,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 
 ## IPv6
 
-- BIND9: dual-stack listeners, AAAA records, IPv6 reverse zones
+- PowerDNS: dual-stack listeners, AAAA records, IPv6 reverse zones
 - Kea: DHCPv6 parallel to DHCPv4
 - nginx: already IPv6-capable
 - Docker: IPv6 on Linux host via `"ipv6": true` in `daemon.json`
@@ -210,7 +241,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 ## Implementation order
 
 1. nginx (slice module + optimizations)
-2. BIND9
+2. PowerDNS (authoritative + recursor)
 3. Kea DHCP
 4. Watchdog
 5. syslog-ng
