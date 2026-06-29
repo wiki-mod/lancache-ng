@@ -1030,7 +1030,8 @@ EOF
 
     print_step "Registering secondary"
     response_file=$(mktemp)
-    trap 'rm -f "$response_file"' EXIT
+    SECONDARY_RESPONSE_FILE="$response_file"
+    trap 'rm -f -- "${SECONDARY_RESPONSE_FILE:-}"' EXIT
 
     if ! http_status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
@@ -1040,6 +1041,10 @@ EOF
     fi
 
     response=$(cat "$response_file")
+    rm -f -- "$response_file"
+    SECONDARY_RESPONSE_FILE=""
+    trap - EXIT
+
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi
