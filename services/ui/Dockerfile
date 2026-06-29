@@ -71,7 +71,7 @@ COPY src/templates /templates
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN groupadd --system --gid 10001 lancache \
-    && useradd --system --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
+    && useradd --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
