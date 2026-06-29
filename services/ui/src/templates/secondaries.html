@@ -19,7 +19,7 @@
     </div>
 
     <div class="relative group">
-      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/scripts/setup-secondary.sh) \
+      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name myname \
@@ -31,7 +31,7 @@
     </div>
 
     <p class="text-xs text-slate-500">
-      Das Skript registriert den Secondary, generiert einen NATS-Token und startet den Container automatisch.
+      Der Befehl registriert den Secondary, generiert die benötigten Werte und startet den Container automatisch.
     </p>
   </div>
 

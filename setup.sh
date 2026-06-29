@@ -1,6 +1,6 @@
 #!/bin/bash
 # LanCache-NG — Guided setup script
-# Usage: ./setup.sh [install|update|update-ip|debug|backup|restore|help] [options]
+# Usage: ./setup.sh [command] [install-dir]
 set -euo pipefail
 export LANG=C LC_ALL=C
 
@@ -28,6 +28,13 @@ ask() {
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
     read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
+}
+
+require_value() {
+    local option="$1" value="${2:-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        die "${option} requires a value"
+    fi
 }
 
 is_valid_ipv4() {
@@ -668,6 +675,7 @@ Commands:
   update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
   update-ip           Change the configured standard and SSL listener IPs.
   debug [install-dir]  Print diagnostic information for an existing stack.
+  secondary [options]  Register and launch a secondary DNS node.
   backup [options]     Create a config-only or full rollback backup.
   restore <archive>    Restore a setup-script backup.
   help, --help         Show this compact command list.
@@ -719,6 +727,15 @@ Usage: ./setup.sh debug [install-dir]
 Prints container status, recent logs, cache usage, LAN addresses, and health
 checks for an existing installation. If [install-dir] is omitted,
 /opt/lancache-ng is used.
+EOF
+            ;;
+        secondary)
+            cat <<EOF
+Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> [--listen-ip <ip>] [--rotate]
+
+Registers and starts a secondary DNS node on a remote host. The command
+creates a local compose directory, writes the secondary .env file, and starts
+the container after the primary server returns the required secrets.
 EOF
             ;;
         backup)
@@ -925,6 +942,181 @@ cmd_update_ip() {
     exit 0
 }
 
+# ── secondary subcommand ──────────────────────────────────────────────────────
+cmd_secondary() {
+    local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
+    local response_file http_status response secondary_dir
+    local nats_url nats_token consumer_name pdns_api_key
+
+    usage_secondary() {
+        cat <<EOF
+Usage: $0 secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> [--listen-ip <ip>] [--rotate]
+
+Required arguments:
+  --primary <url>    Primary LanCache UI/API URL, for example http://192.168.1.10:8080
+  --token <token>    Secondary registration token from the primary server
+  --name <name>      Secondary node name, using letters, numbers, and dashes only
+  --proxy-ip <ip>    Primary proxy IP address clients should use for cached traffic
+
+Optional arguments:
+  --listen-ip <ip>   Bind IP for the secondary DNS container (default: 0.0.0.0)
+  --rotate           Reuse an existing secondary directory and overwrite its files
+EOF
+    }
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --primary)
+                require_value "$1" "${2:-}"
+                primary="$2"
+                shift 2
+                ;;
+            --token)
+                require_value "$1" "${2:-}"
+                token="$2"
+                shift 2
+                ;;
+            --name)
+                require_value "$1" "${2:-}"
+                name="$2"
+                shift 2
+                ;;
+            --proxy-ip)
+                require_value "$1" "${2:-}"
+                proxy_ip="$2"
+                shift 2
+                ;;
+            --listen-ip)
+                require_value "$1" "${2:-}"
+                listen_ip="$2"
+                shift 2
+                ;;
+            --rotate)
+                rotate=1
+                shift
+                ;;
+            -h|--help)
+                usage_secondary
+                exit 0
+                ;;
+            *)
+                usage_secondary >&2
+                die "Unknown argument: $1"
+                ;;
+        esac
+    done
+
+    [[ -n "$primary" ]] || die "--primary is required"
+    [[ -n "$token" ]] || die "--token is required"
+    [[ -n "$name" ]] || die "--name is required"
+    [[ -n "$proxy_ip" ]] || die "--proxy-ip is required"
+
+    for cmd in curl docker; do
+        command -v "$cmd" >/dev/null 2>&1 \
+            || die "$cmd is not installed or is not in PATH"
+    done
+
+    docker compose version >/dev/null 2>&1 \
+        || die "'docker compose' is not available; install Docker Compose v2 before continuing"
+
+    [[ "$name" =~ ^[a-zA-Z0-9-]+$ ]] \
+        || die "--name must contain only alphanumeric characters and dashes"
+    is_valid_ipv4 "$proxy_ip" \
+        || die "--proxy-ip must be a valid IPv4 address"
+    if [[ "$listen_ip" != "0.0.0.0" ]]; then
+        is_valid_ipv4 "$listen_ip" \
+            || die "--listen-ip must be a valid IPv4 address or 0.0.0.0"
+    fi
+
+    print_step "Registering secondary"
+    response_file=$(mktemp)
+    SECONDARY_RESPONSE_FILE="$response_file"
+    trap 'rm -f -- "${SECONDARY_RESPONSE_FILE:-}"' EXIT
+
+    if ! http_status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
+        "${primary}/api/secondary/register"); then
+        die "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running."
+    fi
+
+    response=$(cat "$response_file")
+    rm -f -- "$response_file"
+    SECONDARY_RESPONSE_FILE=""
+    trap - EXIT
+
+    if [[ ! "$http_status" =~ ^2 ]]; then
+        die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
+    fi
+    [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"
+
+    nats_url=$(echo "$response" | grep -oP '"nats_url"\s*:\s*"\K[^"]*' || true)
+    nats_token=$(echo "$response" | grep -oP '"nats_token"\s*:\s*"\K[^"]*' || true)
+    consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || true)
+    pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
+
+    missing_fields=()
+    [[ -n "$nats_url" ]] || missing_fields+=("nats_url")
+    [[ -n "$nats_token" ]] || missing_fields+=("nats_token")
+    [[ -n "$consumer_name" ]] || missing_fields+=("consumer_name")
+    [[ -n "$pdns_api_key" ]] || missing_fields+=("pdns_api_key")
+    if [[ ${#missing_fields[@]} -gt 0 ]]; then
+        die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
+    fi
+
+    secondary_dir="${name}"
+    if [[ -d "$secondary_dir" && "$rotate" -ne 1 ]]; then
+        die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+    fi
+    mkdir -p "$secondary_dir"
+
+    cat > "${secondary_dir}/docker-compose.yml" <<EOF
+# Secondary DNS node — run on a remote host.
+# Generated by setup.sh secondary — do not edit manually.
+# To update this node, rerun: ./setup.sh secondary --rotate ...
+
+services:
+  dns-secondary:
+    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    environment:
+      - PROXY_IP=\${PROXY_IP}
+      - PDNS_API_KEY=\${PDNS_API_KEY}
+      - NATS_URL=\${NATS_URL}
+      - NATS_TOKEN=\${NATS_TOKEN}
+      - NATS_CONSUMER=\${NATS_CONSUMER}
+      - DDNS_ALLOW_FROM=127.0.0.1
+    volumes:
+      - pdns-data:/var/lib/powerdns
+    ports:
+      - "\${LISTEN_IP:-0.0.0.0}:53:53/udp"
+      - "\${LISTEN_IP:-0.0.0.0}:53:53/tcp"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  pdns-data:
+EOF
+
+    cat > "${secondary_dir}/.env" <<EOF
+PROXY_IP=${proxy_ip}
+LISTEN_IP=${listen_ip}
+PDNS_API_KEY=${pdns_api_key}
+NATS_URL=${nats_url}
+NATS_TOKEN=${nats_token}
+NATS_CONSUMER=${consumer_name}
+EOF
+
+    print_step "Starting secondary DNS container"
+    (cd "$secondary_dir" && docker compose up -d) \
+        || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
+
+    print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
+}
+
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
 # Keep this command router in setup.sh rather than splitting files. Operators can
 # read one script, while command names still follow a simple verb / verb-suffix
@@ -960,6 +1152,18 @@ case "${1:-install}" in
             exit 0
         fi
         shift; cmd_restore "$@"; exit 0 ;;
+    secondary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help secondary
+            exit 0
+        fi
+        shift; cmd_secondary "$@"; exit 0 ;;
+    --secondary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help secondary
+            exit 0
+        fi
+        shift; cmd_secondary "$@"; exit 0 ;;
     update-ip|--reconfigure|reconfigure)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help update-ip
@@ -1308,7 +1512,7 @@ PDNS_API_KEY=${PDNS_API_KEY}
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
 # Token for local DNS containers (generated, do not change)
 NATS_LOCAL_TOKEN=${NATS_LOCAL_TOKEN}
-# Token for setup-secondary.sh — anyone who knows this can register a secondary
+# Token for secondary registration — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────

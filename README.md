@@ -521,7 +521,7 @@ Secondary DNS nodes sync with the primary through NATS.
 Setup example:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/scripts/setup-secondary.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary \
   --primary http://192.168.1.10:8080 \
   --token <SECONDARY_REGISTRATION_TOKEN> \
   --name my-secondary \
