@@ -91,14 +91,30 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
       - name: cargo fmt --check (dns/nats-subscriber)
         run: cargo fmt --manifest-path services/dns/nats-subscriber/Cargo.toml -- --check
       - name: cargo check with warnings denied (dns/nats-subscriber)
+        uses: ./.github/actions/cargo-with-sccache-fallback
         env:
-          RUSTC_WRAPPER: ""
           RUSTFLAGS: "-D warnings"
-        run: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
+        with:
+          command: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
+        timeout-minutes: 15
         env:
           RUSTC_WRAPPER: ""
         run: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
@@ -119,14 +135,30 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
       - name: cargo fmt --check (ui)
         run: cargo fmt --manifest-path services/ui/Cargo.toml -- --check
       - name: cargo check with warnings denied (ui)
+        uses: ./.github/actions/cargo-with-sccache-fallback
         env:
-          RUSTC_WRAPPER: ""
           RUSTFLAGS: "-D warnings"
-        run: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
+        with:
+          command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
+        timeout-minutes: 15
         env:
           RUSTC_WRAPPER: ""
         run: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
@@ -147,10 +179,24 @@ jobs:
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
       - name: test (dns/nats-subscriber)
-        env:
-          RUSTC_WRAPPER: ""
-        run: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
   ui_test:
     name: test (ui)
@@ -168,10 +214,24 @@ jobs:
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
       - name: test (ui)
-        env:
-          RUSTC_WRAPPER: ""
-        run: cargo test --locked --manifest-path services/ui/Cargo.toml
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   watchdog_test:
     name: test (watchdog)
@@ -200,6 +260,20 @@ jobs:
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache-cargo-audit
         with:
@@ -210,12 +284,10 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-0.21-dns-nats-subscriber
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        env:
-          RUSTC_WRAPPER: ""
-        run: cargo install cargo-audit --version ">=0.21" --locked
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (dns/nats-subscriber)
-        env:
-          RUSTC_WRAPPER: ""
         run: cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock
 
   ui_cargo_audit:
@@ -234,6 +306,20 @@ jobs:
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache-cargo-audit
         with:
@@ -244,12 +330,10 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-0.21-ui
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        env:
-          RUSTC_WRAPPER: ""
-        run: cargo install cargo-audit --version ">=0.21" --locked
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (ui)
-        env:
-          RUSTC_WRAPPER: ""
         run: cargo audit --deny warnings --file services/ui/Cargo.lock
 
   container-scan:
@@ -267,6 +351,7 @@ jobs:
             context: services/proxy
           - service: dns
             context: services/dns
+            rust: true
           - service: watchdog
             context: services/watchdog
           - service: dhcp
@@ -275,10 +360,66 @@ jobs:
             context: services/dhcp-proxy
           - service: ui
             context: services/ui
+            rust: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Prepare sccache Redis secret file
+        if: matrix.rust == true && github.actor != 'dependabot[bot]'
+        id: sccache-secret
+        env:
+          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+        run: |
+          set -euo pipefail
+
+          mode="${SCCACHE_REDIS_MODE:-required}"
+
+          case "$mode" in
+            required|optional|off)
+              ;;
+            *)
+              echo "::error::SCCACHE_REDIS_MODE must be one of: required, optional, off."
+              exit 1
+              ;;
+          esac
+
+          if [ "$mode" = "off" ]; then
+            echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
+            exit 0
+          fi
+
+          if [ -z "$SCCACHE_REDIS_URL" ]; then
+            if [ "$mode" = "optional" ]; then
+              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
+              exit 0
+            fi
+
+            echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image scans so sccache can use Redis."
+            exit 1
+          fi
+
+          umask 077
+          printf '%s' "$SCCACHE_REDIS_URL" > "${{ runner.temp }}/sccache-redis-url"
+          echo "file=${{ runner.temp }}/sccache-redis-url" >> "$GITHUB_OUTPUT"
+
       - name: Build local scan image
-        run: docker build --pull --platform linux/amd64 -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} ${{ matrix.context }}
+        env:
+          SCCACHE_SECRET_FILE: ${{ steps.sccache-secret.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          secret_args=()
+          if [ -n "$SCCACHE_SECRET_FILE" ]; then
+            secret_args+=(--secret "id=sccache_redis_url,src=$SCCACHE_SECRET_FILE")
+          fi
+
+          DOCKER_BUILDKIT=1 docker build \
+            --pull \
+            --platform linux/amd64 \
+            "${secret_args[@]}" \
+            -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} \
+            ${{ matrix.context }}
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -327,6 +468,7 @@ jobs:
             context: services/proxy
           - service: dns
             context: services/dns
+            rust: true
           - service: watchdog
             context: services/watchdog
           - service: dhcp
@@ -335,6 +477,7 @@ jobs:
             context: services/dhcp-proxy
           - service: ui
             context: services/ui
+            rust: true
 
     steps:
       - name: Checkout
@@ -364,18 +507,88 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Prepare local Buildx cache
+        id: buildx-cache
         env:
-          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
+          BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_READ: ${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-read
+          BUILDX_CACHE_DEST: ${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new
         run: |
-          mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
-          rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
+          set -euo pipefail
+
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is required for safe local Buildx cache locking."
+            exit 1
+          fi
+
+          cache_dir="$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          lock_file="$BUILDX_CACHE_ROOT/${{ matrix.service }}.lock"
+
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          rm -rf "$BUILDX_CACHE_READ" "$BUILDX_CACHE_DEST"
+          mkdir -p "$BUILDX_CACHE_READ" "$(dirname "$BUILDX_CACHE_DEST")"
+
+          (
+            flock -x 9
+            mkdir -p "$cache_dir"
+            cp -a "$cache_dir/." "$BUILDX_CACHE_READ/"
+          ) 9>"$lock_file"
+
+          {
+            echo "cache-from=$BUILDX_CACHE_READ"
+            echo "cache-to=$BUILDX_CACHE_DEST"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Prepare sccache Redis secret file
-        if: matrix.service == 'ui' && github.event_name != 'pull_request'
+        if: >-
+          ${{
+            matrix.rust == true &&
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
         id: sccache-secret
         env:
-          SCCACHE_REDIS_URL: ${{ vars.SCCACHE_REDIS_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
         run: |
+          set -euo pipefail
+
+          mode="${SCCACHE_REDIS_MODE:-required}"
+
+          case "$mode" in
+            required|optional|off)
+              ;;
+            *)
+              echo "::error::SCCACHE_REDIS_MODE must be one of: required, optional, off."
+              exit 1
+              ;;
+          esac
+
+          if [ "$mode" = "off" ]; then
+            echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$BASE_REPOSITORY" ]; then
+            echo "Skipping Redis-backed sccache for an untrusted fork pull request."
+            exit 0
+          fi
+
+          if [ -z "$SCCACHE_REDIS_URL" ]; then
+            if [ "$mode" = "optional" ]; then
+              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
+              exit 0
+            fi
+
+            echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image builds so sccache can use Redis."
+            exit 1
+          fi
+
           umask 077
           printf '%s' "$SCCACHE_REDIS_URL" > "${{ runner.temp }}/sccache-redis-url"
           echo "secret-files=sccache_redis_url=${{ runner.temp }}/sccache-redis-url" >> "$GITHUB_OUTPUT"
@@ -393,8 +606,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
-          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
+          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
       - name: Retry Build and push
         id: retry-build
@@ -409,18 +622,37 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=local,src=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}
-          cache-to: type=local,dest=${{ runner.temp }}/lancache-ng-buildx-cache/${{ matrix.service }}-new,mode=max
+          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
+          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
       - name: Rotate local Buildx cache
-        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        if: >-
+          ${{
+            always() &&
+            (
+              steps.build.outcome == 'success' ||
+              steps.retry-build.outcome == 'success'
+            )
+          }}
         env:
-          BUILDX_CACHE_ROOT: ${{ runner.temp }}/lancache-ng-buildx-cache
+          BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_DEST: ${{ steps.buildx-cache.outputs.cache-to }}
         run: |
-          rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
-          if [ -d "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" ]; then
-            mv "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new" "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          set -euo pipefail
+
+          if [ ! -d "$BUILDX_CACHE_DEST" ]; then
+            exit 0
           fi
+
+          cache_dir="$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+          lock_file="$BUILDX_CACHE_ROOT/${{ matrix.service }}.lock"
+
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          (
+            flock -x 9
+            rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
+            mv "$BUILDX_CACHE_DEST" "$cache_dir"
+          ) 9>"$lock_file"
 
       - name: Attest image build provenance
         if: github.event_name != 'pull_request'

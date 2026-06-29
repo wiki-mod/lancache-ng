@@ -114,6 +114,7 @@ Important rules:
 - do not hardcode Redis URLs in Dockerfiles or workflow files
 - do not pass secret Redis URLs through Docker build arguments
 - prefer BuildKit secrets for Docker builds
+- control usage through `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`)
 - keep cache keys separated between unrelated services
 - keep `CARGO_HOME` separate when multiple jobs install command-line tools in
   parallel
@@ -142,7 +143,7 @@ Important:
 
 - distcc helps the C/C++ parts of the build, not Rust codegen itself
 - if the remote compiler hosts are unreachable, builds should fail fast
-- keep the variable separate from `SCCACHE_REDIS_URL`
+- keep the variable separate from the `SCCACHE_REDIS_URL` secret
 
 ## Parallel jobs
 

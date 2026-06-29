@@ -1,7 +1,19 @@
 FROM mirror.gcr.io/library/rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS subscriber-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && cargo install sccache --locked --version 0.16.0 --root /usr/local
+
 WORKDIR /build
 COPY nats-subscriber/ .
-RUN cargo build --release --locked
+RUN --mount=type=secret,id=sccache_redis_url \
+    if [ -s /run/secrets/sccache_redis_url ]; then \
+      unset CARGO_MAKEFLAGS MAKEFLAGS; \
+      export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-dns; \
+      export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
+    fi \
+    && cargo build --release --locked
 
 FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 

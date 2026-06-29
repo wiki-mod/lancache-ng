@@ -1,0 +1,93 @@
+name: Run cargo with sccache fallback
+description: Run one cargo command and retry without sccache if the cache wrapper fails.
+
+inputs:
+  command:
+    description: Cargo command to run.
+    required: true
+  sccache-timeout-seconds:
+    description: Maximum runtime for the sccache-backed cargo attempt.
+    required: false
+    default: "120"
+  fallback-timeout-seconds:
+    description: Maximum runtime for the fallback cargo attempt without sccache.
+    required: false
+    default: "1800"
+
+runs:
+  using: composite
+  steps:
+    - name: Run cargo command
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        SCCACHE_TIMEOUT_SECONDS: ${{ inputs.sccache-timeout-seconds }}
+        FALLBACK_TIMEOUT_SECONDS: ${{ inputs.fallback-timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ]; then
+          unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
+        fi
+
+        validate_timeout() {
+          local name="$1"
+          local value="$2"
+
+          case "$value" in
+            ''|*[!0-9]*)
+              echo "::error::$name must be a positive integer."
+              exit 1
+              ;;
+          esac
+
+          if [ "$value" -le 0 ]; then
+            echo "::error::$name must be greater than zero."
+            exit 1
+          fi
+        }
+
+        validate_timeout "sccache-timeout-seconds" "$SCCACHE_TIMEOUT_SECONDS"
+        validate_timeout "fallback-timeout-seconds" "$FALLBACK_TIMEOUT_SECONDS"
+
+        run_with_log() {
+          local output_file="$1"
+          local timeout_seconds="$2"
+          local status
+
+          set +e
+          timeout --foreground "${timeout_seconds}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
+          status="${PIPESTATUS[0]}"
+          set -e
+
+          return "$status"
+        }
+
+        is_sccache_failure() {
+          local status="$1"
+          local output_file="$2"
+
+          if [ "$status" -eq 124 ]; then
+            return 0
+          fi
+
+          grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$output_file"
+        }
+
+        output_file="$(mktemp)"
+
+        if run_with_log "$output_file" "$SCCACHE_TIMEOUT_SECONDS"; then
+          exit 0
+        fi
+
+        status="$?"
+
+        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ] || ! is_sccache_failure "$status" "$output_file"; then
+          exit "$status"
+        fi
+
+        echo "::notice::Cargo command failed because the sccache path failed or timed out; retrying once without RUSTC_WRAPPER."
+        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
+
+        fallback_output="$(mktemp)"
+        run_with_log "$fallback_output" "$FALLBACK_TIMEOUT_SECONDS"
