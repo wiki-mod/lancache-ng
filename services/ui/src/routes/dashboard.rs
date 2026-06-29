@@ -11,7 +11,9 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
 
     let standard_status =
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
-    let ssl_status = if cfg.proxy_standard_url == cfg.proxy_ssl_url {
+    let ssl_status = if !cfg.ssl_enabled {
+        None
+    } else if cfg.proxy_standard_url == cfg.proxy_ssl_url {
         standard_status.clone()
     } else {
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
@@ -59,6 +61,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
 
     let mut ctx = Context::new();
     ctx.insert("shared_cache", &shared_cache);
+    ctx.insert("ssl_enabled", &cfg.ssl_enabled);
     ctx.insert("standard_status", &standard_status);
     ctx.insert("ssl_status", &ssl_status);
     ctx.insert("standard_used_gb", &format!("{:.1}", standard_used_gb));
@@ -89,13 +92,16 @@ pub async fn metrics_api(State(state): State<Arc<AppState>>) -> Json<serde_json:
     let cfg = &state.config;
     let standard_status =
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
-    let ssl_status = if cfg.proxy_standard_url == cfg.proxy_ssl_url {
+    let ssl_status = if !cfg.ssl_enabled {
+        None
+    } else if cfg.proxy_standard_url == cfg.proxy_ssl_url {
         standard_status.clone()
     } else {
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
     };
     Json(json!({
         "standard": standard_status,
+        "ssl_enabled": cfg.ssl_enabled,
         "ssl": ssl_status,
     }))
 }

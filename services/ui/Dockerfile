@@ -87,6 +87,7 @@ ENV TEMPLATE_DIR=/templates \
     STANDARD_CACHE_DIR=/var/cache/proxy \
     SSL_CACHE_DIR=/var/cache/proxy \
     PROXY_SERVICE=proxy \
+    SSL_ENABLED=1 \
     PROXY_STANDARD_URL=http://proxy \
     PROXY_SSL_URL=http://proxy \
     NETDATA_URL=http://netdata:19999 \

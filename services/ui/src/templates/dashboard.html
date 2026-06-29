@@ -55,7 +55,9 @@
         <h2 class="font-semibold text-slate-200">SSL-Modus</h2>
         <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
       </div>
-      {% if ssl_status %}
+      {% if not ssl_enabled %}
+      <p class="text-sm text-slate-500 mt-3">SSL mode disabled</p>
+      {% elif ssl_status %}
       <div class="grid grid-cols-3 gap-2 text-center mt-3">
         <div>
           <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
@@ -120,6 +122,7 @@
         <h2 class="font-semibold text-slate-200">SSL Cache</h2>
         <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
       </div>
+      {% if ssl_enabled %}
       <div class="mb-3">
         <div class="flex justify-between text-sm mb-1">
           <span class="text-slate-400">Speicher</span>
@@ -130,7 +133,10 @@
         </div>
         <p class="text-xs text-slate-500 mt-1">{{ ssl_pct }}% belegt</p>
       </div>
-      {% if ssl_status %}
+      {% endif %}
+      {% if not ssl_enabled %}
+      <p class="text-sm text-slate-500 mt-3">SSL mode disabled</p>
+      {% elif ssl_status %}
       <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
         <div>
           <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
