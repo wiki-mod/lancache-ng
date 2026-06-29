@@ -1,0 +1,75 @@
+name: Configure Rust sccache
+description: Configure Redis-backed sccache for trusted Rust CI jobs.
+
+inputs:
+  mode:
+    description: "sccache mode: required, optional, or off."
+    required: false
+    default: required
+  redis-url:
+    description: Redis URL used by sccache.
+    required: false
+    default: ""
+  key-prefix:
+    description: Redis key prefix used by sccache.
+    required: false
+    default: lancache-ci
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Rust sccache environment
+      shell: bash
+      env:
+        SCCACHE_REDIS_MODE: ${{ inputs.mode }}
+        SCCACHE_REDIS_URL: ${{ inputs.redis-url }}
+        SCCACHE_REDIS_KEY_PREFIX: ${{ inputs.key-prefix }}
+      run: |
+        set -euo pipefail
+
+        mode="${SCCACHE_REDIS_MODE:-required}"
+
+        case "$mode" in
+          required|optional|off)
+            ;;
+          *)
+            echo "::error::SCCACHE_REDIS_MODE must be one of: required, optional, off."
+            exit 1
+            ;;
+        esac
+
+        if [ "$mode" = "off" ]; then
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
+          exit 0
+        fi
+
+        if [ -z "$SCCACHE_REDIS_URL" ]; then
+          if [ "$mode" = "optional" ]; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
+            exit 0
+          fi
+
+          echo "::error::SCCACHE_REDIS_URL is required for trusted Rust CI jobs when SCCACHE_REDIS_MODE=required."
+          exit 1
+        fi
+
+        if ! command -v sccache >/dev/null 2>&1; then
+          if [ "$mode" = "optional" ]; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "Skipping Redis-backed sccache because no sccache binary is available and SCCACHE_REDIS_MODE=optional."
+            exit 0
+          fi
+
+          echo "::error::sccache is required on the runner when SCCACHE_REDIS_MODE=required."
+          exit 1
+        fi
+
+        {
+          echo "RUSTC_WRAPPER=sccache"
+          echo "SCCACHE_REDIS=$SCCACHE_REDIS_URL"
+          echo "SCCACHE_REDIS_KEY_PREFIX=$SCCACHE_REDIS_KEY_PREFIX"
+        } >> "$GITHUB_ENV"
+
+        sccache --version

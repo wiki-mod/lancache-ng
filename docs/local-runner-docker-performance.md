@@ -114,6 +114,7 @@ Important rules:
 - do not hardcode Redis URLs in Dockerfiles or workflow files
 - do not pass secret Redis URLs through Docker build arguments
 - prefer BuildKit secrets for Docker builds
+- control usage through `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`)
 - keep cache keys separated between unrelated services
 - keep `CARGO_HOME` separate when multiple jobs install command-line tools in
   parallel
