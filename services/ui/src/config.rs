@@ -32,6 +32,7 @@ pub struct Config {
     pub dns_standard_service: String,
     pub dns_ssl_service: String,
     pub proxy_ssl_service: String,
+    pub ssl_enabled: bool,
     pub standard_cache_max_gb: f64,
     pub ssl_cache_max_gb: f64,
     pub standard_ip: String,
@@ -69,6 +70,7 @@ impl fmt::Debug for Config {
             .field("dns_standard_service", &self.dns_standard_service)
             .field("dns_ssl_service", &self.dns_ssl_service)
             .field("proxy_ssl_service", &self.proxy_ssl_service)
+            .field("ssl_enabled", &self.ssl_enabled)
             .field("standard_cache_max_gb", &self.standard_cache_max_gb)
             .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
             .field("standard_ip", &self.standard_ip)
@@ -116,6 +118,7 @@ impl Config {
         let proxy_standard_url = env_or("PROXY_STANDARD_URL", format!("http://{proxy_service}"));
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
+        let ssl_enabled = env_bool("SSL_ENABLED", true);
         let legacy_cache_max_gb =
             env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0));
         let shared_cache_max_gb = env_f64("CACHE_MAX_GB", legacy_cache_max_gb);
@@ -134,6 +137,7 @@ impl Config {
             dns_standard_service: env_str("DNS_STANDARD_SERVICE", "dns-standard"),
             dns_ssl_service: env_str("DNS_SSL_SERVICE", "dns-ssl"),
             proxy_ssl_service,
+            ssl_enabled,
             standard_cache_max_gb: env_f64("STANDARD_CACHE_MAX_GB", shared_cache_max_gb),
             ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb),
             standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
@@ -273,6 +277,7 @@ mod tests {
             "PROXY_STANDARD_URL",
             "PROXY_SSL_URL",
             "PROXY_SSL_SERVICE",
+            "SSL_ENABLED",
             "STANDARD_LOG",
             "SSL_LOG",
             "STANDARD_CACHE_DIR",
@@ -285,6 +290,7 @@ mod tests {
         assert_eq!(cfg.proxy_standard_url, "http://proxy");
         assert_eq!(cfg.proxy_ssl_url, "http://proxy");
         assert_eq!(cfg.proxy_ssl_service, "proxy");
+        assert!(cfg.ssl_enabled);
         assert_eq!(cfg.standard_log, "/var/log/nginx/access.log");
         assert_eq!(cfg.ssl_log, "/var/log/nginx/access.log");
         assert_eq!(cfg.standard_cache_dir, "/var/cache/proxy");
@@ -306,6 +312,20 @@ mod tests {
         assert_eq!(cfg.proxy_ssl_service, "legacy-proxy");
 
         env::remove_var("PROXY_SERVICE");
+    }
+
+    #[test]
+    fn ssl_enabled_accepts_disabled_env_values() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("SSL_ENABLED", "0");
+        assert!(!Config::from_env().ssl_enabled);
+
+        env::set_var("SSL_ENABLED", "false");
+        assert!(!Config::from_env().ssl_enabled);
+
+        env::remove_var("SSL_ENABLED");
+        assert!(Config::from_env().ssl_enabled);
     }
 
     #[test]

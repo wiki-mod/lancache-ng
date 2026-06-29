@@ -227,6 +227,7 @@ services:
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
+      - SSL_ENABLED=${SSL_ENABLED:-0}
       - PROXY_STANDARD_URL=http://proxy
       - PROXY_SSL_URL=http://proxy
       - PROXY_SSL_SERVICE=proxy
