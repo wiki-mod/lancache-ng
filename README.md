@@ -579,10 +579,10 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
-- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is simple and avoids surprising breakage when a launcher uses a new CDN hostname.
-- `strict` only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can break downloads until missing CDN root domains are added.
+- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
+- `strict` NOT RECOMMENDED! Only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until missing CDN root domains are added. That means, you need to add manually all domains by hand!
 
-`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
+`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. You have to change it, we set by default the LAN-IP ranges for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
@@ -617,7 +617,7 @@ LanCache NG can run inside a Proxmox LXC container.
 
 Recommended:
 
-- use a Debian based container
+- use a Debian based unpriviledged container
 - use enough disk space
 - enable nesting
 - keep the container inside your LAN
@@ -638,7 +638,9 @@ echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
 sysctl -p
 ```
 
-If SSL mode is enabled, give the container two usable LAN IPs.
+If SSL mode is enabled, the container requires a second usable LAN IPs.
+- The reason is, that you then be able to cache also SSL Downloads from the configured domain list.
+  - But you will need to install the CA-Certificate to let this happen.
 
 ## Ports
 
