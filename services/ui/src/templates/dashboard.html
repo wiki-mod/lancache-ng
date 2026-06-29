@@ -7,6 +7,24 @@
   <h1 class="text-xl font-bold text-white">Dashboard</h1>
 
   <!-- Cache-Übersicht -->
+  {% if shared_cache %}
+  <div class="card">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-slate-200">Shared Proxy Cache</h2>
+      <span class="text-xs text-slate-500">HTTP + HTTPS · one cache</span>
+    </div>
+    <div class="mb-3">
+      <div class="flex justify-between text-sm mb-1">
+        <span class="text-slate-400">Speicher</span>
+        <span class="text-white font-mono">{{ shared_cache_used_gb }} / {{ shared_cache_max_gb }} GB</span>
+      </div>
+      <div class="w-full bg-slate-700 rounded-full h-2">
+        <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ shared_cache_pct }}%"></div>
+      </div>
+      <p class="text-xs text-slate-500 mt-1">{{ shared_cache_pct }}% belegt</p>
+    </div>
+  </div>
+  {% else %}
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 
     <!-- Standard Cache -->
@@ -81,6 +99,7 @@
       {% endif %}
     </div>
   </div>
+  {% endif %}
 
   <!-- Cache-Trefferquote -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
