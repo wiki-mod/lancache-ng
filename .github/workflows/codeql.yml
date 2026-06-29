@@ -3,18 +3,12 @@ name: CodeQL
 on:
   push:
     branches: [master]
-    paths:
-      - ".github/workflows/codeql.yml"
-      - ".github/codeql/**"
-      - "services/dns/nats-subscriber/**"
-      - "services/ui/**"
+    paths-ignore:
+      - "**/*.md"
   pull_request:
     branches: [master]
-    paths:
-      - ".github/workflows/codeql.yml"
-      - ".github/codeql/**"
-      - "services/dns/nats-subscriber/**"
-      - "services/ui/**"
+    paths-ignore:
+      - "**/*.md"
   schedule:
     - cron: "24 3 * * *"
   workflow_dispatch:  
