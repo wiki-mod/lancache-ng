@@ -4,7 +4,6 @@
 
 If you discover a security vulnerability in lancache-ng, please report it privately to the repository owner:
 
-- **Email**: dominik.lepiorz@aunetic.com
 - **GitHub**: Please open a private security advisory via [GitHub Security Advisories](https://github.com/wiki-mod/lancache-ng/security/advisories)
 
 Do **not** open a public GitHub issue for security vulnerabilities. Private disclosure helps us address issues before they are publicly known.

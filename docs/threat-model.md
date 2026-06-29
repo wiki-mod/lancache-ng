@@ -279,4 +279,4 @@ Users are responsible for:
 4. Monitoring for suspicious activity
 5. Keeping dependencies up to date
 
-For questions or security concerns, contact dominik.lepiorz@aunetic.com.
+For questions or security concerns, use the project's private security reporting channel.

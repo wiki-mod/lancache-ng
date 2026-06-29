@@ -14,7 +14,7 @@ On a Debian runner, install the baseline tools used by the workflows:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl git jq shellcheck sudo
+sudo apt-get install -y ca-certificates curl git jq shellcheck sudo util-linux
 ```
 
 Install Docker Engine and the Compose plugin from Docker's Debian repository, then add the GitHub Actions runner user to the `docker` group:
@@ -54,7 +54,32 @@ sudo mkdir -p /var/tmp/lancache-ng-buildx-cache
 sudo chown -R actions-runner:actions-runner /var/tmp/lancache-ng-buildx-cache
 ```
 
-Replace `actions-runner:actions-runner` with the runner account and group. If passwordless `sudo` is available for the runner service, the workflow also creates and rotates this directory itself.
+Replace `actions-runner:actions-runner` with the runner account and group. The
+workflow does not use `sudo` for cache rotation; the runner account must be able
+to create and replace service-specific cache directories below this path.
+The workflow uses `flock` from `util-linux` so concurrent runs cannot rotate the
+same service cache while another run is importing it.
+
+## Rust compiler cache
+
+Rust checks and Rust image builds use Redis-backed `sccache` when the repository
+is configured for it.
+
+Configure this repository variable:
+
+- `SCCACHE_REDIS_MODE`: `required`, `optional` or `off`.
+
+Configure this GitHub Actions secret:
+
+- `SCCACHE_REDIS_URL`: Redis URL used by sccache.
+
+Use `required` for trusted self-hosted LAN runners where Redis is expected to
+be reachable. Use `optional` or `off` when moving jobs to runners that do not
+have access to the Redis cache.
+
+When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
+`PATH`. Install it from source and keep the installed binary on the runner
+service account's `PATH`.
 
 ## CodeQL
 

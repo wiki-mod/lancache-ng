@@ -125,7 +125,7 @@ Wait a few seconds, then check everything is healthy:
 docker compose ps
 ```
 
-You should see `healthy` next to all four containers (`proxy-standard`, `proxy-ssl`, `dns-standard`, `dns-ssl`).
+You should see `healthy` next to the proxy and DNS containers (`proxy`, `dns-standard`, and `dns-ssl` when SSL mode is enabled).
 
 ---
 

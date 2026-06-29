@@ -3,8 +3,12 @@ name: CodeQL
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - "**/*.md"
   pull_request:
     branches: [master]
+    paths-ignore:
+      - "**/*.md"
   schedule:
     - cron: "24 3 * * *"
   workflow_dispatch:  
@@ -41,6 +45,20 @@ jobs:
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-codeql-${{ matrix.language }}
       - name: Initialize CodeQL
         uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
@@ -48,12 +66,15 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
 
-      - name: Build Rust crates for CodeQL
-        env:
-          RUSTC_WRAPPER: ""
-        run: |
-          cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
-          cargo build --locked --manifest-path services/ui/Cargo.toml
+      - name: Build DNS Rust crate for CodeQL
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+
+      - name: Build UI Rust crate for CodeQL
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo build --locked --manifest-path services/ui/Cargo.toml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4

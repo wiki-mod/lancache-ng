@@ -234,9 +234,9 @@ Recommended storage:
 
 | Environment | Suggested cache size |
 |---|---|
-| small test setup | 100 GB |
-| few gaming PCs | 500 GB |
-| LAN party or shared network | 1 TB or more |
+| small test setup | 50 GB |
+| few gaming PCs | 100 GB |
+| LAN party or shared network | 500 GB or more |
 
 A fast SSD is nice, but a large HDD can also work.  
 The best choice depends on your network, internet speed and number of clients.
@@ -521,7 +521,7 @@ Secondary DNS nodes sync with the primary through NATS.
 Setup example:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/scripts/setup-secondary.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary \
   --primary http://192.168.1.10:8080 \
   --token <SECONDARY_REGISTRATION_TOKEN> \
   --name my-secondary \
@@ -565,24 +565,23 @@ SSL_ENABLED=1
 CACHE_DIR_STANDARD=/srv/lancache/cache
 CACHE_DIR_SSL=/srv/lancache/cache
 
-CACHE_MAX_SIZE=500g
+CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512
 NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
 PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
 
-STANDARD_CACHE_MAX_GB=500
-SSL_CACHE_MAX_GB=500
+CACHE_MAX_GB=50
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
-- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is simple and avoids surprising breakage when a launcher uses a new CDN hostname.
-- `strict` only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can break downloads until missing CDN root domains are added.
+- `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
+- `strict` NOT RECOMMENDED! Only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until missing CDN root domains are added. That means, you need to add manually all domains by hand!
 
-`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
+`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. You have to change it, we set by default the LAN-IP ranges for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
@@ -617,7 +616,7 @@ LanCache NG can run inside a Proxmox LXC container.
 
 Recommended:
 
-- use a Debian based container
+- use a Debian based unpriviledged container
 - use enough disk space
 - enable nesting
 - keep the container inside your LAN
@@ -638,7 +637,9 @@ echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
 sysctl -p
 ```
 
-If SSL mode is enabled, give the container two usable LAN IPs.
+If SSL mode is enabled, the container requires a second usable LAN IPs.
+- The reason is, that you then be able to cache also SSL Downloads from the configured domain list.
+  - But you will need to install the CA-Certificate to let this happen.
 
 ## Ports
 
@@ -665,8 +666,7 @@ deploy/secondary/        Secondary DNS compose files
 docs/                    Documentation
 scripts/                 Helper scripts
 services/dns/            DNS service
-services/proxy-standard/ Standard mode proxy
-services/proxy/          SSL mode proxy
+services/proxy/          Unified proxy for HTTP mode and SSL mode
 services/ui/             Admin UI
 services/watchdog/       Watchdog service
 services/dhcp/           Kea DHCP service

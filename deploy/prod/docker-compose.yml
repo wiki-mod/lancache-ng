@@ -28,7 +28,7 @@ services:
       - "${IP_SSL}:80:80"
       - "${IP_SSL}:443:443"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost/healthz"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1/healthz >/dev/null; }"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -265,9 +265,16 @@ services:
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
+      - SSL_ENABLED=${SSL_ENABLED:-1}
+      - PROXY_STANDARD_URL=http://proxy
+      - PROXY_SSL_URL=http://proxy
+      - PROXY_SSL_SERVICE=proxy
+      - STANDARD_LOG=/var/log/nginx/access.log
+      - SSL_LOG=/var/log/nginx/access.log
+      - STANDARD_CACHE_DIR=/var/cache/proxy
+      - SSL_CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
-      - STANDARD_CACHE_MAX_GB=500
-      - SSL_CACHE_MAX_GB=500
+      - CACHE_MAX_GB=50
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - DHCP_API_URL=http://host.docker.internal:8000

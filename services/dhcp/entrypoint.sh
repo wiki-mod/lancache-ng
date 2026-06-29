@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-mkdir -p /var/run/kea /var/lib/kea
+install -d -m 750 /run/kea
+mkdir -p /var/lib/kea
 
 # Defaults
 : "${DHCP_SUBNET:=10.0.0.0/24}"
@@ -14,6 +15,7 @@ mkdir -p /var/run/kea /var/lib/kea
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
 : "${KEA_CTRL_TOKEN:=}"
+: "${DDNS_TSIG_KEY:=}"
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 : "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
 : "${DHCP_DDNS_PORT:=53}"
@@ -82,11 +84,13 @@ if [ -n "$DHCP_NTP_SERVERS" ]; then
           }' "$ntp_servers_csv"
 fi
 
-# Generate TSIG key if not set (for DDNS) — stored in the runtime config on first boot
-if [ -z "$DDNS_TSIG_KEY" ]; then
-    DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n' | tr '+/' '-_')
-    export DDNS_TSIG_KEY
-fi
+case "$DDNS_TSIG_KEY" in
+    ""|CHANGE_ME*|changeme*)
+        echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
+        printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
+        exit 1
+        ;;
+esac
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
 # shellcheck disable=SC2090 # DHCP_NTP_OPTION is intentionally passed as literal replacement text to envsubst.
@@ -110,6 +114,66 @@ for name in kea-dhcp4 kea-ctrl-agent kea-dhcp-ddns; do
     fi
 done
 
+migrate_dhcp4_config() {
+    local runtime="$1" next
+
+    next="$(mktemp)"
+    if ! jq \
+        --arg domain "$DHCP_DOMAIN" \
+        --argjson lease_time "$DHCP_LEASE_TIME" \
+        --argjson max_lease_time "$DHCP_MAX_LEASE_TIME" \
+        '
+        .Dhcp4["control-socket"]["socket-name"] = "/run/kea/kea4.sock"
+        |
+        .Dhcp4["multi-threading"] = ({"enable-multi-threading": false} + (.Dhcp4["multi-threading"] // {}))
+        | .Dhcp4["dhcp-ddns"] = ({
+            "enable-updates": true,
+            "server-ip": "127.0.0.1",
+            "server-port": 53001,
+            "sender-ip": "127.0.0.1",
+            "max-queue-size": 1024,
+            "ncr-protocol": "UDP",
+            "ncr-format": "JSON"
+          } + (.Dhcp4["dhcp-ddns"] // {}))
+        | .Dhcp4["ddns-send-updates"] = (.Dhcp4["ddns-send-updates"] // true)
+        | .Dhcp4["ddns-override-no-update"] = (.Dhcp4["ddns-override-no-update"] // true)
+        | .Dhcp4["ddns-override-client-update"] = (.Dhcp4["ddns-override-client-update"] // true)
+        | .Dhcp4["ddns-replace-client-name"] = (.Dhcp4["ddns-replace-client-name"] // "when-present")
+        | .Dhcp4["ddns-generated-prefix"] = (.Dhcp4["ddns-generated-prefix"] // "dhcp")
+        | .Dhcp4["ddns-qualifying-suffix"] = (.Dhcp4["ddns-qualifying-suffix"] // $domain)
+        | .Dhcp4.subnet4 = ((.Dhcp4.subnet4 // []) | map(
+            .["valid-lifetime"] = (.["valid-lifetime"] // .["default-lease-time"] // $lease_time)
+            | .["max-valid-lifetime"] = (.["max-valid-lifetime"] // .["max-lease-time"] // $max_lease_time)
+            | del(.["default-lease-time"], .["max-lease-time"])
+          ))
+        | .Dhcp4.loggers = ((.Dhcp4.loggers // []) as $loggers
+          | if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
+              $loggers | map(if .name == "kea-dhcp4.dhcp4" then .severity = "ERROR" else . end)
+            else
+              $loggers + [{
+                "name": "kea-dhcp4.dhcp4",
+                "output-options": [{"output": "stdout"}],
+                "severity": "ERROR",
+                "debuglevel": 0
+              }]
+            end)
+        ' \
+        "$runtime" > "$next"; then
+        rm -f "$next"
+        echo "ERROR: failed to migrate $runtime for Kea DDNS settings."
+        exit 1
+    fi
+
+    if ! cmp -s "$next" "$runtime"; then
+        mv "$next" "$runtime"
+        echo "Updated $runtime with Kea DDNS and lease lifetime settings"
+    else
+        rm -f "$next"
+    fi
+}
+
+migrate_dhcp4_config /var/lib/kea/kea-dhcp4.conf
+
 # The Control Agent config is not modified by the UI, but it is persisted on
 # the Kea data volume. Regenerate it when KEA_CTRL_TOKEN or KEA_CTRL_HOST
 # changes so upgrades do not leave the API using stale credentials.
@@ -122,6 +186,19 @@ if ! cmp -s "$CTRL_AGENT_NEXT" "$CTRL_AGENT_RUNTIME"; then
     echo "Updated $CTRL_AGENT_RUNTIME from current Kea Control Agent settings"
 else
     rm -f "$CTRL_AGENT_NEXT"
+fi
+
+# The DHCP-DDNS daemon config is not edited by the UI. Regenerate it on start
+# so upgrades can fix D2 schema or target changes without touching DHCP subnets.
+DDNS_TEMPLATE="/etc/kea/kea-dhcp-ddns.conf.template"
+DDNS_RUNTIME="/var/lib/kea/kea-dhcp-ddns.conf"
+DDNS_NEXT="$(mktemp)"
+envsubst "$ENVSUBST_VARS" < "$DDNS_TEMPLATE" > "$DDNS_NEXT"
+if ! cmp -s "$DDNS_NEXT" "$DDNS_RUNTIME"; then
+    mv "$DDNS_NEXT" "$DDNS_RUNTIME"
+    echo "Updated $DDNS_RUNTIME from current Kea DHCP-DDNS settings"
+else
+    rm -f "$DDNS_NEXT"
 fi
 
 # Restrict Kea Control Agent API (port 8000) to Docker-internal networks.
