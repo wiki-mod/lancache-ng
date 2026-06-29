@@ -5,18 +5,25 @@ RUN cargo build --release --locked
 
 FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Debian package triggers try to start services during image builds; the entrypoint starts PDNS instead.
+RUN set -eu; \
+    if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
+    printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
+    chmod +x /usr/sbin/invoke-rc.d; \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     pdns-recursor \
     pdns-server \
     pdns-backend-sqlite3 \
+    dnsutils \
     sqlite3 \
     gettext-base \
     iproute2 \
     locales \
-    iproute2 \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*; \
+    rm -f /usr/sbin/invoke-rc.d; \
+    if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
