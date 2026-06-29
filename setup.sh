@@ -391,13 +391,12 @@ migrate_env_for_update() {
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" "openssl rand -hex 32"
 
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
-    cache_gb=$(cache_size_gb_from_env "${cache_max_size:-500g}")
+    cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
 
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
-    append_env_key_if_missing STANDARD_CACHE_MAX_GB "$cache_gb" "$env_file"
-    append_env_key_if_missing SSL_CACHE_MAX_GB "$cache_gb" "$env_file"
+    append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
     ui_user=$(get_env_var UI_AUTH_USER "$env_file")
@@ -1319,10 +1318,10 @@ else
 fi
 
 while true; do
-    ask "Cache size per mode in GiB" "500"
+    ask "Cache size in GiB" "50"
     cache_gb="$REPLY"
     [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
-    print_error "Please enter a positive integer (e.g. 500)."
+    print_error "Please enter a positive integer (e.g. 50)."
 done
 
 ask "Cache RAM buffer in MB (keys_zone)" "512"
@@ -1487,9 +1486,8 @@ NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
 PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
 
-# For Admin-UI (GB as number for progress bar)
-STANDARD_CACHE_MAX_GB=${cache_gb}
-SSL_CACHE_MAX_GB=${cache_gb}
+# For Admin UI (GB as number for progress bar)
+CACHE_MAX_GB=${cache_gb}
 
 # ── DHCP ───────────────────────────────────────────────────────────────────────
 DHCP_ENABLED=${DHCP_ENABLED}

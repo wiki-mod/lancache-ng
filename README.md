@@ -234,9 +234,9 @@ Recommended storage:
 
 | Environment | Suggested cache size |
 |---|---|
-| small test setup | 100 GB |
-| few gaming PCs | 500 GB |
-| LAN party or shared network | 1 TB or more |
+| small test setup | 50 GB |
+| few gaming PCs | 100 GB |
+| LAN party or shared network | 500 GB or more |
 
 A fast SSD is nice, but a large HDD can also work.  
 The best choice depends on your network, internet speed and number of clients.
@@ -565,14 +565,13 @@ SSL_ENABLED=1
 CACHE_DIR_STANDARD=/srv/lancache/cache
 CACHE_DIR_SSL=/srv/lancache/cache
 
-CACHE_MAX_SIZE=500g
+CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512
 NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
 PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
 
-STANDARD_CACHE_MAX_GB=500
-SSL_CACHE_MAX_GB=500
+CACHE_MAX_GB=50
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
