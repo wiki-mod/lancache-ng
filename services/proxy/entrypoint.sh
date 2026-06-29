@@ -5,6 +5,7 @@ CA_DIR="/etc/nginx/ssl/ca"
 CERT_DIR="/etc/nginx/ssl/certs"
 DOMAINS_FILE="/etc/nginx/cdn-ssl-domains.txt"
 SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
+STREAM_TARGET_FILE="/etc/nginx/stream.d/00-stream-targets.conf"
 PROXY_SECURITY_MODE="${PROXY_SECURITY_MODE:-strict}"
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -90,7 +91,12 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         echo ""
     fi
 
+    worker_user=$(awk '$1 == "user" {gsub(/;/, "", $2); print $2; exit}' /etc/nginx/nginx.conf.template)
+    worker_user="${worker_user:-nginx}"
+
     mkdir -p "$CERT_DIR"
+    chgrp "$worker_user" "$CERT_DIR"
+    chmod 2750 "$CERT_DIR"
 
     # Persist the serial counter in the CA volume so it survives container restarts (#71).
     # Initialized with a nanosecond timestamp on first use to avoid colliding with any
@@ -174,6 +180,13 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         fi
     done < "$DOMAINS_FILE"
 
+    # Keep new keys in the nginx group and make existing/generated keys readable
+    # by nginx workers during TLS handshakes.
+    if ! chgrp "$worker_user" "$CERT_DIR" || ! find "$CERT_DIR" -type f -name '*.key' -exec chgrp "$worker_user" {} + -exec chmod 0640 {} +; then
+        echo "[lancache] ERROR: Failed to set certificate key permissions" >&2
+        exit 1
+    fi
+    find "$CERT_DIR" -type f -name '*.crt' -exec chmod 0644 {} +
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
