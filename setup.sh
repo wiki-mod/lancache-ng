@@ -314,6 +314,8 @@ get_env_var() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
 
+# .env helpers stay in setup.sh because this script owns install, update, and
+# migration behavior for curl | bash users.
 env_key_exists() {
     local key="$1" env_file="$2"
     grep -q "^${key}=" "$env_file" 2>/dev/null
@@ -328,7 +330,7 @@ env_key_has_value() {
 secret_value_is_placeholder() {
     local value="$1"
     case "$value" in
-        ""|CHANGE_ME_*|changeme*|lancache-*-secret)
+        ""|CHANGE_ME_*|YOUR_*_HERE|changeme*|*change-me*|lancache-*-secret)
             return 0
             ;;
     esac
@@ -341,10 +343,58 @@ env_key_has_usable_secret() {
     ! secret_value_is_placeholder "$value"
 }
 
+# Secret generation must fail closed. setup.sh must never write empty secrets
+# after a missing openssl binary, broken RNG, or interrupted generator command.
+generate_secret_value() {
+    local name="$1" kind="$2" value chunk
+
+    case "$kind" in
+        hex32)
+            value=$(openssl rand -hex 32) \
+                || die "Failed to generate $name with openssl."
+            ;;
+        base64_32)
+            value=$(openssl rand -base64 32) \
+                || die "Failed to generate $name with openssl."
+            value="${value//$'\n'/}"
+            ;;
+        alnum20)
+            value=""
+            while (( ${#value} < 20 )); do
+                chunk=$(openssl rand -base64 32) \
+                    || die "Failed to generate $name with openssl."
+                chunk="${chunk//[^A-Za-z0-9]/}"
+                value+="$chunk"
+            done
+            value="${value:0:20}"
+            ;;
+        *)
+            die "Unknown secret generator for $name: $kind"
+            ;;
+    esac
+
+    [[ -n "$value" ]] || die "Generated empty secret for $name."
+    printf '%s\n' "$value"
+}
+
+# Keep real existing secrets, but replace empty values and known placeholders.
+get_or_generate_secret() {
+    local key="$1" env_file="$2" kind="$3"
+
+    if env_key_has_usable_secret "$key" "$env_file"; then
+        get_env_var "$key" "$env_file"
+    else
+        generate_secret_value "$key" "$kind"
+    fi
+}
+
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
     if env_key_exists "$key" "$env_file"; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
+        awk -F= -v key="$key" -v value="$value" '
+            $1 == key { print key "=" value; next }
+            { print }
+        ' "$env_file" | write_env_file "$env_file"
     else
         printf '%s=%s\n' "$key" "$value" >> "$env_file"
     fi
@@ -355,13 +405,46 @@ append_env_key_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
 }
 
+# Full .env rewrites keep the original owner/mode because the file contains
+# runtime tokens and may already be locked down to 0600.
+write_env_file() {
+    local env_file="$1" env_dir tmp
+    env_dir=$(dirname "$env_file")
+    tmp=$(mktemp "${env_dir}/.env.tmp.XXXXXX") \
+        || die "Failed to create a temporary .env file in $env_dir."
+
+    if [[ -f "$env_file" ]]; then
+        chown --reference="$env_file" "$tmp" \
+            || { rm -f "$tmp"; die "Failed to preserve owner for $env_file."; }
+        chmod --reference="$env_file" "$tmp" \
+            || { rm -f "$tmp"; die "Failed to preserve permissions for $env_file."; }
+    else
+        chmod 0600 "$tmp" \
+            || { rm -f "$tmp"; die "Failed to secure permissions for $tmp."; }
+    fi
+
+    if ! cat > "$tmp"; then
+        rm -f "$tmp"
+        die "Failed to write temporary .env file."
+    fi
+
+    mv "$tmp" "$env_file" \
+        || { rm -f "$tmp"; die "Failed to replace $env_file."; }
+}
+
+require_env_value_for_update() {
+    local key="$1" env_file="$2"
+    env_key_has_value "$key" "$env_file" \
+        || die "$key is missing or empty in $env_file. Set it before running setup.sh update."
+}
+
 ensure_secret_env_key() {
-    local key="$1" env_file="$2" generator="$3" value
+    local key="$1" env_file="$2" kind="$3" value
     if env_key_has_usable_secret "$key" "$env_file"; then
         return 0
     fi
 
-    value=$(eval "$generator")
+    value=$(generate_secret_value "$key" "$kind")
     set_env_key "$key" "$value" "$env_file"
     print_ok "Generated missing or placeholder secret: $key"
 }
@@ -370,13 +453,13 @@ cache_size_gb_from_env() {
     local cache_max_size="$1"
     cache_max_size="${cache_max_size,,}"
     cache_max_size="${cache_max_size%g}"
-    [[ "$cache_max_size" =~ ^[0-9]+$ ]] || cache_max_size="500"
+    [[ "$cache_max_size" =~ ^[0-9]+$ ]] || cache_max_size="50"
     printf '%s\n' "$cache_max_size"
 }
 
 migrate_env_for_update() {
     local install_dir="$1" env_file
-    local cache_max_size cache_gb ui_user
+    local allow_insecure_ui cache_dir cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -384,14 +467,34 @@ migrate_env_for_update() {
 
     print_step "Checking local .env"
 
-    ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" "openssl rand -hex 32"
-    ensure_secret_env_key DDNS_TSIG_KEY "$env_file" "openssl rand -base64 32 | tr -d '\n'"
-    ensure_secret_env_key PDNS_API_KEY "$env_file" "openssl rand -hex 32"
-    ensure_secret_env_key NATS_LOCAL_TOKEN "$env_file" "openssl rand -hex 32"
-    ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" "openssl rand -hex 32"
+    require_env_value_for_update IP_STANDARD "$env_file"
+
+    # Listener addresses. IP_SSL may stay empty; that means SSL mode is off.
+    append_env_key_if_missing IP_SSL "" "$env_file"
+    ip_ssl=$(get_env_var IP_SSL "$env_file")
+    ssl_enabled=0
+    [[ -n "$ip_ssl" ]] && ssl_enabled=1
+    append_env_key_if_missing SSL_ENABLED "$ssl_enabled" "$env_file"
+
+    # Cache settings. Older installs may only have CACHE_DIR, so keep that path
+    # and map both proxy modes to the same cache directory by default.
+    cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    if [[ -z "$cache_dir" ]]; then
+        cache_dir=$(get_env_var CACHE_DIR "$env_file")
+    fi
+    cache_dir="${cache_dir:-$install_dir/cache/standard}"
+    append_env_key_if_missing CACHE_DIR_STANDARD "$cache_dir" "$env_file"
+    append_env_key_if_missing CACHE_DIR_SSL "$cache_dir" "$env_file"
 
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
     cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
+
+    append_env_key_if_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
+    append_env_key_if_missing CACHE_MEM_MB "512" "$env_file"
+    append_env_key_if_missing CACHE_SLICE_SIZE "8m" "$env_file"
+    append_env_key_if_missing CACHE_VALID_HIT "365d" "$env_file"
+    append_env_key_if_missing CACHE_VALID_ANY "1m" "$env_file"
+    append_env_key_if_missing CACHE_INACTIVE "365d" "$env_file"
 
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
@@ -399,11 +502,45 @@ migrate_env_for_update() {
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
+    # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
+    # read one complete runtime configuration.
+    append_env_key_if_missing DHCP_ENABLED "0" "$env_file"
+    append_env_key_if_missing KEA_DATA_DIR "$install_dir/kea" "$env_file"
+    append_env_key_if_missing DHCP_SUBNET "" "$env_file"
+    append_env_key_if_missing DHCP_GATEWAY "" "$env_file"
+    append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
+    append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
+
+    # Mandatory service tokens. Preserve real values; regenerate empty values
+    # and known placeholders like CHANGE_ME_* or lancache-*-secret.
+    ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
+    ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
+    ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
+    ensure_secret_env_key NATS_LOCAL_TOKEN "$env_file" hex32
+    ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
+
+    if ! env_key_exists COMPOSE_PROFILES "$env_file"; then
+        if [[ "$(get_env_var SSL_ENABLED "$env_file")" = "1" ]]; then
+            append_env_key_if_missing COMPOSE_PROFILES "ssl" "$env_file"
+        else
+            append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
+        fi
+    fi
+
+    # UI auth stays a user choice. A configured username must have a real
+    # password; otherwise the UI is explicitly marked insecure.
+    append_env_key_if_missing UI_AUTH_USER "" "$env_file"
+    append_env_key_if_missing UI_AUTH_PASSWORD "" "$env_file"
     ui_user=$(get_env_var UI_AUTH_USER "$env_file")
-    if [[ -n "$ui_user" ]] && ! env_key_has_value UI_AUTH_PASSWORD "$env_file"; then
-        set_env_key UI_AUTH_PASSWORD "$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)" "$env_file"
+    ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file")
+    if [[ -n "$ui_user" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
+        set_env_key UI_AUTH_PASSWORD "$(generate_secret_value UI_AUTH_PASSWORD alnum20)" "$env_file"
         print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
     fi
+
+    allow_insecure_ui=false
+    [[ -z "$ui_user" && -z "$ui_password" ]] && allow_insecure_ui=true
+    append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
 
     print_ok ".env is complete for the current quickstart template"
 }
@@ -1397,13 +1534,21 @@ ALLOW_INSECURE_UI=false
 if [[ "${REPLY,,}" = "y" ]]; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
-    UI_AUTH_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
-    printf "\n"
-    print_ok "Credentials:"
-    printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
-    printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
-    print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
-    printf "\n"
+
+    if [[ -f "$INSTALL_DIR/.env" ]] \
+        && [[ "$(get_env_var UI_AUTH_USER "$INSTALL_DIR/.env")" = "$UI_AUTH_USER" ]] \
+        && env_key_has_usable_secret UI_AUTH_PASSWORD "$INSTALL_DIR/.env"; then
+        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$INSTALL_DIR/.env")
+        print_ok "Existing Admin-UI password preserved"
+    else
+        UI_AUTH_PASSWORD=$(generate_secret_value UI_AUTH_PASSWORD alnum20)
+        printf "\n"
+        print_ok "Credentials:"
+        printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
+        printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
+        print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
+        printf "\n"
+    fi
 else
     ask "Allow Admin-UI without authentication? [y/N]" "N"
     if [[ "${REPLY,,}" = "y" ]]; then
@@ -1426,37 +1571,13 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
-if ! env_key_has_usable_secret KEA_CTRL_TOKEN "$env_file"; then
-    KEA_CTRL_TOKEN=$(openssl rand -hex 32)
-else
-    KEA_CTRL_TOKEN=$(get_env_var KEA_CTRL_TOKEN "$env_file")
-fi
+KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
+DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
+PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
+NATS_LOCAL_TOKEN=$(get_or_generate_secret NATS_LOCAL_TOKEN "$env_file" hex32)
+SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
-if ! env_key_has_usable_secret DDNS_TSIG_KEY "$env_file"; then
-    DDNS_TSIG_KEY=$(openssl rand -base64 32 | tr -d '\n')
-else
-    DDNS_TSIG_KEY=$(get_env_var DDNS_TSIG_KEY "$env_file")
-fi
-
-if ! env_key_has_usable_secret PDNS_API_KEY "$env_file"; then
-    PDNS_API_KEY=$(openssl rand -hex 32)
-else
-    PDNS_API_KEY=$(get_env_var PDNS_API_KEY "$env_file")
-fi
-
-if ! env_key_has_usable_secret NATS_LOCAL_TOKEN "$env_file"; then
-    NATS_LOCAL_TOKEN=$(openssl rand -hex 32)
-else
-    NATS_LOCAL_TOKEN=$(get_env_var NATS_LOCAL_TOKEN "$env_file")
-fi
-
-if ! env_key_has_usable_secret SECONDARY_REGISTRATION_TOKEN "$env_file"; then
-    SECONDARY_REGISTRATION_TOKEN=$(openssl rand -hex 32)
-else
-    SECONDARY_REGISTRATION_TOKEN=$(get_env_var SECONDARY_REGISTRATION_TOKEN "$env_file")
-fi
-
-cat > "$INSTALL_DIR/.env" <<EOF
+write_env_file "$INSTALL_DIR/.env" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_STANDARD=${IP_STANDARD}
