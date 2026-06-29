@@ -260,13 +260,6 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -293,6 +286,16 @@ jobs:
           mkdir -p "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
           rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}-new"
 
+      - name: Prepare sccache Redis secret file
+        if: matrix.service == 'ui' && github.event_name != 'pull_request'
+        id: sccache-secret
+        env:
+          SCCACHE_REDIS_URL: ${{ vars.SCCACHE_REDIS_URL }}
+        run: |
+          umask 077
+          printf '%s' "$SCCACHE_REDIS_URL" > "${{ runner.temp }}/sccache-redis-url"
+          echo "secret-files=sccache_redis_url=${{ runner.temp }}/sccache-redis-url" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         timeout-minutes: 60
@@ -301,7 +304,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
-          build-args: ${{ matrix.service == 'ui' && format('DISTCC_POTENTIAL_HOSTS={0}', vars.DISTCC_POTENTIAL_HOSTS) || '' }}
+          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -317,7 +320,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
-          build-args: ${{ matrix.service == 'ui' && format('DISTCC_POTENTIAL_HOSTS={0}', vars.DISTCC_POTENTIAL_HOSTS) || '' }}
+          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
