@@ -111,9 +111,10 @@ jobs:
         with:
           command: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
+        timeout-minutes: 15
+        env:
+          RUSTC_WRAPPER: ""
+        run: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
   ui_rust_quality:
     name: rust-quality (ui)
@@ -151,9 +152,10 @@ jobs:
         with:
           command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
+        timeout-minutes: 15
+        env:
+          RUSTC_WRAPPER: ""
+        run: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   dns_test:
     name: test (dns/nats-subscriber)
