@@ -10,8 +10,8 @@
   {% if shared_cache %}
   <div class="card">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-slate-200">Shared Proxy Cache</h2>
-      <span class="text-xs text-slate-500">HTTP + HTTPS · one cache</span>
+      <h2 class="font-semibold text-slate-200">Gemeinsamer Proxy-Cache</h2>
+      <span class="text-xs text-slate-500">HTTP + HTTPS · ein Cache</span>
     </div>
     <div class="mb-3">
       <div class="flex justify-between text-sm mb-1">
@@ -22,6 +22,57 @@
         <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ shared_cache_pct }}%"></div>
       </div>
       <p class="text-xs text-slate-500 mt-1">{{ shared_cache_pct }}% belegt</p>
+    </div>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-slate-200">Standard-Modus</h2>
+        <span class="text-xs text-slate-500">HTTP · SNI-Passthrough</span>
+      </div>
+      {% if standard_status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3">
+        <div>
+          <p class="text-2xl font-bold text-white">{{ standard_status.active }}</p>
+          <p class="text-xs text-slate-400">Verbindungen</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ standard_status.requests }}</p>
+          <p class="text-xs text-slate-400">Requests</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ standard_status.waiting }}</p>
+          <p class="text-xs text-slate-400">Wartend</p>
+        </div>
+      </div>
+      {% else %}
+      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-slate-200">SSL-Modus</h2>
+        <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
+      </div>
+      {% if ssl_status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3">
+        <div>
+          <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
+          <p class="text-xs text-slate-400">Verbindungen</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ ssl_status.requests }}</p>
+          <p class="text-xs text-slate-400">Requests</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-white">{{ ssl_status.waiting }}</p>
+          <p class="text-xs text-slate-400">Wartend</p>
+        </div>
+      </div>
+      {% else %}
+      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
+      {% endif %}
     </div>
   </div>
   {% else %}

@@ -52,7 +52,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     .await
     .unwrap_or_default();
 
-    let shared_cache_max_gb = cfg.standard_cache_max_gb.max(cfg.ssl_cache_max_gb);
+    let shared_cache_max_gb = cfg.standard_cache_max_gb;
     let standard_pct = cache_usage_pct(standard_used_gb, cfg.standard_cache_max_gb);
     let ssl_pct = cache_usage_pct(ssl_used_gb, cfg.ssl_cache_max_gb);
     let shared_cache_pct = cache_usage_pct(standard_used_gb, shared_cache_max_gb);
