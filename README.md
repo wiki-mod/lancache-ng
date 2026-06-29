@@ -666,8 +666,7 @@ deploy/secondary/        Secondary DNS compose files
 docs/                    Documentation
 scripts/                 Helper scripts
 services/dns/            DNS service
-services/proxy-standard/ Standard mode proxy
-services/proxy/          SSL mode proxy
+services/proxy/          Unified proxy for HTTP mode and SSL mode
 services/ui/             Admin UI
 services/watchdog/       Watchdog service
 services/dhcp/           Kea DHCP service

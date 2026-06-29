@@ -813,8 +813,8 @@ cmd_debug() {
     print_step "Logs (last 30 lines per service)"
     local ssl_enabled; ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
     local -a svc_list
-    svc_list=(proxy-standard dns-standard ui netdata watchdog)
-    [[ "${ssl_enabled:-1}" = "1" ]] && svc_list=(proxy-standard dns-standard proxy-ssl dns-ssl ui netdata watchdog)
+    svc_list=(proxy dns-standard ui netdata watchdog)
+    [[ "${ssl_enabled:-1}" = "1" ]] && svc_list=(proxy dns-standard dns-ssl ui netdata watchdog)
     local svc
     for svc in "${svc_list[@]}"; do
         printf "\n${BOLD}--- %s ---${RESET}\n" "$svc"

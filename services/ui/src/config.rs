@@ -116,7 +116,9 @@ impl Config {
         let proxy_standard_url = env_or("PROXY_STANDARD_URL", format!("http://{proxy_service}"));
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
-        let shared_cache_max_gb = env_f64("CACHE_MAX_GB", 10.0);
+        let legacy_cache_max_gb =
+            env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0));
+        let shared_cache_max_gb = env_f64("CACHE_MAX_GB", legacy_cache_max_gb);
 
         Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
@@ -319,5 +321,33 @@ mod tests {
         assert_eq!(cfg.ssl_cache_max_gb, 42.5);
 
         env::remove_var("CACHE_MAX_GB");
+    }
+
+    #[test]
+    fn legacy_ssl_cache_limit_can_drive_shared_cache_fallback() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("CACHE_MAX_GB");
+        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::set_var("SSL_CACHE_MAX_GB", "88");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.standard_cache_max_gb, 88.0);
+        assert_eq!(cfg.ssl_cache_max_gb, 88.0);
+
+        env::remove_var("SSL_CACHE_MAX_GB");
+    }
+
+    #[test]
+    fn shared_cache_limit_default_is_50_gb() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("CACHE_MAX_GB");
+        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::remove_var("SSL_CACHE_MAX_GB");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.standard_cache_max_gb, 50.0);
+        assert_eq!(cfg.ssl_cache_max_gb, 50.0);
     }
 }
