@@ -91,8 +91,11 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         echo ""
     fi
 
+    worker_user=$(awk '$1 == "user" {gsub(/;/, "", $2); print $2; exit}' /etc/nginx/nginx.conf.template)
+    worker_user="${worker_user:-nginx}"
+
     mkdir -p "$CERT_DIR"
-    chgrp nginx "$CERT_DIR"
+    chgrp "$worker_user" "$CERT_DIR"
     chmod 2750 "$CERT_DIR"
 
     # Persist the serial counter in the CA volume so it survives container restarts (#71).
@@ -179,8 +182,6 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     # Keep new keys in the nginx group and make existing/generated keys readable
     # by nginx workers during TLS handshakes.
-    worker_user=$(awk '$1 == "user" {gsub(/;/, "", $2); print $2; exit}' /etc/nginx/nginx.conf.template)
-    worker_user="${worker_user:-nginx}"
     if ! chgrp "$worker_user" "$CERT_DIR" || ! find "$CERT_DIR" -type f -name '*.key' -exec chgrp "$worker_user" {} + -exec chmod 0640 {} +; then
         echo "[lancache] ERROR: Failed to set certificate key permissions" >&2
         exit 1
