@@ -40,7 +40,7 @@ directio    4m;
 
 | Variable | Default | Description |
 |---|---|---|
-| `CACHE_MAX_SIZE` | `500g` | Max cache size — UI checks against available disk space |
+| `CACHE_MAX_SIZE` | `50g` | Max cache size — UI checks against available disk space |
 | `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
