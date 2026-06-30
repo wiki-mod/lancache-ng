@@ -6,6 +6,8 @@ use axum::response::{Html, Redirect};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::sync::Arc;
 use tera::Context;
 
@@ -126,14 +128,13 @@ pub async fn add_subnet(
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    if !is_valid_cidr(&form.subnet)
-        || !is_valid_ip(&form.pool_start)
-        || !is_valid_ip(&form.pool_end)
-        || !is_valid_ip(&form.gateway)
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let lease_time: u32 = form.lease_time.parse().unwrap_or(86400);
+    let lease_time = validate_dhcp_form(
+        &form.subnet,
+        &form.pool_start,
+        &form.pool_end,
+        &form.gateway,
+        &form.lease_time,
+    )?;
 
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -160,7 +161,7 @@ pub async fn add_subnet(
                 {"name": "domain-search", "data": form.domain}
             ],
             "valid-lifetime": lease_time,
-            "max-valid-lifetime": lease_time * 2,
+            "max-valid-lifetime": lease_time.checked_mul(2).ok_or("lease_time too large")?,
             "host-reservation-identifiers": ["hw-address"]
         }));
         Ok(())
@@ -176,14 +177,13 @@ pub async fn update_subnet(
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    if !is_valid_cidr(&form.subnet)
-        || !is_valid_ip(&form.pool_start)
-        || !is_valid_ip(&form.pool_end)
-        || !is_valid_ip(&form.gateway)
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let lease_time: u32 = form.lease_time.parse().unwrap_or(86400);
+    let lease_time = validate_dhcp_form(
+        &form.subnet,
+        &form.pool_start,
+        &form.pool_end,
+        &form.gateway,
+        &form.lease_time,
+    )?;
     let subnet_id = form.id;
 
     kea_config_modify(&state, move |config| {
@@ -209,7 +209,7 @@ pub async fn update_subnet(
                 {"name": "domain-search", "data": form.domain}
             ],
             "valid-lifetime": lease_time,
-            "max-valid-lifetime": lease_time * 2,
+            "max-valid-lifetime": lease_time.checked_mul(2).ok_or("lease_time too large")?,
             "host-reservation-identifiers": ["hw-address"]
         });
         Ok(())
@@ -612,7 +612,7 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
         }
     };
 
-    // Parse "Server Identifier: 192.168.1.1" from nmap output
+    // Parse "Server Identifier: 198.51.100.1" from nmap output
     for line in output.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Server Identifier:") {
@@ -645,19 +645,173 @@ fn normalize_mac(mac: &str) -> String {
         .collect()
 }
 
-fn is_valid_cidr(cidr: &str) -> bool {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    is_valid_ip(parts[0]) && parts[1].parse::<u8>().ok().is_some_and(|n| n <= 32)
-}
-
 fn is_valid_ip(ip: &str) -> bool {
-    ip.split('.').filter_map(|o| o.parse::<u8>().ok()).count() == 4
+    parse_ipv4(ip).is_some()
 }
 
 fn is_valid_mac(mac: &str) -> bool {
     let cleaned = mac.to_uppercase().replace([':', '-'], "");
     cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn validate_dhcp_form(
+    subnet: &str,
+    pool_start: &str,
+    pool_end: &str,
+    gateway: &str,
+    lease_time: &str,
+) -> Result<u32, StatusCode> {
+    let (subnet_addr, prefix_len) = parse_cidr(subnet).ok_or(StatusCode::BAD_REQUEST)?;
+    let pool_start_addr = parse_ipv4(pool_start).ok_or(StatusCode::BAD_REQUEST)?;
+    let pool_end_addr = parse_ipv4(pool_end).ok_or(StatusCode::BAD_REQUEST)?;
+    let gateway_addr = parse_ipv4(gateway).ok_or(StatusCode::BAD_REQUEST)?;
+
+    if !ipv4_in_cidr(subnet_addr, prefix_len, pool_start_addr)
+        || !ipv4_in_cidr(subnet_addr, prefix_len, pool_end_addr)
+        || !ipv4_in_cidr(subnet_addr, prefix_len, gateway_addr)
+        || ipv4_to_u32(pool_start_addr) > ipv4_to_u32(pool_end_addr)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let lease_time = lease_time
+        .parse::<u32>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if lease_time == 0 || lease_time > u32::MAX / 2 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    Ok(lease_time)
+}
+
+fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
+    Ipv4Addr::from_str(ip).ok()
+}
+
+fn parse_cidr(cidr: &str) -> Option<(Ipv4Addr, u8)> {
+    let (addr, prefix) = cidr.split_once('/')?;
+    let network = parse_ipv4(addr)?;
+    let prefix_len = prefix.parse::<u8>().ok()?;
+    if prefix_len > 32 {
+        return None;
+    }
+    let network_u32 = ipv4_to_u32(network);
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    if prefix_len != 0 && network_u32 & !mask != 0 {
+        return None;
+    }
+    Some((Ipv4Addr::from(network_u32 & mask), prefix_len))
+}
+
+fn ipv4_in_cidr(network: Ipv4Addr, prefix_len: u8, ip: Ipv4Addr) -> bool {
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    ipv4_to_u32(network) & mask == ipv4_to_u32(ip) & mask
+}
+
+fn ipv4_to_u32(ip: Ipv4Addr) -> u32 {
+    u32::from(ip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_valid_dhcp_form() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "86400",
+        );
+
+        assert_eq!(lease_time.unwrap(), 86400);
+    }
+
+    #[test]
+    fn rejects_pool_outside_subnet() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.101.100",
+            "198.51.101.200",
+            "198.51.100.1",
+            "86400",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_reversed_pool_range() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.200",
+            "198.51.100.100",
+            "198.51.100.1",
+            "86400",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_invalid_lease_time() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "not-a-number",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_gateway_outside_subnet() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.101.1",
+            "86400",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_non_network_cidr() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.5/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "86400",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_zero_lease_time() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "0",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
 }
