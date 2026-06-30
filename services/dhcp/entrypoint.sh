@@ -184,12 +184,10 @@ build_ntp_migration_map() {
         mv "$map_next" "$map_file"
     done < <(
         jq -r '
-          [
-            ((.Dhcp4["option-data"] // [])[]?),
-            ((.Dhcp4.subnet4 // [])[]?["option-data"][]?)
-          ]
-          | .[]
+          ..
+          | objects
           | select(.name == "ntp-servers")
+          | select((if has("csv-format") then .["csv-format"] else true end) == true)
           | .data // empty
         ' "$runtime" | sort -u
     )
@@ -227,11 +225,26 @@ migrate_dhcp4_config() {
           and (split(",") | all(.[]; (gsub("^\\s+|\\s+$"; "") | is_ipv4)));
 
         def migrate_ntp_option:
-          if .name == "ntp-servers" and ((.data // "") | is_ipv4_csv | not) then
+          if type == "object"
+              and .name == "ntp-servers"
+              and ((if has("csv-format") then .["csv-format"] else true end) == true)
+              and ((.data // "") | is_ipv4_csv | not) then
             .data = ($ntp_migration_map[.data] // .data)
           else
             .
           end;
+
+        def walk(f):
+          . as $in
+          | if type == "object" then
+              reduce keys_unsorted[] as $key
+                ({}; . + {($key): ($in[$key] | walk(f))})
+              | f
+            elif type == "array" then
+              map(walk(f)) | f
+            else
+              f
+            end;
 
         .Dhcp4["control-socket"]["socket-name"] = "/run/kea/kea4.sock"
         |
@@ -251,21 +264,12 @@ migrate_dhcp4_config() {
         | .Dhcp4["ddns-replace-client-name"] = (.Dhcp4["ddns-replace-client-name"] // "when-present")
         | .Dhcp4["ddns-generated-prefix"] = (.Dhcp4["ddns-generated-prefix"] // "dhcp")
         | .Dhcp4["ddns-qualifying-suffix"] = (.Dhcp4["ddns-qualifying-suffix"] // $domain)
-        | if .Dhcp4["option-data"] then
-            .Dhcp4["option-data"] = (.Dhcp4["option-data"] | map(migrate_ntp_option))
-          else
-            .
-          end
         | .Dhcp4.subnet4 = ((.Dhcp4.subnet4 // []) | map(
             .["valid-lifetime"] = (.["valid-lifetime"] // .["default-lease-time"] // $lease_time)
             | .["max-valid-lifetime"] = (.["max-valid-lifetime"] // .["max-lease-time"] // $max_lease_time)
             | del(.["default-lease-time"], .["max-lease-time"])
-            | if .["option-data"] then
-                .["option-data"] = (.["option-data"] | map(migrate_ntp_option))
-              else
-                .
-              end
           ))
+        | walk(migrate_ntp_option)
         | .Dhcp4.loggers = ((.Dhcp4.loggers // []) as $loggers
           | if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
               $loggers | map(if .name == "kea-dhcp4.dhcp4" then .severity = "ERROR" else . end)
