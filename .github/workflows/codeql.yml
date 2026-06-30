@@ -11,7 +11,7 @@ on:
       - "**/*.md"
   schedule:
     - cron: "24 3 * * *"
-  workflow_dispatch:  
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +28,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - language: actions
+            build-mode: none
           - language: rust
             build-mode: none
     steps:
@@ -35,6 +37,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Isolate Rust toolchain paths
+        if: matrix.language == 'rust'
         run: |
           {
             echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/codeql-${{ matrix.language }}'
@@ -42,12 +45,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
+        if: matrix.language == 'rust'
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
         if: >-
           ${{
+            matrix.language == 'rust' &&
             github.actor != 'dependabot[bot]' &&
             (
               github.event_name != 'pull_request' ||
@@ -67,11 +72,13 @@ jobs:
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Build DNS Rust crate for CodeQL
+        if: matrix.language == 'rust'
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
       - name: Build UI Rust crate for CodeQL
+        if: matrix.language == 'rust'
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/ui/Cargo.toml
