@@ -16,6 +16,10 @@ DNS/setup/template fixture tools. Trivy image scanning remains a workflow
 capability, not a tool bundled into the image. Production service images remain
 separate.
 
+The build-tools image does not replace the baseline runner requirements below.
+The GitHub workflows still run Docker, Compose, CodeQL setup, and the current
+Rust CI jobs on self-hosted runners.
+
 ## Debian runner packages
 
 On a Debian runner, install the baseline tools used by the workflows:
