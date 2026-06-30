@@ -209,12 +209,6 @@ Consoles should continue to work normally through standard mode.
 HTTPS traffic that cannot be cached is passed through to the original CDN.
 
 
-## Docker build performance on local runners
-
-If you build LanCache NG on a self-hosted runner or want to speed up repeated local builds, see the local runner Docker performance guide for practical options such as Docker layer caching, registry mirrors, multi-stage builds, `.dockerignore` files and runner parallelism tuning.
-
-[docs/local-runner-docker-performance.md](docs/local-runner-docker-performance.md)
-
 ## Requirements
 
 You need:

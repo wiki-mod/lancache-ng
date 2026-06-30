@@ -26,6 +26,20 @@ jobs:
     runs-on: [self-hosted, linux, lancache]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate prebuilt production install path
+        run: |
+          set -euo pipefail
+
+          if grep -RInE '^[[:space:]]+build:' deploy/prod deploy/quickstart; then
+            echo "::error::Production and quickstart compose files must use prebuilt images only."
+            exit 1
+          fi
+
+          if grep -RIn -- '--build' README.md deploy/prod deploy/quickstart setup.sh; then
+            echo "::error::User-facing production install paths must not instruct users to build images locally."
+            exit 1
+          fi
+
       - name: Validate compose files
         env:
           CACHE_DIR_STANDARD: /tmp/lancache-standard
@@ -684,3 +698,49 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
           push-to-registry: true
+
+  release:
+    name: publish release source
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, linux, lancache]
+    permissions:
+      contents: write
+    steps:
+      - name: Create or update GitHub release for built images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${COMMIT_SHA::7}"
+          notes_file="$(mktemp)"
+          {
+            printf 'This release source is the exact commit used by CI to build and publish the service images for %s.\n\n' "$TAG_NAME"
+            printf 'Commit: %s\n\n' "$COMMIT_SHA"
+            printf 'Published image tags:\n\n'
+            printf -- '- ghcr.io/%s/proxy:%s\n' "$REPOSITORY" "$TAG_NAME"
+            printf -- '- ghcr.io/%s/dns:%s\n' "$REPOSITORY" "$TAG_NAME"
+            printf -- '- ghcr.io/%s/watchdog:%s\n' "$REPOSITORY" "$TAG_NAME"
+            printf -- '- ghcr.io/%s/dhcp:%s\n' "$REPOSITORY" "$TAG_NAME"
+            printf -- '- ghcr.io/%s/dhcp-proxy:%s\n' "$REPOSITORY" "$TAG_NAME"
+            printf -- '- ghcr.io/%s/ui:%s\n' "$REPOSITORY" "$TAG_NAME"
+            printf -- '- ghcr.io/%s/build-tools:%s\n\n' "$REPOSITORY" "$TAG_NAME"
+            printf 'Matching SHA image tags:\n\n'
+            printf -- '- ghcr.io/%s/proxy:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf -- '- ghcr.io/%s/dns:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf -- '- ghcr.io/%s/watchdog:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf -- '- ghcr.io/%s/dhcp:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf -- '- ghcr.io/%s/dhcp-proxy:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf -- '- ghcr.io/%s/ui:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf -- '- ghcr.io/%s/build-tools:sha-%s\n' "$REPOSITORY" "$short_sha"
+          } > "$notes_file"
+
+          if gh release view "$TAG_NAME" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --repo "$REPOSITORY" --title "$TAG_NAME" --notes-file "$notes_file"
+          else
+            gh release create "$TAG_NAME" --repo "$REPOSITORY" --verify-tag --title "$TAG_NAME" --notes-file "$notes_file"
+          fi
