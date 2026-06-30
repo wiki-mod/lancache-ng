@@ -149,11 +149,6 @@ pub async fn add_subnet(
             .map(|m| m + 1)
             .unwrap_or(1) as u32;
 
-        let preserved_options = subnets
-            .first()
-            .map(preserved_subnet_options)
-            .unwrap_or_default();
-
         subnets.push(build_subnet_value(SubnetValue {
             id: next_id,
             subnet: form.subnet,
@@ -162,8 +157,9 @@ pub async fn add_subnet(
             gateway: form.gateway,
             domain: form.domain,
             lease_time,
-            preserved_options,
+            preserved_options: Vec::new(),
             reservations: None,
+            reservation_identifiers: default_reservation_identifiers(),
         })?);
         Ok(())
     })
@@ -200,6 +196,8 @@ pub async fn update_subnet(
             .find(|s| s["id"].as_u64() == Some(subnet_id as u64))
             .ok_or("subnet not found")?;
         let preserved_options = preserved_subnet_options(entry);
+        let reservations = compatible_reservations_for_subnet(entry, &form.subnet)?;
+        let reservation_identifiers = reservation_identifiers_for_subnet(entry, &reservations);
         apply_subnet_value(
             entry,
             SubnetValue {
@@ -211,7 +209,8 @@ pub async fn update_subnet(
                 domain: form.domain,
                 lease_time,
                 preserved_options,
-                reservations: None,
+                reservations: Some(reservations),
+                reservation_identifiers,
             },
         )?;
         Ok(())
@@ -673,6 +672,7 @@ struct SubnetValue {
     lease_time: u32,
     preserved_options: Vec<Value>,
     reservations: Option<Vec<Value>>,
+    reservation_identifiers: Vec<Value>,
 }
 
 fn build_subnet_value(input: SubnetValue) -> Result<Value, &'static str> {
@@ -704,9 +704,14 @@ fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'sta
     );
     entry.insert("valid-lifetime".to_string(), json!(input.lease_time));
     entry.insert("max-valid-lifetime".to_string(), json!(max_valid_lifetime));
+    let reservation_identifiers = if input.reservation_identifiers.is_empty() {
+        default_reservation_identifiers()
+    } else {
+        input.reservation_identifiers
+    };
     entry.insert(
         "host-reservation-identifiers".to_string(),
-        json!(["hw-address"]),
+        Value::Array(reservation_identifiers),
     );
     entry.remove("default-lease-time");
     entry.remove("max-lease-time");
@@ -806,6 +811,72 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
             .and_then(|v| v.as_u64())
             .unwrap_or(86400) as u32,
         domain: opt("domain-name", 15),
+    }
+}
+
+fn compatible_reservations_for_subnet(
+    subnet: &Value,
+    cidr: &str,
+) -> Result<Vec<Value>, &'static str> {
+    let (network, prefix_len) = parse_cidr(cidr).ok_or("invalid subnet")?;
+    Ok(subnet
+        .get("reservations")
+        .and_then(|value| value.as_array())
+        .map(|reservations| {
+            reservations
+                .iter()
+                .filter(|reservation| {
+                    reservation
+                        .get("ip-address")
+                        .and_then(|value| value.as_str())
+                        .and_then(parse_ipv4)
+                        .map(|ip| ipv4_in_cidr(network, prefix_len, ip))
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn default_reservation_identifiers() -> Vec<Value> {
+    vec![json!("hw-address")]
+}
+
+fn reservation_identifiers_for_subnet(subnet: &Value, reservations: &[Value]) -> Vec<Value> {
+    let mut identifiers = subnet
+        .get("host-reservation-identifiers")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for (field, identifier) in [
+        ("hw-address", "hw-address"),
+        ("duid", "duid"),
+        ("client-id", "client-id"),
+        ("circuit-id", "circuit-id"),
+    ] {
+        if reservations
+            .iter()
+            .any(|reservation| reservation.get(field).is_some())
+        {
+            push_identifier_once(&mut identifiers, identifier);
+        }
+    }
+
+    if identifiers.is_empty() {
+        default_reservation_identifiers()
+    } else {
+        identifiers
+    }
+}
+
+fn push_identifier_once(identifiers: &mut Vec<Value>, identifier: &str) {
+    if !identifiers
+        .iter()
+        .any(|value| value.as_str() == Some(identifier))
+    {
+        identifiers.push(json!(identifier));
     }
 }
 
@@ -1090,6 +1161,7 @@ mod tests {
             lease_time: 3600,
             preserved_options: Vec::new(),
             reservations: Some(reservations.clone()),
+            reservation_identifiers: default_reservation_identifiers(),
         })
         .expect("subnet value");
 
@@ -1140,6 +1212,7 @@ mod tests {
                 lease_time: 7200,
                 preserved_options,
                 reservations: None,
+                reservation_identifiers: default_reservation_identifiers(),
             },
         )
         .expect("apply subnet value");
@@ -1190,5 +1263,75 @@ mod tests {
 
         assert_eq!(parsed.gateway, "10.0.0.1");
         assert_eq!(parsed.domain, "lan.example");
+    }
+
+    #[test]
+    fn build_subnet_value_does_not_inherit_unmanaged_options_from_other_subnets() {
+        let subnet = build_subnet_value(SubnetValue {
+            id: 4,
+            subnet: "10.0.2.0/24".to_string(),
+            pool_start: "10.0.2.10".to_string(),
+            pool_end: "10.0.2.200".to_string(),
+            gateway: "10.0.2.1".to_string(),
+            domain: "new.lan".to_string(),
+            lease_time: 3600,
+            preserved_options: Vec::new(),
+            reservations: None,
+            reservation_identifiers: default_reservation_identifiers(),
+        })
+        .expect("subnet value");
+
+        let options = subnet["option-data"].as_array().expect("option-data array");
+        assert_eq!(options.len(), 3);
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1"));
+        assert!(!options.iter().any(|option| option["name"] == "ntp-servers"));
+    }
+
+    #[test]
+    fn compatible_reservations_drop_addresses_outside_new_subnet() {
+        let subnet = json!({
+            "reservations": [
+                {"hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.0.2.50"},
+                {"hw-address": "11:22:33:44:55:66", "ip-address": "10.0.3.50"},
+                {"client-id": "01:02:03"}
+            ]
+        });
+
+        let reservations =
+            compatible_reservations_for_subnet(&subnet, "10.0.2.0/24").expect("reservations");
+
+        assert_eq!(reservations.len(), 2);
+        assert!(reservations
+            .iter()
+            .any(|reservation| reservation["ip-address"] == "10.0.2.50"));
+        assert!(!reservations
+            .iter()
+            .any(|reservation| reservation["ip-address"] == "10.0.3.50"));
+        assert!(reservations
+            .iter()
+            .any(|reservation| reservation["client-id"] == "01:02:03"));
+    }
+
+    #[test]
+    fn reservation_identifiers_keep_existing_and_present_reservation_types() {
+        let subnet = json!({
+            "host-reservation-identifiers": ["client-id"],
+        });
+        let reservations = vec![
+            json!({"hw-address": "aa:bb:cc:dd:ee:ff"}),
+            json!({"duid": "00:01:00:01"}),
+        ];
+
+        let identifiers = reservation_identifiers_for_subnet(&subnet, &reservations);
+
+        assert_eq!(identifiers[0], "client-id");
+        assert!(identifiers
+            .iter()
+            .any(|identifier| identifier.as_str() == Some("hw-address")));
+        assert!(identifiers
+            .iter()
+            .any(|identifier| identifier.as_str() == Some("duid")));
     }
 }
