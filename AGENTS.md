@@ -28,6 +28,9 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Use local Bash tools such as `rg` for text searches; do not rely on vague manual inspection when a deterministic search is possible.
 - Do not add Python scripts, Python dependencies, or another runtime language to the project without explicit maintainer approval.
 - Project-facing text must be in English.
+- Take the big Picture
+- Think big.
+  - Always look at the bigger picture. Do not only consider the change itself. Consider its dependencies, its impact, and what may happen as a result.
 
 ## Required Validation
 
