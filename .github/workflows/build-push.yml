@@ -38,6 +38,7 @@ jobs:
           DDNS_TSIG_KEY: ci-ddns-tsig-key
           IP_SSL: 127.0.0.2
           IP_STANDARD: 127.0.0.1
+          ALLOW_INSECURE_UI: "true"
           KEA_CTRL_TOKEN: ci-kea-token
           NATS_CONSUMER: ci-secondary
           NATS_LOCAL_TOKEN: ci-nats-local-token
