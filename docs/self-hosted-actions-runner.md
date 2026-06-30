@@ -8,6 +8,10 @@ The repository workflows are configured to run the build, container checks and C
 
 Register at least one runner with the `lancache` label before enabling the workflows. The runner user must be able to run Docker builds and the few package-install commands used by the checks.
 
+The workflow also builds and publishes `ghcr.io/wiki-mod/lancache-ng/build-tools`.
+That image is used by local developer checks and is intentionally based on
+`rust:latest`; production service images remain separate.
+
 ## Debian runner packages
 
 On a Debian runner, install the baseline tools used by the workflows:
