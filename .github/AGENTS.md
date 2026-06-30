@@ -4,6 +4,14 @@
 
 All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**.
 
+## Issue And PR Tracking
+
+- Issue descriptions must include the correct links to related pull requests, issues, or parent tracking threads when those relationships are known.
+- Pull requests must reference their tracking issue in the PR body whenever possible.
+- Use closing keywords such as `Fixes #123` or `Closes #123` only when merging the PR should close the issue.
+- Use non-closing references such as `Refs #123` for parent trackers, design discussions, drafts, or partial follow-up work.
+- Do not leave known issue/PR relationships only in chat history; capture them in GitHub so review, merge, and cleanup decisions stay traceable.
+
 ## Project Language
 
 This project is written in **Rust**. Shell scripts are permitted for entrypoints and automation.
