@@ -1655,7 +1655,7 @@ NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
 # DNS reader role for secondary DNS containers (generated, do not change)
 NATS_DNS_READER_USER=${NATS_DNS_READER_USER}
 NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}
-# Token for setup-secondary.sh — anyone who knows this can register a secondary
+# Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────

@@ -49,6 +49,9 @@ async fn main() {
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://nats:4222".to_string());
     let nats_user = env::var("NATS_USER").ok();
     let nats_password = env::var("NATS_PASSWORD").ok();
+    let nats_token = env::var("NATS_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
     let nats_consumer = match env::var("NATS_CONSUMER") {
         Ok(val) => val,
         Err(_) => {
@@ -74,6 +77,8 @@ async fn main() {
 
     if let (Some(user), Some(password)) = (nats_user, nats_password) {
         opts = opts.user_and_password(user, password);
+    } else if let Some(token) = nats_token {
+        opts = opts.token(token);
     }
 
     let client = match opts.connect(&nats_url).await {

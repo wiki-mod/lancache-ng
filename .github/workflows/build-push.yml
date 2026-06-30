@@ -45,7 +45,6 @@ jobs:
           NATS_DNS_READER_USER: ci-nats-dns-reader
           NATS_DNS_WRITER_PASSWORD: ci-nats-dns-writer-password
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
-          NATS_LOCAL_TOKEN: ci-nats-local-token
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui

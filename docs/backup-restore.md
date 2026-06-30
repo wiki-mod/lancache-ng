@@ -77,7 +77,7 @@ Test restores periodically on a spare host or VM:
 
 ## Secret and CA handling
 
-Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `NATS_LOCAL_TOKEN`, `SECONDARY_REGISTRATION_TOKEN`, optional Admin UI credentials, and possibly `certs/ca.key`. Store backups off-host and encrypt them when they leave the server.
+Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_DNS_READER_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`, optional Admin UI credentials, and possibly `certs/ca.key`. Store backups off-host and encrypt them when they leave the server.
 
 Treat `certs/ca.key` as highly sensitive. Anyone with that private key can issue certificates trusted by SSL-mode clients. Distribute `ca.crt` to clients, but never distribute `ca.key`. If the CA key is exposed, generate a new CA, remove the old CA from clients, install the new `ca.crt`, and restart the proxy stack.
 
