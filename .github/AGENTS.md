@@ -12,6 +12,16 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Use non-closing references such as `Refs #123` for parent trackers, design discussions, drafts, or partial follow-up work.
 - Do not leave known issue/PR relationships only in chat history; capture them in GitHub so review, merge, and cleanup decisions stay traceable.
 
+## Setup, Update, And Migration Semantics
+
+- Setup, update, and migration logic must be idempotent: running the same operation repeatedly must not rotate existing secrets, overwrite local configuration, or create new side effects unless the user explicitly requested that change.
+- Setup, update, and migration logic must converge old or incomplete installations toward the current expected state.
+- Missing required configuration values should be generated when safe or rejected with a clear fail-closed error when they require user input.
+- Existing non-empty local values must be preserved by default.
+- Known placeholders such as `CHANGE_ME_*` are not valid runtime values and must be replaced or rejected before dependent services start.
+- Validation must happen before container restart, image pull, or runtime mutation when a failed validation would leave the installation in a worse state.
+- Re-running `setup.sh update` after a successful update should report no destructive changes and should not rewrite stable local files unnecessarily.
+
 ## Project Language
 
 This project is written in **Rust**. Shell scripts are permitted for entrypoints and automation.
