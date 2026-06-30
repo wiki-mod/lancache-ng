@@ -9,8 +9,6 @@ services:
   proxy:
     container_name: lancache-proxy
     image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
-    build:
-      context: ../../services/proxy
     env_file:
       - ../../config/prod/proxy.env
     environment:
@@ -43,8 +41,6 @@ services:
   dns-standard:
     container_name: lancache-dns-standard
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
-    build:
-      context: ../../services/dns
     env_file:
       - ../../config/prod/dns-standard.env
     environment:
@@ -82,8 +78,6 @@ services:
   dns-ssl:
     container_name: lancache-dns-ssl
     image: ghcr.io/wiki-mod/lancache-ng/dns:latest
-    build:
-      context: ../../services/dns
     env_file:
       - ../../config/prod/dns-ssl.env
     environment:
@@ -139,8 +133,6 @@ services:
 
   watchdog:
     image: ghcr.io/wiki-mod/lancache-ng/watchdog:latest
-    build:
-      context: ../../services/watchdog
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
@@ -164,8 +156,6 @@ services:
   dhcp:
     container_name: lancache-dhcp
     image: ghcr.io/wiki-mod/lancache-ng/dhcp:latest
-    build:
-      context: ../../services/dhcp
     env_file:
       - ../../config/prod/dhcp.env
     environment:
@@ -209,8 +199,6 @@ services:
   dhcp-proxy:
     container_name: lancache-dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:latest
-    build:
-      context: ../../services/dhcp-proxy
     env_file:
       - ../../config/prod/dhcp-proxy.env
     network_mode: host
@@ -314,8 +302,6 @@ services:
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     image: ghcr.io/wiki-mod/lancache-ng/ui:latest
-    build:
-      context: ../../services/ui
     volumes:
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt

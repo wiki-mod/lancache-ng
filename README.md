@@ -495,11 +495,12 @@ services/proxy/cdn-ssl-domains.txt
 Use `cdn-domains.txt` for DNS based cache routing.  
 Use `cdn-ssl-domains.txt` for SSL mode certificate coverage.
 
-After manual file changes, rebuild and restart:
+After manual file changes in a repository-based setup, restart the affected
+services so they reload the mounted files:
 
 ```bash
 cd /opt/lancache-ng
-docker compose up --build -d
+docker compose restart dns-standard dns-ssl proxy
 ```
 
 Only add domains you understand.  
@@ -608,7 +609,8 @@ mkdir -p /srv/lancache/kea
 Start the stack:
 
 ```bash
-docker compose -f deploy/prod/docker-compose.yml up -d --build
+docker compose -f deploy/prod/docker-compose.yml pull
+docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
 Check status:
