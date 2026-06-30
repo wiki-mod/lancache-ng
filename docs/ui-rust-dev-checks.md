@@ -11,7 +11,10 @@ ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 
 That image is intentionally based on `rust:latest` for developer and CI
 validation tooling, then it preinstalls and smoke-tests `rustfmt`, `clippy`,
-`sccache`, `cargo-audit`, `shellcheck`, and the required `PATH`.
+`sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `distcc`, `distcc-pump`,
+DNS/setup fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and
+`envsubst`, and the required `PATH`. Trivy image scanning remains part of the
+workflow container-scan path rather than this local Rust check image.
 
 Run from the repository root:
 

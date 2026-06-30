@@ -10,7 +10,11 @@ Register at least one runner with the `lancache` label before enabling the workf
 
 The workflow also builds and publishes `ghcr.io/wiki-mod/lancache-ng/build-tools`.
 That image is used by local developer checks and is intentionally based on
-`rust:latest`; production service images remain separate.
+`rust:latest`. It carries project validation tools such as Rustfmt, Clippy,
+ShellCheck, Actionlint, Cargo Audit, sccache, distcc, distcc-pump, and
+DNS/setup/template fixture tools. Trivy image scanning remains a workflow
+capability, not a tool bundled into the image. Production service images remain
+separate.
 
 ## Debian runner packages
 
