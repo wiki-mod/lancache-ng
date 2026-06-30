@@ -928,7 +928,8 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling latest images"
-    docker compose pull || print_warn "Pull partially failed — continuing with cached images"
+    docker compose pull \
+        || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
     validate_compose_config "$install_dir"
 
@@ -1797,7 +1798,8 @@ ask "Start now? [Y/n]" "Y"
 # ── 12. Starting stack ───────────────────────────────────────────────────────
 print_step "Pulling images"
 cd "$INSTALL_DIR"
-docker compose pull || print_warn "Pull partially failed — continuing with cached images"
+docker compose pull \
+    || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
 print_step "Starting stack"
 docker compose up -d
