@@ -77,6 +77,10 @@ RUN set -euo pipefail; \
       procps \
       python3 \
       rsync; \
+    # Base and tool packages can receive security fixes after the upstream
+    # rust:latest image was published. Apply Debian upgrades before patching
+    # distcc-pump so package updates cannot overwrite the warning fix below.
+    apt-get upgrade -y; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     chown _apt:root "${distcc_pump_tmp}"; \
@@ -97,13 +101,6 @@ RUN set -euo pipefail; \
     python3 -Werror::SyntaxWarning -m py_compile "${distcc_pump_parser}"; \
     dpkg --configure distcc-pump; \
     python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server; \
-    rm -rf /var/lib/apt/lists/*
-
-# Base and tool packages can receive security fixes after the upstream
-# rust:latest image was published. Apply Debian upgrades after all APT installs.
-RUN set -euo pipefail; \
-    apt-get update; \
-    apt-get upgrade -y; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -euo pipefail; \
