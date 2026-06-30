@@ -359,6 +359,8 @@ async fn kea_config_modify<F>(
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
 {
+    let _guard = state.kea_config_lock.lock().await;
+
     let resp = kea_post(
         state,
         &json!({"command": "config-get", "service": ["dhcp4"]}),
@@ -721,13 +723,7 @@ fn build_subnet_options(
     gateway: String,
     domain: String,
 ) -> Vec<Value> {
-    preserved_options.retain(|option| {
-        option
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(|name| !is_ui_managed_subnet_option(name))
-            .unwrap_or(true)
-    });
+    preserved_options.retain(|option| !is_ui_managed_subnet_option(option));
 
     preserved_options.push(json!({"name": "routers", "data": gateway}));
     preserved_options.push(json!({"name": "domain-name", "data": domain}));
@@ -742,21 +738,26 @@ fn preserved_subnet_options(subnet: &Value) -> Vec<Value> {
         .map(|options| {
             options
                 .iter()
-                .filter(|option| {
-                    option
-                        .get("name")
-                        .and_then(|value| value.as_str())
-                        .map(|name| !is_ui_managed_subnet_option(name))
-                        .unwrap_or(true)
-                })
+                .filter(|option| !is_ui_managed_subnet_option(option))
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn is_ui_managed_subnet_option(name: &str) -> bool {
-    matches!(name, "routers" | "domain-name" | "domain-search")
+fn is_ui_managed_subnet_option(option: &Value) -> bool {
+    let managed_by_name = option
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(|name| matches!(name, "routers" | "domain-name" | "domain-search"))
+        .unwrap_or(false);
+    let managed_by_code = option
+        .get("code")
+        .and_then(|value| value.as_u64())
+        .map(|code| matches!(code, 3 | 15 | 119))
+        .unwrap_or(false);
+
+    managed_by_name || managed_by_code
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -768,13 +769,15 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
         .unwrap_or("");
     let pool_parts: Vec<&str> = pool.splitn(2, " - ").collect();
 
-    let opt = |name: &str| {
+    let opt = |name: &str, code: u64| {
         subnet
             .get("option-data")
             .and_then(|od| od.as_array())
             .and_then(|arr| {
-                arr.iter()
-                    .find(|o| o.get("name").and_then(|v| v.as_str()) == Some(name))
+                arr.iter().find(|o| {
+                    o.get("name").and_then(|v| v.as_str()) == Some(name)
+                        || o.get("code").and_then(|v| v.as_u64()) == Some(code)
+                })
             })
             .and_then(|o| o.get("data"))
             .and_then(|v| v.as_str())
@@ -797,12 +800,12 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
             .get(1)
             .map(|s| s.trim().to_string())
             .unwrap_or_default(),
-        gateway: opt("routers"),
+        gateway: opt("routers", 3),
         lease_time: subnet
             .get("valid-lifetime")
             .and_then(|v| v.as_u64())
             .unwrap_or(86400) as u32,
-        domain: opt("domain-name"),
+        domain: opt("domain-name", 15),
     }
 }
 
@@ -855,7 +858,24 @@ fn upsert_reservation(
             .map(normalize_mac)
             == Some(normalized_mac.clone())
     }) {
-        *existing = reservation;
+        let existing = existing
+            .as_object_mut()
+            .ok_or("existing reservation not an object")?;
+        existing.insert("hw-address".to_string(), json!(normalized_mac));
+        existing.insert(
+            "ip-address".to_string(),
+            reservation
+                .get("ip-address")
+                .cloned()
+                .ok_or("reservation missing ip-address")?,
+        );
+        existing.insert(
+            "hostname".to_string(),
+            reservation
+                .get("hostname")
+                .cloned()
+                .ok_or("reservation missing hostname")?,
+        );
     } else {
         reservations.push(reservation);
     }
@@ -1011,7 +1031,9 @@ mod tests {
                 {
                     "hw-address": "aa:bb:cc:dd:ee:ff",
                     "ip-address": "10.0.0.50",
-                    "hostname": "old"
+                    "hostname": "old",
+                    "option-data": [{"name": "boot-file-name", "data": "pxelinux.0"}],
+                    "client-classes": ["known"]
                 }
             ]
         });
@@ -1036,6 +1058,8 @@ mod tests {
         assert_eq!(reservations.len(), 1);
         assert_eq!(reservations[0]["ip-address"], "10.0.0.60");
         assert_eq!(reservations[0]["hostname"], "new");
+        assert_eq!(reservations[0]["option-data"][0]["data"], "pxelinux.0");
+        assert_eq!(reservations[0]["client-classes"][0], "known");
 
         {
             let reservations = subnet_reservations_mut(&mut subnet).expect("reservations array");
@@ -1083,10 +1107,13 @@ mod tests {
             "pools": [{"pool": "10.0.0.10 - 10.0.0.200"}],
             "option-data": [
                 {"name": "routers", "data": "10.0.0.1"},
+                {"code": 3, "data": "10.0.0.254"},
                 {"name": "domain-name-servers", "data": "10.0.0.2, 10.0.0.3"},
                 {"name": "ntp-servers", "data": "10.0.0.4"},
                 {"name": "domain-name", "data": "old.lan"},
-                {"name": "domain-search", "data": "old.lan"}
+                {"code": 15, "data": "old-by-code.lan"},
+                {"name": "domain-search", "data": "old.lan"},
+                {"code": 119, "data": "old-search-by-code.lan"}
             ],
             "valid-lifetime": 3600,
             "reservations": [
@@ -1125,6 +1152,9 @@ mod tests {
         assert_eq!(subnet["relay"]["ip-addresses"][0], "10.0.0.1");
 
         let options = subnet["option-data"].as_array().expect("option-data array");
+        assert!(!options.iter().any(|option| option["code"] == 3));
+        assert!(!options.iter().any(|option| option["code"] == 15));
+        assert!(!options.iter().any(|option| option["code"] == 119));
         assert!(options
             .iter()
             .any(|option| option["name"] == "domain-name-servers"
@@ -1141,5 +1171,24 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan"));
+    }
+
+    #[test]
+    fn parse_subnet_entry_reads_managed_options_by_numeric_code() {
+        let subnet = json!({
+            "id": 3,
+            "subnet": "10.0.0.0/24",
+            "pools": [{"pool": "10.0.0.10 - 10.0.0.200"}],
+            "option-data": [
+                {"code": 3, "data": "10.0.0.1"},
+                {"code": 15, "data": "lan.example"}
+            ],
+            "valid-lifetime": 3600
+        });
+
+        let parsed = parse_subnet_entry(&subnet);
+
+        assert_eq!(parsed.gateway, "10.0.0.1");
+        assert_eq!(parsed.domain, "lan.example");
     }
 }
