@@ -259,6 +259,7 @@ pub async fn add_reservation(
             .iter_mut()
             .find(|s| s["id"].as_u64() == Some(form.subnet_id as u64))
             .ok_or("subnet not found")?;
+        ensure_subnet_reservation_identifier(subnet, "hw-address")?;
         let reservations = subnet_reservations_mut(subnet)?;
         upsert_reservation(
             reservations,
@@ -751,6 +752,10 @@ fn preserved_subnet_options(subnet: &Value) -> Vec<Value> {
 }
 
 fn is_ui_managed_subnet_option(option: &Value) -> bool {
+    if !is_dhcp4_option_space(option) {
+        return false;
+    }
+
     let managed_by_name = option
         .get("name")
         .and_then(|value| value.as_str())
@@ -763,6 +768,14 @@ fn is_ui_managed_subnet_option(option: &Value) -> bool {
         .unwrap_or(false);
 
     managed_by_name || managed_by_code
+}
+
+fn is_dhcp4_option_space(option: &Value) -> bool {
+    option
+        .get("space")
+        .and_then(|value| value.as_str())
+        .map(|space| space == "dhcp4")
+        .unwrap_or(true)
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -869,6 +882,25 @@ fn reservation_identifiers_for_subnet(subnet: &Value, reservations: &[Value]) ->
     } else {
         identifiers
     }
+}
+
+fn ensure_subnet_reservation_identifier(
+    subnet: &mut Value,
+    identifier: &str,
+) -> Result<(), &'static str> {
+    let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
+    if !subnet.contains_key("host-reservation-identifiers") {
+        subnet.insert(
+            "host-reservation-identifiers".to_string(),
+            Value::Array(default_reservation_identifiers()),
+        );
+    }
+    let identifiers = subnet
+        .get_mut("host-reservation-identifiers")
+        .and_then(|value| value.as_array_mut())
+        .ok_or("host-reservation-identifiers not an array")?;
+    push_identifier_once(identifiers, identifier);
+    Ok(())
 }
 
 fn push_identifier_once(identifiers: &mut Vec<Value>, identifier: &str) {
@@ -1185,7 +1217,8 @@ mod tests {
                 {"name": "domain-name", "data": "old.lan"},
                 {"code": 15, "data": "old-by-code.lan"},
                 {"name": "domain-search", "data": "old.lan"},
-                {"code": 119, "data": "old-search-by-code.lan"}
+                {"code": 119, "data": "old-search-by-code.lan"},
+                {"space": "vendor-foo", "code": 3, "data": "keep-vendor-route"}
             ],
             "valid-lifetime": 3600,
             "reservations": [
@@ -1225,9 +1258,18 @@ mod tests {
         assert_eq!(subnet["relay"]["ip-addresses"][0], "10.0.0.1");
 
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(!options.iter().any(|option| option["code"] == 3));
-        assert!(!options.iter().any(|option| option["code"] == 15));
-        assert!(!options.iter().any(|option| option["code"] == 119));
+        assert!(!options
+            .iter()
+            .any(|option| option["code"] == 3 && is_dhcp4_option_space(option)));
+        assert!(!options
+            .iter()
+            .any(|option| option["code"] == 15 && is_dhcp4_option_space(option)));
+        assert!(!options
+            .iter()
+            .any(|option| option["code"] == 119 && is_dhcp4_option_space(option)));
+        assert!(options.iter().any(|option| option["space"] == "vendor-foo"
+            && option["code"] == 3
+            && option["data"] == "keep-vendor-route"));
         assert!(options
             .iter()
             .any(|option| option["name"] == "domain-name-servers"
@@ -1333,5 +1375,25 @@ mod tests {
         assert!(identifiers
             .iter()
             .any(|identifier| identifier.as_str() == Some("duid")));
+    }
+
+    #[test]
+    fn ensure_subnet_reservation_identifier_adds_hw_address_for_mac_reservations() {
+        let mut subnet = json!({
+            "host-reservation-identifiers": ["client-id"]
+        });
+
+        ensure_subnet_reservation_identifier(&mut subnet, "hw-address")
+            .expect("reservation identifier");
+
+        let identifiers = subnet["host-reservation-identifiers"]
+            .as_array()
+            .expect("identifiers");
+        assert!(identifiers
+            .iter()
+            .any(|identifier| identifier.as_str() == Some("client-id")));
+        assert!(identifiers
+            .iter()
+            .any(|identifier| identifier.as_str() == Some("hw-address")));
     }
 }
