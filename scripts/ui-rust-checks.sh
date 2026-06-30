@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
 UI_MANIFEST="services/ui/Cargo.toml"
+# Intentional developer/check default: use the freshest Rust toolchain for
+# local validation. This is separate from pinned production service Dockerfiles.
 RUST_IMAGE="rust:latest"
 SCCACHE_VERSION="${SCCACHE_VERSION:-0.16.0}"
 NETWORK_NAME=""
