@@ -149,19 +149,22 @@ pub async fn add_subnet(
             .map(|m| m + 1)
             .unwrap_or(1) as u32;
 
-        subnets.push(json!({
-            "id": next_id,
-            "subnet": form.subnet,
-            "pools": [{"pool": format!("{} - {}", form.pool_start, form.pool_end)}],
-            "option-data": [
-                {"name": "routers", "data": form.gateway},
-                {"name": "domain-name", "data": form.domain},
-                {"name": "domain-search", "data": form.domain}
-            ],
-            "valid-lifetime": lease_time,
-            "max-valid-lifetime": lease_time.checked_mul(2).ok_or("lease_time too large")?,
-            "host-reservation-identifiers": ["hw-address"]
-        }));
+        let preserved_options = subnets
+            .first()
+            .map(preserved_subnet_options)
+            .unwrap_or_default();
+
+        subnets.push(build_subnet_value(SubnetValue {
+            id: next_id,
+            subnet: form.subnet,
+            pool_start: form.pool_start,
+            pool_end: form.pool_end,
+            gateway: form.gateway,
+            domain: form.domain,
+            lease_time,
+            preserved_options,
+            reservations: None,
+        })?);
         Ok(())
     })
     .await
@@ -196,21 +199,21 @@ pub async fn update_subnet(
             .iter_mut()
             .find(|s| s["id"].as_u64() == Some(subnet_id as u64))
             .ok_or("subnet not found")?;
-        let reservations = entry
-            .get("reservations")
-            .and_then(|v| v.as_array())
-            .cloned();
-
-        *entry = build_subnet_value(SubnetValue {
-            id: subnet_id,
-            subnet: form.subnet,
-            pool_start: form.pool_start,
-            pool_end: form.pool_end,
-            gateway: form.gateway,
-            domain: form.domain,
-            lease_time,
-            reservations,
-        })?;
+        let preserved_options = preserved_subnet_options(entry);
+        apply_subnet_value(
+            entry,
+            SubnetValue {
+                id: subnet_id,
+                subnet: form.subnet,
+                pool_start: form.pool_start,
+                pool_end: form.pool_end,
+                gateway: form.gateway,
+                domain: form.domain,
+                lease_time,
+                preserved_options,
+                reservations: None,
+            },
+        )?;
         Ok(())
     })
     .await
@@ -666,31 +669,94 @@ struct SubnetValue {
     gateway: String,
     domain: String,
     lease_time: u32,
+    preserved_options: Vec<Value>,
     reservations: Option<Vec<Value>>,
 }
 
 fn build_subnet_value(input: SubnetValue) -> Result<Value, &'static str> {
-    let mut subnet_value = json!({
-        "id": input.id,
-        "subnet": input.subnet,
-        "pools": [{"pool": format!("{} - {}", input.pool_start, input.pool_end)}],
-        "option-data": [
-            {"name": "routers", "data": input.gateway},
-            {"name": "domain-name", "data": input.domain},
-            {"name": "domain-search", "data": input.domain}
-        ],
-        "valid-lifetime": input.lease_time,
-        "max-valid-lifetime": input.lease_time.checked_mul(2).ok_or("lease_time too large")?,
-        "host-reservation-identifiers": ["hw-address"]
-    });
+    let mut subnet_value = json!({});
+    apply_subnet_value(&mut subnet_value, input)?;
+    Ok(subnet_value)
+}
+
+fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'static str> {
+    let max_valid_lifetime = input
+        .lease_time
+        .checked_mul(2)
+        .ok_or("lease_time too large")?;
+    let entry = entry.as_object_mut().ok_or("subnet not an object")?;
+
+    entry.insert("id".to_string(), json!(input.id));
+    entry.insert("subnet".to_string(), json!(input.subnet));
+    entry.insert(
+        "pools".to_string(),
+        json!([{"pool": format!("{} - {}", input.pool_start, input.pool_end)}]),
+    );
+    entry.insert(
+        "option-data".to_string(),
+        Value::Array(build_subnet_options(
+            input.preserved_options,
+            input.gateway,
+            input.domain,
+        )),
+    );
+    entry.insert("valid-lifetime".to_string(), json!(input.lease_time));
+    entry.insert("max-valid-lifetime".to_string(), json!(max_valid_lifetime));
+    entry.insert(
+        "host-reservation-identifiers".to_string(),
+        json!(["hw-address"]),
+    );
+    entry.remove("default-lease-time");
+    entry.remove("max-lease-time");
 
     if let Some(reservations) = input.reservations {
-        if let Some(map) = subnet_value.as_object_mut() {
-            map.insert("reservations".to_string(), Value::Array(reservations));
-        }
+        entry.insert("reservations".to_string(), Value::Array(reservations));
     }
 
-    Ok(subnet_value)
+    Ok(())
+}
+
+fn build_subnet_options(
+    mut preserved_options: Vec<Value>,
+    gateway: String,
+    domain: String,
+) -> Vec<Value> {
+    preserved_options.retain(|option| {
+        option
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(|name| !is_ui_managed_subnet_option(name))
+            .unwrap_or(true)
+    });
+
+    preserved_options.push(json!({"name": "routers", "data": gateway}));
+    preserved_options.push(json!({"name": "domain-name", "data": domain}));
+    preserved_options.push(json!({"name": "domain-search", "data": domain}));
+    preserved_options
+}
+
+fn preserved_subnet_options(subnet: &Value) -> Vec<Value> {
+    subnet
+        .get("option-data")
+        .and_then(|value| value.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter(|option| {
+                    option
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .map(|name| !is_ui_managed_subnet_option(name))
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_ui_managed_subnet_option(name: &str) -> bool {
+    matches!(name, "routers" | "domain-name" | "domain-search")
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -998,6 +1064,7 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
             domain: "lan.example".to_string(),
             lease_time: 3600,
+            preserved_options: Vec::new(),
             reservations: Some(reservations.clone()),
         })
         .expect("subnet value");
@@ -1006,5 +1073,73 @@ mod tests {
         assert_eq!(subnet["valid-lifetime"], 3600);
         assert_eq!(subnet["max-valid-lifetime"], 7200);
         assert_eq!(subnet["reservations"], Value::Array(reservations));
+    }
+
+    #[test]
+    fn apply_subnet_value_preserves_unmanaged_kea_fields_and_options() {
+        let mut subnet = json!({
+            "id": 3,
+            "subnet": "10.0.0.0/24",
+            "pools": [{"pool": "10.0.0.10 - 10.0.0.200"}],
+            "option-data": [
+                {"name": "routers", "data": "10.0.0.1"},
+                {"name": "domain-name-servers", "data": "10.0.0.2, 10.0.0.3"},
+                {"name": "ntp-servers", "data": "10.0.0.4"},
+                {"name": "domain-name", "data": "old.lan"},
+                {"name": "domain-search", "data": "old.lan"}
+            ],
+            "valid-lifetime": 3600,
+            "reservations": [
+                {
+                    "hw-address": "aa:bb:cc:dd:ee:ff",
+                    "ip-address": "10.0.0.50"
+                }
+            ],
+            "ddns-qualifying-suffix": "lan",
+            "relay": {"ip-addresses": ["10.0.0.1"]}
+        });
+
+        let preserved_options = preserved_subnet_options(&subnet);
+
+        apply_subnet_value(
+            &mut subnet,
+            SubnetValue {
+                id: 3,
+                subnet: "10.0.1.0/24".to_string(),
+                pool_start: "10.0.1.10".to_string(),
+                pool_end: "10.0.1.200".to_string(),
+                gateway: "10.0.1.1".to_string(),
+                domain: "new.lan".to_string(),
+                lease_time: 7200,
+                preserved_options,
+                reservations: None,
+            },
+        )
+        .expect("apply subnet value");
+
+        assert_eq!(subnet["subnet"], "10.0.1.0/24");
+        assert_eq!(subnet["valid-lifetime"], 7200);
+        assert_eq!(subnet["max-valid-lifetime"], 14400);
+        assert_eq!(subnet["reservations"][0]["ip-address"], "10.0.0.50");
+        assert_eq!(subnet["ddns-qualifying-suffix"], "lan");
+        assert_eq!(subnet["relay"]["ip-addresses"][0], "10.0.0.1");
+
+        let options = subnet["option-data"].as_array().expect("option-data array");
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "domain-name-servers"
+                && option["data"] == "10.0.0.2, 10.0.0.3"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.0.4"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan"));
     }
 }
