@@ -1,5 +1,7 @@
 # Repository Governance
 
+This file contains repository-wide agent rules. It applies to all paths in this repository, including `.github/**`, `setup.sh`, `deploy/**`, `config/**`, `scripts/**`, and `services/**`.
+
 ## Language
 
 All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**.
