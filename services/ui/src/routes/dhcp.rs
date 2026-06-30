@@ -793,8 +793,9 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
             .and_then(|od| od.as_array())
             .and_then(|arr| {
                 arr.iter().find(|o| {
-                    o.get("name").and_then(|v| v.as_str()) == Some(name)
-                        || o.get("code").and_then(|v| v.as_u64()) == Some(code)
+                    is_dhcp4_option_space(o)
+                        && (o.get("name").and_then(|v| v.as_str()) == Some(name)
+                            || o.get("code").and_then(|v| v.as_u64()) == Some(code))
                 })
             })
             .and_then(|o| o.get("data"))
@@ -888,11 +889,19 @@ fn ensure_subnet_reservation_identifier(
     subnet: &mut Value,
     identifier: &str,
 ) -> Result<(), &'static str> {
+    let inferred_identifiers = reservation_identifiers_for_subnet(
+        subnet,
+        subnet
+            .get("reservations")
+            .and_then(|value| value.as_array())
+            .map(|reservations| reservations.as_slice())
+            .unwrap_or(&[]),
+    );
     let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
     if !subnet.contains_key("host-reservation-identifiers") {
         subnet.insert(
             "host-reservation-identifiers".to_string(),
-            Value::Array(default_reservation_identifiers()),
+            Value::Array(inferred_identifiers),
         );
     }
     let identifiers = subnet
@@ -1308,6 +1317,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_subnet_entry_ignores_non_dhcp4_matching_option_codes() {
+        let subnet = json!({
+            "id": 3,
+            "subnet": "10.0.0.0/24",
+            "pools": [{"pool": "10.0.0.10 - 10.0.0.200"}],
+            "option-data": [
+                {"space": "vendor-foo", "code": 3, "data": "not-a-router"},
+                {"space": "vendor-foo", "name": "domain-name", "data": "not-a-domain"},
+                {"space": "dhcp4", "code": 3, "data": "10.0.0.1"},
+                {"name": "domain-name", "data": "lan.example"}
+            ],
+            "valid-lifetime": 3600
+        });
+
+        let parsed = parse_subnet_entry(&subnet);
+
+        assert_eq!(parsed.gateway, "10.0.0.1");
+        assert_eq!(parsed.domain, "lan.example");
+    }
+
+    #[test]
     fn build_subnet_value_does_not_inherit_unmanaged_options_from_other_subnets() {
         let subnet = build_subnet_value(SubnetValue {
             id: 4,
@@ -1395,5 +1425,28 @@ mod tests {
         assert!(identifiers
             .iter()
             .any(|identifier| identifier.as_str() == Some("hw-address")));
+    }
+
+    #[test]
+    fn ensure_subnet_reservation_identifier_preserves_implicit_identifiers() {
+        let mut subnet = json!({
+            "reservations": [
+                {"client-id": "01:02:03", "ip-address": "10.0.0.50"},
+                {"duid": "00:01:00:01", "ip-address": "10.0.0.51"},
+                {"circuit-id": "uplink-1", "ip-address": "10.0.0.52"}
+            ]
+        });
+
+        ensure_subnet_reservation_identifier(&mut subnet, "hw-address")
+            .expect("reservation identifier");
+
+        let identifiers = subnet["host-reservation-identifiers"]
+            .as_array()
+            .expect("identifiers");
+        for expected in ["client-id", "duid", "circuit-id", "hw-address"] {
+            assert!(identifiers
+                .iter()
+                .any(|identifier| identifier.as_str() == Some(expected)));
+        }
     }
 }
