@@ -5,6 +5,8 @@ queries:
   - uses: security-and-quality
 
 paths:
+  - .github/actions
+  - .github/workflows
   - services/dns/nats-subscriber/src
   - services/ui/src
 
