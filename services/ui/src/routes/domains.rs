@@ -4,9 +4,11 @@ use axum::response::{Html, Redirect};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
 
 #[derive(Deserialize)]
@@ -69,17 +71,19 @@ pub async fn add_dns(
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    let domain = form.domain.trim().to_lowercase();
-    if is_valid_domain(&domain) {
-        let wrote = {
-            let _guard = state.file_lock.lock().expect("file lock poisoned");
-            append_domain(&state.config.cdn_domains_file, &domain)
-        };
-        if let Err(e) = wrote {
-            tracing::error!("Failed to write dns domain: {}", e);
-        } else {
-            flush_recursor_cache(&state).await;
-        }
+    let Some(domain) = normalize_domain_entry(&form.domain) else {
+        tracing::warn!(domain = %form.domain, "Rejected invalid dns domain");
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    };
+
+    let wrote = {
+        let _guard = state.file_lock.lock().expect("file lock poisoned");
+        append_domain(&state.config.cdn_domains_file, &domain)
+    };
+    if let Err(e) = wrote {
+        tracing::error!("Failed to write dns domain: {}", e);
+    } else {
+        flush_recursor_cache(&state).await;
     }
     Ok(Redirect::to("/domains"))
 }
@@ -89,7 +93,11 @@ pub async fn remove_dns(
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    let domain = form.domain.trim().to_string();
+    let Some(domain) = normalize_domain_delete_entry(&form.domain) else {
+        tracing::warn!(domain = %form.domain, "Rejected invalid dns domain delete");
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    };
+
     let removed = {
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         remove_domain(&state.config.cdn_domains_file, &domain)
@@ -107,17 +115,19 @@ pub async fn add_ssl(
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    let domain = form.domain.trim().to_lowercase();
-    if is_valid_domain(&domain) {
-        let wrote = {
-            let _guard = state.file_lock.lock().expect("file lock poisoned");
-            append_domain(&state.config.ssl_domains_file, &domain)
-        };
-        if let Err(e) = wrote {
-            tracing::error!("Failed to write ssl domain: {}", e);
-        } else {
-            restart_ssl(&state).await;
-        }
+    let Some(domain) = normalize_domain_entry(&form.domain) else {
+        tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain");
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    };
+
+    let wrote = {
+        let _guard = state.file_lock.lock().expect("file lock poisoned");
+        append_domain(&state.config.ssl_domains_file, &domain)
+    };
+    if let Err(e) = wrote {
+        tracing::error!("Failed to write ssl domain: {}", e);
+    } else {
+        restart_ssl(&state).await;
     }
     Ok(Redirect::to("/domains"))
 }
@@ -127,7 +137,11 @@ pub async fn remove_ssl(
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    let domain = form.domain.trim().to_string();
+    let Some(domain) = normalize_domain_delete_entry(&form.domain) else {
+        tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain delete");
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    };
+
     let removed = {
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         remove_domain(&state.config.ssl_domains_file, &domain)
@@ -291,6 +305,7 @@ async fn restart_ssl(state: &AppState) {
 
 const MIN_TTL: u32 = 1;
 const MAX_TTL: u32 = u32::MAX;
+const LINUX_ERRNO_EBUSY: i32 = 16;
 
 fn normalize_record_type(record_type: &str) -> Option<&'static str> {
     match record_type.trim().to_ascii_uppercase().as_str() {
@@ -428,16 +443,42 @@ fn validate_lan_record(
     valid_content.then(|| (record_type, content.to_string()))
 }
 
+#[cfg(test)]
 fn is_valid_domain(domain: &str) -> bool {
-    !domain.is_empty()
-        && domain.len() <= 253
-        && domain
+    normalize_domain_entry(domain).is_some()
+}
+
+fn normalize_domain_entry(domain: &str) -> Option<String> {
+    let normalized = domain.trim().to_lowercase();
+    let normalized = normalized.strip_prefix('.').unwrap_or(&normalized);
+
+    (!normalized.is_empty()
+        && normalized.len() <= 253
+        && normalized.split('.').count() >= 2
+        && normalized.split('.').all(is_valid_domain_label))
+    .then(|| normalized.to_string())
+}
+
+fn normalize_domain_delete_entry(domain: &str) -> Option<String> {
+    let trimmed = domain.trim();
+    if let Some(normalized) = normalize_domain_entry(trimmed) {
+        return Some(normalized);
+    }
+
+    // Delete must still clean up malformed legacy/manual entries rendered by
+    // read_domain_file(); additions stay strictly validated.
+    (!trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.chars().any(char::is_control))
+        .then(|| trimmed.to_string())
+}
+
+fn is_valid_domain_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
-        && !domain.starts_with('-')
-        && !domain.ends_with('-')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn read_domain_file(path: &str) -> Vec<String> {
@@ -453,16 +494,29 @@ fn read_domain_file(path: &str) -> Vec<String> {
 }
 
 fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
-    let existing = read_domain_file(path);
-    if existing.iter().any(|d| d == domain) {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
+    if content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(normalize_domain_entry)
+        .any(|line| line == domain)
+    {
         return Ok(());
     }
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    writeln!(file, "{}", domain)?;
-    Ok(())
+
+    let mut new_content = content;
+    if !new_content.is_empty() && !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    new_content.push_str(domain);
+    new_content.push('\n');
+    write_domain_file_atomic(path, &new_content)
 }
 
 fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
@@ -477,7 +531,7 @@ fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
     let new = content
         .lines()
         .filter(|line| {
-            let keep = line.trim() != domain;
+            let keep = !line_matches_domain_delete(line, domain);
             if !keep {
                 removed = true;
             }
@@ -492,9 +546,60 @@ fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
         } else {
             new
         };
-        fs::write(path, new)?;
+        write_domain_file_atomic(path, &new)?;
     }
 
+    Ok(())
+}
+
+fn line_matches_domain_delete(line: &str, domain: &str) -> bool {
+    let trimmed = line.trim();
+    normalize_domain_entry(trimmed).as_deref() == Some(domain)
+        || trimmed.eq_ignore_ascii_case(domain)
+}
+
+fn write_domain_file_atomic(path: &str, content: &str) -> anyhow::Result<()> {
+    let path = Path::new(path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing parent directory"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("domains");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow::anyhow!(err))?
+        .as_nanos();
+    let tmp_path = parent.join(format!(".{file_name}.{stamp}.tmp"));
+
+    fs::write(&tmp_path, content)?;
+    if let Ok(metadata) = fs::metadata(path) {
+        fs::set_permissions(&tmp_path, metadata.permissions())?;
+    }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let bind_mount_replace_error = is_bind_mount_replace_error(&err);
+        let _ = fs::remove_file(&tmp_path);
+        if bind_mount_replace_error {
+            return write_domain_file_in_place(path, content);
+        }
+        return Err(err.into());
+    }
+
+    Ok(())
+}
+
+fn is_bind_mount_replace_error(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(LINUX_ERRNO_EBUSY)
+}
+
+fn write_domain_file_in_place(path: &Path, content: &str) -> anyhow::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -542,6 +647,7 @@ fn normalize_lan_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn validates_supported_lan_record_edge_cases() {
@@ -597,5 +703,113 @@ mod tests {
         assert!(is_valid_lan_name_for_delete("_sip._tcp.lan."));
         assert!(is_valid_lan_name_for_delete("*.dev.lan."));
         assert!(is_valid_lan_name_for_delete("lan."));
+    }
+
+    #[test]
+    fn accepts_domain_entries_with_optional_wildcard_marker() {
+        assert!(is_valid_domain("steamcontent.com"));
+        assert!(is_valid_domain("cdn1.sub.example.com"));
+        assert!(is_valid_domain(".steamcontent.com"));
+        assert!(is_valid_domain(".download.nvidia.com"));
+        assert_eq!(
+            normalize_domain_entry(".SteamContent.COM").as_deref(),
+            Some("steamcontent.com")
+        );
+
+        assert!(!is_valid_domain("localhost"));
+        assert!(!is_valid_domain("."));
+        assert!(!is_valid_domain("..example.com"));
+        assert!(!is_valid_domain(".bad..example.com"));
+        assert!(!is_valid_domain("example.com."));
+        assert!(!is_valid_domain("bad..example.com"));
+        assert!(!is_valid_domain("-bad.example.com"));
+        assert!(!is_valid_domain("bad-.example.com"));
+        assert!(!is_valid_domain("bad_label.example.com"));
+        assert!(!is_valid_domain(&format!("{}.example.com", "a".repeat(64))));
+    }
+
+    #[test]
+    fn append_and_remove_domain_use_atomic_rewrites() {
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, "# comment\nexample.com\n\n").unwrap();
+
+        append_domain(file.to_str().unwrap(), "steamcontent.com").unwrap();
+        let after_append = fs::read_to_string(&file).unwrap();
+        assert!(after_append.contains("# comment"));
+        assert!(after_append.contains("example.com"));
+        assert!(after_append.contains("steamcontent.com"));
+
+        remove_domain(file.to_str().unwrap(), "example.com").unwrap();
+        let after_remove = fs::read_to_string(&file).unwrap();
+        assert!(after_remove.contains("# comment"));
+        assert!(!after_remove.contains("example.com\n"));
+        assert!(after_remove.contains("steamcontent.com"));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn remove_domain_can_cleanup_malformed_existing_entries() {
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-malformed-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, "# comment\nbad..example.com\nsteamcontent.com\n").unwrap();
+
+        let delete_value = normalize_domain_delete_entry("bad..example.com").unwrap();
+        remove_domain(file.to_str().unwrap(), &delete_value).unwrap();
+
+        let after_remove = fs::read_to_string(&file).unwrap();
+        assert!(after_remove.contains("# comment"));
+        assert!(!after_remove.contains("bad..example.com"));
+        assert!(after_remove.contains("steamcontent.com"));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn bind_mount_replace_errors_use_in_place_fallback() {
+        assert!(is_bind_mount_replace_error(
+            &std::io::Error::from_raw_os_error(LINUX_ERRNO_EBUSY)
+        ));
+        assert!(!is_bind_mount_replace_error(&std::io::Error::from(
+            ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
+    fn in_place_rewrite_truncates_and_replaces_file_content() {
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-in-place-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, "old.example.com\nsecond.example.com\n").unwrap();
+
+        write_domain_file_in_place(&file, "new.example.com\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "new.example.com\n".to_string()
+        );
+
+        fs::remove_dir_all(&base).unwrap();
     }
 }
