@@ -80,7 +80,8 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 ## Coding Patterns
 
-- **Docker builds**: production/service Dockerfiles use multi-stage builds with pinned `rust:slim` builder images. Do not use `rust:latest` or Debian-based builder images for production/service Dockerfiles. Local developer helper scripts may default to `rust:latest` when the image is explicitly overrideable.
+- **Docker builds**: production/service Dockerfiles use multi-stage builds with pinned `rust:slim` builder images. Do not use `rust:latest` or Debian-based builder images for production/service Dockerfiles. Local developer helper scripts and the repository build-tools image intentionally use `rust:latest` by default when the image is explicitly overrideable; this keeps developer validation tooling current while remaining separate from production service image pinning.
+- **Build-tools image**: `tools/build-tools/Dockerfile` intentionally uses `rust:latest`, then installs and smoke-tests required tools such as `rustfmt`, `clippy`, `sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `distcc`, `distcc-pump`, and DNS/setup/template fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and `envsubst`. It must explicitly set and verify `PATH`, especially `/usr/local/cargo/bin`, to avoid false `command not found` failures. CodeQL, Trivy image scanning, and Docker Engine/Compose remain GitHub workflow and runner capabilities, not tools bundled into this image.
 - **TLS in Rust**: use `reqwest` with `default-features = false, features = ["rustls-tls"]`. Never add `openssl-sys` as a dependency — `rust:slim` has no OpenSSL headers.
 - **sccache**: controlled by `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`) and the `SCCACHE_REDIS_URL` GitHub Actions secret. Never hardcode a Redis URL.
 - **Cache key**: nginx uses `$host$uri` (not `$request_uri`) — CDN query-string signatures must not bust the cache.

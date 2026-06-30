@@ -4,13 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
 UI_MANIFEST="services/ui/Cargo.toml"
-RUST_IMAGE="rust:latest"
+# Intentional developer/check default: use the repository build-tools image.
+# That image is based on rust:latest and preinstalls rustfmt, clippy, sccache,
+# and PATH smoke tests. This is separate from pinned production Dockerfiles.
+RUST_IMAGE="${RUST_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
 SCCACHE_VERSION="${SCCACHE_VERSION:-0.16.0}"
 NETWORK_NAME=""
 REDIS_CONTAINER=""
 REDIS_URL="${SCCACHE_REDIS_URL:-}"
 REDIS_URL_EXPLICIT=0
-RUN_FMT_CHECK=0
+RUN_FMT_CHECK=1
+RUN_CHECK=1
+RUN_CLIPPY=1
 RUN_TEST=1
 RUN_BUILD=1
 ENABLE_SCCACHE=0
@@ -24,9 +29,13 @@ Run local Docker-based Rust checks for the Admin UI without requiring host rustc
 
 Options:
   --manifest <path>         Cargo manifest path (default: services/ui/Cargo.toml)
-  --rust-image <image>      Rust Docker image to use (default: rust:latest)
-  --fmt                     Also run cargo fmt --all -- --check
-  --no-fmt                  Keep cargo fmt disabled (default)
+  --rust-image <image>      Rust Docker image to use (default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest)
+  --fmt                     Run cargo fmt --all -- --check (default)
+  --no-fmt                  Skip cargo fmt
+  --check                   Run cargo check (default)
+  --no-check                Skip cargo check
+  --clippy                  Run cargo clippy -- -D warnings (default)
+  --no-clippy               Skip cargo clippy
   --no-test                 Skip cargo test
   --no-build                Skip cargo build --locked --release
   --sccache                 Enable sccache for rustc invocation
@@ -36,6 +45,7 @@ Options:
 
 Examples:
   $0
+  $0 --rust-image rust:latest
   SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 $0 --sccache
   $0 --with-redis --sccache
 EOF
@@ -81,6 +91,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-fmt)
       RUN_FMT_CHECK=0
+      shift
+      ;;
+    --check)
+      RUN_CHECK=1
+      shift
+      ;;
+    --no-check)
+      RUN_CHECK=0
+      shift
+      ;;
+    --clippy)
+      RUN_CLIPPY=1
+      shift
+      ;;
+    --no-clippy)
+      RUN_CLIPPY=0
       shift
       ;;
     --no-test)
@@ -132,7 +158,7 @@ if [[ ! -f "${UI_MANIFEST_ABS}" ]]; then
   fail "Cannot find manifest at ${UI_MANIFEST}"
 fi
 
-if [[ ${RUN_FMT_CHECK} -eq 0 && ${RUN_TEST} -eq 0 && ${RUN_BUILD} -eq 0 ]]; then
+if [[ ${RUN_FMT_CHECK} -eq 0 && ${RUN_CHECK} -eq 0 && ${RUN_CLIPPY} -eq 0 && ${RUN_TEST} -eq 0 && ${RUN_BUILD} -eq 0 ]]; then
   fail "No checks selected. Enable at least one with --no- flags removed"
 fi
 
@@ -195,21 +221,42 @@ fi
 CONTAINER_CMD=$'set -euo pipefail\n'
 if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
   CONTAINER_CMD+=$'if ! command -v sccache >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+="  cargo install --locked sccache --version ${SCCACHE_VERSION} >/dev/null\n"
+  CONTAINER_CMD+="  cargo install sccache --version ${SCCACHE_VERSION} >/dev/null"$'\n'
   CONTAINER_CMD+=$'fi\n'
 fi
+CONTAINER_CMD+=$'cargo --version\n'
+CONTAINER_CMD+=$'rustc --version\n'
+
 if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
-  CONTAINER_CMD+=$'if command -v rustup >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'  rustup component add rustfmt >/dev/null\n'
-  CONTAINER_CMD+=$'elif ! command -v rustfmt >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'  echo "rustfmt is missing in the selected Rust image. Use an image with rustfmt or rustup." >&2\n'
-  CONTAINER_CMD+=$'  exit 1\n'
+  CONTAINER_CMD+=$'if ! cargo fmt --version >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+=$'  if command -v rustup >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+=$'    rustup component add rustfmt >/dev/null\n'
+  CONTAINER_CMD+=$'  else\n'
+  CONTAINER_CMD+=$'    echo "rustfmt is missing in the selected Rust image. Use the build-tools image or an image with rustfmt." >&2\n'
+  CONTAINER_CMD+=$'    exit 1\n'
+  CONTAINER_CMD+=$'  fi\n'
+  CONTAINER_CMD+=$'fi\n'
+fi
+if [[ ${RUN_CLIPPY} -eq 1 ]]; then
+  CONTAINER_CMD+=$'if ! cargo clippy --version >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+=$'  if command -v rustup >/dev/null 2>&1; then\n'
+  CONTAINER_CMD+=$'    rustup component add clippy >/dev/null\n'
+  CONTAINER_CMD+=$'  else\n'
+  CONTAINER_CMD+=$'    echo "clippy is missing in the selected Rust image. Use the build-tools image or an image with clippy." >&2\n'
+  CONTAINER_CMD+=$'    exit 1\n'
+  CONTAINER_CMD+=$'  fi\n'
   CONTAINER_CMD+=$'fi\n'
 fi
 CONTAINER_CMD+=$'\n'
 
 if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
   CONTAINER_CMD+="cargo fmt --all --manifest-path ${UI_MANIFEST} -- --check"$'\n'
+fi
+if [[ ${RUN_CHECK} -eq 1 ]]; then
+  CONTAINER_CMD+="cargo check --locked --manifest-path ${UI_MANIFEST}"$'\n'
+fi
+if [[ ${RUN_CLIPPY} -eq 1 ]]; then
+  CONTAINER_CMD+="cargo clippy --locked --manifest-path ${UI_MANIFEST} -- -D warnings"$'\n'
 fi
 if [[ ${RUN_TEST} -eq 1 ]]; then
   CONTAINER_CMD+="cargo test --locked --manifest-path ${UI_MANIFEST}"$'\n'

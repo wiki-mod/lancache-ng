@@ -8,6 +8,18 @@ The repository workflows are configured to run the build, container checks and C
 
 Register at least one runner with the `lancache` label before enabling the workflows. The runner user must be able to run Docker builds and the few package-install commands used by the checks.
 
+The workflow also builds and publishes `ghcr.io/wiki-mod/lancache-ng/build-tools`.
+That image is used by local developer checks and is intentionally based on
+`rust:latest`. It carries project validation tools such as Rustfmt, Clippy,
+ShellCheck, Actionlint, Cargo Audit, sccache, distcc, distcc-pump, and
+DNS/setup/template fixture tools. Trivy image scanning remains a workflow
+capability, not a tool bundled into the image. Production service images remain
+separate.
+
+The build-tools image does not replace the baseline runner requirements below.
+The GitHub workflows still run Docker, Compose, CodeQL setup, and the current
+Rust CI jobs on self-hosted runners.
+
 ## Debian runner packages
 
 On a Debian runner, install the baseline tools used by the workflows:
