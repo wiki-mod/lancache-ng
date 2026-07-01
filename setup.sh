@@ -950,7 +950,7 @@ resolve_lancache_image_tag() {
 }
 
 migrate_env_for_update() {
-    local install_dir="$1" env_file dhcp_mode
+    local install_dir="$1" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     env_file="$install_dir/.env"
 
@@ -1011,16 +1011,21 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
 
+    dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
     dhcp_mode=${dhcp_mode:-${DHCP_MODE:-}}
     if [[ "${dhcp_mode}" = "1" ]]; then
         dhcp_mode=kea
     elif [[ -z "${dhcp_mode}" ]]; then
-        dhcp_mode="disabled"
+        if [[ "$dhcp_enabled" = "1" ]]; then
+            dhcp_mode="kea"
+        else
+            dhcp_mode="disabled"
+        fi
     fi
 
     if ! is_valid_dhcp_mode "$dhcp_mode"; then
-        if [[ "$(get_env_var DHCP_ENABLED "$env_file")" = "1" ]]; then
+        if [[ "$dhcp_enabled" = "1" ]]; then
             dhcp_mode="kea"
         else
             dhcp_mode="disabled"
@@ -2103,7 +2108,7 @@ fi
 print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
-printf "  dnsmasq-proxy: keep router DHCP, override only DNS options\n"
+printf "  dnsmasq-proxy: experimental proxy-DHCP helper; normal clients usually keep router DNS\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
@@ -2166,6 +2171,12 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     printf "  nftables:           nft add rule inet filter input tcp dport 8000 ip saddr != 172.28.0.0/16 drop\n"
     printf "  ufw:                ufw deny from any to any port 8000\n\n"
 elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
+    print_warn "dnsmasq-proxy uses dnsmasq proxy-DHCP."
+    print_warn "It does not reliably replace DNS options from a normal router DHCP server."
+    print_warn "Use Kea mode if LanCache must control normal client DNS settings."
+    confirm "Continue with experimental dnsmasq-proxy mode? [y/N]" "N" \
+        || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or disabled."
+
     ask "DHCP subnet start for dnsmasq-proxy" "10.0.0.0"
     while true; do
         DHCP_SUBNET_START="$REPLY"
@@ -2175,14 +2186,14 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     done
 
     while true; do
-        ask "Primary DNS server sent by LanCache" "$DHCP_DNS_PRIMARY"
+        ask "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY"
         DHCP_DNS_PRIMARY="$REPLY"
         is_valid_ipv4 "$DHCP_DNS_PRIMARY" && break
         print_error "Invalid IPv4 address: $DHCP_DNS_PRIMARY"
     done
 
     while true; do
-        ask "Secondary DNS server sent by LanCache" "$DHCP_DNS_SECONDARY"
+        ask "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY"
         DHCP_DNS_SECONDARY="$REPLY"
         is_valid_ipv4 "$DHCP_DNS_SECONDARY" && break
         print_error "Invalid IPv4 address: $DHCP_DNS_SECONDARY"

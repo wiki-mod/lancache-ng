@@ -2,7 +2,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15
 
 LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     dnsmasq \
     gettext \
     && rm -rf /var/lib/apt/lists/*
