@@ -36,7 +36,7 @@ RUN set -eu; \
       '  case "$arg" in' \
       '    *aws-lc-sys*|*aws_lc_sys*)' \
       '      case "$arg" in' \
-      '        *generated*|*out*|*target*/*/build/*|*target/*/build/*) return 0;;' \
+      '        *generated*|*out*|*target*/*/build/*) return 0;;' \
       '      esac' \
       '      ;;' \
       '  esac' \
