@@ -1427,8 +1427,6 @@ fi
 docker compose version >/dev/null 2>&1 \
     || die "Docker Compose plugin still missing after installing Docker requirements."
 
-assert_prebuilt_image_platform_supported
-
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
     if ! command -v git >/dev/null 2>&1; then
