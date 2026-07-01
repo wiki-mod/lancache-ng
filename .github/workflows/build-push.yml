@@ -13,12 +13,10 @@ permissions:
 jobs:
   shellcheck:
     runs-on: [self-hosted, linux, lancache]
+    container:
+      image: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install shellcheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
       - name: Run ShellCheck
         run: find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning
 
@@ -704,6 +702,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, lancache]
+    container:
+      image: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
     permissions:
       contents: write
     steps:
