@@ -6,7 +6,7 @@ The repository workflows are configured to run the build, container checks and C
 - `linux`
 - `lancache`
 
-Register at least one runner with the `lancache` label before enabling the workflows. The runner user must be able to run Docker builds and the few package-install commands used by the checks.
+Register at least one runner with the `lancache` label before enabling the workflows. The runner user must be able to run Docker builds; project validation tools are supplied by the repository build-tools image instead of being installed ad hoc on the runner.
 
 The workflow also builds and publishes `ghcr.io/wiki-mod/lancache-ng/build-tools`.
 That image is used by local developer checks and is intentionally based on
@@ -31,8 +31,8 @@ refreshes weekly, smoke-tests the bundled tools, scans the local image, and then
 publishes `linux/amd64` and `linux/arm64` tags on trusted non-PR refs.
 
 The build-tools image does not replace the baseline runner requirements below.
-The GitHub workflows still run Docker, Compose, CodeQL setup, and the current
-Rust CI jobs on self-hosted runners.
+The GitHub workflows still need a working self-hosted runner, Docker daemon,
+Buildx support, outbound network access, and CodeQL action setup.
 
 ## Debian runner packages
 
@@ -40,7 +40,7 @@ On a Debian runner, install the baseline tools used by the workflows:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl git jq shellcheck sudo util-linux
+sudo apt-get install -y ca-certificates curl git sudo util-linux
 ```
 
 Install Docker Engine and the Compose plugin from Docker's Debian repository, then add the GitHub Actions runner user to the `docker` group:
@@ -71,7 +71,10 @@ sudo ./svc.sh start
 
 ## Local Docker build cache
 
-The build workflow uses a local Buildx cache under `/var/tmp/lancache-ng-buildx-cache` instead of GitHub's `type=gha` cache backend. This keeps Docker layer cache traffic on the self-hosted runner and avoids consuming GitHub Actions cache quota for image builds.
+The build and build-tools workflows use a local Buildx cache under
+`/var/tmp/lancache-ng-buildx-cache` instead of GitHub's `type=gha` cache
+backend. This keeps Docker layer cache traffic on the self-hosted runner and
+avoids consuming GitHub Actions cache quota for image builds.
 
 Create the cache directory once if your runner has restricted `sudo` rules:
 
