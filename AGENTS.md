@@ -22,6 +22,7 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Do not merge, close, or delete repository work unless the maintainer explicitly asks for that exact action.
 - Keep PRs in draft until the branch has passed local validation and known review findings are addressed.
 - Resolve review threads only after the finding was actually fixed or a clear maintainer-approved explanation was posted.
+- Treat review findings as failure classes, not isolated line comments. Before marking a finding fixed, check matching install, update, secondary, release, CI, documentation, and test paths for the same class of issue.
 - Treat warnings as errors for repository work. Do not list a check as successful when it emitted warnings, failed setup, or used a broken fallback.
 - Treat standard failures such as `command not found`, missing files, missing environment variables, permission denied, malformed commands, empty required outputs, and failed tool setup as hard failures.
 - Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.

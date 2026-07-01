@@ -1137,7 +1137,7 @@ cmd_update_ip() {
 cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
-    local nats_url nats_user nats_password consumer_name pdns_api_key
+    local nats_url nats_user nats_password consumer_name pdns_api_key response_image_tag
     local lancache_image_tag
 
     usage_secondary() {
@@ -1220,7 +1220,6 @@ EOF
             || die "--listen-ip must be a valid IPv4 address or 0.0.0.0"
     fi
     assert_prebuilt_image_platform_supported
-    lancache_image_tag=$(resolve_lancache_image_tag)
 
     print_step "Registering secondary"
     response_file=$(mktemp)
@@ -1249,6 +1248,7 @@ EOF
     nats_password=$(echo "$response" | grep -oP '"nats_password"\s*:\s*"\K[^"]*' || true)
     consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || true)
     pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
+    response_image_tag=$(echo "$response" | grep -oP '"image_tag"\s*:\s*"\K[^"]*' || true)
 
     missing_fields=()
     [[ -n "$nats_url" ]] || missing_fields+=("nats_url")
@@ -1259,6 +1259,11 @@ EOF
     if [[ ${#missing_fields[@]} -gt 0 ]]; then
         die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
     fi
+
+    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" ]]; then
+        LANCACHE_IMAGE_TAG="$response_image_tag"
+    fi
+    lancache_image_tag=$(resolve_lancache_image_tag)
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -1397,6 +1402,8 @@ print_step "Checking prerequisites"
 
 [[ "$(id -u)" = "0" ]] \
     || die "This script must be run as root (sudo ./setup.sh)."
+
+assert_prebuilt_image_platform_supported
 
 if ! command -v curl >/dev/null 2>&1; then
     install_curl

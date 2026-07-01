@@ -95,6 +95,47 @@ jobs:
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
 
+          if awk '
+            /^  release:/ { in_release=1; next }
+            in_release && /^  [[:alnum:]_-]+:/ { in_release=0 }
+            in_release && /build-tools:latest/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::Release jobs with write permissions must use the tag-scoped build-tools image, not mutable latest."
+            exit 1
+          fi
+
+          if awk '
+            /if \[ "\$status" = "200" \]/ { in_patch=1 }
+            /elif \[ "\$status" = "404" \]/ { in_patch=0 }
+            in_patch && /(draft[[:space:]]*:[[:space:]]*false|prerelease[[:space:]]*:[[:space:]]*false)/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::Existing release PATCH must preserve draft/prerelease state."
+            exit 1
+          fi
+
+          if awk '
+            /This script must be run as root/ { after_root=1 }
+            after_root && /assert_prebuilt_image_platform_supported/ { guard_seen=1 }
+            after_root && !guard_seen && /(install_docker|systemctl enable --now docker)/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' setup.sh; then
+            echo "::error::Prebuilt platform guard must run before Docker install or daemon startup."
+            exit 1
+          fi
+
+          grep -F 'pub image_tag: String' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must expose image_tag."; exit 1; }
+          grep -F 'image_tag: state.config.lancache_image_tag.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_TAG."; exit 1; }
+          grep -F "response_image_tag=\$(echo \"\$response\"" setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must parse the primary image_tag."; exit 1; }
+          grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/quickstart/docker-compose.yml >/dev/null \
+            || { echo "::error::Quickstart UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
+          grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::Prod UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
+
   dns_rust_quality:
     name: rust-quality (dns/nats-subscriber)
     runs-on: [self-hosted, linux, lancache]
@@ -703,9 +744,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, lancache]
     container:
-      image: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+      image: ghcr.io/${{ github.repository }}/build-tools:${{ github.ref_name }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
+      packages: read
     steps:
       - name: Create or update GitHub release for built images
         shell: bash
@@ -718,8 +763,11 @@ jobs:
           set -euo pipefail
 
           short_sha="${COMMIT_SHA::7}"
+          image_notes_start='<!-- lancache-ng-image-tags:start -->'
+          image_notes_end='<!-- lancache-ng-image-tags:end -->'
           notes_file="$(mktemp)"
           {
+            printf '%s\n' "$image_notes_start"
             printf 'This release source is the exact commit used by CI to build and publish the service images for %s.\n\n' "$TAG_NAME"
             printf 'Commit: %s\n\n' "$COMMIT_SHA"
             printf 'Published image tags:\n\n'
@@ -738,6 +786,7 @@ jobs:
             printf -- '- ghcr.io/%s/dhcp-proxy:sha-%s\n' "$REPOSITORY" "$short_sha"
             printf -- '- ghcr.io/%s/ui:sha-%s\n' "$REPOSITORY" "$short_sha"
             printf -- '- ghcr.io/%s/build-tools:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
           api_url="https://api.github.com/repos/${REPOSITORY}"
@@ -754,10 +803,26 @@ jobs:
 
           if [ "$status" = "200" ]; then
             release_id="$(jq -r '.id' "$response_file")"
+            existing_body="$(jq -r '.body // ""' "$response_file")"
+            updated_body="$(jq -nr \
+              --arg body "$existing_body" \
+              --arg notes "$(cat "$notes_file")" \
+              --arg start "$image_notes_start" \
+              --arg end "$image_notes_end" \
+              '
+              if ($body | contains($start)) and ($body | contains($end)) then
+                ($body | split($start)[0]) as $prefix
+                | ($body | split($end)[1:] | join($end)) as $suffix
+                | $prefix + $notes + $suffix
+              elif ($body | length) > 0 then
+                $body + "\n\n" + $notes
+              else
+                $notes
+              end
+              ')"
             jq -n \
-              --arg name "$TAG_NAME" \
-              --arg body "$(cat "$notes_file")" \
-              '{name:$name, body:$body, draft:false, prerelease:false}' \
+              --arg body "$updated_body" \
+              '{body:$body}' \
               > "$response_file.patch"
             curl -fsS -X PATCH \
               -H "$auth_header" \
