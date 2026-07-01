@@ -71,7 +71,7 @@ pub async fn add_dns(
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    let Some(domain) = normalize_domain_entry(&form.domain) else {
+    let Some(domain) = parse_domain_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid dns domain");
         return Err(axum::http::StatusCode::BAD_REQUEST);
     };
@@ -115,7 +115,7 @@ pub async fn add_ssl(
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
-    let Some(domain) = normalize_domain_entry(&form.domain) else {
+    let Some(domain) = parse_domain_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain");
         return Err(axum::http::StatusCode::BAD_REQUEST);
     };
@@ -448,27 +448,62 @@ fn is_valid_domain(domain: &str) -> bool {
     normalize_domain_entry(domain).is_some()
 }
 
-fn normalize_domain_entry(domain: &str) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DomainSpec {
+    wildcard_only: bool,
+    domain: String,
+}
+
+fn parse_domain_entry(domain: &str) -> Option<DomainSpec> {
     let normalized = domain.trim().to_lowercase();
-    let normalized = normalized.strip_prefix('.').unwrap_or(&normalized);
+    if normalized.is_empty() || normalized == "#" {
+        return None;
+    }
+
+    let (wildcard_only, normalized) = if normalized.starts_with('.') {
+        (true, normalized.strip_prefix('.').unwrap_or(&normalized))
+    } else {
+        (false, normalized.as_str())
+    };
 
     (!normalized.is_empty()
         && normalized.len() <= 253
         && normalized.split('.').count() >= 2
         && normalized.split('.').all(is_valid_domain_label))
-    .then(|| normalized.to_string())
+    .then(|| DomainSpec {
+        wildcard_only,
+        domain: normalized.to_string(),
+    })
 }
 
-fn normalize_domain_delete_entry(domain: &str) -> Option<String> {
+fn normalize_domain_entry(domain: &str) -> Option<String> {
+    parse_domain_entry(domain).map(|entry| entry.domain)
+}
+
+fn normalize_domain_for_storage(domain: &DomainSpec) -> String {
+    if domain.wildcard_only {
+        format!(".{}", domain.domain)
+    } else {
+        domain.domain.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DomainDeleteTarget {
+    Canonical(DomainSpec),
+    Raw(String),
+}
+
+fn normalize_domain_delete_entry(domain: &str) -> Option<DomainDeleteTarget> {
     let trimmed = domain.trim();
-    if let Some(normalized) = normalize_domain_entry(trimmed) {
-        return Some(normalized);
+    if let Some(normalized) = parse_domain_entry(trimmed) {
+        return Some(DomainDeleteTarget::Canonical(normalized));
     }
 
     // Delete must still clean up malformed legacy/manual entries rendered by
     // read_domain_file(); additions stay strictly validated.
     (!trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.chars().any(char::is_control))
-        .then(|| trimmed.to_string())
+        .then(|| DomainDeleteTarget::Raw(trimmed.to_string()))
 }
 
 fn is_valid_domain_label(label: &str) -> bool {
@@ -493,7 +528,7 @@ fn read_domain_file(path: &str) -> Vec<String> {
         .collect()
 }
 
-fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
+fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
@@ -504,22 +539,23 @@ fn append_domain(path: &str, domain: &str) -> anyhow::Result<()> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(normalize_domain_entry)
-        .any(|line| line == domain)
+        .filter_map(parse_domain_entry)
+        .any(|line| line == *domain)
     {
         return Ok(());
     }
 
+    let new_entry = normalize_domain_for_storage(domain);
     let mut new_content = content;
     if !new_content.is_empty() && !new_content.ends_with('\n') {
         new_content.push('\n');
     }
-    new_content.push_str(domain);
+    new_content.push_str(&new_entry);
     new_content.push('\n');
     write_domain_file_atomic(path, &new_content)
 }
 
-fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
+fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let mut removed = false;
     let sep = if content.contains("\r\n") {
@@ -552,10 +588,15 @@ fn remove_domain(path: &str, domain: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn line_matches_domain_delete(line: &str, domain: &str) -> bool {
+fn line_matches_domain_delete(line: &str, domain: &DomainDeleteTarget) -> bool {
     let trimmed = line.trim();
-    normalize_domain_entry(trimmed).as_deref() == Some(domain)
-        || trimmed.eq_ignore_ascii_case(domain)
+    match domain {
+        DomainDeleteTarget::Canonical(target) => {
+            parse_domain_entry(trimmed)
+                .is_some_and(|entry| entry == *target)
+        }
+        DomainDeleteTarget::Raw(raw) => trimmed.eq_ignore_ascii_case(raw),
+    }
 }
 
 fn write_domain_file_atomic(path: &str, content: &str) -> anyhow::Result<()> {
@@ -728,6 +769,13 @@ mod tests {
         assert!(!is_valid_domain(&format!("{}.example.com", "a".repeat(64))));
     }
 
+    fn domain_spec(domain: &str, wildcard_only: bool) -> DomainSpec {
+        DomainSpec {
+            wildcard_only,
+            domain: domain.to_string(),
+        }
+    }
+
     #[test]
     fn append_and_remove_domain_use_atomic_rewrites() {
         let base = std::env::temp_dir().join(format!(
@@ -741,13 +789,17 @@ mod tests {
         let file = base.join("cdn-domains.txt");
         fs::write(&file, "# comment\nexample.com\n\n").unwrap();
 
-        append_domain(file.to_str().unwrap(), "steamcontent.com").unwrap();
+        append_domain(file.to_str().unwrap(), &domain_spec("steamcontent.com", false)).unwrap();
         let after_append = fs::read_to_string(&file).unwrap();
         assert!(after_append.contains("# comment"));
         assert!(after_append.contains("example.com"));
         assert!(after_append.contains("steamcontent.com"));
 
-        remove_domain(file.to_str().unwrap(), "example.com").unwrap();
+        remove_domain(
+            file.to_str().unwrap(),
+            &DomainDeleteTarget::Canonical(domain_spec("example.com", false)),
+        )
+        .unwrap();
         let after_remove = fs::read_to_string(&file).unwrap();
         assert!(after_remove.contains("# comment"));
         assert!(!after_remove.contains("example.com\n"));
@@ -776,6 +828,66 @@ mod tests {
         assert!(after_remove.contains("# comment"));
         assert!(!after_remove.contains("bad..example.com"));
         assert!(after_remove.contains("steamcontent.com"));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn appending_root_and_wildcard_only_domains_keeps_semantics() {
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-root-wildcard-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, ".steamcontent.com\n").unwrap();
+
+        append_domain(file.to_str().unwrap(), &domain_spec("steamcontent.com", false)).unwrap();
+        append_domain(file.to_str().unwrap(), &domain_spec("steamcontent.com", true)).unwrap();
+
+        let after_append = fs::read_to_string(&file).unwrap();
+        assert!(after_append.contains(".steamcontent.com"));
+        assert!(after_append.contains("steamcontent.com"));
+
+        let duplicate = after_append.matches(".steamcontent.com").count();
+        assert_eq!(duplicate, 1);
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn root_and_wildcard_entries_can_be_removed_independently() {
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-remove-root-vs-wildcard-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, ".steamcontent.com\nsteamcontent.com\n").unwrap();
+
+        remove_domain(
+            file.to_str().unwrap(),
+            &DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", true)),
+        )
+        .unwrap();
+        let after_remove_wild = fs::read_to_string(&file).unwrap();
+        assert!(!after_remove_wild.contains(".steamcontent.com"));
+        assert!(after_remove_wild.contains("steamcontent.com"));
+
+        remove_domain(
+            file.to_str().unwrap(),
+            &DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", false)),
+        )
+        .unwrap();
+        let after_remove_root = fs::read_to_string(&file).unwrap();
+        assert!(!after_remove_root.contains("steamcontent.com"));
+        assert!(!after_remove_root.contains(".steamcontent.com"));
 
         fs::remove_dir_all(&base).unwrap();
     }
