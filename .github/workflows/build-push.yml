@@ -135,6 +135,15 @@ jobs:
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
             exit 1
           fi
+          if ! awk '
+            /if ! \( cmd_backup --config "\$install_dir" \); then/ { in_backup_failure=1; next }
+            in_backup_failure && /resume_lancache_convergence_after_update/ { resume_seen=1 }
+            in_backup_failure && /die "Pre-update rollback backup failed/ { die_seen=1; in_backup_failure=0 }
+            END { exit resume_seen && die_seen ? 0 : 1 }
+          ' setup.sh; then
+            echo "::error::setup.sh update must restore the convergence timer when the rollback backup fails before update mutations."
+            exit 1
+          fi
 
           if awk '
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }

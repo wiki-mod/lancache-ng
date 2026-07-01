@@ -1009,7 +1009,10 @@ cmd_update() {
     pause_lancache_convergence_for_update
 
     print_step "Creating pre-update rollback backup"
-    cmd_backup --config "$install_dir"
+    if ! ( cmd_backup --config "$install_dir" ); then
+        resume_lancache_convergence_after_update
+        die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
+    fi
 
     if [[ -d "$install_dir/.git" ]]; then
         print_step "Updating repo"
