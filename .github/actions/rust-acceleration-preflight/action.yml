@@ -55,7 +55,7 @@ runs:
           exit 0
         fi
 
-        docker run --rm --network host \
+        docker run --rm -i --network host \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
@@ -79,23 +79,59 @@ runs:
               fi
             }
 
+            require_sccache_dist_connected() {
+              local status_file="$1"
+              if ! jq -e 'type == "object" and has("SchedulerStatus")' "$status_file" >/dev/null; then
+                echo "[ERROR] sccache-dist did not report a connected scheduler status." >&2
+                cat "$status_file" >&2
+                exit 1
+              fi
+            }
+
+            require_sccache_activity() {
+              local stats_file="$1"
+              local require_cache_write="$2"
+
+              if ! jq -e '(.stats.compile_requests // 0) > 0' "$stats_file" >/dev/null; then
+                echo "[ERROR] sccache did not record the Rust compile request." >&2
+                cat "$stats_file" >&2
+                exit 1
+              fi
+
+              if [ "$require_cache_write" = "1" ] && ! jq -e '(.stats.cache_writes // 0) > 0' "$stats_file" >/dev/null; then
+                echo "[ERROR] Redis-backed sccache did not record a cache write." >&2
+                cat "$stats_file" >&2
+                exit 1
+              fi
+            }
+
             if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
               export SCCACHE_NO_DAEMON=1
               export SCCACHE_REDIS_KEY_PREFIX="lancache-preflight-${LANCACHE_SERVICE:-rust}"
+              require_cache_write=0
               if [ -s /run/lancache/sccache-redis-url ]; then
                 export SCCACHE_REDIS="$(cat /run/lancache/sccache-redis-url)"
+                require_cache_write=1
               fi
               if [ -s /run/lancache/sccache-dist-config ]; then
                 export SCCACHE_CONF=/run/lancache/sccache-dist-config
                 dist_log="$preflight_dir/sccache-dist-status.log"
                 sccache --dist-status >"$dist_log" 2>&1
                 scan_log "$dist_log"
+                require_sccache_dist_connected "$dist_log"
               fi
 
-              printf '%s\n' 'fn main() {}' > "$preflight_dir/main.rs"
+              sccache --zero-stats >/dev/null 2>&1
+              mkdir -p "$preflight_dir/out"
+              printf '%s\n' 'pub fn lancache_accel_preflight() -> u8 { 42 }' > "$preflight_dir/lib.rs"
               rust_log="$preflight_dir/sccache-rustc.log"
-              sccache rustc --crate-name lancache_accel_preflight --crate-type bin "$preflight_dir/main.rs" -o "$preflight_dir/preflight" >"$rust_log" 2>&1
+              sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out" >"$rust_log" 2>&1
+              sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out" >>"$rust_log" 2>&1
               scan_log "$rust_log"
+              stats_log="$preflight_dir/sccache-stats.log"
+              sccache --show-stats --stats-format=json >"$stats_log" 2>&1
+              scan_log "$stats_log"
+              require_sccache_activity "$stats_log" "$require_cache_write"
               echo "[INFO] sccache preflight completed."
             fi
 

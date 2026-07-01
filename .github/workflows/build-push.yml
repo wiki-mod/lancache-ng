@@ -365,9 +365,22 @@ jobs:
             || { echo "::error::External Rust acceleration preflight must receive all generated secret file paths."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'require_sccache_dist_connected' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'require_sccache_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc-pump --startup' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'DISTCC_FALLBACK=0' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must validate sccache, sccache-dist, and distcc paths."; exit 1; }
+          grep -F 'docker run --rm -i --network host' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must keep stdin attached for the container script."; exit 1; }
+          grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must use a cacheable rustc library probe."; exit 1; }
+          if grep -F -- '--crate-type bin' .github/actions/rust-acceleration-preflight/action.yml \
+            || grep -E 'sccache rustc .* -o ' .github/actions/rust-acceleration-preflight/action.yml; then
+            echo "::error::External Rust acceleration preflight must not use non-cacheable binary rustc probes."
+            exit 1
+          fi
           grep -F 'steps.docker-build-jobs.outputs.jobs' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
           grep -F 'build_tools_image:' .github/workflows/build-push.yml >/dev/null \
