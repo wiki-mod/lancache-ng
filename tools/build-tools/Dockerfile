@@ -47,11 +47,11 @@ RUN set -euo pipefail; \
       xz-utils; \
     rm -rf /var/lib/apt/lists/*
 
-# sccache 0.16.0's upstream lockfile currently references yanked crates.
-# Keep the tool version pinned, but let Cargo resolve non-yanked patch deps.
+# Keep sccache source-built and version-pinned. Only Redis and sccache-dist
+# client support are needed for this project's CI acceleration.
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
-    cargo install sccache --version "${SCCACHE_VERSION}" --root /usr/local; \
+    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
       ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \

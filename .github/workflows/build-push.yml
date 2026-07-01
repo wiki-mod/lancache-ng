@@ -309,6 +309,50 @@ jobs:
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
           grep -F -- "--env HOME=/tmp" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable HOME inside the build-tools container."; exit 1; }
+          if grep -RIn 'RUSTC_WRAPPER:[[:space:]]*""' .github/workflows; then
+            echo "::error::Rust CI jobs must not disable RUSTC_WRAPPER directly; use cargo-with-sccache-fallback for controlled fallback."
+            exit 1
+          fi
+          grep -F 'dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}' .github/workflows/build-push.yml .github/workflows/codeql.yml >/dev/null \
+            || { echo "::error::Rust sccache CI setup must wire SCCACHE_DIST_SCHEDULER_URL into configure-rust-sccache."; exit 1; }
+          grep -F 'dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}' .github/workflows/build-push.yml .github/workflows/codeql.yml >/dev/null \
+            || { echo "::error::Rust sccache CI setup must wire SCCACHE_DIST_AUTH_TOKEN into configure-rust-sccache."; exit 1; }
+          grep -F 'sccache_dist_config=' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must pass sccache-dist config through a BuildKit secret."; exit 1; }
+          grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
+          grep -F 'steps.docker-build-jobs.outputs.jobs' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
+          if grep -RInE '^(ARG SCCACHE_DIST_SCHEDULER_URL|ENV CARGO_BUILD_JOBS=)' services/*/Dockerfile; then
+            echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
+            exit 1
+          fi
+          if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh; then
+            echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
+            exit 1
+          fi
+          if grep -RIn 'cargo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh | grep -v -- '--no-default-features --features redis,dist-client'; then
+            echo "::error::sccache source installs must use the minimal Redis plus dist-client feature set."
+            exit 1
+          fi
+          for dockerfile in services/dns/Dockerfile services/ui/Dockerfile; do
+            grep -F -- "--mount=type=secret,id=sccache_dist_config" "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must consume sccache-dist config through a BuildKit secret."; exit 1; }
+            grep -F -- "--mount=type=secret,id=distcc_potential_hosts" "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must consume distcc hosts through a BuildKit secret."; exit 1; }
+            grep -F 'sccache --dist-status' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must smoke-check sccache-dist when configured."; exit 1; }
+            grep -F 'PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must route cc/gcc/c++/g++ through distcc when distcc is enabled."; exit 1; }
+            grep -F 'apt-get download "distcc-pump=$DISTCC_PUMP_PACKAGE_VERSION"' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must unpack the pinned distcc-pump package before patching Debian Python warnings."; exit 1; }
+            grep -F 'python3 -Werror::SyntaxWarning -m py_compile "$distcc_pump_parser"' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must verify the distcc-pump warning patch with SyntaxWarning as an error."; exit 1; }
+            grep -F 'python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must compile-check distcc-pump include_server with warnings as errors."; exit 1; }
+            grep -F 'cargo build -j "$cargo_jobs"' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must use the resolved cargo job count."; exit 1; }
+          done
 
           if awk '
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }
@@ -376,6 +420,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: cargo fmt --check (dns/nats-subscriber)
         run: cargo fmt --manifest-path services/dns/nats-subscriber/Cargo.toml -- --check
       - name: cargo check with warnings denied (dns/nats-subscriber)
@@ -386,9 +432,9 @@ jobs:
           command: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
         timeout-minutes: 15
-        env:
-          RUSTC_WRAPPER: ""
-        run: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
   ui_rust_quality:
     name: rust-quality (ui)
@@ -420,6 +466,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: cargo fmt --check (ui)
         run: cargo fmt --manifest-path services/ui/Cargo.toml -- --check
       - name: cargo check with warnings denied (ui)
@@ -430,9 +478,9 @@ jobs:
           command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
         timeout-minutes: 15
-        env:
-          RUSTC_WRAPPER: ""
-        run: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   dns_test:
     name: test (dns/nats-subscriber)
@@ -464,6 +512,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: test (dns/nats-subscriber)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
@@ -499,6 +549,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: test (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
@@ -545,6 +597,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache-cargo-audit
         with:
@@ -591,6 +645,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache-cargo-audit
         with:
@@ -637,16 +693,49 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Prepare sccache Redis secret file
-        if: matrix.rust == true && github.actor != 'dependabot[bot]'
+      - name: Compute Docker build parallelism
+        id: docker-build-jobs
+        run: |
+          set -euo pipefail
+
+          detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+          jobs=$((detected_cores - 2))
+          if [ "$jobs" -lt 2 ]; then
+            jobs=2
+          fi
+
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+          echo "::notice::Using CARGO_BUILD_JOBS=$jobs from $detected_cores detected cores for Docker builds."
+
+      - name: Prepare Rust build secret files
+        if: >-
+          ${{
+            matrix.rust == true &&
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
         id: sccache-secret
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
           SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
         run: |
           set -euo pipefail
 
           mode="${SCCACHE_REDIS_MODE:-required}"
+          secret_files=()
+
+          toml_escape() {
+            printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+          }
 
           case "$mode" in
             required|optional|off)
@@ -657,39 +746,104 @@ jobs:
               ;;
           esac
 
+          sccache_enabled=1
+          redis_enabled=1
           if [ "$mode" = "off" ]; then
+            sccache_enabled=0
+            redis_enabled=0
             echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
+          fi
+
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$BASE_REPOSITORY" ]; then
+            echo "Skipping Redis-backed sccache for an untrusted fork pull request."
             exit 0
           fi
 
-          if [ -z "$SCCACHE_REDIS_URL" ]; then
-            if [ "$mode" = "optional" ]; then
-              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
-              exit 0
-            fi
-
-            echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image scans so sccache can use Redis."
+          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -z "$SCCACHE_DIST_AUTH_TOKEN" ]; then
+            echo "::error::SCCACHE_DIST_AUTH_TOKEN is required when SCCACHE_DIST_SCHEDULER_URL is set."
             exit 1
           fi
 
+          if [ "$sccache_enabled" = "1" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -n "$SCCACHE_DIST_AUTH_TOKEN" ]; then
+            echo "::error::SCCACHE_DIST_SCHEDULER_URL is required when SCCACHE_DIST_AUTH_TOKEN is set."
+            exit 1
+          fi
+
+          if [ "$sccache_enabled" = "1" ] && [ -z "$SCCACHE_REDIS_URL" ]; then
+            if [ "$mode" = "optional" ]; then
+              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
+              redis_enabled=0
+            else
+              echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image scans so sccache can use Redis."
+              exit 1
+            fi
+          fi
+
           umask 077
-          printf '%s' "$SCCACHE_REDIS_URL" > "${{ runner.temp }}/sccache-redis-url"
-          echo "file=${{ runner.temp }}/sccache-redis-url" >> "$GITHUB_OUTPUT"
+          if [ "$redis_enabled" = "1" ]; then
+            redis_file="${{ runner.temp }}/sccache-redis-url"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+            secret_files+=("sccache_redis_url=$redis_file")
+            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+            dist_config_file="${{ runner.temp }}/sccache-dist-config"
+            {
+              printf '[dist]\n'
+              printf 'scheduler_url = "%s"\n' "$(toml_escape "$SCCACHE_DIST_SCHEDULER_URL")"
+              printf 'toolchains = []\n'
+              printf 'toolchain_cache_size = 5368709120\n'
+              printf '\n[dist.auth]\n'
+              printf 'type = "token"\n'
+              printf 'token = "%s"\n' "$(toml_escape "$SCCACHE_DIST_AUTH_TOKEN")"
+            } > "$dist_config_file"
+            secret_files+=("sccache_dist_config=$dist_config_file")
+            echo "dist-config-file=$dist_config_file" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+            if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
+              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
+              exit 1
+            fi
+
+            distcc_hosts_file="${{ runner.temp }}/distcc-potential-hosts"
+            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
+            secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
+            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "secret-files<<SECRET_FILES"
+            printf '%s\n' "${secret_files[@]}"
+            echo "SECRET_FILES"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build local scan image
         env:
-          SCCACHE_SECRET_FILE: ${{ steps.sccache-secret.outputs.file }}
+          CARGO_BUILD_JOBS: ${{ steps.docker-build-jobs.outputs.jobs }}
+          SCCACHE_REDIS_FILE: ${{ steps.sccache-secret.outputs.redis-file }}
+          SCCACHE_DIST_CONFIG_FILE: ${{ steps.sccache-secret.outputs.dist-config-file }}
+          DISTCC_HOSTS_FILE: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
         run: |
           set -euo pipefail
 
           secret_args=()
-          if [ -n "$SCCACHE_SECRET_FILE" ]; then
-            secret_args+=(--secret "id=sccache_redis_url,src=$SCCACHE_SECRET_FILE")
+          if [ -n "$SCCACHE_REDIS_FILE" ]; then
+            secret_args+=(--secret "id=sccache_redis_url,src=$SCCACHE_REDIS_FILE")
+          fi
+          if [ -n "$SCCACHE_DIST_CONFIG_FILE" ]; then
+            secret_args+=(--secret "id=sccache_dist_config,src=$SCCACHE_DIST_CONFIG_FILE")
+          fi
+          if [ -n "$DISTCC_HOSTS_FILE" ]; then
+            secret_args+=(--secret "id=distcc_potential_hosts,src=$DISTCC_HOSTS_FILE")
           fi
 
           DOCKER_BUILDKIT=1 docker build \
             --pull \
             --platform linux/amd64 \
+            --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} \
             ${{ matrix.context }}
@@ -816,7 +970,21 @@ jobs:
             echo "cache-to=$BUILDX_CACHE_DEST"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Prepare sccache Redis secret file
+      - name: Compute Docker build parallelism
+        id: docker-build-jobs
+        run: |
+          set -euo pipefail
+
+          detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+          jobs=$((detected_cores - 2))
+          if [ "$jobs" -lt 2 ]; then
+            jobs=2
+          fi
+
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+          echo "::notice::Using CARGO_BUILD_JOBS=$jobs from $detected_cores detected cores for Docker builds."
+
+      - name: Prepare Rust build secret files
         if: >-
           ${{
             matrix.rust == true &&
@@ -833,10 +1001,18 @@ jobs:
           BASE_REPOSITORY: ${{ github.repository }}
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
           SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
         run: |
           set -euo pipefail
 
           mode="${SCCACHE_REDIS_MODE:-required}"
+          secret_files=()
+
+          toml_escape() {
+            printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+          }
 
           case "$mode" in
             required|optional|off)
@@ -847,9 +1023,12 @@ jobs:
               ;;
           esac
 
+          sccache_enabled=1
+          redis_enabled=1
           if [ "$mode" = "off" ]; then
+            sccache_enabled=0
+            redis_enabled=0
             echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
-            exit 0
           fi
 
           if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$BASE_REPOSITORY" ]; then
@@ -857,19 +1036,63 @@ jobs:
             exit 0
           fi
 
-          if [ -z "$SCCACHE_REDIS_URL" ]; then
-            if [ "$mode" = "optional" ]; then
-              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
-              exit 0
-            fi
-
-            echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image builds so sccache can use Redis."
+          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -z "$SCCACHE_DIST_AUTH_TOKEN" ]; then
+            echo "::error::SCCACHE_DIST_AUTH_TOKEN is required when SCCACHE_DIST_SCHEDULER_URL is set."
             exit 1
           fi
 
+          if [ "$sccache_enabled" = "1" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -n "$SCCACHE_DIST_AUTH_TOKEN" ]; then
+            echo "::error::SCCACHE_DIST_SCHEDULER_URL is required when SCCACHE_DIST_AUTH_TOKEN is set."
+            exit 1
+          fi
+
+          if [ "$sccache_enabled" = "1" ] && [ -z "$SCCACHE_REDIS_URL" ]; then
+            if [ "$mode" = "optional" ]; then
+              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
+              redis_enabled=0
+            else
+              echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image builds so sccache can use Redis."
+              exit 1
+            fi
+          fi
+
           umask 077
-          printf '%s' "$SCCACHE_REDIS_URL" > "${{ runner.temp }}/sccache-redis-url"
-          echo "secret-files=sccache_redis_url=${{ runner.temp }}/sccache-redis-url" >> "$GITHUB_OUTPUT"
+          if [ "$redis_enabled" = "1" ]; then
+            redis_file="${{ runner.temp }}/sccache-redis-url"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+            secret_files+=("sccache_redis_url=$redis_file")
+          fi
+
+          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+            dist_config_file="${{ runner.temp }}/sccache-dist-config"
+            {
+              printf '[dist]\n'
+              printf 'scheduler_url = "%s"\n' "$(toml_escape "$SCCACHE_DIST_SCHEDULER_URL")"
+              printf 'toolchains = []\n'
+              printf 'toolchain_cache_size = 5368709120\n'
+              printf '\n[dist.auth]\n'
+              printf 'type = "token"\n'
+              printf 'token = "%s"\n' "$(toml_escape "$SCCACHE_DIST_AUTH_TOKEN")"
+            } > "$dist_config_file"
+            secret_files+=("sccache_dist_config=$dist_config_file")
+          fi
+
+          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+            if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
+              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
+              exit 1
+            fi
+
+            distcc_hosts_file="${{ runner.temp }}/distcc-potential-hosts"
+            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
+            secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
+          fi
+
+          {
+            echo "secret-files<<SECRET_FILES"
+            printf '%s\n' "${secret_files[@]}"
+            echo "SECRET_FILES"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         id: build
@@ -880,6 +1103,8 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
+          build-args: |
+            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -897,6 +1122,8 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
+          build-args: |
+            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

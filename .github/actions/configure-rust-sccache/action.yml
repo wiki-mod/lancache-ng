@@ -14,6 +14,18 @@ inputs:
     description: Redis key prefix used by sccache.
     required: false
     default: lancache-ci
+  dist-scheduler-url:
+    description: Optional sccache-dist scheduler URL.
+    required: false
+    default: ""
+  dist-auth-token:
+    description: Optional sccache-dist client auth token.
+    required: false
+    default: ""
+  dist-toolchain-cache-size:
+    description: sccache-dist client toolchain cache size in bytes.
+    required: false
+    default: "5368709120"
 
 runs:
   using: composite
@@ -24,6 +36,9 @@ runs:
         SCCACHE_REDIS_MODE: ${{ inputs.mode }}
         SCCACHE_REDIS_URL: ${{ inputs.redis-url }}
         SCCACHE_REDIS_KEY_PREFIX: ${{ inputs.key-prefix }}
+        SCCACHE_DIST_SCHEDULER_URL: ${{ inputs.dist-scheduler-url }}
+        SCCACHE_DIST_AUTH_TOKEN: ${{ inputs.dist-auth-token }}
+        SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: ${{ inputs.dist-toolchain-cache-size }}
       run: |
         set -euo pipefail
 
@@ -44,34 +59,81 @@ runs:
           exit 0
         fi
 
-        if [ -z "$SCCACHE_REDIS_URL" ]; then
-          if [ "$mode" = "optional" ]; then
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
-            exit 0
-          fi
-
-          echo "::error::SCCACHE_REDIS_URL is required for trusted Rust CI jobs when SCCACHE_REDIS_MODE=required."
+        if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -z "$SCCACHE_DIST_AUTH_TOKEN" ]; then
+          echo "::error::SCCACHE_DIST_AUTH_TOKEN is required when SCCACHE_DIST_SCHEDULER_URL is set."
           exit 1
         fi
 
+        if [ -z "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -n "$SCCACHE_DIST_AUTH_TOKEN" ]; then
+          echo "::error::SCCACHE_DIST_SCHEDULER_URL is required when SCCACHE_DIST_AUTH_TOKEN is set."
+          exit 1
+        fi
+
+        case "$SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE" in
+          ''|*[!0-9]*)
+            echo "::error::dist-toolchain-cache-size must be a positive integer."
+            exit 1
+            ;;
+        esac
+
+        if [ "$SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE" -le 0 ]; then
+          echo "::error::dist-toolchain-cache-size must be greater than zero."
+          exit 1
+        fi
+
+        redis_enabled=1
+        if [ -z "$SCCACHE_REDIS_URL" ]; then
+          if [ "$mode" = "required" ]; then
+            echo "::error::SCCACHE_REDIS_URL is required for trusted Rust CI jobs when SCCACHE_REDIS_MODE=required."
+            exit 1
+          fi
+          redis_enabled=0
+        fi
+
+        if [ "$redis_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "Skipping sccache because Redis is optional but unset and sccache-dist is not configured."
+          exit 0
+        fi
+
         if ! command -v sccache >/dev/null 2>&1; then
-          if [ "$mode" = "optional" ]; then
+          if [ "$mode" = "optional" ] && [ "$redis_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
             echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
             echo "Skipping Redis-backed sccache because no sccache binary is available and SCCACHE_REDIS_MODE=optional."
             exit 0
           fi
 
-          echo "::error::sccache is required on the runner when SCCACHE_REDIS_MODE=required."
+          echo "::error::sccache is required on the runner when Redis-backed sccache or sccache-dist is configured."
           exit 1
         fi
 
+        toml_escape() {
+          printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+
         sccache_config="$(mktemp)"
-        printf '[cache.redis]\nurl = "%s"\n' "$SCCACHE_REDIS_URL" > "$sccache_config"
+        : > "$sccache_config"
+        if [ "$redis_enabled" = "1" ]; then
+          printf '[cache.redis]\nurl = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_URL")" > "$sccache_config"
+        fi
+
+        if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+          {
+            printf '\n[dist]\n'
+            printf 'scheduler_url = "%s"\n' "$(toml_escape "$SCCACHE_DIST_SCHEDULER_URL")"
+            printf 'toolchains = []\n'
+            printf 'toolchain_cache_size = %s\n' "$SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE"
+            printf '\n[dist.auth]\n'
+            printf 'type = "token"\n'
+            printf 'token = "%s"\n' "$(toml_escape "$SCCACHE_DIST_AUTH_TOKEN")"
+          } >> "$sccache_config"
+        fi
 
         {
           echo "RUSTC_WRAPPER=sccache"
-          echo "SCCACHE_REDIS=$SCCACHE_REDIS_URL"
+          if [ "$redis_enabled" = "1" ]; then
+            echo "SCCACHE_REDIS=$SCCACHE_REDIS_URL"
+          fi
           echo "SCCACHE_REDIS_KEY_PREFIX=$SCCACHE_REDIS_KEY_PREFIX"
           echo "SCCACHE_CONF=$sccache_config"
           echo "SCCACHE_NO_DAEMON=1"
@@ -79,3 +141,6 @@ runs:
         } >> "$GITHUB_ENV"
 
         sccache --version
+        if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+          sccache --dist-status
+        fi

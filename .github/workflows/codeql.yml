@@ -64,6 +64,8 @@ jobs:
           mode: ${{ vars.SCCACHE_REDIS_MODE }}
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-codeql-${{ matrix.language }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Initialize CodeQL
         uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
