@@ -16,7 +16,7 @@ pub enum DhcpMode {
 }
 
 impl DhcpMode {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
             Self::Kea => "kea",
@@ -24,7 +24,7 @@ impl DhcpMode {
         }
     }
 
-    fn is_kea(self) -> bool {
+    pub fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
     }
 }

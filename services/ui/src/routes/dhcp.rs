@@ -104,12 +104,15 @@ pub struct RemoveReservationForm {
 
 pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
+    let dhcp_has_kea = state.config.dhcp_mode.is_kea();
     ctx.insert("active_page", "dhcp");
+    ctx.insert("dhcp_mode", &state.config.dhcp_mode.as_str());
+    ctx.insert("dhcp_has_kea", &dhcp_has_kea);
     ctx.insert("csrf_token", &state.csrf_token);
     ctx.insert("dhcp_api_url", &state.config.dhcp_api_url);
     crate::routes::insert_csrf_token(&mut ctx, &state);
 
-    if !state.config.dhcp_api_url.is_empty() {
+    if dhcp_has_kea && !state.config.dhcp_api_url.is_empty() {
         let subnets = fetch_subnets(&state).await.unwrap_or_default();
         let (leases, reservations) =
             tokio::join!(fetch_leases(&state), fetch_all_reservations(&state));
@@ -126,10 +129,19 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     crate::routes::render(&state.templates, "dhcp.html", &ctx, state.config.dev_mode)
 }
 
+fn require_kea_mode(state: &AppState) -> Result<(), StatusCode> {
+    if state.config.dhcp_mode.is_kea() && !state.config.dhcp_api_url.is_empty() {
+        Ok(())
+    } else {
+        Err(StatusCode::CONFLICT)
+    }
+}
+
 pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
@@ -178,6 +190,7 @@ pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
@@ -230,6 +243,7 @@ pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, StatusCode> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
@@ -253,6 +267,7 @@ pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, StatusCode> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(StatusCode::BAD_REQUEST);
@@ -285,6 +300,7 @@ pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, StatusCode> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {

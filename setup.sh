@@ -77,6 +77,44 @@ is_valid_dhcp_mode() {
     esac
 }
 
+compose_profiles_for_runtime() {
+    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}"
+    local profile result="" trimmed
+
+    IFS=',' read -r -a profiles <<< "$existing"
+    for profile in "${profiles[@]}"; do
+        trimmed="${profile#"${profile%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        case "$trimmed" in
+            ""|ssl|dhcp-kea|dhcp-proxy) continue ;;
+        esac
+        case ",$result," in
+            *",$trimmed,"*) ;;
+            *) [[ -n "$result" ]] && result+=","; result+="$trimmed" ;;
+        esac
+    done
+
+    if [[ "$ssl_enabled" = "1" ]]; then
+        case ",$result," in
+            *,ssl,*) ;;
+            *) [[ -n "$result" ]] && result+=","; result+="ssl" ;;
+        esac
+    fi
+
+    case "$dhcp_mode" in
+        kea)
+            [[ -n "$result" ]] && result+=","
+            result+="dhcp-kea"
+            ;;
+        dnsmasq-proxy)
+            [[ -n "$result" ]] && result+=","
+            result+="dhcp-proxy"
+            ;;
+    esac
+
+    printf '%s\n' "$result"
+}
+
 confirm() {
     local prompt="$1" default="${2:-N}"
     ask "$prompt" "$default"
@@ -1009,13 +1047,10 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_DNS_READER_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
-    if ! env_key_exists COMPOSE_PROFILES "$env_file"; then
-        if [[ "$(get_env_var SSL_ENABLED "$env_file")" = "1" ]]; then
-            append_env_key_if_missing COMPOSE_PROFILES "ssl" "$env_file"
-        else
-            append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
-        fi
-    fi
+    append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
+    set_env_key COMPOSE_PROFILES \
+        "$(compose_profiles_for_runtime "$(get_env_var COMPOSE_PROFILES "$env_file")" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
+        "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real
     # password; otherwise the UI is explicitly marked insecure.
@@ -2164,6 +2199,8 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
+
+COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE")"
 
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"

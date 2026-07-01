@@ -273,6 +273,73 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+  # ── DHCP Server (Kea) ─────────────────────────────────────────────────────
+  # Full DHCP mode with Control Agent API. Active only with COMPOSE_PROFILES=dhcp-kea.
+  dhcp:
+    profiles: [dhcp-kea]
+    container_name: lancache-dhcp
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp:${LANCACHE_IMAGE_TAG:-latest}
+    environment:
+      - DHCP_DNS_PRIMARY=${IP_STANDARD}
+      - DHCP_DNS_SECONDARY=${IP_SSL:-${IP_STANDARD}}
+      - DHCP_DNS_SERVER_IP=${IP_STANDARD}
+      - DHCP_DNS_SERVER_IP_SSL=${IP_SSL:-${IP_STANDARD}}
+      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:?DDNS_TSIG_KEY is required}
+      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN:?KEA_CTRL_TOKEN is required}
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - DHCP_SUBNET=${DHCP_SUBNET:-}
+      - DHCP_GATEWAY=${DHCP_GATEWAY:-}
+      - DHCP_RANGE_START=${DHCP_RANGE_START:-}
+      - DHCP_RANGE_END=${DHCP_RANGE_END:-}
+    volumes:
+      - ${KEA_DATA_DIR:-./kea}:/var/lib/kea
+    network_mode: host
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          host="$${KEA_CTRL_HOST:-127.0.0.1}";
+          [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
+          curl -sf -u admin:$${KEA_CTRL_TOKEN}
+          -H 'Content-Type: application/json'
+          -d '{"command":"config-get","service":["dhcp4"]}'
+          "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
+  # ── DHCP Proxy (dnsmasq) ──────────────────────────────────────────────────
+  # Proxy mode keeps an existing router DHCP server and only overrides DNS options.
+  dhcp-proxy:
+    profiles: [dhcp-proxy]
+    container_name: lancache-dhcp-proxy
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
+    environment:
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-10.0.0.0}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL:-${IP_STANDARD}}}
+      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-${IP_STANDARD}}}
+    network_mode: host
+    cap_add:
+      - NET_BIND_SERVICE
+    restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
 
   # ── Admin UI ───────────────────────────────────────────────────────────────
   # UI is LAN-reachable by default for the quickstart workflow. Password protection
@@ -323,8 +390,10 @@ services:
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
-      - DHCP_API_URL=http://dhcp:8000
+      - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - docker-socket-proxy
       - proxy
