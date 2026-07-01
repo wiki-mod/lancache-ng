@@ -17,6 +17,9 @@ permissions:
   contents: read
   security-events: write
 
+env:
+  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})

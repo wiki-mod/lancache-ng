@@ -151,6 +151,10 @@ put `/usr/lib/distcc` first in `PATH`, export `CC=distcc`, `GCC=distcc`,
 `CXX=distcc`, and `GXX=distcc`, then start with
 `eval \`distcc-pump --startup\`` before
 `cargo build` and shut it down after the build with `distcc-pump --shutdown`.
+When the distcc path is attempted, the build logs `[INFO] trying distcc path.`
+and uses `DISTCC_FALLBACK=0` so project logic can explicitly retry once with
+the normal local compiler if distcc is unavailable. Do not add `127.0.0.1` as
+an implicit host.
 Images that install Debian `distcc-pump` patch the package's known invalid
 Python regex escapes before configuration and compile-check the result with
 `SyntaxWarning` treated as an error.
@@ -164,6 +168,10 @@ Important:
 ## Parallel jobs
 
 Parallel CI jobs can reduce wall-clock time, but they also increase load.
+Set the optional `CARGO_BUILD_JOBS` repository variable when the runner farm
+should use a fixed Cargo job count. If it is unset, workflows and Rust service
+Dockerfiles use detected CPU cores minus two, with a minimum of four jobs.
+Invalid configured values fail closed instead of silently falling back.
 
 Watch these host resources:
 

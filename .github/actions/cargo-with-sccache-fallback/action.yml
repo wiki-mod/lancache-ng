@@ -30,17 +30,7 @@ runs:
           unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
         fi
 
-        if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
-          detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
-          cargo_jobs=$((detected_cores - 2))
-          if [ "$cargo_jobs" -lt 2 ]; then
-            cargo_jobs=2
-          fi
-          export CARGO_BUILD_JOBS="$cargo_jobs"
-          echo "::notice::Using CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} from ${detected_cores} detected cores."
-        fi
-
-        validate_timeout() {
+        validate_positive_integer() {
           local name="$1"
           local value="$2"
 
@@ -55,6 +45,26 @@ runs:
             echo "::error::$name must be greater than zero."
             exit 1
           fi
+        }
+
+        if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+          detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+          cargo_jobs=$((detected_cores - 2))
+          if [ "$cargo_jobs" -lt 4 ]; then
+            cargo_jobs=4
+          fi
+          export CARGO_BUILD_JOBS="$cargo_jobs"
+          echo "::notice::Using CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} from ${detected_cores} detected cores."
+        else
+          validate_positive_integer "CARGO_BUILD_JOBS" "$CARGO_BUILD_JOBS"
+          echo "::notice::Using CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} from workflow environment."
+        fi
+
+        validate_timeout() {
+          local name="$1"
+          local value="$2"
+
+          validate_positive_integer "$name" "$value"
         }
 
         validate_timeout "sccache-timeout-seconds" "$SCCACHE_TIMEOUT_SECONDS"

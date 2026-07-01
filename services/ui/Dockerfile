@@ -53,6 +53,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
+    distcc_enabled=0; \
     configure_sccache() { \
       if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
@@ -66,12 +67,36 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
       fi; \
     }; \
+    disable_distcc() { \
+      if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
+      distcc_enabled=0; \
+      trap - EXIT; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_FALLBACK CC GCC CXX GXX; \
+      PATH="$(printf '%s' "$PATH" | sed 's#^/usr/lib/distcc:##; s#:/usr/lib/distcc:##; s#:/usr/lib/distcc$##')"; \
+      export PATH; \
+    }; \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
+        distcc_probe_dir="$(mktemp -d)"; \
         export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
-        export PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc; \
-        eval `distcc-pump --startup`; \
+        echo "[INFO] trying distcc path." >&2; \
+        export PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
+        if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+          rm -rf "$distcc_probe_dir"; \
+          echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
+          return 0; \
+        fi; \
+        eval "$distcc_pump_env"; \
+        distcc_enabled=1; \
         trap 'distcc-pump --shutdown' EXIT; \
+        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
+        if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
+          disable_distcc; \
+          rm -rf "$distcc_probe_dir"; \
+          echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
+          return 0; \
+        fi; \
+        rm -rf "$distcc_probe_dir"; \
       fi; \
     }; \
     resolve_cargo_jobs() { \
@@ -79,17 +104,38 @@ RUN --mount=type=secret,id=sccache_redis_url \
       if [ -z "$jobs" ]; then \
         cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
         jobs=$((cores - 2)); \
-        if [ "$jobs" -lt 2 ]; then jobs=2; fi; \
+        if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
       fi; \
       case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
       if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
       printf '%s\n' "$jobs"; \
     }; \
+    run_cargo_build() { \
+      if [ "${distcc_enabled:-0}" != "1" ]; then cargo build -j "$cargo_jobs" --release --locked; return; fi; \
+      cargo_log="$(mktemp)"; \
+      cargo_status_file="$(mktemp)"; \
+      (cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" > "$cargo_status_file") | tee "$cargo_log"; \
+      cargo_status="$(cat "$cargo_status_file")"; \
+      rm -f "$cargo_status_file"; \
+      if [ "$cargo_status" -eq 0 ]; then \
+        rm -f "$cargo_log"; \
+        return 0; \
+      fi; \
+      disable_distcc; \
+      echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
+      if cargo build -j "$cargo_jobs" --release --locked; then \
+        echo "[INFO] normal local C compiler fallback completed." >&2; \
+        rm -f "$cargo_log"; \
+        return 0; \
+      fi; \
+      rm -f "$cargo_log"; \
+      return 1; \
+    }; \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && cargo build -j "$cargo_jobs" --release --locked 2>&1 \
+    && run_cargo_build \
     && rm -rf src
 
 COPY src ./src
@@ -97,6 +143,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
+    distcc_enabled=0; \
     configure_sccache() { \
       if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
@@ -110,12 +157,36 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
       fi; \
     }; \
+    disable_distcc() { \
+      if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
+      distcc_enabled=0; \
+      trap - EXIT; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_FALLBACK CC GCC CXX GXX; \
+      PATH="$(printf '%s' "$PATH" | sed 's#^/usr/lib/distcc:##; s#:/usr/lib/distcc:##; s#:/usr/lib/distcc$##')"; \
+      export PATH; \
+    }; \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
+        distcc_probe_dir="$(mktemp -d)"; \
         export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
-        export PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc; \
-        eval `distcc-pump --startup`; \
+        echo "[INFO] trying distcc path." >&2; \
+        export PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
+        if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+          rm -rf "$distcc_probe_dir"; \
+          echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
+          return 0; \
+        fi; \
+        eval "$distcc_pump_env"; \
+        distcc_enabled=1; \
         trap 'distcc-pump --shutdown' EXIT; \
+        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
+        if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
+          disable_distcc; \
+          rm -rf "$distcc_probe_dir"; \
+          echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
+          return 0; \
+        fi; \
+        rm -rf "$distcc_probe_dir"; \
       fi; \
     }; \
     resolve_cargo_jobs() { \
@@ -123,17 +194,38 @@ RUN --mount=type=secret,id=sccache_redis_url \
       if [ -z "$jobs" ]; then \
         cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
         jobs=$((cores - 2)); \
-        if [ "$jobs" -lt 2 ]; then jobs=2; fi; \
+        if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
       fi; \
       case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
       if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
       printf '%s\n' "$jobs"; \
     }; \
+    run_cargo_build() { \
+      if [ "${distcc_enabled:-0}" != "1" ]; then cargo build -j "$cargo_jobs" --release --locked; return; fi; \
+      cargo_log="$(mktemp)"; \
+      cargo_status_file="$(mktemp)"; \
+      (cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" > "$cargo_status_file") | tee "$cargo_log"; \
+      cargo_status="$(cat "$cargo_status_file")"; \
+      rm -f "$cargo_status_file"; \
+      if [ "$cargo_status" -eq 0 ]; then \
+        rm -f "$cargo_log"; \
+        return 0; \
+      fi; \
+      disable_distcc; \
+      echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
+      if cargo build -j "$cargo_jobs" --release --locked; then \
+        echo "[INFO] normal local C compiler fallback completed." >&2; \
+        rm -f "$cargo_log"; \
+        return 0; \
+      fi; \
+      rm -f "$cargo_log"; \
+      return 1; \
+    }; \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     touch src/main.rs \
-    && cargo build -j "$cargo_jobs" --release --locked
+    && run_cargo_build
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
