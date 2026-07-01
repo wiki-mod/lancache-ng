@@ -988,9 +988,8 @@ resolve_lancache_image_tag() {
 # install, preserve real operator secrets, replace placeholders, and normalize
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
-    local install_dir="$1" env_file dhcp_enabled dhcp_mode
+    local install_dir="$1" env_file dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
-    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_gateway dhcp_subnet_start ip_standard upstream_dhcp_ip
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -1050,26 +1049,16 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
 
-    compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
-    dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
     dhcp_mode=${dhcp_mode:-${DHCP_MODE:-}}
     if [[ "${dhcp_mode}" = "1" ]]; then
         dhcp_mode=kea
     elif [[ -z "${dhcp_mode}" ]]; then
-        if [[ ",$compose_profiles," = *,dhcp-proxy,* ]]; then
-            dhcp_mode="dnsmasq-proxy"
-        elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
-            dhcp_mode="kea"
-        else
-            dhcp_mode="disabled"
-        fi
+        dhcp_mode="disabled"
     fi
 
     if ! is_valid_dhcp_mode "$dhcp_mode"; then
-        if [[ ",$compose_profiles," = *,dhcp-proxy,* ]]; then
-            dhcp_mode="dnsmasq-proxy"
-        elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
+        if [[ "$(get_env_var DHCP_ENABLED "$env_file")" = "1" ]]; then
             dhcp_mode="kea"
         else
             dhcp_mode="disabled"
@@ -1078,17 +1067,10 @@ migrate_env_for_update() {
 
     append_env_key_if_missing DHCP_MODE "disabled" "$env_file"
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
-    ip_standard=$(get_env_var IP_STANDARD "$env_file")
-    ip_ssl=$(get_env_var IP_SSL "$env_file")
-    dhcp_gateway=$(get_env_var DHCP_GATEWAY "$env_file")
-    dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file")
-    dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
-    dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
-    upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
-    append_env_key_if_missing DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
-    append_env_key_if_missing DHCP_DNS_PRIMARY "${dhcp_dns_primary:-$ip_standard}" "$env_file"
-    append_env_key_if_missing DHCP_DNS_SECONDARY "${dhcp_dns_secondary:-${ip_ssl:-$ip_standard}}" "$env_file"
-    append_env_key_if_missing UPSTREAM_DHCP_IP "${upstream_dhcp_ip:-$dhcp_gateway}" "$env_file"
+    append_env_key_if_missing DHCP_SUBNET_START "10.0.0.0" "$env_file"
+    append_env_key_if_missing DHCP_DNS_PRIMARY "192.168.1.10" "$env_file"
+    append_env_key_if_missing DHCP_DNS_SECONDARY "192.168.1.11" "$env_file"
+    append_env_key_if_missing UPSTREAM_DHCP_IP "192.168.1.1" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -1103,10 +1085,13 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_DNS_READER_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
-    append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
-    set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
-        "$env_file"
+    if ! env_key_exists COMPOSE_PROFILES "$env_file"; then
+        if [[ "$(get_env_var SSL_ENABLED "$env_file")" = "1" ]]; then
+            append_env_key_if_missing COMPOSE_PROFILES "ssl" "$env_file"
+        else
+            append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
+        fi
+    fi
 
     # UI auth stays a user choice. A configured username must have a real
     # password; otherwise the UI is explicitly marked insecure.
@@ -2183,7 +2168,7 @@ fi
 print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
-printf "  dnsmasq-proxy: experimental proxy-DHCP helper; normal clients usually keep router DNS\n"
+printf "  dnsmasq-proxy: keep router DHCP, override only DNS options\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
@@ -2246,12 +2231,6 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     printf "  nftables:           nft add rule inet filter input tcp dport 8000 ip saddr != 172.28.0.0/16 drop\n"
     printf "  ufw:                ufw deny from any to any port 8000\n\n"
 elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
-    print_warn "dnsmasq-proxy uses dnsmasq proxy-DHCP."
-    print_warn "It does not reliably replace DNS options from a normal router DHCP server."
-    print_warn "Use Kea mode if LanCache must control normal client DNS settings."
-    confirm "Continue with experimental dnsmasq-proxy mode? [y/N]" "N" \
-        || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or disabled."
-
     ask "DHCP subnet start for dnsmasq-proxy" "10.0.0.0"
     while true; do
         DHCP_SUBNET_START="$REPLY"
@@ -2261,14 +2240,14 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     done
 
     while true; do
-        ask "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY"
+        ask "Primary DNS server sent by LanCache" "$DHCP_DNS_PRIMARY"
         DHCP_DNS_PRIMARY="$REPLY"
         is_valid_ipv4 "$DHCP_DNS_PRIMARY" && break
         print_error "Invalid IPv4 address: $DHCP_DNS_PRIMARY"
     done
 
     while true; do
-        ask "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY"
+        ask "Secondary DNS server sent by LanCache" "$DHCP_DNS_SECONDARY"
         DHCP_DNS_SECONDARY="$REPLY"
         is_valid_ipv4 "$DHCP_DNS_SECONDARY" && break
         print_error "Invalid IPv4 address: $DHCP_DNS_SECONDARY"
@@ -2285,8 +2264,6 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
-
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE")"
 
 # ── 7. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"

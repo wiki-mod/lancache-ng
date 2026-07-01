@@ -154,8 +154,6 @@ services:
     container_name: lancache-dhcp
     build:
       context: ../../services/dhcp
-    profiles:
-      - dhcp-kea
     env_file:
       - ../../config/dev/dhcp.env
     environment:
@@ -206,10 +204,6 @@ services:
     network_mode: host
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
-      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL:-${IP_STANDARD}}}
-      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-}}
     cap_add:
       - NET_BIND_SERVICE
     profiles:
@@ -373,6 +367,7 @@ services:
       - docker-socket-proxy
       - proxy
       - netdata
+      - dhcp
       - nats
     restart: unless-stopped
 

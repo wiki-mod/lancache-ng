@@ -22,7 +22,7 @@ pub enum DhcpMode {
 }
 
 impl DhcpMode {
-    pub fn as_str(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
             Self::Kea => "kea",
@@ -30,7 +30,7 @@ impl DhcpMode {
         }
     }
 
-    pub fn is_kea(self) -> bool {
+    fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
     }
 }
@@ -277,10 +277,7 @@ fn env_bool(key: &str, default: bool) -> bool {
 }
 
 fn env_dhcp_mode(key: &str, legacy_enabled: bool) -> DhcpMode {
-    let raw = env::var(key)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    let raw = env::var(key).unwrap_or_default().trim().to_ascii_lowercase();
     match raw.as_str() {
         "kea" => DhcpMode::Kea,
         "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
@@ -508,10 +505,7 @@ mod tests {
 
         env::set_var("DHCP_MODE", "dnsmasq-proxy");
         env::remove_var("DHCP_ENABLED");
-        assert!(matches!(
-            Config::from_env().dhcp_mode,
-            DhcpMode::DnsmasqProxy
-        ));
+        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::DnsmasqProxy));
 
         env::set_var("DHCP_MODE", "kea");
         assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Kea));
