@@ -1,18 +1,11 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
-//!
-//! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
-//! conflict checks, and applies guarded DHCP config mutations through the Kea
-//! control-agent with rollback handling for failed persistence.
-
 use crate::docker_client::exec_in_container;
 use crate::AppState;
 use axum::extract::{Form, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, Redirect};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::future::Future;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,74 +15,6 @@ use tera::Context;
 
 const MIN_LEASE_TIME: u32 = 60;
 const MAX_LEASE_TIME: u32 = 604_800; // 7 days
-
-// ─── Error Handling ───
-
-/// Error type for DHCP configuration operations that carries a message
-/// and HTTP status code, suitable for surfacing to HTTP responses.
-#[derive(Debug)]
-pub struct DhcpError {
-    status: StatusCode,
-    message: String,
-}
-
-impl DhcpError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            message: message.into(),
-        }
-    }
-
-    fn config_error(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
-    }
-
-    fn conflict(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, message)
-    }
-}
-
-impl From<StatusCode> for DhcpError {
-    fn from(status: StatusCode) -> Self {
-        Self::new(status, format!("HTTP {}", status.as_u16()))
-    }
-}
-
-impl std::fmt::Display for DhcpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for DhcpError {}
-
-impl IntoResponse for DhcpError {
-    fn into_response(self) -> Response {
-        let body = format!(
-            "<!DOCTYPE html>\n<html>\n<head><title>DHCP Configuration Error</title></head>\n\
-             <body><h1>DHCP Configuration Error</h1>\n<p>{}</p>\n\
-             <p><a href=\"/dhcp\">Return to DHCP settings</a></p>\n</body>\n</html>",
-            html_escape(&self.message)
-        );
-        (self.status, Html(body)).into_response()
-    }
-}
-
-#[derive(Debug)]
-enum KeaWriteOutcome {
-    Success,
-    ConfirmedFailure(String),
-    AmbiguousFailure(String),
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
 
 // ─── Data Structures ───
 
@@ -204,34 +129,27 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     crate::routes::render(&state.templates, "dhcp.html", &ctx, state.config.dev_mode)
 }
 
-fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
-    if kea_api_available(state.config.dhcp_mode, &state.config.dhcp_api_url) {
+fn require_kea_mode(state: &AppState) -> Result<(), StatusCode> {
+    if state.config.dhcp_mode.is_kea() && !state.config.dhcp_api_url.is_empty() {
         Ok(())
     } else {
-        Err(DhcpError::conflict(
-            "DHCP mutations require Kea mode with a configured Kea API URL.",
-        ))
+        Err(StatusCode::CONFLICT)
     }
-}
-
-fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
-    mode.is_kea() && !api_url.is_empty()
 }
 
 pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
-) -> Result<Redirect, DhcpError> {
+) -> Result<Redirect, StatusCode> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
         &form.pool_end,
         &form.gateway,
         &form.lease_time,
-    )
-    .map_err(DhcpError::from)?;
+    )?;
 
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -263,7 +181,7 @@ pub async fn add_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -271,17 +189,16 @@ pub async fn add_subnet(
 pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
-) -> Result<Redirect, DhcpError> {
+) -> Result<Redirect, StatusCode> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
         &form.pool_end,
         &form.gateway,
         &form.lease_time,
-    )
-    .map_err(DhcpError::from)?;
+    )?;
     let subnet_id = form.id;
 
     kea_config_modify(&state, move |config| {
@@ -317,7 +234,7 @@ pub async fn update_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -325,9 +242,9 @@ pub async fn update_subnet(
 pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
-) -> Result<Redirect, DhcpError> {
+) -> Result<Redirect, StatusCode> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -341,7 +258,7 @@ pub async fn remove_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -349,11 +266,11 @@ pub async fn remove_subnet(
 pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
-) -> Result<Redirect, DhcpError> {
+) -> Result<Redirect, StatusCode> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
-        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+        return Err(StatusCode::BAD_REQUEST);
     }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
@@ -375,16 +292,16 @@ pub async fn add_reservation(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Redirect::to("/dhcp"))
 }
 
 pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
-) -> Result<Redirect, DhcpError> {
+) -> Result<Redirect, StatusCode> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
@@ -397,7 +314,7 @@ pub async fn remove_reservation(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -420,17 +337,17 @@ pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Val
 
 // ─── Kea API Core ───
 
-type KeaResponse = Result<Value, Box<dyn std::error::Error + Send + Sync>>;
-type KeaResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-async fn kea_post(state: &AppState, cmd: Value) -> KeaResponse {
+async fn kea_post(
+    state: &AppState,
+    cmd: &Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}/", state.config.dhcp_api_url);
     Ok(state
         .http_client
         .post(&url)
         .header("Content-Type", "application/json")
         .basic_auth("admin", Some(&state.config.dhcp_api_token))
-        .json(&cmd)
+        .json(cmd)
         .send()
         .await?
         .json::<Value>()
@@ -456,29 +373,20 @@ fn kea_result(resp: &Value) -> Result<(), Box<dyn std::error::Error + Send + Syn
 }
 
 // config-get → modify → config-test → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
-// This function implements config rollback logic: if config-write fails after config-set succeeds,
-// it attempts to restore the previous config to maintain consistency between runtime and persisted state.
-async fn kea_config_modify<F>(state: &AppState, modify: F) -> KeaResult
-where
-    F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
-{
-    kea_config_modify_with_post(&state.kea_config_lock, |cmd| kea_post(state, cmd), modify).await
-}
-
-async fn kea_config_modify_with_post<F, P, Fut>(
-    lock: &tokio::sync::Mutex<()>,
-    mut post: P,
+async fn kea_config_modify<F>(
+    state: &AppState,
     modify: F,
-) -> KeaResult
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
-    P: FnMut(Value) -> Fut + Send,
-    Fut: Future<Output = KeaResponse> + Send,
 {
-    let _guard = lock.lock().await;
+    let _guard = state.kea_config_lock.lock().await;
 
-    // Step 1: Fetch current config
-    let resp = post(json!({"command": "config-get", "service": ["dhcp4"]})).await?;
+    let resp = kea_post(
+        state,
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
+    )
+    .await?;
     kea_result(&resp)?;
 
     let mut config = resp
@@ -487,119 +395,30 @@ where
         .cloned()
         .ok_or("config-get: missing arguments")?;
 
-    // Step 2: Save old config for potential rollback
-    let old_config = config.clone();
-
-    // Step 3: Apply modifications
     modify(&mut config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-    // Step 4: Validate new config
-    let test_resp =
-        post(json!({"command": "config-test", "service": ["dhcp4"], "arguments": config.clone()}))
-            .await?;
+    let test_resp = kea_post(
+        state,
+        &json!({"command": "config-test", "service": ["dhcp4"], "arguments": config.clone()}),
+    )
+    .await?;
     kea_result(&test_resp)?;
 
-    // Step 5: Apply new config at runtime
-    let set_resp =
-        post(json!({"command": "config-set", "service": ["dhcp4"], "arguments": config})).await?;
+    let set_resp = kea_post(
+        state,
+        &json!({"command": "config-set", "service": ["dhcp4"], "arguments": config}),
+    )
+    .await?;
     kea_result(&set_resp)?;
 
-    // Step 6: Persist config to disk.
-    match kea_write_config(&mut post).await {
-        KeaWriteOutcome::Success => Ok(()),
-        KeaWriteOutcome::ConfirmedFailure(write_err) => {
-            tracing::warn!(error = %write_err, "DHCP config-write failed; attempting rollback to previous config");
-            rollback_kea_config(&mut post, old_config, &write_err).await
-        }
-        KeaWriteOutcome::AmbiguousFailure(write_err) => {
-            tracing::warn!(
-                error = %write_err,
-                "DHCP config-write outcome could not be confirmed; retrying before rollback"
-            );
-            match kea_write_config(&mut post).await {
-                KeaWriteOutcome::Success => Ok(()),
-                KeaWriteOutcome::ConfirmedFailure(retry_err) => {
-                    let msg = format!(
-                        "Config applied at runtime but the first config-write result was ambiguous, \
-                         and a retry returned a Kea failure. Runtime and persisted config may now differ. \
-                         First error: {}. Retry error: {}",
-                        write_err, retry_err
-                    );
-                    tracing::error!(
-                        error = %msg,
-                        "DHCP config-write retry failed after ambiguous first write; not rolling back blindly"
-                    );
-                    Err(msg.into())
-                }
-                KeaWriteOutcome::AmbiguousFailure(retry_err) => {
-                    let msg = format!(
-                        "Config applied at runtime but config-write could not be confirmed after retry. \
-                         Runtime and persisted config may now differ. First error: {}. Retry error: {}",
-                        write_err, retry_err
-                    );
-                    tracing::error!(error = %msg, "DHCP config-write remained ambiguous after retry");
-                    Err(msg.into())
-                }
-            }
-        }
-    }
-}
+    let write_resp = kea_post(
+        state,
+        &json!({"command": "config-write", "service": ["dhcp4"]}),
+    )
+    .await?;
+    kea_result(&write_resp)?;
 
-async fn kea_write_config<P, Fut>(post: &mut P) -> KeaWriteOutcome
-where
-    P: FnMut(Value) -> Fut + Send,
-    Fut: Future<Output = KeaResponse> + Send,
-{
-    match post(json!({"command": "config-write", "service": ["dhcp4"]})).await {
-        Ok(resp) => match kea_result(&resp) {
-            Ok(_) => KeaWriteOutcome::Success,
-            Err(err) => KeaWriteOutcome::ConfirmedFailure(err.to_string()),
-        },
-        Err(err) => KeaWriteOutcome::AmbiguousFailure(err.to_string()),
-    }
-}
-
-async fn rollback_kea_config<P, Fut>(post: &mut P, old_config: Value, write_err: &str) -> KeaResult
-where
-    P: FnMut(Value) -> Fut + Send,
-    Fut: Future<Output = KeaResponse> + Send,
-{
-    let rollback_result = post(json!({
-        "command": "config-set",
-        "service": ["dhcp4"],
-        "arguments": old_config
-    }))
-    .await;
-
-    match rollback_result {
-        Ok(resp) => match kea_result(&resp) {
-            Ok(_) => {
-                let msg =
-                    "Config change failed to persist and was rolled back; no change was made."
-                        .to_string();
-                tracing::warn!(error = %write_err, "DHCP config rollback succeeded");
-                Err(msg.into())
-            }
-            Err(rollback_err) => {
-                let msg = format!(
-                    "Config applied at runtime but NOT persisted to disk — runtime and persisted config may now differ. \
-                     Write failed: {}. Rollback also failed: {}",
-                    write_err, rollback_err
-                );
-                tracing::error!(error = %msg, "DHCP config rollback failed");
-                Err(msg.into())
-            }
-        },
-        Err(rollback_err) => {
-            let msg = format!(
-                "Config applied at runtime but NOT persisted to disk — runtime and persisted config may now differ. \
-                 Write failed: {}. Rollback request also failed: {}",
-                write_err, rollback_err
-            );
-            tracing::error!(error = %msg, "DHCP config rollback request failed");
-            Err(msg.into())
-        }
-    }
+    Ok(())
 }
 
 // ─── Data Fetchers ───
@@ -609,7 +428,7 @@ async fn fetch_dhcp_config(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resp = kea_post(
         state,
-        json!({"command": "config-get", "service": ["dhcp4"]}),
+        &json!({"command": "config-get", "service": ["dhcp4"]}),
     )
     .await?;
     kea_result(&resp)?;
@@ -659,7 +478,7 @@ async fn fetch_leases(
 ) -> Result<Vec<Lease>, Box<dyn std::error::Error + Send + Sync>> {
     let resp = kea_post(
         state,
-        json!({"command": "lease4-get-all", "service": ["dhcp4"]}),
+        &json!({"command": "lease4-get-all", "service": ["dhcp4"]}),
     )
     .await?;
 
@@ -1214,72 +1033,6 @@ fn remove_reservation_entry(reservations: &mut Vec<Value>, mac: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
-    use std::error::Error;
-    use std::sync::Arc;
-
-    #[derive(Debug)]
-    enum MockStep {
-        Response(Value),
-        Transport(&'static str),
-    }
-
-    async fn run_kea_config_modify_with_steps(
-        steps: Vec<MockStep>,
-        modify: impl FnOnce(&mut Value) -> Result<(), &'static str> + Send,
-    ) -> (Result<(), Box<dyn Error + Send + Sync>>, Vec<Value>) {
-        let calls = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
-        let steps = Arc::new(tokio::sync::Mutex::new(VecDeque::from(steps)));
-        let lock = tokio::sync::Mutex::new(());
-
-        let calls_for_post = Arc::clone(&calls);
-        let steps_for_post = Arc::clone(&steps);
-        let post = move |cmd: Value| {
-            let calls = Arc::clone(&calls_for_post);
-            let steps = Arc::clone(&steps_for_post);
-            async move {
-                calls.lock().await.push(cmd);
-                match steps
-                    .lock()
-                    .await
-                    .pop_front()
-                    .expect("unexpected Kea command")
-                {
-                    MockStep::Response(resp) => Ok(resp),
-                    MockStep::Transport(message) => Err(std::io::Error::other(message).into()),
-                }
-            }
-        };
-
-        let result = kea_config_modify_with_post(&lock, post, modify).await;
-        let calls = calls.lock().await.clone();
-        (result, calls)
-    }
-
-    fn kea_success_response() -> Value {
-        json!([{ "result": 0 }])
-    }
-
-    fn kea_config_get_response(config: Value) -> Value {
-        json!([{ "result": 0, "arguments": config }])
-    }
-
-    #[test]
-    fn kea_mutation_guard_requires_kea_mode_and_api_url() {
-        assert!(kea_api_available(
-            crate::config::DhcpMode::Kea,
-            "http://dhcp:8000"
-        ));
-        assert!(!kea_api_available(crate::config::DhcpMode::Kea, ""));
-        assert!(!kea_api_available(
-            crate::config::DhcpMode::Disabled,
-            "http://dhcp:8000"
-        ));
-        assert!(!kea_api_available(
-            crate::config::DhcpMode::DnsmasqProxy,
-            "http://dhcp:8000"
-        ));
-    }
 
     #[test]
     fn accepts_valid_dhcp_form() {
@@ -1435,297 +1188,6 @@ mod tests {
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
-    }
-
-    #[tokio::test]
-    async fn kea_config_modify_succeeds_without_rollback() {
-        let initial_config = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    }
-                ]
-            }
-        });
-        let expected_modified = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    },
-                    {
-                        "id": 2,
-                        "valid-lifetime": 7200
-                    }
-                ]
-            }
-        });
-
-        let (result, calls) = run_kea_config_modify_with_steps(
-            vec![
-                MockStep::Response(kea_config_get_response(initial_config)),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(kea_success_response()),
-            ],
-            |config| {
-                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
-                let subnets = dhcp4
-                    .get_mut("subnet4")
-                    .ok_or("subnet4 missing")?
-                    .as_array_mut()
-                    .ok_or("subnet4 not an array")?;
-                subnets.push(json!({
-                    "id": 2,
-                    "valid-lifetime": 7200
-                }));
-                Ok(())
-            },
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(calls.len(), 4);
-        assert_eq!(calls[0]["command"], "config-get");
-        assert_eq!(calls[1]["command"], "config-test");
-        assert_eq!(calls[2]["command"], "config-set");
-        assert_eq!(calls[3]["command"], "config-write");
-        assert_eq!(calls[1]["arguments"], expected_modified);
-        assert_eq!(calls[2]["arguments"], expected_modified);
-    }
-
-    #[tokio::test]
-    async fn kea_config_modify_rolls_back_on_confirmed_write_failure() {
-        let initial_config = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    }
-                ]
-            }
-        });
-        let expected_modified = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    },
-                    {
-                        "id": 2,
-                        "valid-lifetime": 7200
-                    }
-                ]
-            }
-        });
-
-        let (result, calls) = run_kea_config_modify_with_steps(
-            vec![
-                MockStep::Response(kea_config_get_response(initial_config.clone())),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(json!([{ "result": 1, "text": "write failed" }])),
-                MockStep::Response(kea_success_response()),
-            ],
-            |config| {
-                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
-                let subnets = dhcp4
-                    .get_mut("subnet4")
-                    .ok_or("subnet4 missing")?
-                    .as_array_mut()
-                    .ok_or("subnet4 not an array")?;
-                subnets.push(json!({
-                    "id": 2,
-                    "valid-lifetime": 7200
-                }));
-                Ok(())
-            },
-        )
-        .await;
-
-        let error = result.expect_err("write failure should return error");
-        let error_message = error.to_string();
-
-        assert!(error_message.contains("rolled back"));
-        assert_eq!(calls.len(), 5);
-        assert_eq!(calls[0]["command"], "config-get");
-        assert_eq!(calls[3]["command"], "config-write");
-        assert_eq!(calls[4]["command"], "config-set");
-        assert_eq!(calls[4]["arguments"], initial_config);
-        assert_eq!(calls[1]["arguments"], expected_modified);
-        assert_eq!(calls[2]["arguments"], expected_modified);
-    }
-
-    #[tokio::test]
-    async fn kea_config_modify_accepts_successful_write_retry_after_ambiguous_failure() {
-        let initial_config = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    }
-                ]
-            }
-        });
-        let expected_modified = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    },
-                    {
-                        "id": 2,
-                        "valid-lifetime": 7200
-                    }
-                ]
-            }
-        });
-
-        let (result, calls) = run_kea_config_modify_with_steps(
-            vec![
-                MockStep::Response(kea_config_get_response(initial_config.clone())),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(kea_success_response()),
-                MockStep::Transport("config-write transport failure"),
-                MockStep::Response(kea_success_response()),
-            ],
-            |config| {
-                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
-                let subnets = dhcp4
-                    .get_mut("subnet4")
-                    .ok_or("subnet4 missing")?
-                    .as_array_mut()
-                    .ok_or("subnet4 not an array")?;
-                subnets.push(json!({
-                    "id": 2,
-                    "valid-lifetime": 7200
-                }));
-                Ok(())
-            },
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(calls.len(), 5);
-        assert_eq!(calls[0]["command"], "config-get");
-        assert_eq!(calls[3]["command"], "config-write");
-        assert_eq!(calls[4]["command"], "config-write");
-        assert!(
-            !calls.iter().any(|cmd| cmd["command"] == "config-set"
-                && cmd.get("arguments") == Some(&initial_config)),
-            "successful write retry should not rollback",
-        );
-        assert_eq!(calls[1]["arguments"], expected_modified);
-        assert_eq!(calls[2]["arguments"], expected_modified);
-    }
-
-    #[tokio::test]
-    async fn kea_config_modify_does_not_rollback_when_write_retry_confirms_failure() {
-        let initial_config = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    }
-                ]
-            }
-        });
-
-        let (result, calls) = run_kea_config_modify_with_steps(
-            vec![
-                MockStep::Response(kea_config_get_response(initial_config.clone())),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(kea_success_response()),
-                MockStep::Transport("config-write transport failure"),
-                MockStep::Response(json!([{ "result": 1, "text": "write failed on retry" }])),
-            ],
-            |config| {
-                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
-                let subnets = dhcp4
-                    .get_mut("subnet4")
-                    .ok_or("subnet4 missing")?
-                    .as_array_mut()
-                    .ok_or("subnet4 not an array")?;
-                subnets.push(json!({
-                    "id": 2,
-                    "valid-lifetime": 7200
-                }));
-                Ok(())
-            },
-        )
-        .await;
-
-        let error = result.expect_err("confirmed retry failure after ambiguous write should error");
-        let error_message = error.to_string();
-
-        assert!(error_message.contains("first config-write result was ambiguous"));
-        assert_eq!(calls.len(), 5);
-        assert_eq!(calls[3]["command"], "config-write");
-        assert_eq!(calls[4]["command"], "config-write");
-        assert!(
-            !calls.iter().any(|cmd| cmd["command"] == "config-set"
-                && cmd.get("arguments") == Some(&initial_config)),
-            "confirmed retry failure after ambiguous first write should not rollback blindly",
-        );
-    }
-
-    #[tokio::test]
-    async fn kea_config_modify_does_not_rollback_on_ambiguous_write_failure() {
-        let initial_config = json!({
-            "Dhcp4": {
-                "subnet4": [
-                    {
-                        "id": 1,
-                        "valid-lifetime": 3600
-                    }
-                ]
-            }
-        });
-
-        let (result, calls) = run_kea_config_modify_with_steps(
-            vec![
-                MockStep::Response(kea_config_get_response(initial_config.clone())),
-                MockStep::Response(kea_success_response()),
-                MockStep::Response(kea_success_response()),
-                MockStep::Transport("config-write transport failure"),
-                MockStep::Transport("config-write transport failure"),
-            ],
-            |config| {
-                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
-                let subnets = dhcp4
-                    .get_mut("subnet4")
-                    .ok_or("subnet4 missing")?
-                    .as_array_mut()
-                    .ok_or("subnet4 not an array")?;
-                subnets.push(json!({
-                    "id": 2,
-                    "valid-lifetime": 7200
-                }));
-                Ok(())
-            },
-        )
-        .await;
-
-        let error = result.expect_err("ambiguous write should return error");
-        let error_message = error.to_string();
-
-        assert!(error_message.contains("could not be confirmed after retry"));
-        assert_eq!(calls.len(), 5);
-        assert_eq!(calls[3]["command"], "config-write");
-        assert_eq!(calls[4]["command"], "config-write");
-        assert!(
-            !calls.iter().any(|cmd| cmd["command"] == "config-set"
-                && cmd.get("arguments") == Some(&initial_config)),
-            "ambiguous write failure should not rollback blindly",
-        );
     }
 
     #[test]
