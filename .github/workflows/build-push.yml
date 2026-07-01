@@ -99,6 +99,45 @@ jobs:
           validate_compose -f deploy/dev/docker-compose.yml
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
+          validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
+
+          missing_required=0
+          while IFS= read -r key; do
+            if ! grep -Eq "^${key}=[^[:space:]]+" deploy/quickstart/.env; then
+              echo "::error::deploy/quickstart/.env must define non-empty ${key} because quickstart compose marks it required."
+              missing_required=1
+            fi
+          done < <(
+            grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' deploy/quickstart/docker-compose.yml \
+              | sed -E 's/^\$\{([^:]+):.*/\1/' \
+              | sort -u
+          )
+          if [[ "$missing_required" = "1" ]]; then
+            exit 1
+          fi
+
+          if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
+            echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
+            exit 1
+          fi
+
+          setup_required_keys=(
+            DDNS_TSIG_KEY
+            KEA_CTRL_TOKEN
+            LANCACHE_IMAGE_TAG
+            NATS_DNS_READER_PASSWORD
+            NATS_DNS_READER_USER
+            NATS_DNS_WRITER_PASSWORD
+            NATS_DNS_WRITER_USER
+            NATS_UI_PASSWORD
+            NATS_UI_USER
+            PDNS_API_KEY
+            SECONDARY_REGISTRATION_TOKEN
+          )
+          for key in "${setup_required_keys[@]}"; do
+            grep -F "$key" setup.sh >/dev/null \
+              || { echo "::error::setup.sh must generate or migrate required runtime key ${key}."; exit 1; }
+          done
 
           if awk '
             /^  release:/ { in_release=1; next }
@@ -134,7 +173,7 @@ jobs:
             /^cmd_update\(\) \{/ { in_update=1; pause_seen=0; next }
             /^# .*debug subcommand/ { in_update=0 }
             in_update && /pause_lancache_convergence_for_update/ { pause_seen=1 }
-            in_update && !pause_seen && /(cmd_backup|migrate_env_for_update|docker compose pull)/ { print FILENAME ":" FNR ":" $0; found=1 }
+            in_update && !pause_seen && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker compose pull|docker compose up)/ { print FILENAME ":" FNR ":" $0; found=1 }
             END { exit found ? 0 : 1 }
           ' setup.sh; then
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
@@ -179,10 +218,10 @@ jobs:
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }
             /^# .*Post-start info/ { in_install=0 }
             in_install && /docker compose pull/ { pull_seen=1 }
-            in_install && /(systemctl enable lancache\.service|systemctl enable lancache-converge\.timer)/ && !pull_seen { print FILENAME ":" FNR ":" $0; found=1 }
+            in_install && /^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+(lancache\.service|lancache-converge\.timer)|docker[[:space:]]+compose[[:space:]]+up[[:space:]]+-d)/ && !pull_seen { print FILENAME ":" FNR ":" $0; found=1 }
             END { exit found ? 0 : 1 }
           ' setup.sh; then
-            echo "::error::setup.sh must not enable lancache systemd units before image pull succeeds."
+            echo "::error::setup.sh must not start or enable lancache services before image pull succeeds."
             exit 1
           fi
 
