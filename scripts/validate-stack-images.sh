@@ -35,15 +35,15 @@ require_name() {
 }
 
 require_manifest_platform() {
-  local name=$1
-  awk -v name="$name" '
+  local name=$1 platform=$2
+  awk -v name="$name" -v platform="$platform" '
     $0 == "  - name: " name { in_image=1; next }
     in_image && /^  - name: / { in_image=0 }
     in_image && /^    platforms:/ { in_platforms=1; next }
-    in_platforms && /^      - linux\/amd64$/ { found=1 }
+    in_platforms && $0 == "      - " platform { found=1 }
     in_platforms && /^    [^ ]/ { in_platforms=0 }
     END { exit found ? 0 : 1 }
-  ' "$manifest" || fail "manifest must declare linux/amd64 platform support for $name"
+  ' "$manifest" || fail "manifest must declare $platform platform support for $name"
 }
 
 require_file "${manifest#$repo_root/}"
@@ -64,12 +64,15 @@ external_names=$(collect_names external)
 runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
-  require_manifest_platform "$image"
+  require_manifest_platform "$image" linux/amd64
+  require_manifest_platform "$image" linux/arm64
 done
 require_name "$tooling_names" build-tools tooling
-require_manifest_platform build-tools
+require_manifest_platform build-tools linux/amd64
+require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
-require_manifest_platform stack
+require_manifest_platform stack linux/amd64
+require_manifest_platform stack linux/arm64
 for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
   require_name "$external_names" "$image" external
 done
@@ -163,6 +166,12 @@ require_grep 'channel_tags\+=\(latest\)' \
 require_grep 'docker buildx imagetools inspect "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* source image before moving a public channel'
+require_grep 'require_platforms\(\)' \
+  .github/workflows/build-push.yml \
+  'promotion must define a platform coverage guard before moving public tags'
+require_grep 'require_platforms "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}"' \
+  .github/workflows/build-push.yml \
+  'promotion must verify every sha-* service image platform before moving public tags'
 require_grep 'rollback_promotions\(\)' \
   .github/workflows/build-push.yml \
   'promotion must attempt rollback if a public channel move fails midway'
@@ -235,9 +244,27 @@ require_grep 'bash scripts/check-stable-external-images.sh' \
 require_grep 'expected_prerelease=' \
   .github/workflows/build-push.yml \
   'release job must derive RC prerelease status from the tag'
-require_grep 'platforms: linux/amd64' \
+require_grep '^  RELEASE_PLATFORMS: linux/amd64,linux/arm64$' \
   .github/workflows/build-push.yml \
-  'build workflow must publish the platform declared by the stack manifest'
+  'build workflow must publish every platform declared by the stack manifest'
+awk '
+  /- name: Set up QEMU/ && !qemu { qemu=NR }
+  /- name: Set up Docker Buildx/ && qemu && !buildx { buildx=NR }
+  END { exit (qemu && buildx && qemu < buildx) ? 0 : 1 }
+' "$repo_root/.github/workflows/build-push.yml" \
+  || fail 'build workflow must set up QEMU before Docker Buildx so arm64 RUN steps can execute'
+require_grep 'awk .*/Platform:.*print \$2' \
+  .github/workflows/build-push.yml \
+  'release workflow must parse docker buildx imagetools platform output'
+require_grep 'is missing required platform' \
+  .github/workflows/build-push.yml \
+  'release workflow must fail closed when a first-party release image misses a required platform'
+require_grep 'cache-dir: /var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}' \
+  .github/workflows/build-push.yml \
+  'container scans must use platform-specific Trivy cache directories'
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack' \
+  .github/workflows/build-push.yml \
+  'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \
   setup.sh \
   'setup must fail closed on unsupported prebuilt-image platforms'

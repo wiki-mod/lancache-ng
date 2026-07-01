@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+  RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
 defaults:
@@ -841,28 +842,84 @@ jobs:
           - service: proxy
             context: services/proxy
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+            platform: linux/amd64
+            platform_tag: amd64
           - service: dns
             context: services/dns
             description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
             rust: true
+            platform: linux/amd64
+            platform_tag: amd64
           - service: watchdog
             context: services/watchdog
             description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+            platform: linux/amd64
+            platform_tag: amd64
           - service: dhcp
             context: services/dhcp
             description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+            platform: linux/amd64
+            platform_tag: amd64
           - service: dhcp-proxy
             context: services/dhcp-proxy
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/amd64
+            platform_tag: amd64
           - service: ui
             context: services/ui
             description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
             rust: true
+            platform: linux/amd64
+            platform_tag: amd64
           - service: build-tools
             context: tools/build-tools
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
+            platform: linux/amd64
+            platform_tag: amd64
+          - service: proxy
+            context: services/proxy
+            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+            platform: linux/arm64
+            platform_tag: arm64
+          - service: dns
+            context: services/dns
+            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
+            rust: true
+            platform: linux/arm64
+            platform_tag: arm64
+          - service: watchdog
+            context: services/watchdog
+            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+            platform: linux/arm64
+            platform_tag: arm64
+          - service: dhcp
+            context: services/dhcp
+            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+            platform: linux/arm64
+            platform_tag: arm64
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
+            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/arm64
+            platform_tag: arm64
+          - service: ui
+            context: services/ui
+            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
+            rust: true
+            platform: linux/arm64
+            platform_tag: arm64
+          - service: build-tools
+            context: tools/build-tools
+            description: Prebuilt lancache-ng CI and developer validation toolchain image.
+            platform: linux/arm64
+            platform_tag: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: ${{ env.RELEASE_PLATFORMS }}
 
       - name: Detect build-tools scan input changes
         id: build-tools-scan-changes
@@ -942,6 +999,7 @@ jobs:
               steps.build-tools-scan-changes.outputs.should-scan == 'true'
             ) &&
             matrix.rust == true &&
+            matrix.platform == 'linux/amd64' &&
             github.actor != 'dependabot[bot]' &&
             (
               github.event_name != 'pull_request' ||
@@ -1077,7 +1135,7 @@ jobs:
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
-          platform: linux/amd64
+          platform: ${{ matrix.platform }}
 
       - name: Build local scan image
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
@@ -1102,12 +1160,12 @@ jobs:
 
           DOCKER_BUILDKIT=1 docker build \
             --pull \
-            --platform linux/amd64 \
+            --platform ${{ matrix.platform }} \
             --network "$RUST_ACCELERATION_NETWORK" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
-            -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} \
+            -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
             ${{ matrix.context }}
       - name: Prepare local Trivy cache
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
@@ -1118,7 +1176,7 @@ jobs:
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }}
+          image-ref: lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -1126,7 +1184,7 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}-${{ matrix.platform_tag }}
           timeout: 10m
           exit-code: "1"
       - name: Remove scan image
@@ -1138,7 +1196,7 @@ jobs:
               steps.build-tools-scan-changes.outputs.should-scan == 'true'
             )
           }}
-        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} || true
+        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
   build:
     needs:
@@ -1253,6 +1311,11 @@ jobs:
             echo "::notice::build-tools image inputs did not change; skipping routine build-tools image rebuild."
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: ${{ env.RELEASE_PLATFORMS }}
 
       - name: Set up Docker Buildx
         if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
@@ -1393,6 +1456,7 @@ jobs:
           SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
           DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
+          RELEASE_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
         run: |
           set -euo pipefail
 
@@ -1453,7 +1517,7 @@ jobs:
             echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ "$RELEASE_PLATFORMS" = "linux/amd64" ]; then
             dist_config_file="${{ runner.temp }}/sccache-dist-config"
             {
               printf '[dist]\n'
@@ -1466,9 +1530,11 @@ jobs:
             } > "$dist_config_file"
             secret_files+=("sccache_dist_config=$dist_config_file")
             echo "dist-config-file=$dist_config_file" >> "$GITHUB_OUTPUT"
+          elif [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+            echo "::notice::Skipping sccache-dist secret for multi-platform build; current dist toolchains are amd64-only."
           fi
 
-          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+          if [ -n "$DISTCC_POTENTIAL_HOSTS" ] && [ "$RELEASE_PLATFORMS" = "linux/amd64" ]; then
             if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
               echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
               exit 1
@@ -1478,6 +1544,8 @@ jobs:
             printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
             secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
             echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
+          elif [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+            echo "::notice::Skipping distcc secret for multi-platform build; current distcc hosts are amd64-only."
           fi
 
           {
@@ -1538,7 +1606,7 @@ jobs:
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           annotations: |
             org.opencontainers.image.description=${{ matrix.description }}
-          platforms: linux/amd64
+          platforms: ${{ env.RELEASE_PLATFORMS }}
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
@@ -1573,7 +1641,7 @@ jobs:
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           annotations: |
             org.opencontainers.image.description=${{ matrix.description }}
-          platforms: linux/amd64
+          platforms: ${{ env.RELEASE_PLATFORMS }}
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
@@ -1668,6 +1736,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
         run: |
           set -euo pipefail
 
@@ -1691,6 +1760,24 @@ jobs:
             digest="${digest#\"}"
             [[ -n "$digest" && "$digest" != "null" ]]
             printf '%s\n' "$digest"
+          }
+
+          require_platforms() {
+            local image=$1 expected manifest_output discovered_platforms
+
+            if ! manifest_output="$(docker buildx imagetools inspect "$image" 2>&1)"; then
+              echo "::error::Failed to inspect image manifest for $image."
+              printf '%s\n' "$manifest_output"
+              exit 1
+            fi
+
+            discovered_platforms="$(printf '%s\n' "$manifest_output" | awk '/Platform:/ { print $2 }' | sort -u)"
+            for expected in $(printf '%s\n' "$REQUIRED_PLATFORMS" | tr ',' ' '); do
+              if ! printf '%s\n' "$discovered_platforms" | grep -Eq "^${expected}(/.*)?$"; then
+                echo "::error::$image is missing required platform $expected before public tag promotion; discovered: ${discovered_platforms//$'\n'/, }"
+                exit 1
+              fi
+            done
           }
 
           rollback_promotions() {
@@ -1751,6 +1838,10 @@ jobs:
             exit 1
           fi
 
+          for service in "${services[@]}"; do
+            require_platforms "ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+          done
+
           pointer_context="$(mktemp -d)"
           {
             printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
@@ -1765,11 +1856,12 @@ jobs:
           CMD ["true"]
           DOCKERFILE
           docker buildx build \
-            --platform linux/amd64 \
+            --platform "$RELEASE_PLATFORMS" \
             --push \
             -t "$stack_pointer_image" \
             "$pointer_context"
           docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          require_platforms "$stack_pointer_image"
 
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
@@ -1816,6 +1908,34 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify release image platform coverage
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack
+          REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+        run: |
+          set -euo pipefail
+
+          read -r -a services <<< "$SERVICES"
+          for service in "${services[@]}"; do
+            image="ghcr.io/${REPOSITORY}/${service}:${TAG_NAME}"
+            if ! manifest_output="$(docker buildx imagetools inspect "$image" 2>&1)"; then
+              echo "::error::Failed to inspect image manifest for ${image}."
+              printf '%s\n' "$manifest_output"
+              exit 1
+            fi
+
+            discovered_platforms="$(printf '%s\n' "$manifest_output" | awk '/Platform:/ { print $2 }' | sort -u)"
+            for expected in $(printf '%s\n' "$REQUIRED_PLATFORMS" | tr ',' ' '); do
+              if ! printf '%s\n' "$discovered_platforms" | grep -Eq "^${expected}(/.*)?$"; then
+                echo "::error::${image} is missing required platform ${expected}; discovered: ${discovered_platforms//$'\\n'/, }"
+                exit 1
+              fi
+            done
+          done
 
       - name: Create or update GitHub release for built images
         shell: bash
