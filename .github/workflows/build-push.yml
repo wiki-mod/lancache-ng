@@ -13,6 +13,10 @@ permissions:
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   shellcheck:
     runs-on: [self-hosted, linux, lancache]
@@ -26,7 +30,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             ghcr.io/wiki-mod/lancache-ng/build-tools:latest \
-            sh -lc 'find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+            bash -lc 'find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
 
   validate-compose:
     runs-on: [self-hosted, linux, lancache]

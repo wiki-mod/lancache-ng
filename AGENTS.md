@@ -62,6 +62,8 @@ This project is written in **Rust**. Shell scripts are permitted for entrypoints
 
 No other runtime language (Go, Python, Node.js, etc.) may be introduced without explicit approval from @djdomi.
 
+Shell automation should use Bash by default when it relies on project fail-closed behavior such as `set -euo pipefail`, arrays, `[[ ... ]]`, process substitution, or other Bash-specific syntax. POSIX `sh` is acceptable only for intentionally small portable scripts that are validated with ShellCheck in `sh` mode.
+
 ## Feature Completeness
 
 - Treat the Admin UI as an unfinished control plane.
