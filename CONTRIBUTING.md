@@ -42,10 +42,32 @@ Each pull request should explain:
 Prefer focused pull requests. For example, do not mix documentation rewrites,
 CI fixes and runtime behavior changes unless they must land together.
 
+### PR and issue linking
+
+Track related work explicitly in the PR body:
+
+- Use `Refs #123` for parent issues, umbrella issues, and follow-up references.
+- Use `Closes #123` only when this PR should also close that issue.
+- Open PRs should include links for relevant review context (for example tracking and umbrella issue).
+
+### Changelog expectations
+
+There is no checked-in changelog file.
+For each user-facing change, include a short changelog-style summary in the PR body under a clear heading (for example `## Changelog`).
+This summary should be reused in the final release notes text when available.
 Every pull request should include a changelog section that explains user-visible
 behavior, operational impact, validation performed, and any explicit follow-up
 issue. Silent changes are not acceptable for release, setup, CI, or runtime
 behavior.
+
+### Quality and release process expectations
+
+- Treat warnings as failures in local checks and workflow validation.
+- Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
+- Keep workflow changes reviewable:
+  - document changed checks,
+  - explain any intentional risk,
+  - and include PR links to all impacted issue threads.
 
 ## Local checks
 
