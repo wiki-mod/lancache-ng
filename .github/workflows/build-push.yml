@@ -357,6 +357,17 @@ jobs:
             || { echo "::error::Docker Rust builds must pass sccache-dist config through a BuildKit secret."; exit 1; }
           grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
+          grep -F 'uses: ./.github/actions/rust-acceleration-preflight' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must run an external acceleration preflight outside BuildKit cache."; exit 1; }
+          grep -F 'redis-file: $'"{{"}}' steps.sccache-secret.outputs.redis-file '"}}" .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'dist-config-file: $'"{{"}}' steps.sccache-secret.outputs.dist-config-file '"}}" .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'distcc-hosts-file: $'"{{"}}' steps.sccache-secret.outputs.distcc-hosts-file '"}}" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must receive all generated secret file paths."; exit 1; }
+          grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc-pump --startup' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'DISTCC_FALLBACK=0' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must validate sccache, sccache-dist, and distcc paths."; exit 1; }
           grep -F 'steps.docker-build-jobs.outputs.jobs' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
           grep -F 'build_tools_image:' .github/workflows/build-push.yml >/dev/null \
@@ -996,6 +1007,15 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Validate Rust acceleration outside BuildKit cache
+        if: matrix.rust == true
+        uses: ./.github/actions/rust-acceleration-preflight
+        with:
+          service: ${{ matrix.service }}
+          redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
+          dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
+          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+
       - name: Build local scan image
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         env:
@@ -1366,6 +1386,7 @@ jobs:
             redis_file="${{ runner.temp }}/sccache-redis-url"
             printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
             secret_files+=("sccache_redis_url=$redis_file")
+            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
           fi
 
           if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
@@ -1380,6 +1401,7 @@ jobs:
               printf 'token = "%s"\n' "$(toml_escape "$SCCACHE_DIST_AUTH_TOKEN")"
             } > "$dist_config_file"
             secret_files+=("sccache_dist_config=$dist_config_file")
+            echo "dist-config-file=$dist_config_file" >> "$GITHUB_OUTPUT"
           fi
 
           if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
@@ -1391,6 +1413,7 @@ jobs:
             distcc_hosts_file="${{ runner.temp }}/distcc-potential-hosts"
             printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
             secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
+            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
           fi
 
           {
@@ -1398,6 +1421,15 @@ jobs:
             printf '%s\n' "${secret_files[@]}"
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Validate Rust acceleration outside BuildKit cache
+        if: matrix.rust == true
+        uses: ./.github/actions/rust-acceleration-preflight
+        with:
+          service: ${{ matrix.service }}
+          redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
+          dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
+          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
 
       - name: Build and push
         id: build

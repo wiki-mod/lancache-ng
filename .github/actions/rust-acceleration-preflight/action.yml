@@ -1,0 +1,145 @@
+name: Rust acceleration preflight
+description: Validate Rust build acceleration secrets outside BuildKit cacheable Docker build layers.
+
+inputs:
+  service:
+    description: Service name used for logs and sccache key prefix.
+    required: true
+  redis-file:
+    description: Optional file containing the sccache Redis URL.
+    required: false
+    default: ""
+  dist-config-file:
+    description: Optional sccache-dist client configuration file.
+    required: false
+    default: ""
+  distcc-hosts-file:
+    description: Optional file containing DISTCC_POTENTIAL_HOSTS.
+    required: false
+    default: ""
+  build-tools-image:
+    description: Build tools image that provides rustc, sccache, distcc, and distcc-pump.
+    required: false
+    default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Rust acceleration secrets
+      shell: bash
+      env:
+        LANCACHE_SERVICE: ${{ inputs.service }}
+        REDIS_FILE: ${{ inputs.redis-file }}
+        DIST_CONFIG_FILE: ${{ inputs.dist-config-file }}
+        DISTCC_HOSTS_FILE: ${{ inputs.distcc-hosts-file }}
+        BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
+      run: |
+        set -euo pipefail
+
+        mount_args=()
+        if [ -n "$REDIS_FILE" ]; then
+          [ -s "$REDIS_FILE" ] || { echo "::error::redis-file input points to an empty or missing file."; exit 1; }
+          mount_args+=(-v "$REDIS_FILE:/run/lancache/sccache-redis-url:ro")
+        fi
+        if [ -n "$DIST_CONFIG_FILE" ]; then
+          [ -s "$DIST_CONFIG_FILE" ] || { echo "::error::dist-config-file input points to an empty or missing file."; exit 1; }
+          mount_args+=(-v "$DIST_CONFIG_FILE:/run/lancache/sccache-dist-config:ro")
+        fi
+        if [ -n "$DISTCC_HOSTS_FILE" ]; then
+          [ -s "$DISTCC_HOSTS_FILE" ] || { echo "::error::distcc-hosts-file input points to an empty or missing file."; exit 1; }
+          mount_args+=(-v "$DISTCC_HOSTS_FILE:/run/lancache/distcc-potential-hosts:ro")
+        fi
+
+        if [ "${#mount_args[@]}" -eq 0 ]; then
+          echo "[INFO] no Rust acceleration secrets configured; skipping external preflight."
+          exit 0
+        fi
+
+        docker run --rm --network host \
+          "${mount_args[@]}" \
+          -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
+          "$BUILD_TOOLS_IMAGE" \
+          bash -lc '
+            set -euo pipefail
+
+            preflight_dir="$(mktemp -d)"
+            cleanup() {
+              if [ -n "${pump_started:-}" ]; then
+                distcc-pump --shutdown >/dev/null 2>&1 || true
+              fi
+              rm -rf "$preflight_dir"
+            }
+            trap cleanup EXIT
+
+            scan_log() {
+              local log_file="$1"
+              if grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file"; then
+                echo "[ERROR] Rust acceleration preflight emitted a forbidden diagnostic." >&2
+                exit 1
+              fi
+            }
+
+            if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
+              export SCCACHE_NO_DAEMON=1
+              export SCCACHE_REDIS_KEY_PREFIX="lancache-preflight-${LANCACHE_SERVICE:-rust}"
+              if [ -s /run/lancache/sccache-redis-url ]; then
+                export SCCACHE_REDIS="$(cat /run/lancache/sccache-redis-url)"
+              fi
+              if [ -s /run/lancache/sccache-dist-config ]; then
+                export SCCACHE_CONF=/run/lancache/sccache-dist-config
+                dist_log="$preflight_dir/sccache-dist-status.log"
+                sccache --dist-status >"$dist_log" 2>&1
+                scan_log "$dist_log"
+              fi
+
+              printf '%s\n' 'fn main() {}' > "$preflight_dir/main.rs"
+              rust_log="$preflight_dir/sccache-rustc.log"
+              sccache rustc --crate-name lancache_accel_preflight --crate-type bin "$preflight_dir/main.rs" -o "$preflight_dir/preflight" >"$rust_log" 2>&1
+              scan_log "$rust_log"
+              echo "[INFO] sccache preflight completed."
+            fi
+
+            if [ -s /run/lancache/distcc-potential-hosts ]; then
+              wrapper_dir=""
+              for candidate in /usr/local/lib/distcc /usr/lib/distcc; do
+                if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then
+                  wrapper_dir="$candidate"
+                  break
+                fi
+              done
+              if [ -z "$wrapper_dir" ]; then
+                echo "[ERROR] distcc wrapper directory not found." >&2
+                exit 1
+              fi
+
+              printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/distcc-probe.c"
+
+              export PATH="$wrapper_dir:$PATH"
+              export DISTCC_FALLBACK=0
+
+              export DISTCC_POTENTIAL_HOSTS="$(cat /run/lancache/distcc-potential-hosts)"
+              pump_env="$(distcc-pump --startup)"
+              eval "$pump_env"
+              pump_started=1
+              pump_log="$preflight_dir/distcc-pump.log"
+              cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1
+              scan_log "$pump_log"
+              distcc-pump --shutdown >/dev/null 2>&1 || true
+              unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS
+
+              distcc_hosts="$(grep -v ",cpp" /run/lancache/distcc-potential-hosts | sed "/^[[:space:]]*$/d" || true)"
+              if [ -z "$distcc_hosts" ]; then
+                distcc_hosts="$(sed "s/,.*//" /run/lancache/distcc-potential-hosts | sed "/^[[:space:]]*$/d")"
+              fi
+              if [ -z "$distcc_hosts" ]; then
+                echo "[ERROR] DISTCC_POTENTIAL_HOSTS does not contain usable non-pump distcc hosts." >&2
+                exit 1
+              fi
+
+              export DISTCC_HOSTS="$distcc_hosts"
+              distcc_log="$preflight_dir/distcc.log"
+              cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1
+              scan_log "$distcc_log"
+              echo "[INFO] distcc preflight completed."
+            fi
+          '
