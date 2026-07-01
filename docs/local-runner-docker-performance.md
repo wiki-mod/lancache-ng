@@ -144,13 +144,17 @@ Use this as an opt-in setting:
 - do not commit LAN IP addresses into Dockerfiles, workflows or docs
 - include pump-capable entries with the `,cpp` option, for example
   `build-a build-b build-a,cpp,lzo build-b,cpp,lzo`
-- keep `pump` enabled so header preprocessing stays correct
+- keep `pump` enabled only for builders that do not generate C headers during
+  the build; otherwise use normal distcc hosts from the same host list
 
 Rust service builder images consume the host list through a BuildKit secret,
-put `/usr/lib/distcc` first in `PATH`, export `CC=distcc`, `GCC=distcc`,
-`CXX=distcc`, and `GXX=distcc`, then start with
-`eval \`distcc-pump --startup\`` before
-`cargo build` and shut it down after the build with `distcc-pump --shutdown`.
+discover either `/usr/local/lib/distcc` or `/usr/lib/distcc`, put the discovered
+wrapper directory first in `PATH`, export `CC=distcc`, `GCC=distcc`,
+`CXX=distcc`, and `GXX=distcc`. Builders without generated C headers may start
+with `eval \`distcc-pump --startup\`` before `cargo build` and shut it down
+after the build with `distcc-pump --shutdown`. Builders with generated C
+headers, such as the UI build through `aws-lc-sys`, must use normal distcc mode
+instead so generated includes are preprocessed locally before remote compile.
 When the distcc path is attempted, the build logs `[INFO] trying distcc path.`
 and uses `DISTCC_FALLBACK=0` so project logic can explicitly retry once with
 the normal local compiler if distcc is unavailable. Do not add `127.0.0.1` as

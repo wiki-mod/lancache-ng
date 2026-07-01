@@ -354,8 +354,26 @@ jobs:
               || { echo "::error::$dockerfile must consume distcc hosts through a BuildKit secret."; exit 1; }
             grep -F 'sccache --dist-status' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must smoke-check sccache-dist when configured."; exit 1; }
-            grep -F 'PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc' "$dockerfile" >/dev/null \
-              || { echo "::error::$dockerfile must route cc/gcc/c++/g++ through distcc when distcc is enabled."; exit 1; }
+            grep -F 'resolve_distcc_wrapper_dir()' "$dockerfile" >/dev/null \
+              && grep -F 'for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done' "$dockerfile" >/dev/null \
+              && grep -F '/usr/local/lib/distcc /usr/lib/distcc' "$dockerfile" >/dev/null \
+              && grep -F 'PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must discover the distcc wrapper directory and route cc/gcc/c++/g++ through it."; exit 1; }
+            grep -F 'original_path="$PATH"' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must save the original PATH before enabling distcc."; exit 1; }
+            grep -F 'PATH="$original_path"' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must restore the original PATH before local compiler fallback."; exit 1; }
+            grep -F 'lancache-rustc-wrapper' "$dockerfile" >/dev/null \
+              && grep -F 'distcc|*/distcc) exec "$@" ;;' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must keep distcc out of the sccache Rust wrapper path."; exit 1; }
+            if [ "$dockerfile" = "services/ui/Dockerfile" ]; then
+              grep -F "grep -v ',cpp' /run/secrets/distcc_potential_hosts" "$dockerfile" >/dev/null \
+                && grep -F 'DISTCC_HOSTS="$distcc_hosts"' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must use normal distcc hosts because aws-lc-sys generates C headers during the build."; exit 1; }
+            else
+              grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must use distcc-pump unless the builder is documented as incompatible with generated C headers."; exit 1; }
+            fi
             grep -F 'echo "[INFO] trying distcc path."' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must log when the distcc path is actually attempted."; exit 1; }
             grep -F 'DISTCC_FALLBACK=0' "$dockerfile" >/dev/null \

@@ -23,6 +23,9 @@ RUN set -eu; \
         pkg-config \
         procps \
         python3; \
+    distcc_bin="$(command -v distcc)"; \
+    mkdir -p /usr/local/lib/distcc; \
+    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "$distcc_pump_tmp"; \
     chown _apt:root "$distcc_pump_tmp"; \
@@ -42,7 +45,15 @@ RUN set -eu; \
     dpkg --configure distcc-pump; \
     python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server; \
     rm -rf /var/lib/apt/lists/*; \
-    cargo install sccache --version 0.16.0 --no-default-features --features redis,dist-client --root /usr/local
+    cargo install sccache --version 0.16.0 --no-default-features --features redis,dist-client --root /usr/local; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'case "${1:-}" in' \
+      '  distcc|*/distcc) exec "$@" ;;' \
+      '  *) exec /usr/local/bin/sccache "$@" ;;' \
+      'esac' \
+      > /usr/local/bin/lancache-rustc-wrapper; \
+    chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
 
@@ -54,10 +65,11 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
     distcc_enabled=0; \
+    original_path="$PATH"; \
     configure_sccache() { \
       if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
-        export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+        export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
           export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
         fi; \
@@ -68,27 +80,39 @@ RUN --mount=type=secret,id=sccache_redis_url \
       fi; \
     }; \
     disable_distcc() { \
-      if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
       distcc_enabled=0; \
       trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_FALLBACK CC GCC CXX GXX; \
-      PATH="$(printf '%s' "$PATH" | sed 's#^/usr/lib/distcc:##; s#:/usr/lib/distcc:##; s#:/usr/lib/distcc$##')"; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
+      PATH="$original_path"; \
       export PATH; \
+    }; \
+    resolve_distcc_wrapper_dir() { \
+      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
+        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then \
+          printf '%s\n' "$candidate"; \
+          return 0; \
+        fi; \
+      done; \
+      echo "distcc wrapper directory not found" >&2; \
+      exit 1; \
     }; \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
         export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
-        echo "[INFO] trying distcc path." >&2; \
-        export PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
-        if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
+        distcc_hosts="$(grep -v ',cpp' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d' || true)"; \
+        if [ -z "$distcc_hosts" ]; then \
+          distcc_hosts="$(sed 's/,.*//' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d')"; \
         fi; \
-        eval "$distcc_pump_env"; \
+        if [ -z "$distcc_hosts" ]; then \
+          rm -rf "$distcc_probe_dir"; \
+          echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
+          exit 1; \
+        fi; \
+        echo "[INFO] trying distcc path." >&2; \
+        distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
+        export DISTCC_HOSTS="$distcc_hosts" PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
-        trap 'distcc-pump --shutdown' EXIT; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
           disable_distcc; \
@@ -113,11 +137,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       if [ "${distcc_enabled:-0}" != "1" ]; then cargo build -j "$cargo_jobs" --release --locked; return; fi; \
       cargo_log="$(mktemp)"; \
-      cargo_status_file="$(mktemp)"; \
-      (cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" > "$cargo_status_file") | tee "$cargo_log"; \
-      cargo_status="$(cat "$cargo_status_file")"; \
-      rm -f "$cargo_status_file"; \
-      if [ "$cargo_status" -eq 0 ]; then \
+      if cargo build -j "$cargo_jobs" --release --locked >"$cargo_log" 2>&1; then \
         rm -f "$cargo_log"; \
         return 0; \
       fi; \
@@ -144,10 +164,11 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
     distcc_enabled=0; \
+    original_path="$PATH"; \
     configure_sccache() { \
       if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
-        export RUSTC_WRAPPER=sccache SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
+        export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
           export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
         fi; \
@@ -158,27 +179,39 @@ RUN --mount=type=secret,id=sccache_redis_url \
       fi; \
     }; \
     disable_distcc() { \
-      if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
       distcc_enabled=0; \
       trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_FALLBACK CC GCC CXX GXX; \
-      PATH="$(printf '%s' "$PATH" | sed 's#^/usr/lib/distcc:##; s#:/usr/lib/distcc:##; s#:/usr/lib/distcc$##')"; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
+      PATH="$original_path"; \
       export PATH; \
+    }; \
+    resolve_distcc_wrapper_dir() { \
+      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
+        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then \
+          printf '%s\n' "$candidate"; \
+          return 0; \
+        fi; \
+      done; \
+      echo "distcc wrapper directory not found" >&2; \
+      exit 1; \
     }; \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
         export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
-        echo "[INFO] trying distcc path." >&2; \
-        export PATH="/usr/lib/distcc:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
-        if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
+        distcc_hosts="$(grep -v ',cpp' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d' || true)"; \
+        if [ -z "$distcc_hosts" ]; then \
+          distcc_hosts="$(sed 's/,.*//' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d')"; \
         fi; \
-        eval "$distcc_pump_env"; \
+        if [ -z "$distcc_hosts" ]; then \
+          rm -rf "$distcc_probe_dir"; \
+          echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
+          exit 1; \
+        fi; \
+        echo "[INFO] trying distcc path." >&2; \
+        distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
+        export DISTCC_HOSTS="$distcc_hosts" PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
-        trap 'distcc-pump --shutdown' EXIT; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
           disable_distcc; \
@@ -203,11 +236,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       if [ "${distcc_enabled:-0}" != "1" ]; then cargo build -j "$cargo_jobs" --release --locked; return; fi; \
       cargo_log="$(mktemp)"; \
-      cargo_status_file="$(mktemp)"; \
-      (cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" > "$cargo_status_file") | tee "$cargo_log"; \
-      cargo_status="$(cat "$cargo_status_file")"; \
-      rm -f "$cargo_status_file"; \
-      if [ "$cargo_status" -eq 0 ]; then \
+      if cargo build -j "$cargo_jobs" --release --locked >"$cargo_log" 2>&1; then \
         rm -f "$cargo_log"; \
         return 0; \
       fi; \
