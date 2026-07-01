@@ -40,8 +40,9 @@ You can override the image for investigation:
 
 To speed up repeated builds in containers, pass `--sccache` together with Redis.
 The build-tools image already includes `sccache`. If you override the image and
-the replacement image does not contain `sccache`, the script installs the pinned
-version from source inside that container.
+the replacement image does not contain `sccache`, the script fails closed instead
+of compiling `sccache` inside that container. Use the build-tools image or
+another image with preinstalled `sccache`.
 
 ```bash
 SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/ui-rust-checks.sh --sccache
