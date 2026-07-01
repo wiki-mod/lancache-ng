@@ -221,7 +221,7 @@ fi
 CONTAINER_CMD=$'set -euo pipefail\n'
 if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
   CONTAINER_CMD+=$'if ! command -v sccache >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+="  cargo install sccache --version ${SCCACHE_VERSION} >/dev/null"$'\n'
+  CONTAINER_CMD+="  cargo install sccache --version ${SCCACHE_VERSION} --no-default-features --features redis,dist-client >/dev/null"$'\n'
   CONTAINER_CMD+=$'fi\n'
 fi
 CONTAINER_CMD+=$'cargo --version\n'

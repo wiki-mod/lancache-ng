@@ -1,0 +1,10 @@
+vulnerabilities:
+  - id: CVE-2026-34040
+    paths:
+      - usr/local/lib/docker/cli-plugins/docker-compose
+    statement: >-
+      Docker Compose v5.2.0 and docker/compose main currently embed
+      github.com/docker/docker v28.5.2, and github.com/docker/docker does not
+      publish v29.x Go module tags. Revisit when Docker Compose publishes a
+      release that carries a scanner-visible fixed module version.
+    expired_at: 2026-08-15

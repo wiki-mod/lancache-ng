@@ -18,8 +18,8 @@ FROM rust:latest
 ARG SCCACHE_VERSION=0.16.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
-ARG DOCKER_CLI_VERSION=28.5.2
-ARG DOCKER_COMPOSE_VERSION=2.40.3
+ARG DOCKER_CLI_VERSION=29.6.1
+ARG DOCKER_COMPOSE_VERSION=5.2.0
 ARG DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -47,12 +47,15 @@ RUN set -euo pipefail; \
       xz-utils; \
     rm -rf /var/lib/apt/lists/*
 
-# sccache 0.16.0's upstream lockfile currently references yanked crates.
-# Keep the tool version pinned, but let Cargo resolve non-yanked patch deps.
+# Keep sccache source-built and version-pinned. Only Redis and sccache-dist
+# client support are needed for this project's CI acceleration.
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
-    cargo install sccache --version "${SCCACHE_VERSION}" --root /usr/local; \
+    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --root /usr/local; \
+    for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
+      ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
+    done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
 COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
@@ -207,7 +210,8 @@ RUN set -euo pipefail; \
     case ":$PATH:" in \
       *:/usr/local/cargo/bin:*) ;; \
       *) echo "/usr/local/cargo/bin is missing from PATH" >&2; exit 1 ;; \
-    esac
+    esac; \
+    bash -lc 'set -euo pipefail; cargo --version; rustc --version; rustfmt --version; cargo clippy --version'
 
 WORKDIR /workspace
 

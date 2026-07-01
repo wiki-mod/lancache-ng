@@ -5,6 +5,9 @@ CI jobs on their own Linux machine.
 
 You do not need a local runner to use lancache-ng. It is only useful if you
 want to test pull requests, build images locally or reduce hosted CI usage.
+Local runner settings are an optimization layer. Keep them optional and
+documented so the project can move jobs back to GitHub-hosted runners without
+rewriting Dockerfiles or build scripts.
 
 ## When a local runner helps
 
@@ -118,6 +121,13 @@ Important rules:
 - keep cache keys separated between unrelated services
 - keep `CARGO_HOME` separate when multiple jobs install command-line tools in
   parallel
+- keep source-built sccache version-pinned and install only the Redis plus
+  `dist-client` features unless a PR explicitly needs another backend
+- configure distributed Rust compilation as a complete pair:
+  `SCCACHE_DIST_SCHEDULER_URL` as a repository variable and
+  `SCCACHE_DIST_AUTH_TOKEN` as a repository secret
+- do not set only the scheduler URL; sccache-dist requires client auth in
+  `SCCACHE_CONF`
 
 The goal is faster builds without leaking secrets into image history, logs or
 repository files.
@@ -132,12 +142,26 @@ Use this as an opt-in setting:
 
 - store the host list in a GitHub repository variable named `DISTCC_POTENTIAL_HOSTS`
 - do not commit LAN IP addresses into Dockerfiles, workflows or docs
-- use a host list format such as `build-a/6 build-b/6`
-- keep `pump` enabled so header preprocessing stays correct
+- include pump-capable entries with the `,cpp` option, for example
+  `build-a build-b build-a,cpp,lzo build-b,cpp,lzo`
+- keep `pump` enabled only for builders that do not generate C headers during
+  the build; otherwise use normal distcc hosts from the same host list
 
-The UI builder image accepts `DISTCC_POTENTIAL_HOSTS` when present and
-starts with `eval \`distcc-pump --startup\`` before `cargo build`, then
-shuts it down after the build with `distcc-pump --shutdown`.
+Rust service builder images consume the host list through a BuildKit secret,
+discover either `/usr/local/lib/distcc` or `/usr/lib/distcc`, put the discovered
+wrapper directory first in `PATH`, export `CC=distcc`, `GCC=distcc`,
+`CXX=distcc`, and `GXX=distcc`. Builders without generated C headers may start
+with `eval \`distcc-pump --startup\`` before `cargo build` and shut it down
+after the build with `distcc-pump --shutdown`. Builders with generated C
+headers, such as the UI build through `aws-lc-sys`, must use normal distcc mode
+instead so generated includes are preprocessed locally before remote compile.
+When the distcc path is attempted, the build logs `[INFO] trying distcc path.`
+and uses `DISTCC_FALLBACK=0` so project logic can explicitly retry once with
+the normal local compiler if distcc is unavailable. Do not add `127.0.0.1` as
+an implicit host.
+Images that install Debian `distcc-pump` patch the package's known invalid
+Python regex escapes before configuration and compile-check the result with
+`SyntaxWarning` treated as an error.
 
 Important:
 
@@ -148,6 +172,10 @@ Important:
 ## Parallel jobs
 
 Parallel CI jobs can reduce wall-clock time, but they also increase load.
+Set the optional `CARGO_BUILD_JOBS` repository variable when the runner farm
+should use a fixed Cargo job count. If it is unset, workflows and Rust service
+Dockerfiles use detected CPU cores minus two, with a minimum of four jobs.
+Invalid configured values fail closed instead of silently falling back.
 
 Watch these host resources:
 

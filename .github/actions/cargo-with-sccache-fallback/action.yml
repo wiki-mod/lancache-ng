@@ -26,11 +26,13 @@ runs:
       run: |
         set -euo pipefail
 
-        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ]; then
+        sccache_enabled="${LANCACHE_SCCACHE_ENABLED:-0}"
+
+        if [ "$sccache_enabled" != "1" ]; then
           unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
         fi
 
-        validate_timeout() {
+        validate_positive_integer() {
           local name="$1"
           local value="$2"
 
@@ -47,8 +49,32 @@ runs:
           fi
         }
 
+        if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+          detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+          cargo_jobs=$((detected_cores - 2))
+          if [ "$cargo_jobs" -lt 4 ]; then
+            cargo_jobs=4
+          fi
+          export CARGO_BUILD_JOBS="$cargo_jobs"
+          echo "::notice::Using CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} from ${detected_cores} detected cores."
+        else
+          validate_positive_integer "CARGO_BUILD_JOBS" "$CARGO_BUILD_JOBS"
+          echo "::notice::Using CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} from workflow environment."
+        fi
+
+        validate_timeout() {
+          local name="$1"
+          local value="$2"
+
+          validate_positive_integer "$name" "$value"
+        }
+
         validate_timeout "sccache-timeout-seconds" "$SCCACHE_TIMEOUT_SECONDS"
         validate_timeout "fallback-timeout-seconds" "$FALLBACK_TIMEOUT_SECONDS"
+
+        if [ "$sccache_enabled" != "1" ]; then
+          SCCACHE_TIMEOUT_SECONDS="$FALLBACK_TIMEOUT_SECONDS"
+        fi
 
         run_with_log() {
           local output_file="$1"
@@ -82,7 +108,7 @@ runs:
 
         status="$?"
 
-        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ] || ! is_sccache_failure "$status" "$output_file"; then
+        if [ "$sccache_enabled" != "1" ] || ! is_sccache_failure "$status" "$output_file"; then
           exit "$status"
         fi
 
