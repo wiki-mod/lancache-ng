@@ -13,12 +13,17 @@ permissions:
 jobs:
   shellcheck:
     runs-on: [self-hosted, linux, lancache]
-    container:
-      image: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Run ShellCheck
-        run: find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            ghcr.io/wiki-mod/lancache-ng/build-tools:latest \
+            sh -lc 'find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
 
   validate-compose:
     runs-on: [self-hosted, linux, lancache]
@@ -135,15 +140,40 @@ jobs:
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
             exit 1
           fi
+          grep -F 'systemctl stop lancache-converge.service' setup.sh >/dev/null \
+            || { echo "::error::setup.sh update must stop any active convergence service before mutating local install state."; exit 1; }
           if ! awk '
             /if ! \( cmd_backup --config "\$install_dir" \); then/ { in_backup_failure=1; next }
-            in_backup_failure && /resume_lancache_convergence_after_update/ { resume_seen=1 }
+            in_backup_failure && /resume_lancache_convergence_after_update true/ { resume_seen=1 }
             in_backup_failure && /die "Pre-update rollback backup failed/ { die_seen=1; in_backup_failure=0 }
             END { exit resume_seen && die_seen ? 0 : 1 }
           ' setup.sh; then
             echo "::error::setup.sh update must restore the convergence timer when the rollback backup fails before update mutations."
             exit 1
           fi
+          if awk '
+            /^cmd_update_ip\(\) \{/ { in_update_ip=1; guard_seen=0; next }
+            /^# .*backup subcommand/ { in_update_ip=0 }
+            in_update_ip && /assert_prebuilt_image_platform_supported/ { guard_seen=1 }
+            in_update_ip && !guard_seen && /(sed -i|docker compose -f)/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' setup.sh; then
+            echo "::error::setup.sh update-ip must check prebuilt platform support before mutating local configuration."
+            exit 1
+          fi
+          if awk '
+            /^  shellcheck:/ { in_shellcheck=1; next }
+            /^  [[:alnum:]_-]+:/ { in_shellcheck=0 }
+            in_shellcheck && /^[[:space:]]+container:/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::shellcheck job must not checkout inside a root-running job container."
+            exit 1
+          fi
+          grep -F -- "--user \"\$(id -u):\$(id -g)\"" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::shellcheck container must run with the runner UID/GID."; exit 1; }
+          grep -F -- "-v \"\$PWD:/work:ro\"" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
 
           if awk '
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }

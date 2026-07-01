@@ -477,23 +477,38 @@ systemd_unit_exists() {
 
 CONVERGENCE_TIMER_WAS_ACTIVE=0
 CONVERGENCE_TIMER_WAS_ENABLED=0
+CONVERGENCE_SERVICE_WAS_ACTIVE=0
 
 pause_lancache_convergence_for_update() {
     CONVERGENCE_TIMER_WAS_ACTIVE=0
     CONVERGENCE_TIMER_WAS_ENABLED=0
+    CONVERGENCE_SERVICE_WAS_ACTIVE=0
 
-    if ! systemd_unit_exists lancache-converge.timer; then
+    local timer_exists=0 service_exists=0
+    systemd_unit_exists lancache-converge.timer && timer_exists=1
+    systemd_unit_exists lancache-converge.service && service_exists=1
+    if [[ "$timer_exists" = "0" && "$service_exists" = "0" ]]; then
         return 0
     fi
 
-    if systemctl is-active --quiet lancache-converge.timer; then
+    if [[ "$timer_exists" = "1" ]] && systemctl is-active --quiet lancache-converge.timer; then
         CONVERGENCE_TIMER_WAS_ACTIVE=1
         print_step "Pausing convergence timer"
         systemctl stop lancache-converge.timer \
             || die "Failed to stop lancache-converge.timer before update."
     fi
 
-    if systemctl is-enabled --quiet lancache-converge.timer; then
+    if [[ "$service_exists" = "1" ]] && systemctl is-active --quiet lancache-converge.service; then
+        CONVERGENCE_SERVICE_WAS_ACTIVE=1
+        print_step "Stopping active convergence service"
+        systemctl stop lancache-converge.service \
+            || die "Failed to stop lancache-converge.service before update."
+        if systemctl is-active --quiet lancache-converge.service; then
+            die "lancache-converge.service is still active after stop; refusing to update concurrently."
+        fi
+    fi
+
+    if [[ "$timer_exists" = "1" ]] && systemctl is-enabled --quiet lancache-converge.timer; then
         CONVERGENCE_TIMER_WAS_ENABLED=1
         systemctl disable lancache-converge.timer >/dev/null \
             || die "Failed to disable lancache-converge.timer before update."
@@ -501,6 +516,15 @@ pause_lancache_convergence_for_update() {
 }
 
 resume_lancache_convergence_after_update() {
+    local restart_service="${1:-false}"
+
+    if [[ "$restart_service" = "true" ]] \
+        && [[ "$CONVERGENCE_SERVICE_WAS_ACTIVE" = "1" ]] \
+        && systemd_unit_exists lancache-converge.service; then
+        systemctl start lancache-converge.service \
+            || die "Failed to restart lancache-converge.service after failed pre-mutation update."
+    fi
+
     if ! systemd_unit_exists lancache-converge.timer; then
         return 0
     fi
@@ -1010,7 +1034,7 @@ cmd_update() {
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
-        resume_lancache_convergence_after_update
+        resume_lancache_convergence_after_update true
         die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
     fi
 
@@ -1106,6 +1130,7 @@ cmd_update_ip() {
 
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh update-ip)."
+    assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
 
