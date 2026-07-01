@@ -255,12 +255,19 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
 
+        # Track wildcard-only intent BEFORE normalization
+        is_wildcard_only=0
+        if [[ "$domain" == .* ]]; then
+            is_wildcard_only=1
+        fi
+
         # Validate and normalize domain before using it in cert generation or filenames
         if ! _is_valid_domain "$domain"; then
             echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
             continue
         fi
         domain="$(_normalize_domain "$domain")"
+        [[ -z "$domain" ]] && continue
 
         [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
 
@@ -295,14 +302,24 @@ fi
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
 
+        # Track wildcard-only intent BEFORE normalization
+        is_wildcard_only=0
+        if [[ "$domain" == .* ]]; then
+            is_wildcard_only=1
+        fi
+
         # Validate and normalize domain before using it in nginx map entries
         if ! _is_valid_domain "$domain"; then
             echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
             continue
         fi
         domain="$(_normalize_domain "$domain")"
+        [[ -z "$domain" ]] && continue
 
-        printf "    %-45s %s;\n" ".$domain"  "$domain"
+        printf "    %-45s %s;\n" "*.${domain}"  "$domain"
+        if [ "$is_wildcard_only" -eq 0 ]; then
+            printf "    %-45s %s;\n" ".$domain" "$domain"
+        fi
     done < "$DOMAINS_FILE"
     echo "    default default;"
     echo "}"
@@ -315,14 +332,24 @@ fi
         while IFS= read -r domain || [ -n "$domain" ]; do
             [[ -z "$domain" || "$domain" == \#* ]] && continue
 
+            # Track wildcard-only intent BEFORE normalization
+            is_wildcard_only=0
+            if [[ "$domain" == .* ]]; then
+                is_wildcard_only=1
+            fi
+
             # Validate and normalize domain before using it in nginx map entries
             if ! _is_valid_domain "$domain"; then
                 echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
                 continue
             fi
             domain="$(_normalize_domain "$domain")"
+            [[ -z "$domain" ]] && continue
 
-            printf "    %-45s 1;\n" ".$domain"
+            printf "    %-45s 1;\n" "*.${domain}"
+            if [ "$is_wildcard_only" -eq 0 ]; then
+                printf "    %-45s 1;\n" ".$domain"
+            fi
         done < "$DOMAINS_FILE"
     else
         echo "    default 1;"
@@ -355,14 +382,24 @@ mkdir -p /etc/nginx/stream.d
         while IFS= read -r domain || [ -n "$domain" ]; do
             [[ -z "$domain" || "$domain" == \#* ]] && continue
 
+            # Track wildcard-only intent BEFORE normalization
+            is_wildcard_only=0
+            if [[ "$domain" == .* ]]; then
+                is_wildcard_only=1
+            fi
+
             # Validate and normalize domain before using it in stream target entries
             if ! _is_valid_domain "$domain"; then
                 echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
                 continue
             fi
             domain="$(_normalize_domain "$domain")"
+            [[ -z "$domain" ]] && continue
 
-            printf "    %-45s %s:443;\n" ".$domain" "$domain"
+            printf "    %-45s %s:443;\n" "*.${domain}" "$domain"
+            if [ "$is_wildcard_only" -eq 0 ]; then
+                printf "    %-45s %s:443;\n" ".$domain" "$domain"
+            fi
         done < "$DOMAINS_FILE"
     fi
     echo "}"

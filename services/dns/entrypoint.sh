@@ -169,10 +169,20 @@ fi
     echo ""
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
-        printf "%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
+        is_wildcard_only=0
+        if [[ "$domain" == .* ]]; then
+            is_wildcard_only=1
+            domain="${domain#.}"
+        fi
+        [[ -z "$domain" ]] && continue
+        if [ "$is_wildcard_only" -eq 0 ]; then
+            printf "%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
+        fi
         printf "*.%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
         if [ -n "$PROXY_IPV6" ]; then
-            printf "%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
+            if [ "$is_wildcard_only" -eq 0 ]; then
+                printf "%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
+            fi
             printf "*.%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
         fi
     done < /etc/pdns/cdn-domains.txt
