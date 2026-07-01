@@ -708,6 +708,7 @@ jobs:
       contents: write
     steps:
       - name: Create or update GitHub release for built images
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
