@@ -597,8 +597,7 @@ fn line_matches_domain_delete(line: &str, domain: &DomainDeleteTarget) -> bool {
     let trimmed = line.trim();
     match domain {
         DomainDeleteTarget::Canonical(target) => {
-            parse_domain_entry(trimmed)
-                .is_some_and(|entry| entry == *target)
+            parse_domain_entry(trimmed).is_some_and(|entry| entry == *target)
         }
         DomainDeleteTarget::Raw(raw) => trimmed.eq_ignore_ascii_case(raw),
     }
@@ -824,7 +823,11 @@ mod tests {
         let file = base.join("cdn-domains.txt");
         fs::write(&file, "# comment\nexample.com\n\n").unwrap();
 
-        append_domain(file.to_str().unwrap(), &domain_spec("steamcontent.com", false)).unwrap();
+        append_domain(
+            file.to_str().unwrap(),
+            &domain_spec("steamcontent.com", false),
+        )
+        .unwrap();
         let after_append = fs::read_to_string(&file).unwrap();
         assert!(after_append.contains("# comment"));
         assert!(after_append.contains("example.com"));
@@ -880,8 +883,16 @@ mod tests {
         let file = base.join("cdn-domains.txt");
         fs::write(&file, ".steamcontent.com\n").unwrap();
 
-        append_domain(file.to_str().unwrap(), &domain_spec("steamcontent.com", false)).unwrap();
-        append_domain(file.to_str().unwrap(), &domain_spec("steamcontent.com", true)).unwrap();
+        append_domain(
+            file.to_str().unwrap(),
+            &domain_spec("steamcontent.com", false),
+        )
+        .unwrap();
+        append_domain(
+            file.to_str().unwrap(),
+            &domain_spec("steamcontent.com", true),
+        )
+        .unwrap();
 
         let after_append = fs::read_to_string(&file).unwrap();
         assert!(after_append.contains(".steamcontent.com"));
