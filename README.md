@@ -532,6 +532,11 @@ The registration token is generated during primary setup and stored in `.env`.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
+If a secondary was created before scoped NATS user/password credentials existed,
+rerun the same command with `--rotate` in that secondary's install directory.
+This rewrites the local secondary `.env` from the primary registration API
+without changing the secondary name.
+
 After setup, point additional clients to the secondary DNS IP.
 
 ## Manual setup
@@ -587,7 +592,9 @@ If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
 ```env
 DDNS_TSIG_KEY=<generate-a-secret>
-NATS_LOCAL_TOKEN=<generate-a-secret>
+NATS_UI_PASSWORD=<generate-a-secret>
+NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
+NATS_DNS_READER_PASSWORD=<generate-a-secret>
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 ```
 

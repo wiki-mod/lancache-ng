@@ -300,13 +300,15 @@ async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
     let max_delay = std::time::Duration::from_secs(30);
 
     loop {
-        let result = if cfg.nats_local_token.is_empty() {
+        let result = if cfg.nats_ui_user.is_empty() || cfg.nats_ui_password.is_empty() {
             async_nats::connect(&cfg.nats_url).await
         } else {
-            async_nats::ConnectOptions::new()
-                .token(cfg.nats_local_token.clone())
-                .connect(&cfg.nats_url)
-                .await
+            async_nats::ConnectOptions::with_user_and_password(
+                cfg.nats_ui_user.clone(),
+                cfg.nats_ui_password.clone(),
+            )
+            .connect(&cfg.nats_url)
+            .await
         };
 
         match result {
@@ -363,6 +365,20 @@ async fn main() -> Result<()> {
         tracing::error!(
             "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
              Generate one with: openssl rand -hex 32"
+        );
+        std::process::exit(1);
+    }
+    if cfg.nats_ui_user.is_empty()
+        || cfg.nats_ui_password.is_empty()
+        || cfg.nats_dns_writer_user.is_empty()
+        || cfg.nats_dns_writer_password.is_empty()
+        || cfg.nats_dns_reader_user.is_empty()
+        || cfg.nats_dns_reader_password.is_empty()
+    {
+        tracing::error!(
+            "NATS role credentials are incomplete — refusing to start. \
+             Set NATS_UI_USER/NATS_UI_PASSWORD, NATS_DNS_WRITER_USER/NATS_DNS_WRITER_PASSWORD, \
+             and NATS_DNS_READER_USER/NATS_DNS_READER_PASSWORD."
         );
         std::process::exit(1);
     }

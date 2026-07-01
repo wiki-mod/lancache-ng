@@ -48,7 +48,12 @@ pub struct Config {
     pub pdns_rec_url: String,
     pub pdns_api_key: String,
     pub nats_url: String,
-    pub nats_local_token: String,
+    pub nats_ui_user: String,
+    pub nats_ui_password: String,
+    pub nats_dns_writer_user: String,
+    pub nats_dns_writer_password: String,
+    pub nats_dns_reader_user: String,
+    pub nats_dns_reader_password: String,
     pub secondary_registration_token: String,
     pub nats_conf_path: String,
     pub nats_service: String,
@@ -90,7 +95,12 @@ impl fmt::Debug for Config {
             .field("pdns_rec_url", &self.pdns_rec_url)
             .field("pdns_api_key", &"***REDACTED***")
             .field("nats_url", &self.nats_url)
-            .field("nats_local_token", &"***REDACTED***")
+            .field("nats_ui_user", &self.nats_ui_user)
+            .field("nats_ui_password", &"***REDACTED***")
+            .field("nats_dns_writer_user", &self.nats_dns_writer_user)
+            .field("nats_dns_writer_password", &"***REDACTED***")
+            .field("nats_dns_reader_user", &self.nats_dns_reader_user)
+            .field("nats_dns_reader_password", &"***REDACTED***")
             .field("secondary_registration_token", &"***REDACTED***")
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_service", &self.nats_service)
@@ -153,7 +163,12 @@ impl Config {
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
-            nats_local_token: env_str("NATS_LOCAL_TOKEN", ""),
+            nats_ui_user: env_str("NATS_UI_USER", ""),
+            nats_ui_password: env_str("NATS_UI_PASSWORD", ""),
+            nats_dns_writer_user: env_str("NATS_DNS_WRITER_USER", ""),
+            nats_dns_writer_password: env_str("NATS_DNS_WRITER_PASSWORD", ""),
+            nats_dns_reader_user: env_str("NATS_DNS_READER_USER", ""),
+            nats_dns_reader_password: env_str("NATS_DNS_READER_PASSWORD", ""),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
