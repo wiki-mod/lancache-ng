@@ -97,7 +97,7 @@ runs:
         fi
 
         if ! command -v sccache >/dev/null 2>&1; then
-          if [ "$mode" = "optional" ] && [ "$redis_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+          if [ "$mode" = "optional" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
             echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
             echo "Skipping Redis-backed sccache because no sccache binary is available and SCCACHE_REDIS_MODE=optional."
             exit 0

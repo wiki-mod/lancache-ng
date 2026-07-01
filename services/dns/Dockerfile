@@ -104,6 +104,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
         export PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
         if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+          disable_distcc; \
           rm -rf "$distcc_probe_dir"; \
           echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
           return 0; \

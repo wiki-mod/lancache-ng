@@ -26,7 +26,9 @@ runs:
       run: |
         set -euo pipefail
 
-        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ]; then
+        sccache_enabled="${LANCACHE_SCCACHE_ENABLED:-0}"
+
+        if [ "$sccache_enabled" != "1" ]; then
           unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
         fi
 
@@ -70,6 +72,10 @@ runs:
         validate_timeout "sccache-timeout-seconds" "$SCCACHE_TIMEOUT_SECONDS"
         validate_timeout "fallback-timeout-seconds" "$FALLBACK_TIMEOUT_SECONDS"
 
+        if [ "$sccache_enabled" != "1" ]; then
+          SCCACHE_TIMEOUT_SECONDS="$FALLBACK_TIMEOUT_SECONDS"
+        fi
+
         run_with_log() {
           local output_file="$1"
           local timeout_seconds="$2"
@@ -102,7 +108,7 @@ runs:
 
         status="$?"
 
-        if [ "${LANCACHE_SCCACHE_ENABLED:-0}" != "1" ] || ! is_sccache_failure "$status" "$output_file"; then
+        if [ "$sccache_enabled" != "1" ] || ! is_sccache_failure "$status" "$output_file"; then
           exit "$status"
         fi
 
