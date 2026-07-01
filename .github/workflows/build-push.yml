@@ -65,7 +65,7 @@ jobs:
             exit 1
           fi
 
-          fallback_image="lancache-ng-build-tools-validation:${GITHUB_SHA}"
+          fallback_image="lancache-ng-build-tools-validation:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "::notice::Published build-tools image does not contain Docker CLI/Compose yet; building a branch-local validation image."
           docker build --pull -t "$fallback_image" tools/build-tools
           docker run --rm "$fallback_image" bash -lc 'set -euo pipefail; docker --version; docker compose version'
@@ -132,6 +132,8 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
             --env CACHE_DIR_STANDARD \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
@@ -301,6 +303,12 @@ jobs:
             || { echo "::error::shellcheck container must run with the runner UID/GID."; exit 1; }
           grep -F -- "-v \"\$PWD:/work:ro\"" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
+          grep -F 'fallback_image="lancache-ng-build-tools-validation:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Compose validation fallback image tag must be scoped to the workflow run and attempt."; exit 1; }
+          grep -F -- "--env DOCKER_CONFIG=/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
+          grep -F -- "--env HOME=/tmp" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Compose validation must set a writable HOME inside the build-tools container."; exit 1; }
 
           if awk '
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }
