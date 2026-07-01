@@ -469,6 +469,39 @@ assert_prebuilt_image_platform_supported() {
     esac
 }
 
+validate_lancache_image_tag() {
+    local tag="$1"
+    [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
+        || die "LANCACHE_IMAGE_TAG must be a valid Docker image tag."
+}
+
+resolve_lancache_image_tag() {
+    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" version="" in_git_tree=0
+
+    if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
+        tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    fi
+
+    if [[ -z "$tag" ]] && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        in_git_tree=1
+        tag=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null || true)
+    fi
+
+    if [[ -z "$tag" && "$in_git_tree" = "0" && -f "$SCRIPT_DIR/VERSION" ]]; then
+        version=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")
+        [[ -n "$version" ]] || die "VERSION is empty; cannot derive a release image tag."
+        if [[ "$version" = v* ]]; then
+            tag="$version"
+        else
+            tag="v$version"
+        fi
+    fi
+
+    tag="${tag:-latest}"
+    validate_lancache_image_tag "$tag"
+    printf '%s\n' "$tag"
+}
+
 migrate_env_for_update() {
     local install_dir="$1" env_file
     local allow_insecure_ui cache_dir cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
@@ -923,6 +956,7 @@ cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
+    assert_prebuilt_image_platform_supported
     cd "$install_dir"
 
     print_step "Creating pre-update rollback backup"
@@ -941,7 +975,6 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling latest images"
-    assert_prebuilt_image_platform_supported
     docker compose pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
@@ -1105,6 +1138,7 @@ cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
     local nats_url nats_user nats_password consumer_name pdns_api_key
+    local lancache_image_tag
 
     usage_secondary() {
         cat <<EOF
@@ -1185,6 +1219,8 @@ EOF
         is_valid_ipv4 "$listen_ip" \
             || die "--listen-ip must be a valid IPv4 address or 0.0.0.0"
     fi
+    assert_prebuilt_image_platform_supported
+    lancache_image_tag=$(resolve_lancache_image_tag)
 
     print_step "Registering secondary"
     response_file=$(mktemp)
@@ -1276,11 +1312,10 @@ NATS_URL=${nats_url}
 NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
-LANCACHE_IMAGE_TAG=latest
+LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
     print_step "Starting secondary DNS container"
-    assert_prebuilt_image_platform_supported
     (cd "$secondary_dir" && docker compose up -d) \
         || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 
@@ -1384,6 +1419,8 @@ fi
 
 docker compose version >/dev/null 2>&1 \
     || die "Docker Compose plugin still missing after installing Docker requirements."
+
+assert_prebuilt_image_platform_supported
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
@@ -1605,6 +1642,7 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
+LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
@@ -1654,7 +1692,7 @@ CACHE_MAX_GB=${cache_gb}
 
 # First-party service image tag. Keep "latest" for the default master/edge path.
 # When running from a tagged release archive, set this to the matching vX.Y.Z tag.
-LANCACHE_IMAGE_TAG=latest
+LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 
 # ── DHCP ───────────────────────────────────────────────────────────────────────
 DHCP_ENABLED=${DHCP_ENABLED}
@@ -1719,6 +1757,7 @@ fi
 # ── 10. Installing systemd watchdog ───────────────────────────────────────────
 print_step "Installing systemd watchdog"
 
+SYSTEMD_AVAILABLE=0
 if ! command -v systemctl >/dev/null 2>&1; then
     print_warn "systemd not found — watchdog will not be installed"
     print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
@@ -1767,10 +1806,11 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now lancache.service
-    systemctl enable --now lancache-converge.timer
-    print_ok "lancache.service enabled (starts on boot)"
-    print_ok "lancache-converge.timer enabled (convergence check every 5 minutes)"
+    systemctl enable lancache.service
+    systemctl enable lancache-converge.timer
+    SYSTEMD_AVAILABLE=1
+    print_ok "lancache.service enabled for boot"
+    print_ok "lancache-converge.timer enabled for boot"
 fi
 
 # ── 11. Summary and confirmation ──────────────────────────────────────────────
@@ -1823,7 +1863,12 @@ docker compose pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
 print_step "Starting stack"
-docker compose up -d
+if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
+    systemctl start lancache.service
+    systemctl start lancache-converge.timer
+else
+    docker compose up -d
+fi
 print_ok "Stack started"
 
 # ── 13. Post-start info ──────────────────────────────────────────────────────
