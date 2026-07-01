@@ -365,6 +365,7 @@ jobs:
             || { echo "::error::External Rust acceleration preflight must receive all generated secret file paths."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'require_sccache_dist_connected' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'require_sccache_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc-pump --startup' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \

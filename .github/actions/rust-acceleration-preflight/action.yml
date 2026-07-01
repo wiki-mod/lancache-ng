@@ -79,6 +79,18 @@ runs:
               fi
             }
 
+            run_logged() {
+              local log_file="$1"
+              shift
+
+              if ! "$@" >"$log_file" 2>&1; then
+                cat "$log_file" >&2
+                echo "[ERROR] Rust acceleration preflight command failed: $*" >&2
+                exit 1
+              fi
+              scan_log "$log_file"
+            }
+
             require_sccache_dist_connected() {
               local status_file="$1"
               if ! jq -e 'type == "object" and has("SchedulerStatus")' "$status_file" >/dev/null; then
@@ -116,21 +128,19 @@ runs:
               if [ -s /run/lancache/sccache-dist-config ]; then
                 export SCCACHE_CONF=/run/lancache/sccache-dist-config
                 dist_log="$preflight_dir/sccache-dist-status.log"
-                sccache --dist-status >"$dist_log" 2>&1
-                scan_log "$dist_log"
+                run_logged "$dist_log" sccache --dist-status
                 require_sccache_dist_connected "$dist_log"
               fi
 
-              sccache --zero-stats >/dev/null 2>&1
+              zero_stats_log="$preflight_dir/sccache-zero-stats.log"
+              run_logged "$zero_stats_log" sccache --zero-stats
               mkdir -p "$preflight_dir/out"
               printf '%s\n' 'pub fn lancache_accel_preflight() -> u8 { 42 }' > "$preflight_dir/lib.rs"
               rust_log="$preflight_dir/sccache-rustc.log"
-              sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out" >"$rust_log" 2>&1
-              sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out" >>"$rust_log" 2>&1
-              scan_log "$rust_log"
+              run_logged "$rust_log" sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out"
+              run_logged "$rust_log" sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out"
               stats_log="$preflight_dir/sccache-stats.log"
-              sccache --show-stats --stats-format=json >"$stats_log" 2>&1
-              scan_log "$stats_log"
+              run_logged "$stats_log" sccache --show-stats --stats-format=json
               require_sccache_activity "$stats_log" "$require_cache_write"
               echo "[INFO] sccache preflight completed."
             fi
@@ -158,8 +168,7 @@ runs:
               eval "$pump_env"
               pump_started=1
               pump_log="$preflight_dir/distcc-pump.log"
-              cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1
-              scan_log "$pump_log"
+              run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
               distcc-pump --shutdown >/dev/null 2>&1 || true
               unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS
 
@@ -174,8 +183,7 @@ runs:
 
               export DISTCC_HOSTS="$distcc_hosts"
               distcc_log="$preflight_dir/distcc.log"
-              cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1
-              scan_log "$distcc_log"
+              run_logged "$distcc_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
               echo "[INFO] distcc preflight completed."
             fi
         PREFLIGHT
