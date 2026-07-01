@@ -1210,7 +1210,13 @@ EOF
     fi
 
     secondary_dir="${name}"
-    if [[ -d "$secondary_dir" && "$rotate" -ne 1 ]]; then
+    if [[ "$rotate" -eq 1 ]]; then
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            secondary_dir="."
+        elif [[ ! -d "$secondary_dir" ]]; then
+            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
+        fi
+    elif [[ -d "$secondary_dir" ]]; then
         die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
     fi
     mkdir -p "$secondary_dir"

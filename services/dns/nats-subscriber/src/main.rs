@@ -47,8 +47,10 @@ struct ZoneInfo {
 #[tokio::main]
 async fn main() {
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://nats:4222".to_string());
-    let nats_user = env::var("NATS_USER").ok();
-    let nats_password = env::var("NATS_PASSWORD").ok();
+    let nats_user = env::var("NATS_USER").ok().filter(|user| !user.is_empty());
+    let nats_password = env::var("NATS_PASSWORD")
+        .ok()
+        .filter(|password| !password.is_empty());
     let nats_token = env::var("NATS_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
