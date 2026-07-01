@@ -23,7 +23,7 @@ services:
   # ── Unified proxy (standard + SSL mode in one container) ─────────────────
   proxy:
     container_name: lancache-proxy
-    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest
+    image: ghcr.io/wiki-mod/lancache-ng/proxy:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}
       - CACHE_MEM_MB=${CACHE_MEM_MB}
@@ -159,7 +159,7 @@ services:
 
   dns-standard:
     container_name: lancache-dns-standard
-    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    image: ghcr.io/wiki-mod/lancache-ng/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${IP_STANDARD}
       - LOG_QUERIES=0
@@ -192,7 +192,7 @@ services:
   dns-ssl:
     profiles: [ssl]
     container_name: lancache-dns-ssl
-    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    image: ghcr.io/wiki-mod/lancache-ng/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${IP_SSL}
       - LOG_QUERIES=0
@@ -245,7 +245,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   watchdog:
-    image: ghcr.io/wiki-mod/lancache-ng/watchdog:latest
+    image: ghcr.io/wiki-mod/lancache-ng/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - CHECK_INTERVAL=30
@@ -280,7 +280,7 @@ services:
   # UI_BIND_IP=127.0.0.1 to restrict access to the host. Direct Docker socket mount
   # removed; Docker operations are proxied through the isolated docker-api network.
   ui:
-    image: ghcr.io/wiki-mod/lancache-ng/ui:latest
+    image: ghcr.io/wiki-mod/lancache-ng/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - proxy-logs:/var/log/nginx:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
@@ -303,6 +303,7 @@ services:
       - NETDATA_URL=http://netdata:19999
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
+      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-50}}}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}

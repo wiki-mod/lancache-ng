@@ -209,12 +209,6 @@ Consoles should continue to work normally through standard mode.
 HTTPS traffic that cannot be cached is passed through to the original CDN.
 
 
-## Docker build performance on local runners
-
-If you build LanCache NG on a self-hosted runner or want to speed up repeated local builds, see the local runner Docker performance guide for practical options such as Docker layer caching, registry mirrors, multi-stage builds, `.dockerignore` files and runner parallelism tuning.
-
-[docs/local-runner-docker-performance.md](docs/local-runner-docker-performance.md)
-
 ## Requirements
 
 You need:
@@ -495,11 +489,12 @@ services/proxy/cdn-ssl-domains.txt
 Use `cdn-domains.txt` for DNS based cache routing.  
 Use `cdn-ssl-domains.txt` for SSL mode certificate coverage.
 
-After manual file changes, rebuild and restart:
+After manual file changes in a repository-based setup, restart the affected
+services so they reload the mounted files:
 
 ```bash
 cd /opt/lancache-ng
-docker compose up --build -d
+docker compose restart dns-standard dns-ssl proxy
 ```
 
 Only add domains you understand.  
@@ -577,6 +572,11 @@ PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
 
 CACHE_MAX_GB=50
+
+# First-party service image tag.
+# Use "latest" for the default master/edge path.
+# Use the matching vX.Y.Z tag when running from a release archive.
+LANCACHE_IMAGE_TAG=latest
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
@@ -587,6 +587,10 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 - `strict` NOT RECOMMENDED! Only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until missing CDN root domains are added. That means, you need to add manually all domains by hand!
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. You have to change it, we set by default the LAN-IP ranges for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
+
+`LANCACHE_IMAGE_TAG` controls which first-party container images are pulled. Keep `latest` when following the default master/edge path. If you install from a tagged release archive or a checked-out `vX.Y.Z` tag, set `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
+
+Current prebuilt first-party images are published for `linux/amd64`. Multi-architecture images are tracked separately; non-amd64 production installs should not assume the prebuilt pull-only path is available yet.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
@@ -608,7 +612,8 @@ mkdir -p /srv/lancache/kea
 Start the stack:
 
 ```bash
-docker compose -f deploy/prod/docker-compose.yml up -d --build
+docker compose -f deploy/prod/docker-compose.yml pull
+docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
 Check status:

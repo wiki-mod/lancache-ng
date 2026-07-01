@@ -27,6 +27,7 @@ pub struct RegisterResponse {
     pub consumer_name: String,
     pub proxy_ip: String,
     pub pdns_api_key: String,
+    pub image_tag: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -147,6 +148,7 @@ pub async fn register_secondary(
         consumer_name,
         proxy_ip: state.config.standard_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
+        image_tag: state.config.lancache_image_tag.clone(),
     }))
 }
 
@@ -260,4 +262,26 @@ pub async fn update_nats_conf(
 
     std::fs::write(&state.config.nats_conf_path, nats_conf)
         .map_err(|e| format!("Failed to write nats.conf: {}", e).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_response_serializes_image_tag_for_secondary_setup() {
+        let response = RegisterResponse {
+            nats_url: "nats://primary:4222".to_string(),
+            nats_user: "lancache-dns-reader".to_string(),
+            nats_password: "reader-secret".to_string(),
+            nats_token: "reader-secret".to_string(),
+            consumer_name: "secondary-a".to_string(),
+            proxy_ip: "192.168.1.100".to_string(),
+            pdns_api_key: "pdns-secret".to_string(),
+            image_tag: "v1.2.3".to_string(),
+        };
+
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["image_tag"], "v1.2.3");
+    }
 }

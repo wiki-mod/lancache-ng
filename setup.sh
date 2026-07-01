@@ -457,6 +457,122 @@ cache_size_gb_from_env() {
     printf '%s\n' "$cache_max_size"
 }
 
+assert_prebuilt_image_platform_supported() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)
+            ;;
+        *)
+            die "Prebuilt production images are currently published for linux/amd64 only. This host reports '${arch}'. Use an amd64 host or wait for the planned multi-architecture image workflow."
+            ;;
+    esac
+}
+
+systemd_unit_exists() {
+    local unit="$1"
+    command -v systemctl >/dev/null 2>&1 \
+        && systemctl list-unit-files "$unit" >/dev/null 2>&1
+}
+
+CONVERGENCE_TIMER_WAS_ACTIVE=0
+CONVERGENCE_TIMER_WAS_ENABLED=0
+CONVERGENCE_SERVICE_WAS_ACTIVE=0
+
+pause_lancache_convergence_for_update() {
+    CONVERGENCE_TIMER_WAS_ACTIVE=0
+    CONVERGENCE_TIMER_WAS_ENABLED=0
+    CONVERGENCE_SERVICE_WAS_ACTIVE=0
+
+    local timer_exists=0 service_exists=0
+    systemd_unit_exists lancache-converge.timer && timer_exists=1
+    systemd_unit_exists lancache-converge.service && service_exists=1
+    if [[ "$timer_exists" = "0" && "$service_exists" = "0" ]]; then
+        return 0
+    fi
+
+    if [[ "$timer_exists" = "1" ]] && systemctl is-active --quiet lancache-converge.timer; then
+        CONVERGENCE_TIMER_WAS_ACTIVE=1
+        print_step "Pausing convergence timer"
+        systemctl stop lancache-converge.timer \
+            || die "Failed to stop lancache-converge.timer before update."
+    fi
+
+    if [[ "$service_exists" = "1" ]] && systemctl is-active --quiet lancache-converge.service; then
+        CONVERGENCE_SERVICE_WAS_ACTIVE=1
+        print_step "Stopping active convergence service"
+        systemctl stop lancache-converge.service \
+            || die "Failed to stop lancache-converge.service before update."
+        if systemctl is-active --quiet lancache-converge.service; then
+            die "lancache-converge.service is still active after stop; refusing to update concurrently."
+        fi
+    fi
+
+    if [[ "$timer_exists" = "1" ]] && systemctl is-enabled --quiet lancache-converge.timer; then
+        CONVERGENCE_TIMER_WAS_ENABLED=1
+        systemctl disable lancache-converge.timer >/dev/null \
+            || die "Failed to disable lancache-converge.timer before update."
+    fi
+}
+
+resume_lancache_convergence_after_update() {
+    local restart_service="${1:-false}"
+
+    if [[ "$restart_service" = "true" ]] \
+        && [[ "$CONVERGENCE_SERVICE_WAS_ACTIVE" = "1" ]] \
+        && systemd_unit_exists lancache-converge.service; then
+        systemctl start lancache-converge.service \
+            || die "Failed to restart lancache-converge.service after failed pre-mutation update."
+    fi
+
+    if ! systemd_unit_exists lancache-converge.timer; then
+        return 0
+    fi
+
+    if [[ "$CONVERGENCE_TIMER_WAS_ENABLED" = "1" ]]; then
+        systemctl enable lancache-converge.timer >/dev/null \
+            || die "Failed to re-enable lancache-converge.timer after update."
+    fi
+
+    if [[ "$CONVERGENCE_TIMER_WAS_ACTIVE" = "1" ]]; then
+        systemctl start lancache-converge.timer \
+            || die "Failed to restart lancache-converge.timer after update."
+    fi
+}
+
+validate_lancache_image_tag() {
+    local tag="$1"
+    [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
+        || die "LANCACHE_IMAGE_TAG must be a valid Docker image tag."
+}
+
+resolve_lancache_image_tag() {
+    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" version="" in_git_tree=0
+
+    if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
+        tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    fi
+
+    if [[ -z "$tag" ]] && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        in_git_tree=1
+        tag=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null || true)
+    fi
+
+    if [[ -z "$tag" && "$in_git_tree" = "0" && -f "$SCRIPT_DIR/VERSION" ]]; then
+        version=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")
+        [[ -n "$version" ]] || die "VERSION is empty; cannot derive a release image tag."
+        if [[ "$version" = v* ]]; then
+            tag="$version"
+        else
+            tag="v$version"
+        fi
+    fi
+
+    tag="${tag:-latest}"
+    validate_lancache_image_tag "$tag"
+    printf '%s\n' "$tag"
+}
+
 migrate_env_for_update() {
     local install_dir="$1" env_file
     local allow_insecure_ui cache_dir cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
@@ -499,6 +615,7 @@ migrate_env_for_update() {
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
@@ -910,10 +1027,16 @@ cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
+    assert_prebuilt_image_platform_supported
     cd "$install_dir"
 
+    pause_lancache_convergence_for_update
+
     print_step "Creating pre-update rollback backup"
-    cmd_backup --config "$install_dir"
+    if ! ( cmd_backup --config "$install_dir" ); then
+        resume_lancache_convergence_after_update true
+        die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
+    fi
 
     if [[ -d "$install_dir/.git" ]]; then
         print_step "Updating repo"
@@ -928,12 +1051,14 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling latest images"
-    docker compose pull || print_warn "Pull partially failed — continuing with cached images"
+    docker compose pull \
+        || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
     validate_compose_config "$install_dir"
 
     print_step "Restarting containers"
     docker compose up -d --remove-orphans
+    resume_lancache_convergence_after_update
     print_ok "Stack updated"
 }
 
@@ -1005,6 +1130,7 @@ cmd_update_ip() {
 
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh update-ip)."
+    assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
 
@@ -1089,7 +1215,8 @@ cmd_update_ip() {
 cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
-    local nats_url nats_user nats_password consumer_name pdns_api_key
+    local nats_url nats_user nats_password consumer_name pdns_api_key response_image_tag
+    local lancache_image_tag
 
     usage_secondary() {
         cat <<EOF
@@ -1170,6 +1297,7 @@ EOF
         is_valid_ipv4 "$listen_ip" \
             || die "--listen-ip must be a valid IPv4 address or 0.0.0.0"
     fi
+    assert_prebuilt_image_platform_supported
 
     print_step "Registering secondary"
     response_file=$(mktemp)
@@ -1198,6 +1326,7 @@ EOF
     nats_password=$(echo "$response" | grep -oP '"nats_password"\s*:\s*"\K[^"]*' || true)
     consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || true)
     pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
+    response_image_tag=$(echo "$response" | grep -oP '"image_tag"\s*:\s*"\K[^"]*' || true)
 
     missing_fields=()
     [[ -n "$nats_url" ]] || missing_fields+=("nats_url")
@@ -1208,6 +1337,11 @@ EOF
     if [[ ${#missing_fields[@]} -gt 0 ]]; then
         die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
     fi
+
+    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" ]]; then
+        LANCACHE_IMAGE_TAG="$response_image_tag"
+    fi
+    lancache_image_tag=$(resolve_lancache_image_tag)
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -1228,7 +1362,7 @@ EOF
 
 services:
   dns-secondary:
-    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    image: ghcr.io/wiki-mod/lancache-ng/dns:\${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=\${PROXY_IP}
       - PDNS_API_KEY=\${PDNS_API_KEY}
@@ -1261,6 +1395,7 @@ NATS_URL=${nats_url}
 NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
+LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
     print_step "Starting secondary DNS container"
@@ -1345,6 +1480,8 @@ print_step "Checking prerequisites"
 
 [[ "$(id -u)" = "0" ]] \
     || die "This script must be run as root (sudo ./setup.sh)."
+
+assert_prebuilt_image_platform_supported
 
 if ! command -v curl >/dev/null 2>&1; then
     install_curl
@@ -1588,6 +1725,7 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
+LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
@@ -1634,6 +1772,10 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 
 # For Admin UI (GB as number for progress bar)
 CACHE_MAX_GB=${cache_gb}
+
+# First-party service image tag. Keep "latest" for the default master/edge path.
+# When running from a tagged release archive, set this to the matching vX.Y.Z tag.
+LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 
 # ── DHCP ───────────────────────────────────────────────────────────────────────
 DHCP_ENABLED=${DHCP_ENABLED}
@@ -1698,6 +1840,7 @@ fi
 # ── 10. Installing systemd watchdog ───────────────────────────────────────────
 print_step "Installing systemd watchdog"
 
+SYSTEMD_AVAILABLE=0
 if ! command -v systemctl >/dev/null 2>&1; then
     print_warn "systemd not found — watchdog will not be installed"
     print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
@@ -1746,10 +1889,8 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now lancache.service
-    systemctl enable --now lancache-converge.timer
-    print_ok "lancache.service enabled (starts on boot)"
-    print_ok "lancache-converge.timer enabled (convergence check every 5 minutes)"
+    SYSTEMD_AVAILABLE=1
+    print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
 
 # ── 11. Summary and confirmation ──────────────────────────────────────────────
@@ -1797,10 +1938,21 @@ ask "Start now? [Y/n]" "Y"
 # ── 12. Starting stack ───────────────────────────────────────────────────────
 print_step "Pulling images"
 cd "$INSTALL_DIR"
-docker compose pull || print_warn "Pull partially failed — continuing with cached images"
+assert_prebuilt_image_platform_supported
+docker compose pull \
+    || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
 print_step "Starting stack"
-docker compose up -d
+if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
+    systemctl enable lancache.service
+    systemctl enable lancache-converge.timer
+    print_ok "lancache.service enabled for boot"
+    print_ok "lancache-converge.timer enabled for boot"
+    systemctl start lancache.service
+    systemctl start lancache-converge.timer
+else
+    docker compose up -d
+fi
 print_ok "Stack started"
 
 # ── 13. Post-start info ──────────────────────────────────────────────────────

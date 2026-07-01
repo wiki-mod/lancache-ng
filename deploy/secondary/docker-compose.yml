@@ -4,7 +4,7 @@
 
 services:
   dns-secondary:
-    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    image: ghcr.io/wiki-mod/lancache-ng/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${PROXY_IP}
       - PDNS_API_KEY=${PDNS_API_KEY}

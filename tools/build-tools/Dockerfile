@@ -18,6 +18,8 @@ FROM rust:latest
 ARG SCCACHE_VERSION=0.16.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
+ARG DOCKER_CLI_VERSION=28.5.2
+ARG DOCKER_COMPOSE_VERSION=2.40.3
 ARG DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -54,6 +56,26 @@ RUN set -euo pipefail; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
 COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
+
+RUN set -euo pipefail; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) docker_arch="x86_64"; compose_arch="x86_64" ;; \
+      arm64) docker_arch="aarch64"; compose_arch="aarch64" ;; \
+      *) echo "Unsupported Docker CLI architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    docker_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$docker_tmp"' EXIT; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o "$docker_tmp/docker.tgz"; \
+    tar -xzf "$docker_tmp/docker.tgz" -C "$docker_tmp"; \
+    install -m 0755 "$docker_tmp/docker/docker" /usr/local/bin/docker; \
+    install -d /usr/local/lib/docker/cli-plugins; \
+    curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-compose; \
+    chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose; \
+    docker --version; \
+    docker compose version
 
 RUN set -euo pipefail; \
     distcc_pump_tmp=""; \
@@ -135,6 +157,7 @@ RUN set -euo pipefail; \
       dirname \
       distcc \
       distcc-pump \
+      docker \
       dpkg \
       envsubst \
       find \
@@ -178,6 +201,8 @@ RUN set -euo pipefail; \
     cargo audit --version; \
     actionlint --version; \
     shellcheck --version; \
+    docker --version; \
+    docker compose version; \
     printf 'PATH=%s\n' "$PATH"; \
     case ":$PATH:" in \
       *:/usr/local/cargo/bin:*) ;; \
