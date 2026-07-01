@@ -59,7 +59,7 @@ runs:
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
-          bash -lc '
+          bash -s <<'PREFLIGHT'
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"
@@ -142,4 +142,4 @@ runs:
               scan_log "$distcc_log"
               echo "[INFO] distcc preflight completed."
             fi
-          '
+        PREFLIGHT
