@@ -1028,6 +1028,8 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
           cache: "false"
           cache-dir: /var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}
           timeout: 10m
