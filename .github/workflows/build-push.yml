@@ -359,9 +359,9 @@ jobs:
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
           grep -F 'uses: ./.github/actions/rust-acceleration-preflight' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must run an external acceleration preflight outside BuildKit cache."; exit 1; }
-          grep -F 'redis-file: $'"{{"}}' steps.sccache-secret.outputs.redis-file '"}}" .github/workflows/build-push.yml >/dev/null \
-            && grep -F 'dist-config-file: $'"{{"}}' steps.sccache-secret.outputs.dist-config-file '"}}" .github/workflows/build-push.yml >/dev/null \
-            && grep -F 'distcc-hosts-file: $'"{{"}}' steps.sccache-secret.outputs.distcc-hosts-file '"}}" .github/workflows/build-push.yml >/dev/null \
+          grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must receive all generated secret file paths."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
