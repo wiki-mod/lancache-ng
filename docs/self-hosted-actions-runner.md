@@ -16,6 +16,20 @@ DNS/setup/template fixture tools. Trivy image scanning remains a workflow
 capability, not a tool bundled into the image. Production service images remain
 separate.
 
+Workflow jobs that only need these bundled validation tools should run them from
+the prebuilt image instead of compiling or installing them per job. For example,
+the Cargo Audit jobs use the image-provided `cargo-audit` binary.
+
+Routine pull requests skip the `build-tools` image build when neither
+`tools/build-tools` nor the build workflow changed. Release tags always build the
+tag-scoped build-tools image because release jobs must not use mutable `latest`
+tooling.
+
+The dedicated `Build Tools Image` workflow provides the normal refresh path for
+that image. It runs when build-tools inputs change, can be triggered manually,
+refreshes weekly, smoke-tests the bundled tools, scans the local image, and then
+publishes `linux/amd64` and `linux/arm64` tags on trusted non-PR refs.
+
 The build-tools image does not replace the baseline runner requirements below.
 The GitHub workflows still run Docker, Compose, CodeQL setup, and the current
 Rust CI jobs on self-hosted runners.

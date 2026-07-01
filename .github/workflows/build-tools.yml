@@ -1,0 +1,153 @@
+name: Build Tools Image
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly refresh for base-image and package updates without requiring a
+    # product-code change.
+    - cron: "23 3 * * 0"
+  push:
+    branches: [master]
+    paths:
+      - "tools/build-tools/**"
+      - ".github/workflows/build-tools.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "tools/build-tools/**"
+      - ".github/workflows/build-tools.yml"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  BUILD_TOOLS_PLATFORMS: linux/amd64,linux/arm64
+  BUILD_TOOLS_SCAN_IMAGE: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-tools:
+    runs-on: [self-hosted, linux, lancache]
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.BUILD_TOOLS_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build local scan image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          load: true
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          platforms: linux/amd64
+          provenance: false
+
+      - name: Smoke-test validation tools
+        run: |
+          set -euo pipefail
+
+          docker run --rm "${BUILD_TOOLS_SCAN_IMAGE}" bash -c '
+            set -euo pipefail
+
+            required_tools=(
+              actionlint
+              bash
+              cargo
+              cargo-audit
+              clippy-driver
+              dig
+              distcc
+              distcc-pump
+              docker
+              envsubst
+              jq
+              rustc
+              rustfmt
+              sccache
+              shellcheck
+            )
+
+            for tool in "${required_tools[@]}"; do
+              command -v "$tool" >/dev/null
+            done
+
+            cargo --version
+            cargo audit --version
+            cargo-audit --version
+            sccache --version
+            actionlint --version
+            shellcheck --version
+            distcc --version
+            distcc-pump --help >/dev/null
+            docker --version
+            docker compose version
+          '
+
+      - name: Scan local build-tools image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+
+      - name: Build and push multi-architecture build-tools image
+        id: build
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
+          provenance: false
+
+      - name: Attest build-tools image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Remove local scan image
+        if: always()
+        run: docker rmi "${BUILD_TOOLS_SCAN_IMAGE}" || true
