@@ -40,12 +40,26 @@ jobs:
           set -euo pipefail
 
           published_image="ghcr.io/wiki-mod/lancache-ng/build-tools:latest"
-          if published_check_output="$(docker run --rm "$published_image" bash -lc 'set -euo pipefail; command -v docker >/dev/null; docker compose version >/dev/null' 2>&1)"; then
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$published_image" >> "$GITHUB_ENV"
-            exit 0
+          published_image_pulled=false
+          if published_pull_output="$(docker pull "$published_image" 2>&1)"; then
+            printf '%s\n' "$published_pull_output"
+            published_image_pulled=true
+          else
+            printf '%s\n' "$published_pull_output"
+            if [ "$TRUSTED_BUILD_TOOLS_FALLBACK" != "true" ]; then
+              echo "::error::Published build-tools image could not be pulled and branch-local fallback builds are disabled for untrusted pull requests."
+              exit 1
+            fi
           fi
 
-          printf '%s\n' "$published_check_output"
+          if [ "$published_image_pulled" = "true" ]; then
+            if published_check_output="$(docker run --rm "$published_image" bash -lc 'set -euo pipefail; command -v docker >/dev/null; docker compose version >/dev/null' 2>&1)"; then
+              printf 'BUILD_TOOLS_IMAGE=%s\n' "$published_image" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            printf '%s\n' "$published_check_output"
+          fi
+
           if [ "$TRUSTED_BUILD_TOOLS_FALLBACK" != "true" ]; then
             echo "::error::Published build-tools image is not usable and branch-local fallback builds are disabled for untrusted pull requests."
             exit 1
@@ -675,7 +689,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }}
-          scanners: vuln
+          scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
