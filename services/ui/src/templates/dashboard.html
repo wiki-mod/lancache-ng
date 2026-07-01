@@ -6,6 +6,25 @@
 
   <h1 class="text-xl font-bold text-white">Dashboard</h1>
 
+  <!-- DHCP Status -->
+  <div class="card space-y-2">
+    <div class="flex items-center justify-between">
+      <h2 class="font-semibold text-slate-200">DHCP-Modus</h2>
+      <span class="text-xs text-slate-500">{{ dhcp_mode }}</span>
+    </div>
+    {% if dhcp_mode == "disabled" %}
+      <p class="text-sm text-slate-400">DHCP ist deaktiviert.</p>
+    {% elif dhcp_mode == "kea" %}
+      <p class="text-sm text-slate-400">Kea läuft aktiv und steuert Subnetze, Optionen und Leases.</p>
+      {% if dhcp_mode_has_kea %}
+      <p class="text-xs text-slate-500">DHCP-API-Konfiguration im Admin-UI verfügbar.</p>
+      {% endif %}
+    {% else %}
+      <p class="text-sm text-slate-400">dnsmasq-Proxy läuft nur als DHCP-Relay und kann nur DNS-Optionen setzen.</p>
+      <p class="text-xs text-amber-400">Kea-spezifische Konfigurationen in der UI sind in diesem Modus nicht aktiv.</p>
+    {% endif %}
+  </div>
+
   <!-- Cache-Übersicht -->
   {% if shared_cache %}
   <div class="card">

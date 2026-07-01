@@ -311,6 +311,7 @@ services:
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
+      - DHCP_MODE=${DHCP_MODE:-disabled}
       - NATS_URL=nats://nats:4222
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}

@@ -48,6 +48,35 @@ is_valid_ipv4() {
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+is_valid_cidr() {
+    local cidr="$1" ip mask octets
+
+    if [[ ! "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+        return 1
+    fi
+
+    ip=${cidr%/*}
+    mask=${cidr#*/}
+
+    [[ "$mask" =~ ^[0-9]+$ ]] || return 1
+    (( mask >= 1 && mask <= 32 )) || return 1
+
+    IFS='.' read -r -a octets <<< "$ip"
+    for part in "${octets[@]}"; do
+        [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( part >= 0 && part <= 255 )) || return 1
+    done
+
+    return 0
+}
+
+is_valid_dhcp_mode() {
+    case "$1" in
+        disabled|kea|dnsmasq-proxy) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 confirm() {
     local prompt="$1" default="${2:-N}"
     ask "$prompt" "$default"
@@ -883,7 +912,7 @@ resolve_lancache_image_tag() {
 }
 
 migrate_env_for_update() {
-    local install_dir="$1" env_file
+    local install_dir="$1" env_file dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     env_file="$install_dir/.env"
 
@@ -943,6 +972,29 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_GATEWAY "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
+
+    dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
+    dhcp_mode=${dhcp_mode:-${DHCP_MODE:-}}
+    if [[ "${dhcp_mode}" = "1" ]]; then
+        dhcp_mode=kea
+    elif [[ -z "${dhcp_mode}" ]]; then
+        dhcp_mode="disabled"
+    fi
+
+    if ! is_valid_dhcp_mode "$dhcp_mode"; then
+        if [[ "$(get_env_var DHCP_ENABLED "$env_file")" = "1" ]]; then
+            dhcp_mode="kea"
+        else
+            dhcp_mode="disabled"
+        fi
+    fi
+
+    append_env_key_if_missing DHCP_MODE "disabled" "$env_file"
+    set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
+    append_env_key_if_missing DHCP_SUBNET_START "10.0.0.0" "$env_file"
+    append_env_key_if_missing DHCP_DNS_PRIMARY "192.168.1.10" "$env_file"
+    append_env_key_if_missing DHCP_DNS_SECONDARY "192.168.1.11" "$env_file"
+    append_env_key_if_missing UPSTREAM_DHCP_IP "192.168.1.1" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -2012,42 +2064,103 @@ else
     print_warn "Watchtower disabled — manual updates with: ./setup.sh update"
 fi
 
-# ── 6. DHCP server ───────────────────────────────────────────────────────────
-print_step "DHCP server (optional)"
+# ── 6. DHCP mode ─────────────────────────────────────────────────────────────
+print_step "DHCP mode"
 
-printf "  LanCache-NG can run as a DHCP server and assign cache DNS IPs to clients.\n"
-printf "  The existing DHCP server (router) can then be shut down.\n\n"
+printf "  Kea (full mode): route and DNS options via Admin-UI\n"
+printf "  dnsmasq-proxy: keep router DHCP, override only DNS options\n"
+printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
-ask "Enable DHCP server? [y/N]" "N"
+while true; do
+    ask "DHCP mode (disabled, kea, dnsmasq-proxy)" "disabled"
+    DHCP_MODE="${REPLY,,}"
+    if is_valid_dhcp_mode "$DHCP_MODE"; then
+        break
+    fi
+    print_error "Invalid DHCP mode: $DHCP_MODE"
+done
+
 DHCP_ENABLED=0
 KEA_DATA_DIR=""
 DHCP_SUBNET=""
-DHCP_GATEWAY=""
+DHCP_GATEWAY="10.0.0.1"
 DHCP_RANGE_START=""
 DHCP_RANGE_END=""
-if [[ "${REPLY,,}" = "y" ]]; then
+DHCP_SUBNET_START=""
+DHCP_DNS_PRIMARY="$IP_STANDARD"
+DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
+UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
+
+if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
 
     ask "Kea data directory (config + leases)" "$INSTALL_DIR/kea"
     KEA_DATA_DIR="$REPLY"
 
-    ask "DHCP subnet (CIDR)" "10.0.0.0/24"
-    DHCP_SUBNET="$REPLY"
+    while true; do
+        ask "DHCP subnet (CIDR)" "10.0.0.0/24"
+        DHCP_SUBNET="$REPLY"
+        is_valid_cidr "$DHCP_SUBNET" && break
+        print_error "Invalid CIDR: $DHCP_SUBNET"
+    done
 
-    ask "Gateway" "10.0.0.1"
-    DHCP_GATEWAY="$REPLY"
+    while true; do
+        ask "Gateway" "10.0.0.1"
+        DHCP_GATEWAY="$REPLY"
+        is_valid_ipv4 "$DHCP_GATEWAY" && break
+        print_error "Invalid IPv4 address: $DHCP_GATEWAY"
+    done
 
-    ask "IP pool start" "10.0.0.128"
-    DHCP_RANGE_START="$REPLY"
+    while true; do
+        ask "IP pool start" "10.0.0.128"
+        DHCP_RANGE_START="$REPLY"
+        is_valid_ipv4 "$DHCP_RANGE_START" && break
+        print_error "Invalid IPv4 address: $DHCP_RANGE_START"
+    done
 
-    ask "IP pool end" "10.0.0.254"
-    DHCP_RANGE_END="$REPLY"
+    while true; do
+        ask "IP pool end" "10.0.0.254"
+        DHCP_RANGE_END="$REPLY"
+        is_valid_ipv4 "$DHCP_RANGE_END" && break
+        print_error "Invalid IPv4 address: $DHCP_RANGE_END"
+    done
 
-    print_ok "DHCP enabled — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
+    print_ok "DHCP enabled in Kea mode — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
     print_warn "Kea Control Agent port 8000 should be restricted by firewall"
     printf "  iptables (legacy):  iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n"
     printf "  nftables:           nft add rule inet filter input tcp dport 8000 ip saddr != 172.28.0.0/16 drop\n"
     printf "  ufw:                ufw deny from any to any port 8000\n\n"
+elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
+    ask "DHCP subnet start for dnsmasq-proxy" "10.0.0.0"
+    while true; do
+        DHCP_SUBNET_START="$REPLY"
+        is_valid_ipv4 "$DHCP_SUBNET_START" && break
+        print_error "Invalid IPv4 address: $DHCP_SUBNET_START"
+        ask "DHCP subnet start for dnsmasq-proxy" "10.0.0.0"
+    done
+
+    while true; do
+        ask "Primary DNS server sent by LanCache" "$DHCP_DNS_PRIMARY"
+        DHCP_DNS_PRIMARY="$REPLY"
+        is_valid_ipv4 "$DHCP_DNS_PRIMARY" && break
+        print_error "Invalid IPv4 address: $DHCP_DNS_PRIMARY"
+    done
+
+    while true; do
+        ask "Secondary DNS server sent by LanCache" "$DHCP_DNS_SECONDARY"
+        DHCP_DNS_SECONDARY="$REPLY"
+        is_valid_ipv4 "$DHCP_DNS_SECONDARY" && break
+        print_error "Invalid IPv4 address: $DHCP_DNS_SECONDARY"
+    done
+
+    while true; do
+        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
+        UPSTREAM_DHCP_IP="$REPLY"
+        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
+        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
+    done
+
+    print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
@@ -2173,10 +2286,15 @@ LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 # ── DHCP ───────────────────────────────────────────────────────────────────────
 DHCP_ENABLED=${DHCP_ENABLED}
 KEA_DATA_DIR=${KEA_DATA_DIR}
+DHCP_MODE=${DHCP_MODE}
 DHCP_SUBNET=${DHCP_SUBNET}
 DHCP_GATEWAY=${DHCP_GATEWAY}
 DHCP_RANGE_START=${DHCP_RANGE_START}
 DHCP_RANGE_END=${DHCP_RANGE_END}
+DHCP_SUBNET_START=${DHCP_SUBNET_START:-10.0.0.0}
+DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-$IP_STANDARD}
+DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-$IP_STANDARD}
+UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-$IP_STANDARD}}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
@@ -2303,10 +2421,14 @@ printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR_STANDARD"
     && printf "  %-26s %s\n" "Cache SSL:"            "$CACHE_DIR_SSL"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
+printf "  %-26s %s\n"    "DHCP mode:"               "$DHCP_MODE"
 if [[ "$DHCP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "DHCP server:"             "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
 else
     printf "  %-26s %s\n" "DHCP server:"             "disabled"
+fi
+if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
+    printf "  %-26s %s\n" "DHCP proxy subnet start:" "$DHCP_SUBNET_START"
 fi
 if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
     printf "  %-26s %s\n" "Watchtower:"              "enabled for helper updates (daily at 04:00)"

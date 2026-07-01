@@ -11,6 +11,19 @@
     </p>
   </div>
 
+  <div class="card space-y-2">
+    <h2 class="font-semibold text-slate-200">DHCP-Modus</h2>
+    <p class="text-sm text-slate-400">Aktueller Modus: <span class="text-slate-200">{{ dhcp_mode }}</span></p>
+    {% if dhcp_mode == "disabled" %}
+      <p class="text-xs text-slate-500">DHCP ist deaktiviert; Ihre bestehende Router-DHCP-Konfiguration bleibt aktiv.</p>
+    {% elif dhcp_mode == "kea" %}
+      <p class="text-xs text-slate-500">Kea ist aktiv (voller Modus): DNS, Optionen, Reservierungen und Leases können hier verwaltet werden.</p>
+    {% else %}
+      <p class="text-xs text-amber-300">dnsmasq-Proxy ist aktiv (eingeschränkter Modus): Nur DHCP-Relay + DNS-Overrides werden gesetzt.</p>
+      <p class="text-xs text-slate-500">Kea-Konfigurationsseiten in der UI sind in diesem Modus bewusst eingeschränkt.</p>
+    {% endif %}
+  </div>
+
   <!-- ── Transparenter Proxy (Router) ─────────────────────────────────────── -->
   <div class="card space-y-4">
     <div>
