@@ -469,6 +469,53 @@ assert_prebuilt_image_platform_supported() {
     esac
 }
 
+systemd_unit_exists() {
+    local unit="$1"
+    command -v systemctl >/dev/null 2>&1 \
+        && systemctl list-unit-files "$unit" >/dev/null 2>&1
+}
+
+CONVERGENCE_TIMER_WAS_ACTIVE=0
+CONVERGENCE_TIMER_WAS_ENABLED=0
+
+pause_lancache_convergence_for_update() {
+    CONVERGENCE_TIMER_WAS_ACTIVE=0
+    CONVERGENCE_TIMER_WAS_ENABLED=0
+
+    if ! systemd_unit_exists lancache-converge.timer; then
+        return 0
+    fi
+
+    if systemctl is-active --quiet lancache-converge.timer; then
+        CONVERGENCE_TIMER_WAS_ACTIVE=1
+        print_step "Pausing convergence timer"
+        systemctl stop lancache-converge.timer \
+            || die "Failed to stop lancache-converge.timer before update."
+    fi
+
+    if systemctl is-enabled --quiet lancache-converge.timer; then
+        CONVERGENCE_TIMER_WAS_ENABLED=1
+        systemctl disable lancache-converge.timer >/dev/null \
+            || die "Failed to disable lancache-converge.timer before update."
+    fi
+}
+
+resume_lancache_convergence_after_update() {
+    if ! systemd_unit_exists lancache-converge.timer; then
+        return 0
+    fi
+
+    if [[ "$CONVERGENCE_TIMER_WAS_ENABLED" = "1" ]]; then
+        systemctl enable lancache-converge.timer >/dev/null \
+            || die "Failed to re-enable lancache-converge.timer after update."
+    fi
+
+    if [[ "$CONVERGENCE_TIMER_WAS_ACTIVE" = "1" ]]; then
+        systemctl start lancache-converge.timer \
+            || die "Failed to restart lancache-converge.timer after update."
+    fi
+}
+
 validate_lancache_image_tag() {
     local tag="$1"
     [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
@@ -544,7 +591,7 @@ migrate_env_for_update() {
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_TAG "latest" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
@@ -959,6 +1006,8 @@ cmd_update() {
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
 
+    pause_lancache_convergence_for_update
+
     print_step "Creating pre-update rollback backup"
     cmd_backup --config "$install_dir"
 
@@ -982,6 +1031,7 @@ cmd_update() {
 
     print_step "Restarting containers"
     docker compose up -d --remove-orphans
+    resume_lancache_convergence_after_update
     print_ok "Stack updated"
 }
 
@@ -1811,11 +1861,8 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable lancache.service
-    systemctl enable lancache-converge.timer
     SYSTEMD_AVAILABLE=1
-    print_ok "lancache.service enabled for boot"
-    print_ok "lancache-converge.timer enabled for boot"
+    print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
 
 # ── 11. Summary and confirmation ──────────────────────────────────────────────
@@ -1869,6 +1916,10 @@ docker compose pull \
 
 print_step "Starting stack"
 if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
+    systemctl enable lancache.service
+    systemctl enable lancache-converge.timer
+    print_ok "lancache.service enabled for boot"
+    print_ok "lancache-converge.timer enabled for boot"
     systemctl start lancache.service
     systemctl start lancache-converge.timer
 else
