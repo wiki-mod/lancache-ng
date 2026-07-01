@@ -457,6 +457,18 @@ cache_size_gb_from_env() {
     printf '%s\n' "$cache_max_size"
 }
 
+assert_prebuilt_image_platform_supported() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)
+            ;;
+        *)
+            die "Prebuilt production images are currently published for linux/amd64 only. This host reports '${arch}'. Use an amd64 host or wait for the planned multi-architecture image workflow."
+            ;;
+    esac
+}
+
 migrate_env_for_update() {
     local install_dir="$1" env_file
     local allow_insecure_ui cache_dir cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
@@ -499,6 +511,7 @@ migrate_env_for_update() {
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_TAG "latest" "$env_file"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
@@ -928,6 +941,7 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling latest images"
+    assert_prebuilt_image_platform_supported
     docker compose pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
@@ -1229,7 +1243,7 @@ EOF
 
 services:
   dns-secondary:
-    image: ghcr.io/wiki-mod/lancache-ng/dns:latest
+    image: ghcr.io/wiki-mod/lancache-ng/dns:\${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=\${PROXY_IP}
       - PDNS_API_KEY=\${PDNS_API_KEY}
@@ -1262,9 +1276,11 @@ NATS_URL=${nats_url}
 NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
+LANCACHE_IMAGE_TAG=latest
 EOF
 
     print_step "Starting secondary DNS container"
+    assert_prebuilt_image_platform_supported
     (cd "$secondary_dir" && docker compose up -d) \
         || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 
@@ -1636,6 +1652,10 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 # For Admin UI (GB as number for progress bar)
 CACHE_MAX_GB=${cache_gb}
 
+# First-party service image tag. Keep "latest" for the default master/edge path.
+# When running from a tagged release archive, set this to the matching vX.Y.Z tag.
+LANCACHE_IMAGE_TAG=latest
+
 # ── DHCP ───────────────────────────────────────────────────────────────────────
 DHCP_ENABLED=${DHCP_ENABLED}
 KEA_DATA_DIR=${KEA_DATA_DIR}
@@ -1798,6 +1818,7 @@ ask "Start now? [Y/n]" "Y"
 # ── 12. Starting stack ───────────────────────────────────────────────────────
 print_step "Pulling images"
 cd "$INSTALL_DIR"
+assert_prebuilt_image_platform_supported
 docker compose pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
