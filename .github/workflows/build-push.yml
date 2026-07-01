@@ -1014,6 +1014,11 @@ jobs:
             "${secret_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} \
             ${{ matrix.context }}
+      - name: Prepare local Trivy cache
+        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}"
       - name: Scan image with Trivy
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -1023,6 +1028,9 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}
+          timeout: 10m
           exit-code: "1"
       - name: Remove scan image
         if: >-

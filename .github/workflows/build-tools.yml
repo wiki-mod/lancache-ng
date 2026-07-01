@@ -153,6 +153,11 @@ jobs:
             docker compose version
           '
 
+      - name: Prepare local Trivy cache
+        run: |
+          set -euo pipefail
+          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools
+
       - name: Scan local build-tools image with Trivy
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -162,6 +167,9 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools
+          timeout: 10m
           exit-code: "1"
 
       - name: Build and push multi-architecture build-tools image
