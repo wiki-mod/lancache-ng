@@ -1,0 +1,103 @@
+name: First Interaction
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Welcome first-time contributors
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sender = context.payload.sender?.login;
+            const issue = context.payload.issue;
+            const pullRequest = context.payload.pull_request;
+
+            if (!sender) {
+              core.setFailed('GitHub event payload did not include sender.login.');
+              return;
+            }
+
+            if (!issue && !pullRequest) {
+              core.info('Skipping: event is not an issue or pull request.');
+              return;
+            }
+
+            const number = issue?.number ?? pullRequest.number;
+            const isPullRequest = Boolean(pullRequest);
+
+            async function hasOlderIssueByAuthor() {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner,
+                repo,
+                creator: sender,
+                state: 'all',
+                per_page: 100,
+              });
+
+              return issues.some((item) => !item.pull_request && item.number < number);
+            }
+
+            async function hasOlderPullRequestByAuthor() {
+              const pulls = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'all',
+                per_page: 100,
+              });
+
+              return pulls.some((item) => item.user?.login === sender && item.number < number);
+            }
+
+            const alreadyWelcomed = isPullRequest
+              ? await hasOlderPullRequestByAuthor()
+              : await hasOlderIssueByAuthor();
+
+            if (alreadyWelcomed) {
+              core.info(`Skipping: ${sender} already has an older ${isPullRequest ? 'pull request' : 'issue'}.`);
+              return;
+            }
+
+            const issueMessage = [
+              'Thanks for opening your first issue in lancache-ng.',
+              '',
+              'Please make sure the issue includes:',
+              '- expected behavior',
+              '- actual behavior',
+              '- logs or reproduction steps',
+              '- relevant configuration without secrets',
+              '',
+              'Do not post private keys, tokens, passwords, personal data, or private infrastructure details.',
+              "Security-sensitive reports should use the project's private security reporting channel.",
+            ].join('\n');
+
+            const pullRequestMessage = [
+              'Thanks for opening your first pull request in lancache-ng.',
+              '',
+              'Please make sure the pull request:',
+              '- links the related issue',
+              '- explains the user-visible behavior change',
+              '- lists the validation that was run',
+              '- does not include private keys, tokens, passwords, personal data, or private infrastructure details',
+              '',
+              "Security-sensitive reports should use the project's private security reporting channel.",
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: number,
+              body: isPullRequest ? pullRequestMessage : issueMessage,
+            });
