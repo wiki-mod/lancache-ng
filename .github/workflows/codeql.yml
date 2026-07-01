@@ -20,6 +20,10 @@ permissions:
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
