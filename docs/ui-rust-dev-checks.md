@@ -36,13 +36,16 @@ You can override the image for investigation:
 ./scripts/ui-rust-checks.sh --rust-image rust:latest
 ```
 
+If you override the image, it must already contain `rustfmt`, `clippy`, and
+`sccache` when you use the corresponding checks. The script no longer installs
+missing Rust tooling inside the container.
+
 ### Optional sccache with Redis
 
 To speed up repeated builds in containers, pass `--sccache` together with Redis.
 The build-tools image already includes `sccache`. If you override the image and
-the replacement image does not contain `sccache`, the script fails closed instead
-of compiling `sccache` inside that container. Use the build-tools image or
-another image with preinstalled `sccache`.
+the replacement image does not contain `sccache`, the script fails closed
+instead of bootstrapping it.
 
 ```bash
 SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/ui-rust-checks.sh --sccache
