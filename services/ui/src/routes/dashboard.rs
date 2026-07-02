@@ -77,7 +77,12 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("recent_logs", &recent_logs);
     ctx.insert("active_page", "dashboard");
 
-    crate::routes::render(&state.templates, "dashboard.html", &ctx, state.config.dev_mode)
+    crate::routes::render(
+        &state.templates,
+        "dashboard.html",
+        &ctx,
+        state.config.dev_mode,
+    )
 }
 
 fn cache_usage_pct(used_gb: f64, max_gb: f64) -> u64 {
