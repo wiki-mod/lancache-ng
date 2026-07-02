@@ -31,12 +31,16 @@ runtime:
   - name: proxy
     image: ghcr.io/wiki-mod/lancache-ng/proxy
     source: services/proxy/Dockerfile
+    platforms:
+      - linux/amd64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
   - name: dns
     image: ghcr.io/wiki-mod/lancache-ng/dns
     source: services/dns/Dockerfile
+    platforms:
+      - linux/amd64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
@@ -44,22 +48,30 @@ runtime:
   - name: watchdog
     image: ghcr.io/wiki-mod/lancache-ng/watchdog
     source: services/watchdog/Dockerfile
+    platforms:
+      - linux/amd64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
   - name: dhcp
     image: ghcr.io/wiki-mod/lancache-ng/dhcp
     source: services/dhcp/Dockerfile
+    platforms:
+      - linux/amd64
     compose:
       - deploy/prod/docker-compose.yml
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
     source: services/dhcp-proxy/Dockerfile
+    platforms:
+      - linux/amd64
     compose:
       - deploy/prod/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
     source: services/ui/Dockerfile
+    platforms:
+      - linux/amd64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
@@ -67,6 +79,8 @@ tooling:
   - name: build-tools
     image: ghcr.io/wiki-mod/lancache-ng/build-tools
     source: tools/build-tools/Dockerfile
+    platforms:
+      - linux/amd64
     consumers:
       - .github/workflows/build-push.yml
       - docs/self-hosted-actions-runner.md

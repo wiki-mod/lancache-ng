@@ -92,6 +92,16 @@ Tags matching `vX.Y.Z` are stable releases. They must create or update a normal
 GitHub release. They may move `latest` after the full package set has passed the
 release gate.
 
+## Platform Support
+
+The current supported prebuilt production platform is `linux/amd64`.
+`release/stack-images.yml`, the build workflow, and `setup.sh` must agree on
+that platform. Until the project deliberately enables another platform, setup
+fails closed on non-amd64 hosts before pulling prebuilt production images.
+
+Adding `linux/arm64` or another platform requires updating the manifest, build
+workflow, setup platform guard, release notes, and validation together.
+
 ## External Images
 
 External images are not part of the first-party stack tag. They remain explicit

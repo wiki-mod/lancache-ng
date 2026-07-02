@@ -34,6 +34,18 @@ require_name() {
   grep -Fxq "$name" <<<"$names" || fail "missing $section image: $name"
 }
 
+require_manifest_platform() {
+  local name=$1
+  awk -v name="$name" '
+    $0 == "  - name: " name { in_image=1; next }
+    in_image && /^  - name: / { in_image=0 }
+    in_image && /^    platforms:/ { in_platforms=1; next }
+    in_platforms && /^      - linux\/amd64$/ { found=1 }
+    in_platforms && /^    [^ ]/ { in_platforms=0 }
+    END { exit found ? 0 : 1 }
+  ' "$manifest" || fail "manifest must declare linux/amd64 platform support for $name"
+}
+
 require_file "${manifest#$repo_root/}"
 require_grep '^schema: stack-images/v1$' "${manifest#$repo_root/}" 'manifest schema must be stack-images/v1'
 require_grep '^registry: ghcr\.io$' "${manifest#$repo_root/}" 'manifest registry must be ghcr.io'
@@ -46,8 +58,10 @@ external_names=$(collect_names external)
 runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
+  require_manifest_platform "$image"
 done
 require_name "$tooling_names" build-tools tooling
+require_manifest_platform build-tools
 for image in docker-socket-proxy nats fluent-bit netdata watchtower; do
   require_name "$external_names" "$image" external
 done
@@ -119,6 +133,15 @@ require_grep 'channel_tags\+=\(latest\)' \
 require_grep 'docker buildx imagetools inspect "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* source image before moving a public channel'
+require_grep 'actions/attest@' \
+  .github/workflows/build-push.yml \
+  'release workflow must create provenance attestations for published first-party images'
+require_grep 'push-to-registry: true' \
+  .github/workflows/build-push.yml \
+  'provenance attestations must be pushed to the registry'
+require_grep 'subject-digest: \$\{\{ steps.retry-build.outputs.digest \|\| steps.build.outputs.digest \}\}' \
+  .github/workflows/build-push.yml \
+  'provenance attestations must bind to the pushed image digest'
 require_grep 'digest_for_image\(\)' \
   .github/workflows/build-push.yml \
   'release notes must read immutable image digests'
@@ -134,5 +157,11 @@ require_grep 'Stable releases must pin, mirror, or explicitly exclude release-re
 require_grep 'expected_prerelease=' \
   .github/workflows/build-push.yml \
   'release job must derive RC prerelease status from the tag'
+require_grep 'platforms: linux/amd64' \
+  .github/workflows/build-push.yml \
+  'build workflow must publish the platform declared by the stack manifest'
+require_grep 'assert_prebuilt_image_platform_supported' \
+  setup.sh \
+  'setup must fail closed on unsupported prebuilt-image platforms'
 
 printf 'validate-stack-images: %s looks good\n' "$manifest"
