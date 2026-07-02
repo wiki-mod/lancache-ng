@@ -577,10 +577,11 @@ CACHE_MAX_GB=50
 # latest is the latest stable release channel.
 # Use edge only when you explicitly want the tested pre-stable channel.
 # setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
+# Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
 LANCACHE_IMAGE_CHANNEL=latest
-LANCACHE_IMAGE_TAG=sha-<commit>
+LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
