@@ -347,6 +347,10 @@ get_env_var() {
     _compose_parse_env_value "$raw"
 }
 
+get_env_assignment_value_raw() {
+    awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
+}
+
 # .env helpers stay in setup.sh because this script owns install, update, and
 # migration behavior for curl | bash users.
 env_key_exists() {
@@ -470,6 +474,23 @@ append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+}
+
+append_env_assignment_if_missing() {
+    local key="$1" assignment_value="$2" env_file="$3"
+    case "$key" in
+        ""|*[!A-Za-z0-9_]*|[0-9]*)
+            die "Invalid .env key: $key"
+            ;;
+    esac
+    case "$assignment_value" in
+        *$'\n'*)
+            die "$key contains a newline and cannot be copied into .env."
+            ;;
+    esac
+    # Migration-only helper: duplicate an existing Compose .env assignment
+    # without destroying supported interpolation such as ${LAN_CACHE_ROOT:-...}.
+    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -846,7 +867,7 @@ resolve_lancache_image_tag() {
 
 migrate_env_for_update() {
     local install_dir="$1" env_file
-    local allow_insecure_ui cache_dir cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_dir_assignment cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -866,12 +887,15 @@ migrate_env_for_update() {
     # Cache settings. Older installs may only have CACHE_DIR, so keep that path
     # and map both proxy modes to the same cache directory by default.
     cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    cache_dir_assignment=$(get_env_assignment_value_raw CACHE_DIR_STANDARD "$env_file")
     if [[ -z "$cache_dir" ]]; then
         cache_dir=$(get_env_var CACHE_DIR "$env_file")
+        cache_dir_assignment=$(get_env_assignment_value_raw CACHE_DIR "$env_file")
     fi
     cache_dir="${cache_dir:-$install_dir/cache/standard}"
-    append_env_key_if_missing CACHE_DIR_STANDARD "$cache_dir" "$env_file"
-    append_env_key_if_missing CACHE_DIR_SSL "$cache_dir" "$env_file"
+    cache_dir_assignment="${cache_dir_assignment:-$cache_dir}"
+    append_env_assignment_if_missing CACHE_DIR_STANDARD "$cache_dir_assignment" "$env_file"
+    append_env_assignment_if_missing CACHE_DIR_SSL "$cache_dir_assignment" "$env_file"
 
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
     cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
