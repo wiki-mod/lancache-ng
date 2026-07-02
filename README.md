@@ -21,15 +21,16 @@ Some internal paths, root elements and service details may still change while th
 
 LanCache NG combines several services into one Docker based stack:
 
-- DNS service for redirecting known CDN domains to your local cache
+- DNS service
+  - for redirecting known CDN domains to your local cache
 - Nginx cache proxy for standard HTTP caching
-- optional SSL cache proxy for HTTPS capable clients
+  - optional SSL cache proxy for HTTPS capable clients
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
-- optional Kea DHCP server
-- optional DHCP proxy helper
-- optional Watchtower helper updates
-- optional watchdog and convergence checks
-- optional secondary DNS nodes synced through NATS
+  - optional Kea DHCP server
+  - optional DHCP-Dnsmasq-based proxy helper
+  - optional Watchtower helper updates
+  - optional watchdog and convergence checks
+  - optional secondary DNS nodes synced through NATS
 
 The goal is simple:
 
