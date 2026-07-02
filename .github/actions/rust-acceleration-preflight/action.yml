@@ -115,6 +115,13 @@ runs:
             require_sccache_activity() {
               local stats_file="$1"
               local require_cache_write="$2"
+              local count_cache_entries='
+                def count_entries:
+                  if type == "number" then .
+                  elif type == "object" then ([.. | numbers] | add // 0)
+                  else 0
+                  end;
+              '
 
               if ! jq -e '(.stats.compile_requests // 0) > 0' "$stats_file" >/dev/null; then
                 echo "[ERROR] sccache did not record the Rust compile request." >&2
@@ -122,10 +129,34 @@ runs:
                 exit 1
               fi
 
-              if [ "$require_cache_write" = "1" ] && ! jq -e '(.stats.cache_writes // 0) > 0' "$stats_file" >/dev/null; then
-                echo "[ERROR] Redis-backed sccache did not record a cache write." >&2
-                cat "$stats_file" >&2
-                exit 1
+              if [ "$require_cache_write" = "1" ]; then
+                if ! jq -e '(.stats.cache_writes // 0) > 0' "$stats_file" >/dev/null; then
+                  echo "[ERROR] Redis-backed sccache did not record a cache write." >&2
+                  cat "$stats_file" >&2
+                  exit 1
+                fi
+
+                if ! jq -e "$count_cache_entries (.stats.cache_hits // {} | count_entries) > 0" "$stats_file" >/dev/null; then
+                  echo "[ERROR] Redis-backed sccache did not record a cache read hit." >&2
+                  cat "$stats_file" >&2
+                  exit 1
+                fi
+
+                if ! jq -e '
+                  (.stats.cache_read_errors // 0) == 0
+                  and (.stats.cache_write_errors // 0) == 0
+                  and (.stats.cache_timeouts // 0) == 0
+                ' "$stats_file" >/dev/null; then
+                  echo "[ERROR] Redis-backed sccache recorded cache read, write, or timeout errors." >&2
+                  cat "$stats_file" >&2
+                  exit 1
+                fi
+
+                if ! jq -e "$count_cache_entries (.stats.cache_errors // {} | count_entries) == 0" "$stats_file" >/dev/null; then
+                  echo "[ERROR] Redis-backed sccache recorded cache backend errors." >&2
+                  cat "$stats_file" >&2
+                  exit 1
+                fi
               fi
             }
 

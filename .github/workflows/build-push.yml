@@ -385,10 +385,15 @@ jobs:
             && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'require_sccache_dist_connected' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'require_sccache_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_hits' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_read_errors' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_write_errors' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_timeouts' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_errors' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'require_sccache_dist_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc-pump --startup' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'DISTCC_FALLBACK=0' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
-            || { echo "::error::External Rust acceleration preflight must validate sccache, sccache-dist, and distcc paths."; exit 1; }
+            || { echo "::error::External Rust acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
           grep -F 'docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
