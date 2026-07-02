@@ -1714,24 +1714,6 @@ jobs:
             printf '%s\n' "$digest"
           }
 
-          require_platforms() {
-            local image=$1 expected manifest_output discovered_platforms
-
-            if ! manifest_output="$(docker buildx imagetools inspect "$image" 2>&1)"; then
-              echo "::error::Failed to inspect image manifest for $image."
-              printf '%s\n' "$manifest_output"
-              exit 1
-            fi
-
-            discovered_platforms="$(printf '%s\n' "$manifest_output" | awk '/Platform:/ { print $2 }' | sort -u)"
-            for expected in $(printf '%s\n' "$REQUIRED_PLATFORMS" | tr ',' ' '); do
-              if ! printf '%s\n' "$discovered_platforms" | grep -Eq "^${expected}(/.*)?$"; then
-                echo "::error::$image is missing required platform $expected before public tag promotion; discovered: ${discovered_platforms//$'\n'/, }"
-                exit 1
-              fi
-            done
-          }
-
           rollback_promotions() {
             local status=$?
             local target_image previous_digest
@@ -1791,7 +1773,7 @@ jobs:
           fi
 
           for service in "${services[@]}"; do
-            require_platforms "ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}:${source_tag}" "$REQUIRED_PLATFORMS"
           done
 
           pointer_context="$(mktemp -d)"
@@ -1813,7 +1795,7 @@ jobs:
             -t "$stack_pointer_image" \
             "$pointer_context"
           docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
-          require_platforms "$stack_pointer_image"
+          bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
 
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
@@ -1851,6 +1833,9 @@ jobs:
       contents: write
       packages: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -1874,19 +1859,7 @@ jobs:
           read -r -a services <<< "$SERVICES"
           for service in "${services[@]}"; do
             image="ghcr.io/${REPOSITORY}/${service}:${TAG_NAME}"
-            if ! manifest_output="$(docker buildx imagetools inspect "$image" 2>&1)"; then
-              echo "::error::Failed to inspect image manifest for ${image}."
-              printf '%s\n' "$manifest_output"
-              exit 1
-            fi
-
-            discovered_platforms="$(printf '%s\n' "$manifest_output" | awk '/Platform:/ { print $2 }' | sort -u)"
-            for expected in $(printf '%s\n' "$REQUIRED_PLATFORMS" | tr ',' ' '); do
-              if ! printf '%s\n' "$discovered_platforms" | grep -Eq "^${expected}(/.*)?$"; then
-                echo "::error::${image} is missing required platform ${expected}; discovered: ${discovered_platforms//$'\\n'/, }"
-                exit 1
-              fi
-            done
+            bash scripts/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
           done
 
       - name: Create or update GitHub release for built images

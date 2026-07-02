@@ -163,10 +163,10 @@ require_grep 'channel_tags\+=\(latest\)' \
 require_grep 'docker buildx imagetools inspect "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* source image before moving a public channel'
-require_grep 'require_platforms\(\)' \
-  .github/workflows/build-push.yml \
-  'promotion must define a platform coverage guard before moving public tags'
-require_grep 'require_platforms "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}"' \
+require_grep 'imagetools inspect "\$image" --format' \
+  scripts/require-image-platforms.sh \
+  'the shared platform coverage guard must inspect images via JSON format, not text-parsed Platform: lines (breaks on single-platform manifests)'
+require_grep 'bash scripts/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* service image platform before moving public tags'
 require_grep 'rollback_promotions\(\)' \
@@ -244,12 +244,12 @@ require_grep 'expected_prerelease=' \
 require_grep '^  RELEASE_PLATFORMS: linux/amd64$' \
   .github/workflows/build-push.yml \
   'build workflow must publish every platform declared by the stack manifest'
-require_grep 'awk .*/Platform:.*print \$2' \
+require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
-  'release workflow must parse docker buildx imagetools platform output'
+  'release workflow must verify every published release image via the shared platform coverage guard'
 require_grep 'is missing required platform' \
-  .github/workflows/build-push.yml \
-  'release workflow must fail closed when a first-party release image misses a required platform'
+  scripts/require-image-platforms.sh \
+  'the shared platform coverage guard must fail closed when a release image misses a required platform'
 require_grep 'cache-dir: /var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}' \
   .github/workflows/build-push.yml \
   'container scans must use platform-specific Trivy cache directories'
