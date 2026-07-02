@@ -1,51 +1,16 @@
-FROM mirror.gcr.io/library/rust:slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
+ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+FROM ${BUILD_TOOLS_IMAGE} AS builder
 
-# Keep sccache source-built and version-pinned, but only enable the cache
-# backends this project wires: Redis and sccache-dist client support.
-ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
+# The shared build-tools image already carries the Rust toolchain, sccache,
+# distcc, distcc-pump, and the supporting Debian packages. Keep this stage
+# lean and fail closed if the contract is not met.
 RUN set -eu; \
-    export DEBIAN_FRONTEND=noninteractive; \
-    distcc_pump_tmp=""; \
-    cleanup_builder_apt() { \
-        if [ -n "$distcc_pump_tmp" ]; then rm -rf "$distcc_pump_tmp"; fi; \
-        rm -f /usr/sbin/invoke-rc.d; \
-        if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi; \
-    }; \
-    trap cleanup_builder_apt EXIT; \
-    if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
-    printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
-    chmod +x /usr/sbin/invoke-rc.d; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        distcc \
-        libssl-dev \
-        pkg-config \
-        procps \
-        python3; \
+    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
+      command -v "$tool" >/dev/null; \
+    done; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    distcc_pump_tmp="$(mktemp -d)"; \
-    chmod 0755 "$distcc_pump_tmp"; \
-    chown _apt:root "$distcc_pump_tmp"; \
-    (cd "$distcc_pump_tmp" && apt-get download "distcc-pump=$DISTCC_PUMP_PACKAGE_VERSION"); \
-    dpkg --unpack "$distcc_pump_tmp"/distcc-pump_*.deb; \
-    distcc_pump_parser="/usr/lib/python3/dist-packages/include_server/parse_command.py"; \
-    grep -F "'-Wa,(%s\\.s)'" "$distcc_pump_parser" >/dev/null; \
-    grep -F "'-Wa,\\[(%s\\.s)\\]'" "$distcc_pump_parser" >/dev/null; \
-    sed -i \
-        -e 's/%s\\.s/%s\\\\.s/g' \
-        -e 's/-Wa,\\\[/-Wa,\\\\[/g' \
-        -e 's/)\\\]/)\\\\]/g' \
-        "$distcc_pump_parser"; \
-    grep -F "'-Wa,(%s\\\\.s)'" "$distcc_pump_parser" >/dev/null; \
-    grep -F "'-Wa,\\\\[(%s\\\\.s)\\\\]'" "$distcc_pump_parser" >/dev/null; \
-    python3 -Werror::SyntaxWarning -m py_compile "$distcc_pump_parser"; \
-    dpkg --configure distcc-pump; \
-    python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server; \
-    rm -rf /var/lib/apt/lists/*; \
-    cargo install sccache --version 0.16.0 --no-default-features --features redis,dist-client --root /usr/local; \
     printf '%s\n' \
       '#!/bin/sh' \
       'case "${1:-}" in' \
