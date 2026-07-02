@@ -952,6 +952,7 @@ resolve_lancache_image_tag() {
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_gateway dhcp_subnet_start ip_standard upstream_dhcp_ip
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -1011,13 +1012,16 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
 
+    compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
     dhcp_mode=${dhcp_mode:-${DHCP_MODE:-}}
     if [[ "${dhcp_mode}" = "1" ]]; then
         dhcp_mode=kea
     elif [[ -z "${dhcp_mode}" ]]; then
-        if [[ "$dhcp_enabled" = "1" ]]; then
+        if [[ ",$compose_profiles," = *,dhcp-proxy,* ]]; then
+            dhcp_mode="dnsmasq-proxy"
+        elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
             dhcp_mode="kea"
         else
             dhcp_mode="disabled"
@@ -1025,7 +1029,9 @@ migrate_env_for_update() {
     fi
 
     if ! is_valid_dhcp_mode "$dhcp_mode"; then
-        if [[ "$dhcp_enabled" = "1" ]]; then
+        if [[ ",$compose_profiles," = *,dhcp-proxy,* ]]; then
+            dhcp_mode="dnsmasq-proxy"
+        elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
             dhcp_mode="kea"
         else
             dhcp_mode="disabled"
@@ -1034,10 +1040,17 @@ migrate_env_for_update() {
 
     append_env_key_if_missing DHCP_MODE "disabled" "$env_file"
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
-    append_env_key_if_missing DHCP_SUBNET_START "10.0.0.0" "$env_file"
-    append_env_key_if_missing DHCP_DNS_PRIMARY "192.168.1.10" "$env_file"
-    append_env_key_if_missing DHCP_DNS_SECONDARY "192.168.1.11" "$env_file"
-    append_env_key_if_missing UPSTREAM_DHCP_IP "192.168.1.1" "$env_file"
+    ip_standard=$(get_env_var IP_STANDARD "$env_file")
+    ip_ssl=$(get_env_var IP_SSL "$env_file")
+    dhcp_gateway=$(get_env_var DHCP_GATEWAY "$env_file")
+    dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file")
+    dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
+    dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
+    upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    append_env_key_if_missing DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
+    append_env_key_if_missing DHCP_DNS_PRIMARY "${dhcp_dns_primary:-$ip_standard}" "$env_file"
+    append_env_key_if_missing DHCP_DNS_SECONDARY "${dhcp_dns_secondary:-${ip_ssl:-$ip_standard}}" "$env_file"
+    append_env_key_if_missing UPSTREAM_DHCP_IP "${upstream_dhcp_ip:-$dhcp_gateway}" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -1054,7 +1067,7 @@ migrate_env_for_update() {
 
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
     set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$(get_env_var COMPOSE_PROFILES "$env_file")" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
+        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
         "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real

@@ -278,7 +278,7 @@ services:
   dhcp:
     profiles: [dhcp-kea]
     container_name: lancache-dhcp
-    image: ghcr.io/wiki-mod/lancache-ng/dhcp:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL:-${IP_STANDARD}}
@@ -323,13 +323,13 @@ services:
   dhcp-proxy:
     profiles: [dhcp-proxy]
     container_name: lancache-dhcp-proxy
-    image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
-      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-10.0.0.0}
+      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
       - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
       - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL:-${IP_STANDARD}}}
-      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-${IP_STANDARD}}}
+      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-}}
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE

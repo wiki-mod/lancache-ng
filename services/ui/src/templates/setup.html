@@ -12,15 +12,15 @@
   </div>
 
   <div class="card space-y-2">
-    <h2 class="font-semibold text-slate-200">DHCP-Modus</h2>
-    <p class="text-sm text-slate-400">Aktueller Modus: <span class="text-slate-200">{{ dhcp_mode }}</span></p>
+    <h2 class="font-semibold text-slate-200">DHCP mode</h2>
+    <p class="text-sm text-slate-400">Current mode: <span class="text-slate-200">{{ dhcp_mode }}</span></p>
     {% if dhcp_mode == "disabled" %}
-      <p class="text-xs text-slate-500">DHCP ist deaktiviert; Ihre bestehende Router-DHCP-Konfiguration bleibt aktiv.</p>
+      <p class="text-xs text-slate-500">DHCP is disabled; the existing router DHCP configuration stays active.</p>
     {% elif dhcp_mode == "kea" %}
-      <p class="text-xs text-slate-500">Kea ist aktiv (voller Modus): DNS, Optionen, Reservierungen und Leases können hier verwaltet werden.</p>
+      <p class="text-xs text-slate-500">Kea is active in full mode: DNS, options, reservations, and leases can be managed here.</p>
     {% else %}
-      <p class="text-xs text-amber-300">dnsmasq-Proxy ist aktiv (eingeschränkter Modus): Nur DHCP-Relay + DNS-Overrides werden gesetzt.</p>
-      <p class="text-xs text-slate-500">Kea-Konfigurationsseiten in der UI sind in diesem Modus bewusst eingeschränkt.</p>
+      <p class="text-xs text-amber-300">dnsmasq proxy mode is active in limited mode: only DHCP relay and DNS overrides are configured.</p>
+      <p class="text-xs text-slate-500">Kea configuration pages are intentionally limited in this mode.</p>
     {% endif %}
   </div>
 
