@@ -1450,3 +1450,4 @@ mod tests {
         }
     }
 }
+// TODO(#370): Add practical upper bound for DHCP lease time (7 days = 604800 seconds)
