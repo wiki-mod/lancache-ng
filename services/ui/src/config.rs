@@ -141,6 +141,12 @@ impl Config {
             env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0));
         let shared_cache_max_gb = env_f64("CACHE_MAX_GB", legacy_cache_max_gb);
 
+        let lancache_image_tag = env_str("LANCACHE_IMAGE_TAG", "latest");
+        let lancache_image_channel = env::var("LANCACHE_IMAGE_CHANNEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| derive_lancache_image_channel(&lancache_image_tag));
+
         Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
             cdn_domains_file: env_str("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
@@ -180,11 +186,21 @@ impl Config {
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             lancache_image_registry: env_str("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
             lancache_image_prefix: env_str("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
-            lancache_image_channel: env_str("LANCACHE_IMAGE_CHANNEL", "latest"),
-            lancache_image_tag: env_str("LANCACHE_IMAGE_TAG", "latest"),
+            lancache_image_channel,
+            lancache_image_tag,
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
         }
+    }
+}
+
+fn derive_lancache_image_channel(tag: &str) -> String {
+    if tag == "dev" || tag == "edge" || tag == "latest" {
+        tag.to_string()
+    } else if tag.starts_with("sha-") || tag.starts_with('v') {
+        "pinned".to_string()
+    } else {
+        "latest".to_string()
     }
 }
 
@@ -404,12 +420,18 @@ mod tests {
 
         env::remove_var("LANCACHE_IMAGE_REGISTRY");
         env::remove_var("LANCACHE_IMAGE_PREFIX");
+        env::remove_var("LANCACHE_IMAGE_CHANNEL");
         env::remove_var("LANCACHE_IMAGE_TAG");
         let cfg = Config::from_env();
         assert_eq!(cfg.lancache_image_registry, "ghcr.io");
         assert_eq!(cfg.lancache_image_prefix, "wiki-mod/lancache-ng");
         assert_eq!(cfg.lancache_image_channel, "latest");
         assert_eq!(cfg.lancache_image_tag, "latest");
+
+        env::set_var("LANCACHE_IMAGE_TAG", "sha-deadbeef");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.lancache_image_channel, "pinned");
+        assert_eq!(cfg.lancache_image_tag, "sha-deadbeef");
 
         env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");

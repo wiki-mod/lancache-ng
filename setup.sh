@@ -729,6 +729,11 @@ resolve_lancache_image_tag() {
             return 0
             ;;
         pinned)
+            if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
+                tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+            fi
+            [[ -n "$tag" ]] \
+                || die "LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag."
             ;;
         "")
             ;;
@@ -814,8 +819,8 @@ migrate_env_for_update() {
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "ghcr.io" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_PREFIX "wiki-mod/lancache-ng" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
     append_env_key_if_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
     set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
@@ -1883,17 +1888,19 @@ ask "Cache RAM buffer in MB (keys_zone)" "512"
 CACHE_MEM_MB="$REPLY"
 
 # ── 5. Watchtower ─────────────────────────────────────────────────────────────
-print_step "Automatic updates (Watchtower)"
+print_step "Automatic helper updates (Watchtower)"
 
-printf "  Watchtower checks daily for new images\n"
-printf "  and updates containers automatically. Default: enabled.\n\n"
+printf "  LanCache-NG first-party images are pinned to one resolved stack tag.\n"
+printf "  Use ./setup.sh update for first-party updates so .env migrations run first.\n"
+printf "  Watchtower is optional and should only be used for helper image refreshes.\n"
+printf "  Default: disabled.\n\n"
 
-ask "Enable automatic updates? [Y/n]" "Y"
+ask "Enable optional Watchtower helper updates? [y/N]" "N"
 COMPOSE_PROFILES=""
 [[ "$SSL_ENABLED" = "1" ]] && COMPOSE_PROFILES="ssl"
-if [[ "${REPLY,,}" != "n" ]]; then
+if [[ "${REPLY,,}" = "y" ]]; then
     [[ -n "$COMPOSE_PROFILES" ]] && COMPOSE_PROFILES="${COMPOSE_PROFILES},watchtower" || COMPOSE_PROFILES="watchtower"
-    print_ok "Watchtower enabled (checks daily at 04:00 for new images)"
+    print_ok "Watchtower enabled for optional helper updates (daily at 04:00)"
 else
     print_warn "Watchtower disabled — manual updates with: ./setup.sh update"
 fi
@@ -2082,7 +2089,7 @@ NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────
-# ssl = SSL mode active; watchtower = automatic updates; empty = both disabled
+# ssl = SSL mode active; watchtower = optional helper updates; empty = both disabled
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
 # ── Admin-UI ───────────────────────────────────────────────────────────────────
@@ -2189,7 +2196,7 @@ else
     printf "  %-26s %s\n" "DHCP server:"             "disabled"
 fi
 if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
-    printf "  %-26s %s\n" "Watchtower:"              "enabled (daily at 04:00)"
+    printf "  %-26s %s\n" "Watchtower:"              "enabled for helper updates (daily at 04:00)"
 else
     printf "  %-26s %s\n" "Watchtower:"              "disabled"
 fi

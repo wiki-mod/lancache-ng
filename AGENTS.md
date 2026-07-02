@@ -18,6 +18,8 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 
 - Start every branch from a freshly fetched and rebased current base branch.
 - Use a separate worktree for each non-trivial PR or subagent task.
+- Use fanout for bounded independent work when it reduces main-thread cost without reducing quality. Prefer the cheapest suitable model and reasoning level: Spark first while available; if Spark is unavailable, rate-limited, or unsuitable, evaluate `gpt-5.4-mini` next before keeping delegable work in the main thread.
+- Choosing main-thread work while Spark is unavailable requires a concrete reason, such as unsafe delegation, time-critical local context, or higher integration risk from a separate agent.
 - Do not push directly to `master`. All changes go through pull requests.
 - Do not merge, close, or delete repository work unless the maintainer explicitly asks for that exact action.
 - Keep PRs in draft until the branch has passed local validation and known review findings are addressed.

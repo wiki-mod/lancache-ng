@@ -305,7 +305,7 @@ services:
       - SSL_IP=${IP_SSL}
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
       - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
-      - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-latest}
+      - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
       - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-50}}}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
@@ -360,7 +360,7 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
-  # ── Watchtower (automatic updates) ────────────────────────────────────────────
+  # ── Watchtower (optional helper updates) ──────────────────────────────────────
   # Only active if COMPOSE_PROFILES contains watchtower (setup.sh prompts for this)
   # Fork from nicholas-fedor: actively maintained, NegotiateAPIVersion=true (Docker 29+)
   watchtower:
