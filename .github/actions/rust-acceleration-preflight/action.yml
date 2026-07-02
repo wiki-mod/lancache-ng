@@ -25,6 +25,10 @@ inputs:
     description: Docker network mode shared with the real Rust image builds.
     required: false
     default: host
+  platform:
+    description: Docker platform shared with the real Rust image builds.
+    required: false
+    default: linux/amd64
 
 runs:
   using: composite
@@ -38,6 +42,7 @@ runs:
         DISTCC_HOSTS_FILE: ${{ inputs.distcc-hosts-file }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
         BUILD_NETWORK: ${{ inputs.build-network }}
+        BUILD_PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
 
@@ -60,9 +65,9 @@ runs:
           exit 0
         fi
 
-        docker pull "$BUILD_TOOLS_IMAGE" >/dev/null
+        docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
-        docker run --rm -i --network "$BUILD_NETWORK" \
+        docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
@@ -149,6 +154,7 @@ runs:
 
             if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
               export SCCACHE_NO_DAEMON=1
+              export SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"
               export SCCACHE_REDIS_KEY_PREFIX="lancache-preflight-${LANCACHE_SERVICE:-rust}"
               require_cache_write=0
               require_dist_activity=0
