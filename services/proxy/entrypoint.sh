@@ -71,7 +71,12 @@ _is_valid_domain_label() {
 # whether a value validates, it does not mutate the caller's variable.
 _normalize_domain() {
     local domain="$1"
-    domain=$(echo "$domain" | xargs | tr '[:upper:]' '[:lower:]')
+    # Trim whitespace via pure parameter expansion, not xargs — xargs applies
+    # shell-style unquoting/escaping first, which would let malformed manual
+    # entries like a quoted "Example.COM" slip through as a clean example.com.
+    domain="${domain#"${domain%%[![:space:]]*}"}"
+    domain="${domain%"${domain##*[![:space:]]}"}"
+    domain="${domain,,}"
     domain="${domain#.}"
     printf '%s' "$domain"
 }
