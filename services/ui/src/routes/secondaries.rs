@@ -77,6 +77,7 @@ pub async fn secondaries_page(
         &state.templates,
         "secondaries.html",
         &ctx,
+        state.config.dev_mode,
     ))
 }
 

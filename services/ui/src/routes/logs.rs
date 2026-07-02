@@ -64,5 +64,5 @@ pub async fn logs_page(
     let mut ctx = Context::new();
     ctx.insert("logs", &all_logs);
     ctx.insert("active_page", "logs");
-    crate::routes::render(&state.templates, "logs.html", &ctx)
+    crate::routes::render(&state.templates, "logs.html", &ctx, state.config.dev_mode)
 }

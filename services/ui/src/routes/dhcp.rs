@@ -118,7 +118,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
         ctx.insert("reservations", &Vec::<Reservation>::new());
     }
 
-    crate::routes::render(&state.templates, "dhcp.html", &ctx)
+    crate::routes::render(&state.templates, "dhcp.html", &ctx, state.config.dev_mode)
 }
 
 pub async fn add_subnet(

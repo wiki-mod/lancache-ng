@@ -58,6 +58,7 @@ pub struct Config {
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
     pub nats_service: String,
+    pub dev_mode: bool,
 }
 
 impl fmt::Debug for Config {
@@ -106,6 +107,7 @@ impl fmt::Debug for Config {
             .field("lancache_image_tag", &self.lancache_image_tag)
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_service", &self.nats_service)
+            .field("dev_mode", &self.dev_mode)
             .finish()
     }
 }
@@ -175,6 +177,7 @@ impl Config {
             lancache_image_tag: env_str("LANCACHE_IMAGE_TAG", "latest"),
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
+            dev_mode: env_bool("LANCACHE_DEV_MODE", false),
         }
     }
 }
