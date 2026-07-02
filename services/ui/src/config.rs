@@ -553,4 +553,3 @@ mod tests {
         env::remove_var("DHCP_API_URL");
     }
 }
-// TODO(#369): Add NATS config escaping helper for username and password values
