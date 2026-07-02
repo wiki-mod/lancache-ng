@@ -1421,7 +1421,6 @@ jobs:
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           annotations: |
             org.opencontainers.image.description=${{ matrix.description }}
-            index:org.opencontainers.image.description=${{ matrix.description }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1455,7 +1454,6 @@ jobs:
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           annotations: |
             org.opencontainers.image.description=${{ matrix.description }}
-            index:org.opencontainers.image.description=${{ matrix.description }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}

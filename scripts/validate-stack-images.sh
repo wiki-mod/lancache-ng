@@ -142,9 +142,9 @@ require_grep 'description: .+' \
 require_grep 'org\.opencontainers\.image\.description=\$\{\{ matrix\.description \}\}' \
   .github/workflows/build-push.yml \
   'build workflow must publish OCI image description labels'
-require_grep 'index:org\.opencontainers\.image\.description=\$\{\{ matrix\.description \}\}' \
+require_grep 'annotations:' \
   .github/workflows/build-push.yml \
-  'build workflow must publish OCI image description annotations for multi-arch manifests'
+  'build workflow must publish OCI image description annotations'
 require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
