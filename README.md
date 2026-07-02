@@ -302,6 +302,28 @@ sudo /opt/lancache-ng/setup.sh restore /var/backups/lancache-ng/lancache-ng-conf
 
 See `docs/backup-restore.md` for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.
 
+## Image Versioning and Release Channels
+
+`LANCACHE_IMAGE_CHANNEL` selects the first-party image channel. `setup.sh`
+resolves mutable channels to the immutable `LANCACHE_IMAGE_TAG` used by Docker
+Compose.
+
+- `latest` is the default stable release channel.
+- `edge` is the tested pre-stable channel promoted from `master`.
+- `vX.Y.Z` pins all stack services to an immutable stable release tag.
+- Branch and commit images are optional for development and testing.
+  If CI has published them, valid examples are branch names (for branch pushes)
+  and short `sha-<short>` tags.
+
+Recommended for production:
+
+- Use `latest` for normal stable deployments.
+- Use a tagged release value (for example `v1.2.3`) for pinned deployments.
+- Use `edge`, branch tags, or `sha-*` tags only for temporary test environments
+  where intentional drift is acceptable.
+
+The release workflow publishes service images with branch, tag, and SHA tags and keeps release source notes in GitHub releases.
+
 ## Debug information
 
 If something does not work, run:
