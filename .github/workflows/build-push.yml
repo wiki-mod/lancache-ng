@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+  RUST_ACCELERATION_NETWORK: bridge
 
 defaults:
   run:
@@ -357,6 +358,60 @@ jobs:
             || { echo "::error::Docker Rust builds must pass sccache-dist config through a BuildKit secret."; exit 1; }
           grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
+          grep -F 'uses: ./.github/actions/rust-acceleration-preflight' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must run an external acceleration preflight outside BuildKit cache."; exit 1; }
+          if grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+host[[:space:]]*$' .github/workflows/build-push.yml >/dev/null; then
+            echo "::error::Rust acceleration network must not be globally pinned to host; trusted secret-backed builds select host per job."
+            exit 1
+          fi
+          grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+bridge[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Rust acceleration network must default to bridge for untrusted and non-accelerated builds."; exit 1; }
+          grep -F 'rust_network=bridge' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'buildx_network=""' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'rust_network=host' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'buildx_network=host' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'printf '\''RUST_ACCELERATION_NETWORK=%s\n'\'' "$rust_network" >> "$GITHUB_ENV"' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'printf '\''RUST_BUILDX_NETWORK=%s\n'\'' "$buildx_network" >> "$GITHUB_ENV"' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Rust build network must be selected per job from generated acceleration secret files."; exit 1; }
+          grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+build-tools-image:[[:space:]]+\$\{\{[[:space:]]*env\.BUILD_TOOLS_IMAGE[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must receive all generated secret file paths."; exit 1; }
+          grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'require_sccache_dist_connected' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'require_sccache_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_hits' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_read_errors' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_write_errors' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_timeouts' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F '.stats.cache_errors' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'require_sccache_dist_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc-pump --startup' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'DISTCC_FALLBACK=0' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
+          grep -F 'docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
+          grep -F 'SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
+          grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
+            && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
+            || { echo "::error::Rust Docker builds must use the same network mode as the acceleration preflight."; exit 1; }
+          grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::External Rust acceleration preflight must use a cacheable rustc library probe."; exit 1; }
+          if grep -F -- '--crate-type bin' .github/actions/rust-acceleration-preflight/action.yml \
+            || grep -E 'sccache rustc .* -o ' .github/actions/rust-acceleration-preflight/action.yml; then
+            echo "::error::External Rust acceleration preflight must not use non-cacheable binary rustc probes."
+            exit 1
+          fi
           grep -F 'steps.docker-build-jobs.outputs.jobs' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
           grep -F 'build_tools_image:' .github/workflows/build-push.yml >/dev/null \
@@ -996,6 +1051,34 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select Rust build network
+        if: matrix.rust == true
+        env:
+          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+        run: |
+          set -euo pipefail
+
+          rust_network=bridge
+          buildx_network=""
+          if [ -n "$SECRET_FILES" ]; then
+            rust_network=host
+            buildx_network=host
+          fi
+          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
+          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
+
+      - name: Validate Rust acceleration outside BuildKit cache
+        if: matrix.rust == true
+        uses: ./.github/actions/rust-acceleration-preflight
+        with:
+          service: ${{ matrix.service }}
+          redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
+          dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
+          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
+          platform: linux/amd64
+
       - name: Build local scan image
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         env:
@@ -1020,6 +1103,7 @@ jobs:
           DOCKER_BUILDKIT=1 docker build \
             --pull \
             --platform linux/amd64 \
+            --network "$RUST_ACCELERATION_NETWORK" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
@@ -1366,6 +1450,7 @@ jobs:
             redis_file="${{ runner.temp }}/sccache-redis-url"
             printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
             secret_files+=("sccache_redis_url=$redis_file")
+            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
           fi
 
           if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
@@ -1380,6 +1465,7 @@ jobs:
               printf 'token = "%s"\n' "$(toml_escape "$SCCACHE_DIST_AUTH_TOKEN")"
             } > "$dist_config_file"
             secret_files+=("sccache_dist_config=$dist_config_file")
+            echo "dist-config-file=$dist_config_file" >> "$GITHUB_OUTPUT"
           fi
 
           if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
@@ -1391,6 +1477,7 @@ jobs:
             distcc_hosts_file="${{ runner.temp }}/distcc-potential-hosts"
             printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
             secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
+            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
           fi
 
           {
@@ -1398,6 +1485,34 @@ jobs:
             printf '%s\n' "${secret_files[@]}"
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Select Rust build network
+        if: matrix.rust == true
+        env:
+          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+        run: |
+          set -euo pipefail
+
+          rust_network=bridge
+          buildx_network=""
+          if [ -n "$SECRET_FILES" ]; then
+            rust_network=host
+            buildx_network=host
+          fi
+          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
+          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
+
+      - name: Validate Rust acceleration outside BuildKit cache
+        if: matrix.rust == true
+        uses: ./.github/actions/rust-acceleration-preflight
+        with:
+          service: ${{ matrix.service }}
+          redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
+          dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
+          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
+          platform: linux/amd64
 
       - name: Build and push
         id: build
@@ -1412,6 +1527,8 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+          network: ${{ env.RUST_BUILDX_NETWORK }}
+          allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
@@ -1445,6 +1562,8 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+          network: ${{ env.RUST_BUILDX_NETWORK }}
+          allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
