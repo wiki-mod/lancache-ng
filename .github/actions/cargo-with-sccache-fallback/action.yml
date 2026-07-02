@@ -102,11 +102,19 @@ runs:
 
         output_file="$(mktemp)"
 
+        # Capture the real exit status in the else branch — under `set -e`, a bare
+        # failing command would abort the script immediately, and `$?` after an
+        # `if` with no matching `else` is defined by POSIX as the `if` construct's
+        # own exit status (0 when no branch ran), not the tested command's status.
         if run_with_log "$output_file" "$SCCACHE_TIMEOUT_SECONDS"; then
-          exit 0
+          status=0
+        else
+          status="$?"
         fi
 
-        status="$?"
+        if [ "$status" -eq 0 ]; then
+          exit 0
+        fi
 
         if [ "$sccache_enabled" != "1" ] || ! is_sccache_failure "$status" "$output_file"; then
           exit "$status"
