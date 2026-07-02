@@ -224,6 +224,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
+LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update && apt-get install -y --no-install-recommends \
