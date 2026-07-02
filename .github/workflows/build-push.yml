@@ -70,7 +70,7 @@ jobs:
           else
             build_tools_image="$(bash scripts/select-build-tools-image.sh)"
             printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-            printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+            printf 'build_tools_image=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate stack image contract
@@ -360,6 +360,8 @@ jobs:
             || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
           grep -F 'build_tools_image:' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must expose the selected build-tools image as a job output."; exit 1; }
+          grep -F "printf 'build_tools_image=ghcr.io/%s/build-tools:latest\\n' \"\$GITHUB_REPOSITORY\" >> \"\$GITHUB_OUTPUT\"" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::The exported build-tools job output must be a pullable GHCR image, not a runner-local validation tag."; exit 1; }
           grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
             && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }

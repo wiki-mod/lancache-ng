@@ -8,6 +8,8 @@
   `distcc` host lists intact while removing local Rust builder tool bootstrap.
 - Threaded the selected build-tools image through the build workflow so CI uses
   the same prebuilt builder contract as the Dockerfiles.
+- Kept downstream Docker build jobs on a pullable GHCR build-tools image instead
+  of exporting runner-local validation tags across jobs.
 - Documented that subagent findings must be revalidated against the current
   GitHub head before they are used, and that local Rust builder checks only
   prove compile-farm behavior when the same BuildKit cache secrets are wired.
