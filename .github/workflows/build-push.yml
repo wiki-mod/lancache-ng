@@ -25,6 +25,65 @@ defaults:
     shell: bash
 
 jobs:
+  # PR-only path scoping: skips per-crate/per-service test, audit, and build
+  # work when a PR clearly cannot affect it, based on each Dockerfile's own
+  # COPY graph (verified: no service Dockerfile copies files from outside its
+  # own services/<name>/ directory, so these groups are genuinely isolated).
+  # Any change to this workflow or its composite actions is treated as
+  # touching everything, since the CI logic itself changed. Master/tag pushes
+  # are never scoped — they always run the full pipeline unconditionally, so
+  # this job's outputs are only consumed on pull_request.
+  detect-changes:
+    name: detect changed paths
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    outputs:
+      dns_rust: ${{ steps.filter.outputs.dns_rust }}
+      dns_image: ${{ steps.filter.outputs.dns_image }}
+      ui: ${{ steps.filter.outputs.ui }}
+      watchdog: ${{ steps.filter.outputs.watchdog }}
+      dhcp: ${{ steps.filter.outputs.dhcp }}
+      dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
+      proxy: ${{ steps.filter.outputs.proxy }}
+      build_tools: ${{ steps.filter.outputs.build_tools }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Determine changed top-level paths
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          printf 'Changed files:\n%s\n' "$changed"
+
+          touches() {
+            local prefix="$1"
+            printf '%s\n' "$changed" | grep -q "^${prefix}" && echo true || echo false
+          }
+
+          {
+            echo "dns_rust=$(touches 'services/dns/nats-subscriber/')"
+            echo "dns_image=$(touches 'services/dns/')"
+            echo "ui=$(touches 'services/ui/')"
+            echo "watchdog=$(touches 'services/watchdog/')"
+            echo "dhcp=$(touches 'services/dhcp/')"
+            echo "dhcp_proxy=$(touches 'services/dhcp-proxy/')"
+            echo "proxy=$(touches 'services/proxy/')"
+            echo "build_tools=$(touches 'tools/build-tools/')"
+            if printf '%s\n' "$changed" | grep -qE '^\.github/(workflows/build-push\.yml|actions/)'; then
+              echo "workflow=true"
+            else
+              echo "workflow=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
   shellcheck:
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
@@ -598,6 +657,16 @@ jobs:
 
   dns_rust_quality:
     name: rust-quality (dns/nats-subscriber)
+    needs: detect-changes
+    if: >-
+      ${{
+        always() &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.dns_rust == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -644,6 +713,16 @@ jobs:
 
   ui_rust_quality:
     name: rust-quality (ui)
+    needs: detect-changes
+    if: >-
+      ${{
+        always() &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.ui == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -690,7 +769,18 @@ jobs:
 
   dns_test:
     name: test (dns/nats-subscriber)
-    needs: [validate-compose, dns_rust_quality]
+    needs: [validate-compose, dns_rust_quality, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (needs.dns_rust_quality.result == 'success' || needs.dns_rust_quality.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.dns_rust == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -727,7 +817,18 @@ jobs:
 
   ui_test:
     name: test (ui)
-    needs: [validate-compose, ui_rust_quality]
+    needs: [validate-compose, ui_rust_quality, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (needs.ui_rust_quality.result == 'success' || needs.ui_rust_quality.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.ui == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -764,7 +865,17 @@ jobs:
 
   watchdog_test:
     name: test (watchdog)
-    needs: validate-compose
+    needs: [validate-compose, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.watchdog == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -775,7 +886,17 @@ jobs:
 
   dns_cargo_audit:
     name: cargo-audit (dns/nats-subscriber)
-    needs: validate-compose
+    needs: [validate-compose, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.dns_rust == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -807,7 +928,17 @@ jobs:
 
   ui_cargo_audit:
     name: cargo-audit (ui)
-    needs: validate-compose
+    needs: [validate-compose, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.ui == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -1176,16 +1307,17 @@ jobs:
       - dns_cargo_audit
       - ui_cargo_audit
       - container-scan
+      - detect-changes
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
-        needs.dns_test.result == 'success' &&
-        needs.ui_test.result == 'success' &&
-        needs.watchdog_test.result == 'success' &&
-        needs.dns_cargo_audit.result == 'success' &&
-        needs.ui_cargo_audit.result == 'success' &&
+        (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
+        (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
+        (needs.watchdog_test.result == 'success' || needs.watchdog_test.result == 'skipped') &&
+        (needs.dns_cargo_audit.result == 'success' || needs.dns_cargo_audit.result == 'skipped') &&
+        (needs.ui_cargo_audit.result == 'success' || needs.ui_cargo_audit.result == 'skipped') &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -1230,58 +1362,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Detect build-tools image input changes
-        id: build-tools-changes
-        if: matrix.service == 'build-tools'
+      - name: Determine whether this service needs building
+        id: should-build
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
+          MATRIX_SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
 
-          should_build=false
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              should_build=true
-              ;;
-          esac
-
-          if [ "$should_build" = "false" ]; then
-            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-              if [ -z "${BASE_SHA:-}" ]; then
-                echo "::error::Pull request base SHA is required to detect build-tools image changes."
+          should_build=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            case "$MATRIX_SERVICE" in
+              proxy) should_build="${{ needs['detect-changes'].outputs.proxy }}" ;;
+              dns) should_build="${{ needs['detect-changes'].outputs.dns_image }}" ;;
+              watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
+              dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
+              dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
+              build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
+              *)
+                echo "::error::Unknown matrix service '$MATRIX_SERVICE' has no path-scoping mapping."
                 exit 1
-              fi
-              git fetch --no-tags --depth=1 origin "$BASE_SHA"
-              changed_files="$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml)"
-            else
-              if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-                should_build=true
-                changed_files="initial-or-unknown-history"
-              else
-                git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_build=true
-                if [ "$should_build" = "false" ]; then
-                  changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml)"
-                else
-                  changed_files="previous-commit-unavailable"
-                fi
-              fi
-            fi
-
-            if [ "${changed_files:-}" != "" ]; then
+                ;;
+            esac
+            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ]; then
               should_build=true
             fi
           fi
 
           if [ "$should_build" = "true" ]; then
-            echo "::notice::build-tools image inputs changed or a release tag is being built; image build remains enabled."
+            echo "::notice::$MATRIX_SERVICE inputs changed (or this is not a pull request); image build remains enabled."
           else
-            echo "::notice::build-tools image inputs did not change; skipping routine build-tools image rebuild."
+            echo "::notice::$MATRIX_SERVICE inputs did not change in this pull request; skipping routine image rebuild."
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
+        if: steps.should-build.outputs.should-build == 'true'
         id: buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -1290,8 +1406,7 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-changes.outputs.should-build == 'true'
+              steps.should-build.outputs.should-build == 'true'
             )
           }}
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -1301,7 +1416,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
-        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
+        if: steps.should-build.outputs.should-build == 'true'
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
@@ -1311,7 +1426,7 @@ jobs:
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
-        if: matrix.service == 'build-tools'
+        if: matrix.service == 'build-tools' && steps.should-build.outputs.should-build == 'true'
         run: |
           set -euo pipefail
 
@@ -1333,7 +1448,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare local Buildx cache
-        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
+        if: steps.should-build.outputs.should-build == 'true'
         id: buildx-cache
         env:
           BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
@@ -1366,7 +1481,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
-        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
+        if: steps.should-build.outputs.should-build == 'true'
         id: docker-build-jobs
         run: |
           set -euo pipefail
@@ -1399,8 +1514,7 @@ jobs:
         if: >-
           ${{
             (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-changes.outputs.should-build == 'true'
+              steps.should-build.outputs.should-build == 'true'
             ) &&
             matrix.rust == true &&
             github.actor != 'dependabot[bot]' &&
@@ -1547,7 +1661,7 @@ jobs:
 
       - name: Build and push
         id: build
-        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
+        if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
         continue-on-error: true
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
@@ -1579,8 +1693,7 @@ jobs:
         if: >-
           ${{
             (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-changes.outputs.should-build == 'true'
+              steps.should-build.outputs.should-build == 'true'
             ) &&
             steps.build.outcome == 'failure'
           }}
@@ -1613,8 +1726,7 @@ jobs:
         if: >-
           ${{
             (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-changes.outputs.should-build == 'true'
+              steps.should-build.outputs.should-build == 'true'
             ) &&
             always() &&
             (
@@ -1647,8 +1759,7 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-changes.outputs.should-build == 'true'
+              steps.should-build.outputs.should-build == 'true'
             )
           }}
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -1662,8 +1773,7 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-changes.outputs.should-build == 'true'
+              steps.should-build.outputs.should-build == 'true'
             )
           }}
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
