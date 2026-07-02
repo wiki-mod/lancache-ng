@@ -74,7 +74,7 @@ mod tests {
         tera.add_raw_template("test.html", "{{ undefined_var }}")
             .expect("failed to add template");
 
-        let mut ctx = Context::new();
+        let ctx = Context::new();
         let html = render(&tera, "test.html", &ctx, true);
         let response = html.0;
 
@@ -88,7 +88,7 @@ mod tests {
         tera.add_raw_template("test.html", "{{ undefined_var }}")
             .expect("failed to add template");
 
-        let mut ctx = Context::new();
+        let ctx = Context::new();
         let html = render(&tera, "test.html", &ctx, false);
         let response = html.0;
 
