@@ -11,6 +11,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tera::Context;
 
+// ─── Constants ───
+
+const MIN_LEASE_TIME: u32 = 60;
+const MAX_LEASE_TIME: u32 = 604_800; // 7 days
+
 // ─── Data Structures ───
 
 #[derive(Debug)]
@@ -603,7 +608,7 @@ fn validate_dhcp_form(
     let lease_time = lease_time
         .parse::<u32>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if lease_time == 0 || lease_time > u32::MAX / 2 {
+    if lease_time < MIN_LEASE_TIME || lease_time > MAX_LEASE_TIME {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -1096,6 +1101,71 @@ mod tests {
             "198.51.100.200",
             "198.51.100.1",
             "0",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_lease_time_below_minimum() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "59",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn accepts_lease_time_at_minimum() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "60",
+        );
+
+        assert_eq!(lease_time.unwrap(), 60);
+    }
+
+    #[test]
+    fn accepts_lease_time_at_maximum() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "604800",
+        );
+
+        assert_eq!(lease_time.unwrap(), 604800);
+    }
+
+    #[test]
+    fn rejects_lease_time_above_maximum() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "604801",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn rejects_huge_lease_time() {
+        let lease_time = validate_dhcp_form(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "999999999",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
