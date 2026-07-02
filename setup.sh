@@ -464,7 +464,7 @@ assert_prebuilt_image_platform_supported() {
         x86_64|amd64)
             ;;
         *)
-            die "Prebuilt production images are currently published for linux/amd64 only. This host reports '${arch}'. Use an amd64 host or wait for the planned multi-architecture image workflow."
+            die "Prebuilt production images are currently published for linux/amd64 only. This host reports '${arch}'. Multi-architecture images are tracked separately."
             ;;
     esac
 }
