@@ -42,6 +42,11 @@ Each pull request should explain:
 Prefer focused pull requests. For example, do not mix documentation rewrites,
 CI fixes and runtime behavior changes unless they must land together.
 
+Every pull request should include a changelog section that explains user-visible
+behavior, operational impact, validation performed, and any explicit follow-up
+issue. Silent changes are not acceptable for release, setup, CI, or runtime
+behavior.
+
 ## Local checks
 
 Run the checks that match your change.
@@ -58,6 +63,18 @@ For Compose changes:
 ```bash
 docker compose -f deploy/quickstart/docker-compose.yml config
 docker compose -f deploy/prod/docker-compose.yml config
+```
+
+For image inventory, release, or package-channel changes:
+
+```bash
+bash scripts/validate-stack-images.sh
+```
+
+For workflow changes:
+
+```bash
+actionlint .github/workflows/*.yml
 ```
 
 For Rust services, run the relevant Cargo checks for the service you changed.
@@ -82,6 +99,24 @@ Setup and update changes must preserve these rules:
 - generated secrets must be unique per installation
 - Docker Compose should be validated before restarting containers
 - errors should fail closed and be understandable to non-expert operators
+
+## Release and package changes
+
+Release and package changes must follow `docs/release-versioning.md` and the
+machine-readable inventory in `release/stack-images.yml`.
+
+Required rules:
+
+- first-party runtime images are promoted as one stack package set
+- `latest` means the latest stable release only
+- `edge` is the tested pre-stable channel from `master`
+- release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
+- stable releases use `vX.Y.Z` and may move `latest`
+- release-capable paths must not depend on mutable `build-tools:latest`
+- compose image references must keep `LANCACHE_IMAGE_REGISTRY`,
+  `LANCACHE_IMAGE_PREFIX`, and `LANCACHE_IMAGE_TAG` wired consistently
+- package, workflow, release-note, and setup changes must run
+  `bash scripts/validate-stack-images.sh`
 
 ## Admin UI changes
 

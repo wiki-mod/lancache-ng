@@ -18,14 +18,20 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 
 - Start every branch from a freshly fetched and rebased current base branch.
 - Use a separate worktree for each non-trivial PR or subagent task.
+- Use fanout for bounded independent work when it reduces main-thread cost without reducing quality. Prefer the cheapest suitable model and reasoning level: Spark first while available; if Spark is unavailable, rate-limited, or unsuitable, evaluate `gpt-5.4-mini` next before keeping delegable work in the main thread.
+- Choosing main-thread work while Spark is unavailable requires a concrete reason, such as unsafe delegation, time-critical local context, or higher integration risk from a separate agent.
 - Do not push directly to `master`. All changes go through pull requests.
 - Do not merge, close, or delete repository work unless the maintainer explicitly asks for that exact action.
 - Keep PRs in draft until the branch has passed local validation and known review findings are addressed.
 - Resolve review threads only after the finding was actually fixed or a clear maintainer-approved explanation was posted.
+- Every review finding that was fixed must receive a factual reply explaining the fix and must then be resolved, even if GitHub already marks the thread as outdated after later code movement.
+- If GitHub does not allow resolving a stale or outdated thread, add a factual PR comment naming the finding, explaining why it is fixed, and stating that GitHub did not allow resolving it.
 - Before changing, reviewing, or resolving an issue or pull request, read the full issue/PR context, including the description, linked issues and PRs, all review comments, replies, and resolved threads, then evaluate the surrounding file and project-wide impact instead of acting only on an isolated line.
 - Treat review findings as failure classes, not isolated line comments. Before marking a finding fixed, check matching install, update, secondary, release, CI, documentation, and test paths for the same class of issue.
+- When writing GitHub issue or pull-request bodies/comments from local files, verify the API call uploads file content and not the literal file path. Read the GitHub object back immediately and treat bodies such as `@/tmp/...` as malformed failed writes that must be corrected before continuing.
 - Treat warnings as errors for repository work. Do not list a check as successful when it emitted warnings, failed setup, or used a broken fallback.
 - Treat standard failures such as `command not found`, missing files, missing environment variables, permission denied, malformed commands, empty required outputs, and failed tool setup as hard failures.
+- Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
 - Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
 - Use local Bash tools such as `rg` for text searches; do not rely on vague manual inspection when a deterministic search is possible.
 - Do not add Python scripts, Python dependencies, or another runtime language to the project without explicit maintainer approval.

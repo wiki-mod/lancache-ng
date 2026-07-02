@@ -1,6 +1,6 @@
 # Backup, Restore, and Rollback
 
-LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling automatic updates.
+LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling optional Watchtower helper updates.
 
 ## Setup script commands
 
@@ -61,7 +61,7 @@ The backup command stops the compose stack before copying mutable databases and 
    sudo docker compose ps
    ```
 
-If Watchtower caused the update, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same image is not pulled immediately. If the failure was caused by a bad `latest` image, inspect the restored backup's `image-revisions.txt` and pin or pull the previous image revision before restarting the affected service.
+If Watchtower changed an optional helper image, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same helper image is not pulled immediately. If the failure was caused by a bad first-party image, inspect the restored backup's `image-revisions.txt` and pin `LANCACHE_IMAGE_TAG` to the previous `sha-*`, release candidate, or stable release tag before restarting the affected service.
 
 ## Restore testing
 
