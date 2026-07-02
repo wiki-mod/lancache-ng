@@ -2304,4 +2304,3 @@ printf "  ${BOLD}Commands:${RESET}\n"
 printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
 printf "\n"
-# TODO(#374): Add write_env_assignment helper for consistent .env value escaping
