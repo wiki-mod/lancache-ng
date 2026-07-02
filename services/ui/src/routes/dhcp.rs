@@ -688,10 +688,13 @@ fn build_subnet_value(input: SubnetValue) -> Result<Value, &'static str> {
 }
 
 fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'static str> {
+    // Clamp to MAX_LEASE_TIME: doubling the form value alone would let a
+    // client at the advertised 7-day cap request up to 14 days from Kea.
     let max_valid_lifetime = input
         .lease_time
         .checked_mul(2)
-        .ok_or("lease_time too large")?;
+        .ok_or("lease_time too large")?
+        .min(MAX_LEASE_TIME);
     let entry = entry.as_object_mut().ok_or("subnet not an object")?;
 
     entry.insert("id".to_string(), json!(input.id));
@@ -1253,6 +1256,26 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("reservations array");
         assert!(reservations.is_empty());
+    }
+
+    #[test]
+    fn build_subnet_value_clamps_max_valid_lifetime_to_lease_time_cap() {
+        let subnet = build_subnet_value(SubnetValue {
+            id: 4,
+            subnet: "10.0.0.0/24".to_string(),
+            pool_start: "10.0.0.10".to_string(),
+            pool_end: "10.0.0.200".to_string(),
+            gateway: "10.0.0.1".to_string(),
+            domain: "lan.example".to_string(),
+            lease_time: MAX_LEASE_TIME,
+            preserved_options: Vec::new(),
+            reservations: None,
+            reservation_identifiers: default_reservation_identifiers(),
+        })
+        .expect("subnet value");
+
+        assert_eq!(subnet["valid-lifetime"], MAX_LEASE_TIME);
+        assert_eq!(subnet["max-valid-lifetime"], MAX_LEASE_TIME);
     }
 
     #[test]
