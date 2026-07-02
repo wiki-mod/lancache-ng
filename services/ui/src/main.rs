@@ -44,6 +44,8 @@ fn generate_csrf_token() -> String {
     hex::encode(bytes)
 }
 
+// TODO(#366): Migrate from process-wide CSRF token to per-session tokens with rotation on login
+
 fn is_mutating_method(method: &Method) -> bool {
     matches!(
         *method,
