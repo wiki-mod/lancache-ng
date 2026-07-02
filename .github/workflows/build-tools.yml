@@ -1,0 +1,232 @@
+name: Build Tools Image
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly refresh for base-image and package updates without requiring a
+    # product-code change.
+    - cron: "23 3 * * 0"
+  push:
+    branches: [master]
+    paths:
+      - "tools/build-tools/**"
+      - ".github/workflows/build-tools.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "tools/build-tools/**"
+      - ".github/workflows/build-tools.yml"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  BUILD_TOOLS_PLATFORMS: linux/amd64,linux/arm64
+  BUILD_TOOLS_SCAN_IMAGE: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-tools:
+    runs-on: [self-hosted, linux, lancache]
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Prepare local Buildx cache
+        id: buildx-cache
+        env:
+          BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_READ: ${{ runner.temp }}/lancache-ng-build-tools-cache/read
+          BUILDX_CACHE_DEST: ${{ runner.temp }}/lancache-ng-build-tools-cache/new
+        run: |
+          set -euo pipefail
+
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is required for safe local Buildx cache locking."
+            exit 1
+          fi
+
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools.lock"
+
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          rm -rf "$BUILDX_CACHE_READ" "$BUILDX_CACHE_DEST"
+          mkdir -p "$BUILDX_CACHE_READ" "$(dirname "$BUILDX_CACHE_DEST")"
+
+          (
+            flock -x 9
+            mkdir -p "$cache_dir"
+            cp -a "$cache_dir/." "$BUILDX_CACHE_READ/"
+          ) 9>"$lock_file"
+
+          {
+            echo "cache-from=$BUILDX_CACHE_READ"
+            echo "cache-to=$BUILDX_CACHE_DEST"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.BUILD_TOOLS_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build local scan image
+        id: local-build
+        timeout-minutes: 60
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          load: true
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
+          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
+
+      - name: Smoke-test validation tools
+        run: |
+          set -euo pipefail
+
+          docker run --rm "${BUILD_TOOLS_SCAN_IMAGE}" bash -c '
+            set -euo pipefail
+
+            required_tools=(
+              actionlint
+              bash
+              cargo
+              cargo-audit
+              clippy-driver
+              dig
+              distcc
+              distcc-pump
+              docker
+              envsubst
+              jq
+              rustc
+              rustfmt
+              sccache
+              shellcheck
+            )
+
+            for tool in "${required_tools[@]}"; do
+              command -v "$tool" >/dev/null
+            done
+
+            cargo --version
+            cargo audit --version
+            cargo-audit --version
+            sccache --version
+            actionlint --version
+            shellcheck --version
+            distcc --version
+            distcc-pump --help >/dev/null
+            docker --version
+            docker compose version
+          '
+
+      - name: Prepare local Trivy cache
+        run: |
+          set -euo pipefail
+          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools
+
+      - name: Scan local build-tools image with Trivy
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Build and push multi-architecture build-tools image
+        id: build
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 90
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
+          provenance: false
+          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
+
+      - name: Attest build-tools image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Rotate local Buildx cache
+        if: >-
+          ${{
+            always() &&
+            steps.local-build.outcome == 'success' &&
+            (
+              github.event_name == 'pull_request' ||
+              steps.build.outcome == 'success'
+            )
+          }}
+        env:
+          BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_DEST: ${{ steps.buildx-cache.outputs.cache-to }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "$BUILDX_CACHE_DEST" ]; then
+            exit 0
+          fi
+
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools.lock"
+
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          (
+            flock -x 9
+            rm -rf "$cache_dir"
+            mv "$BUILDX_CACHE_DEST" "$cache_dir"
+          ) 9>"$lock_file"
+
+      - name: Remove local scan image
+        if: always()
+        run: docker rmi "${BUILD_TOOLS_SCAN_IMAGE}" || true

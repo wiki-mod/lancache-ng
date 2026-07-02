@@ -377,6 +377,18 @@ jobs:
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
           fi
+          if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh; then
+            echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
+            exit 1
+          fi
+          if grep -RIn 'cargo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh | grep -v -- '--no-default-features --features redis,dist-client'; then
+            echo "::error::sccache source installs must use the minimal Redis plus dist-client feature set."
+            exit 1
+          fi
+          if grep -RIn '[c]argo install cargo-audit' .github/workflows scripts services/*/Dockerfile; then
+            echo "::error::CI and service builds must use prebuilt cargo-audit from the build-tools image instead of compiling it per job."
+            exit 1
+          fi
           for dockerfile in services/dns/Dockerfile services/ui/Dockerfile; do
             grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must declare the shared build-tools image as a build argument."; exit 1; }
@@ -698,97 +710,65 @@ jobs:
     name: cargo-audit (dns/nats-subscriber)
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/dns-nats-subscriber'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
-        with:
-          toolchain: stable
-      - name: Configure Redis-backed sccache
-        if: >-
-          ${{
-            github.actor != 'dependabot[bot]' &&
-            (
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            )
-          }}
-        uses: ./.github/actions/configure-rust-sccache
-        with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
-          key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cache-cargo-audit
-        with:
-          path: |
-            ${{ runner.temp }}/cargo-home/dns-nats-subscriber/bin/cargo-audit
-            ${{ runner.temp }}/cargo-home/dns-nats-subscriber/.crates.toml
-            ${{ runner.temp }}/cargo-home/dns-nats-subscriber/.crates2.json
-          key: ${{ runner.os }}-cargo-audit-0.21-dns-nats-subscriber
-      - name: Install cargo-audit
-        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (dns/nats-subscriber)
-        run: cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              audit_log="$(mktemp)"
+              trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              if ! cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock >"$audit_log" 2>&1; then
+                cat "$audit_log"
+                exit 1
+              fi
+              cat "$audit_log"
+              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
+                echo "::error::cargo-audit emitted warnings."
+                exit 1
+              fi'
 
   ui_cargo_audit:
     name: cargo-audit (ui)
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/ui'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
-        with:
-          toolchain: stable
-      - name: Configure Redis-backed sccache
-        if: >-
-          ${{
-            github.actor != 'dependabot[bot]' &&
-            (
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            )
-          }}
-        uses: ./.github/actions/configure-rust-sccache
-        with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
-          key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cache-cargo-audit
-        with:
-          path: |
-            ${{ runner.temp }}/cargo-home/ui/bin/cargo-audit
-            ${{ runner.temp }}/cargo-home/ui/.crates.toml
-            ${{ runner.temp }}/cargo-home/ui/.crates2.json
-          key: ${{ runner.os }}-cargo-audit-0.21-ui
-      - name: Install cargo-audit
-        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo install cargo-audit --version ">=0.21" --locked
       - name: Audit Rust dependencies (ui)
-        run: cargo audit --deny warnings --file services/ui/Cargo.lock
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              audit_log="$(mktemp)"
+              trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              if ! cargo audit --deny warnings --file services/ui/Cargo.lock >"$audit_log" 2>&1; then
+                cat "$audit_log"
+                exit 1
+              fi
+              cat "$audit_log"
+              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
+                echo "::error::cargo-audit emitted warnings."
+                exit 1
+              fi'
 
   container-scan:
     # Full image vulnerability scans are intentionally limited to trusted refs.
@@ -822,7 +802,48 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Detect build-tools scan input changes
+        id: build-tools-scan-changes
+        if: matrix.service == 'build-tools'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          should_scan=false
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              should_scan=true
+              ;;
+          esac
+
+          if [ "$should_scan" = "false" ]; then
+            if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              should_scan=true
+              changed_files="initial-or-unknown-history"
+            else
+              git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_scan=true
+              if [ "$should_scan" = "false" ]; then
+                changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml .github/workflows/build-tools.yml)"
+              else
+                changed_files="previous-commit-unavailable"
+              fi
+            fi
+
+            if [ "${changed_files:-}" != "" ]; then
+              should_scan=true
+            fi
+          fi
+
+          if [ "$should_scan" = "true" ]; then
+            echo "::notice::build-tools scan inputs changed or a release tag is being built; image scan remains enabled."
+          else
+            echo "::notice::build-tools scan inputs did not change; skipping routine build-tools scan image rebuild."
+          fi
+          echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
+
       - name: Compute Docker build parallelism
+        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         id: docker-build-jobs
         run: |
           set -euo pipefail
@@ -854,6 +875,10 @@ jobs:
       - name: Prepare Rust build secret files
         if: >-
           ${{
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-scan-changes.outputs.should-scan == 'true'
+            ) &&
             matrix.rust == true &&
             github.actor != 'dependabot[bot]' &&
             (
@@ -965,6 +990,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build local scan image
+        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         env:
           CARGO_BUILD_JOBS: ${{ steps.docker-build-jobs.outputs.jobs }}
           SCCACHE_REDIS_FILE: ${{ steps.sccache-secret.outputs.redis-file }}
@@ -992,7 +1018,13 @@ jobs:
             "${secret_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} \
             ${{ matrix.context }}
+      - name: Prepare local Trivy cache
+        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}"
       - name: Scan image with Trivy
+        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }}
@@ -1000,9 +1032,21 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}
+          timeout: 10m
           exit-code: "1"
       - name: Remove scan image
-        if: always()
+        if: >-
+          ${{
+            always() &&
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-scan-changes.outputs.should-scan == 'true'
+            )
+          }}
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} || true
 
   build:
@@ -1062,12 +1106,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Detect build-tools image input changes
+        id: build-tools-changes
+        if: matrix.service == 'build-tools'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          should_build=false
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              should_build=true
+              ;;
+          esac
+
+          if [ "$should_build" = "false" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              if [ -z "${BASE_SHA:-}" ]; then
+                echo "::error::Pull request base SHA is required to detect build-tools image changes."
+                exit 1
+              fi
+              git fetch --no-tags --depth=1 origin "$BASE_SHA"
+              changed_files="$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml)"
+            else
+              if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+                should_build=true
+                changed_files="initial-or-unknown-history"
+              else
+                git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_build=true
+                if [ "$should_build" = "false" ]; then
+                  changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml)"
+                else
+                  changed_files="previous-commit-unavailable"
+                fi
+              fi
+            fi
+
+            if [ "${changed_files:-}" != "" ]; then
+              should_build=true
+            fi
+          fi
+
+          if [ "$should_build" = "true" ]; then
+            echo "::notice::build-tools image inputs changed or a release tag is being built; image build remains enabled."
+          else
+            echo "::notice::build-tools image inputs did not change; skipping routine build-tools image rebuild."
+          fi
+          echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
+        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
         id: buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-changes.outputs.should-build == 'true'
+            )
+          }}
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
@@ -1075,6 +1177,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
+        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
@@ -1106,6 +1209,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare local Buildx cache
+        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
         id: buildx-cache
         env:
           BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
@@ -1138,6 +1242,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
+        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
         id: docker-build-jobs
         run: |
           set -euo pipefail
@@ -1169,6 +1274,10 @@ jobs:
       - name: Prepare Rust build secret files
         if: >-
           ${{
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-changes.outputs.should-build == 'true'
+            ) &&
             matrix.rust == true &&
             github.actor != 'dependabot[bot]' &&
             (
@@ -1278,6 +1387,7 @@ jobs:
 
       - name: Build and push
         id: build
+        if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
         timeout-minutes: 60
         continue-on-error: true
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
@@ -1301,7 +1411,14 @@ jobs:
 
       - name: Retry Build and push
         id: retry-build
-        if: steps.build.outcome == 'failure'
+        if: >-
+          ${{
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-changes.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
         timeout-minutes: 60
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -1325,6 +1442,10 @@ jobs:
       - name: Rotate local Buildx cache
         if: >-
           ${{
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-changes.outputs.should-build == 'true'
+            ) &&
             always() &&
             (
               steps.build.outcome == 'success' ||
@@ -1352,7 +1473,14 @@ jobs:
           ) 9>"$lock_file"
 
       - name: Log in to GHCR for provenance attestation
-        if: github.event_name != 'pull_request'
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-changes.outputs.should-build == 'true'
+            )
+          }}
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
@@ -1360,7 +1488,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attest image build provenance
-        if: github.event_name != 'pull_request'
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              matrix.service != 'build-tools' ||
+              steps.build-tools-changes.outputs.should-build == 'true'
+            )
+          }}
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
