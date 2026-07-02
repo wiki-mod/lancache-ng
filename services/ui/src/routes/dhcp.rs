@@ -608,7 +608,7 @@ fn validate_dhcp_form(
     let lease_time = lease_time
         .parse::<u32>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if lease_time < MIN_LEASE_TIME || lease_time > MAX_LEASE_TIME {
+    if !(MIN_LEASE_TIME..=MAX_LEASE_TIME).contains(&lease_time) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
