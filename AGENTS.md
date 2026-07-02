@@ -24,6 +24,8 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Do not merge, close, or delete repository work unless the maintainer explicitly asks for that exact action.
 - Keep PRs in draft until the branch has passed local validation and known review findings are addressed.
 - Resolve review threads only after the finding was actually fixed or a clear maintainer-approved explanation was posted.
+- Every review finding that was fixed must receive a factual reply explaining the fix and must then be resolved, even if GitHub already marks the thread as outdated after later code movement.
+- If GitHub does not allow resolving a stale or outdated thread, add a factual PR comment naming the finding, explaining why it is fixed, and stating that GitHub did not allow resolving it.
 - Before changing, reviewing, or resolving an issue or pull request, read the full issue/PR context, including the description, linked issues and PRs, all review comments, replies, and resolved threads, then evaluate the surrounding file and project-wide impact instead of acting only on an isolated line.
 - Treat review findings as failure classes, not isolated line comments. Before marking a finding fixed, check matching install, update, secondary, release, CI, documentation, and test paths for the same class of issue.
 - When writing GitHub issue or pull-request bodies/comments from local files, verify the API call uploads file content and not the literal file path. Read the GitHub object back immediately and treat bodies such as `@/tmp/...` as malformed failed writes that must be corrected before continuing.
