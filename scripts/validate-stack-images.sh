@@ -181,9 +181,12 @@ require_grep 'FROM busybox:stable-musl' \
 require_grep 'CMD \["true"\]' \
   .github/workflows/build-push.yml \
   'stack pointer image must have a harmless command so docker create works consistently'
-require_grep 'docker buildx imagetools create -t "\$target_image" "\$stack_pointer_image"' \
+require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$stack_pointer_image"' \
   .github/workflows/build-push.yml \
-  'promotion must move the single stack channel pointer after service channel tags'
+  'promotion must preserve single-platform manifest metadata when moving the stack channel pointer'
+require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$source_image"' \
+  .github/workflows/build-push.yml \
+  'promotion must preserve single-platform service image metadata when moving channel tags'
 require_grep 'actions/attest@' \
   .github/workflows/build-push.yml \
   'release workflow must create provenance attestations for published first-party images'
