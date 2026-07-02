@@ -276,12 +276,12 @@ mod tests {
 
     #[test]
     fn invalid_password_fails_combined() {
-        assert!(validate_nats_credentials("valid-user", "invalid\"password").is_err());
+        assert!(validate_nats_credentials("valid-user", "invalid\"value").is_err());
     }
 
     #[test]
     fn both_invalid_fails_on_username() {
-        let result = validate_nats_credentials("invalid user", "invalid\"password");
+        let result = validate_nats_credentials("invalid user", "invalid\"value");
         assert!(result.is_err());
         // Should fail on username first (fail fast)
         assert!(result.unwrap_err().contains("username"));
@@ -296,9 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn unicode_in_password_rejected() {
-        assert!(validate_nats_password("pässwörd").is_err());
-        assert!(validate_nats_password("密码").is_err());
+    fn unicode_in_password_allowed() {
+        // Unlike usernames, passwords intentionally allow non-ASCII characters —
+        // only control characters and quotes actually break the config syntax.
+        assert!(validate_nats_password("pässwörd").is_ok());
+        assert!(validate_nats_password("密码").is_ok());
     }
 
     #[test]
