@@ -574,11 +574,13 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 CACHE_MAX_GB=50
 
 # First-party service image selector.
-# latest is the latest stable release.
+# latest is the latest stable release channel.
 # Use edge only when you explicitly want the tested pre-stable channel.
+# setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
-LANCACHE_IMAGE_TAG=latest
+LANCACHE_IMAGE_CHANNEL=latest
+LANCACHE_IMAGE_TAG=sha-<commit>
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
@@ -590,7 +592,7 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. You have to change it, we set by default the LAN-IP ranges for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
-`LANCACHE_IMAGE_TAG` controls which first-party container images are pulled. `latest` means the latest stable release. Use `edge` only when you explicitly want the tested pre-stable channel. If you install from a tagged release archive or a checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the latest stable release. Use `edge` only when you explicitly want the tested pre-stable channel. `setup.sh` resolves mutable channels through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
 

@@ -93,6 +93,13 @@ tooling:
       - .github/workflows/build-push.yml
       - docs/self-hosted-actions-runner.md
       - docs/ui-rust-dev-checks.md
+metadata:
+  - name: stack
+    image: ghcr.io/wiki-mod/lancache-ng/stack
+    source: .github/workflows/build-push.yml
+    platforms:
+      - linux/amd64
+    description: Single channel pointer that resolves mutable stack channels to an immutable sha-* image set.
 legacy:
   - name: proxy-standard
     status: retired
@@ -131,3 +138,7 @@ external:
     policy: optional-auto-update-helper-not-release-authoritative
     compose:
       - deploy/quickstart/docker-compose.yml
+  - name: busybox
+    image: busybox:stable-musl
+    policy: stack-pointer-base-pin-before-stable
+    compose: []

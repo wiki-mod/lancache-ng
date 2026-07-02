@@ -58,6 +58,7 @@ require_grep '^concurrency:$' .github/workflows/build-push.yml 'build workflow m
 
 runtime_names=$(collect_names runtime)
 tooling_names=$(collect_names tooling)
+metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
 runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
@@ -67,7 +68,9 @@ for image in "${runtime_images[@]}"; do
 done
 require_name "$tooling_names" build-tools tooling
 require_manifest_platform build-tools
-for image in docker-socket-proxy nats fluent-bit netdata watchtower; do
+require_name "$metadata_names" stack metadata
+require_manifest_platform stack
+for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
   require_name "$external_names" "$image" external
 done
 
@@ -144,6 +147,21 @@ require_grep 'rollback_promotions\(\)' \
 require_grep 'previous_refs\["\$target_image"\]' \
   .github/workflows/build-push.yml \
   'promotion must remember previous channel digests before moving public tags'
+require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack:\$\{source_tag\}"' \
+  .github/workflows/build-push.yml \
+  'promotion must create an immutable stack pointer image for the source commit'
+require_grep 'LANCACHE_IMAGE_TAG=%s\\n' \
+  .github/workflows/build-push.yml \
+  'stack pointer image must contain the resolved immutable service image tag'
+require_grep 'FROM busybox:stable-musl' \
+  .github/workflows/build-push.yml \
+  'stack pointer image must use an explicit minimal runtime base so docker create can read stack.env'
+require_grep 'CMD \["true"\]' \
+  .github/workflows/build-push.yml \
+  'stack pointer image must have a harmless command so docker create works consistently'
+require_grep 'docker buildx imagetools create -t "\$target_image" "\$stack_pointer_image"' \
+  .github/workflows/build-push.yml \
+  'promotion must move the single stack channel pointer after service channel tags'
 require_grep 'actions/attest@' \
   .github/workflows/build-push.yml \
   'release workflow must create provenance attestations for published first-party images'
@@ -165,6 +183,9 @@ require_grep 'Published image tags and digests' \
 require_grep 'Resolved build-tools base image digests' \
   .github/workflows/build-push.yml \
   'release notes must include resolved build-tools base image digests'
+require_grep 'Stack channel pointer' \
+  .github/workflows/build-push.yml \
+  'release notes must include the stack channel pointer digest'
 require_grep 'Provenance and SBOM status' \
   .github/workflows/build-push.yml \
   'release notes must explicitly state provenance and SBOM status'
@@ -195,24 +216,45 @@ require_grep 'platforms: linux/amd64' \
 require_grep 'assert_prebuilt_image_platform_supported' \
   setup.sh \
   'setup must fail closed on unsupported prebuilt-image platforms'
+require_grep 'resolve_lancache_stack_channel_tag\(\)' \
+  setup.sh \
+  'setup must resolve mutable stack channels through the stack pointer image'
+require_grep 'docker pull "\$stack_image"' \
+  setup.sh \
+  'setup must pull the stack pointer image before resolving a mutable channel'
+require_grep 'docker cp "\$\{container_id\}:/stack.env" -' \
+  setup.sh \
+  'setup must read stack.env from the stack pointer image'
+require_grep 'LANCACHE_IMAGE_CHANNEL=\$\{LANCACHE_IMAGE_CHANNEL\}' \
+  setup.sh \
+  'setup must persist the selected image channel separately from the resolved immutable tag'
 require_grep 'pub image_registry: String' \
   services/ui/src/routes/secondaries.rs \
   'secondary registration response must expose image_registry for mirror/private-registry setups'
 require_grep 'pub image_prefix: String' \
   services/ui/src/routes/secondaries.rs \
   'secondary registration response must expose image_prefix for mirror/private-registry setups'
+require_grep 'pub image_channel: String' \
+  services/ui/src/routes/secondaries.rs \
+  'secondary registration response must expose image_channel for mutable-channel setup'
 require_grep 'image_registry: state.config.lancache_image_registry.clone\(\)' \
   services/ui/src/routes/secondaries.rs \
   'secondary registration response must use the primary LANCACHE_IMAGE_REGISTRY'
 require_grep 'image_prefix: state.config.lancache_image_prefix.clone\(\)' \
   services/ui/src/routes/secondaries.rs \
   'secondary registration response must use the primary LANCACHE_IMAGE_PREFIX'
+require_grep 'image_channel: state.config.lancache_image_channel.clone\(\)' \
+  services/ui/src/routes/secondaries.rs \
+  'secondary registration response must use the primary LANCACHE_IMAGE_CHANNEL'
 require_grep 'response_image_registry=\$\(echo "\$response"' \
   setup.sh \
   'setup.sh secondary must parse the primary image_registry'
 require_grep 'response_image_prefix=\$\(echo "\$response"' \
   setup.sh \
   'setup.sh secondary must parse the primary image_prefix'
+require_grep 'response_image_channel=\$\(echo "\$response"' \
+  setup.sh \
+  'setup.sh secondary must parse the primary image_channel'
 require_grep 'LANCACHE_IMAGE_REGISTRY=\$\{lancache_image_registry\}' \
   setup.sh \
   'setup.sh secondary must write the resolved registry instead of a hard-coded default'

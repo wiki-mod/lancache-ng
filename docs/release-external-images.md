@@ -28,6 +28,7 @@ Mutable external tags are not authoritative release records.
 | `tecnativa/docker-socket-proxy` | Docker API guard for UI/watchdog | Pin or mirror before stable release |
 | `netdata/netdata` | Optional monitoring helper | Pin before stable release when profile is supported |
 | `ghcr.io/nicholas-fedor/watchtower:latest` | Optional automatic update helper | Not release-authoritative; avoid relying on `latest` for stable profiles |
+| `busybox:stable-musl` | Minimal base for the stack channel pointer image | Pin before stable release |
 | `rust:latest` | Build-tools base image | Allowed for build-tools only when provenance records the resolved base digest |
 
 ## Provenance And SBOM Expectations

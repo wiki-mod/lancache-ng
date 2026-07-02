@@ -57,6 +57,7 @@ pub struct Config {
     pub secondary_registration_token: String,
     pub lancache_image_registry: String,
     pub lancache_image_prefix: String,
+    pub lancache_image_channel: String,
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
     pub nats_service: String,
@@ -107,6 +108,7 @@ impl fmt::Debug for Config {
             .field("secondary_registration_token", &"***REDACTED***")
             .field("lancache_image_registry", &self.lancache_image_registry)
             .field("lancache_image_prefix", &self.lancache_image_prefix)
+            .field("lancache_image_channel", &self.lancache_image_channel)
             .field("lancache_image_tag", &self.lancache_image_tag)
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_service", &self.nats_service)
@@ -178,6 +180,7 @@ impl Config {
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             lancache_image_registry: env_str("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
             lancache_image_prefix: env_str("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
+            lancache_image_channel: env_str("LANCACHE_IMAGE_CHANNEL", "latest"),
             lancache_image_tag: env_str("LANCACHE_IMAGE_TAG", "latest"),
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
@@ -405,18 +408,22 @@ mod tests {
         let cfg = Config::from_env();
         assert_eq!(cfg.lancache_image_registry, "ghcr.io");
         assert_eq!(cfg.lancache_image_prefix, "wiki-mod/lancache-ng");
+        assert_eq!(cfg.lancache_image_channel, "latest");
         assert_eq!(cfg.lancache_image_tag, "latest");
 
         env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
         env::set_var("LANCACHE_IMAGE_TAG", "v1.2.3");
         let cfg = Config::from_env();
         assert_eq!(cfg.lancache_image_registry, "registry.example.test:5000");
         assert_eq!(cfg.lancache_image_prefix, "mirror/lancache-ng");
+        assert_eq!(cfg.lancache_image_channel, "edge");
         assert_eq!(cfg.lancache_image_tag, "v1.2.3");
 
         env::remove_var("LANCACHE_IMAGE_REGISTRY");
         env::remove_var("LANCACHE_IMAGE_PREFIX");
+        env::remove_var("LANCACHE_IMAGE_CHANNEL");
         env::remove_var("LANCACHE_IMAGE_TAG");
     }
 }

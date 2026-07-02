@@ -407,26 +407,38 @@ jobs:
             exit 1
           fi
 
-          grep -F "append_env_key_if_missing LANCACHE_IMAGE_TAG \"\$(resolve_lancache_image_tag \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
-            || { echo "::error::Update migration must derive LANCACHE_IMAGE_TAG with resolve_lancache_image_tag."; exit 1; }
+          grep -F "append_env_key_if_missing LANCACHE_IMAGE_CHANNEL \"\$(resolve_lancache_image_channel \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F "set_env_key LANCACHE_IMAGE_TAG \"\$(resolve_lancache_image_tag \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must refresh LANCACHE_IMAGE_TAG with resolve_lancache_image_tag."; exit 1; }
+          grep -F 'resolve_lancache_stack_channel_tag()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must resolve mutable image channels through the stack pointer image."; exit 1; }
+          grep -F 'docker cp "${container_id}:/stack.env" -' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must read stack.env from the stack pointer image."; exit 1; }
           grep -F 'pub image_tag: String' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must expose image_tag."; exit 1; }
           grep -F 'pub image_registry: String' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must expose image_registry."; exit 1; }
           grep -F 'pub image_prefix: String' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must expose image_prefix."; exit 1; }
+          grep -F 'pub image_channel: String' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must expose image_channel."; exit 1; }
           grep -F 'image_tag: state.config.lancache_image_tag.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_TAG."; exit 1; }
           grep -F 'image_registry: state.config.lancache_image_registry.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_REGISTRY."; exit 1; }
           grep -F 'image_prefix: state.config.lancache_image_prefix.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F 'image_channel: state.config.lancache_image_channel.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_CHANNEL."; exit 1; }
           grep -F "response_image_tag=\$(echo \"\$response\"" setup.sh >/dev/null \
             || { echo "::error::setup.sh secondary must parse the primary image_tag."; exit 1; }
           grep -F "response_image_registry=\$(echo \"\$response\"" setup.sh >/dev/null \
             || { echo "::error::setup.sh secondary must parse the primary image_registry."; exit 1; }
           grep -F "response_image_prefix=\$(echo \"\$response\"" setup.sh >/dev/null \
             || { echo "::error::setup.sh secondary must parse the primary image_prefix."; exit 1; }
+          grep -F "response_image_channel=\$(echo \"\$response\"" setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must parse the primary image_channel."; exit 1; }
           grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::Quickstart UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
           grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/prod/docker-compose.yml >/dev/null \
@@ -435,6 +447,8 @@ jobs:
             || { echo "::error::setup.sh must write LANCACHE_IMAGE_REGISTRY."; exit 1; }
           grep -F 'LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}' setup.sh >/dev/null \
             || { echo "::error::setup.sh must write LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F 'LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}' setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must write LANCACHE_IMAGE_CHANNEL."; exit 1; }
           bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
 
@@ -1296,7 +1310,9 @@ jobs:
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
+          stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
           channel_tags=()
+          pointer_context=""
           declare -A previous_refs=()
           promoted_targets=()
 
@@ -1316,6 +1332,10 @@ jobs:
           rollback_promotions() {
             local status=$?
             local target_image previous_digest
+
+            if [[ -n "$pointer_context" ]]; then
+              rm -rf "$pointer_context"
+            fi
 
             if [[ "$status" = "0" || "${#promoted_targets[@]}" = "0" ]]; then
               exit "$status"
@@ -1362,6 +1382,26 @@ jobs:
             exit 1
           fi
 
+          pointer_context="$(mktemp -d)"
+          {
+            printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
+            printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
+            printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
+          } > "$pointer_context/stack.env"
+          cat > "$pointer_context/Dockerfile" <<'DOCKERFILE'
+          FROM busybox:stable-musl
+          LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
+          LABEL org.opencontainers.image.description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
+          COPY stack.env /stack.env
+          CMD ["true"]
+          DOCKERFILE
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "$stack_pointer_image" \
+            "$pointer_context"
+          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
             for channel_tag in "${channel_tags[@]}"; do
@@ -1372,10 +1412,21 @@ jobs:
             done
           done
 
+          for channel_tag in "${channel_tags[@]}"; do
+            target_image="ghcr.io/${REPOSITORY}/stack:${channel_tag}"
+            previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+            docker buildx imagetools create -t "$target_image" "$stack_pointer_image"
+            promoted_targets+=("$target_image")
+          done
+
           for service in "${services[@]}"; do
             for channel_tag in "${channel_tags[@]}"; do
               docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/${service}:${channel_tag}" >/dev/null
             done
+          done
+
+          for channel_tag in "${channel_tags[@]}"; do
+            docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
           done
 
   release:
@@ -1433,7 +1484,9 @@ jobs:
           rust_base_digest="$(digest_for_image rust:latest)"
           golang_base_digest="$(digest_for_image golang:latest)"
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+          stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${TAG_NAME}"
           docker buildx imagetools inspect "$build_tools_image" >/dev/null
+          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
 
           image_notes_start='<!-- lancache-ng-image-tags:start -->'
           image_notes_end='<!-- lancache-ng-image-tags:end -->'
@@ -1460,6 +1513,9 @@ jobs:
               sha_digest="$(digest_for_image "$sha_image")"
               printf -- '- %s -> %s\n' "$sha_image" "$sha_digest"
             done
+            printf '\nStack channel pointer:\n\n'
+            printf -- '- %s -> %s\n' "$stack_pointer_image" "$(digest_for_image "$stack_pointer_image")"
+            printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
             printf '\nResolved build-tools base image digests:\n\n'
             printf -- '- rust:latest -> %s\n' "$rust_base_digest"
             printf -- '- golang:latest -> %s\n' "$golang_base_digest"

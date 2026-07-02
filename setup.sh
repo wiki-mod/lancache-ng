@@ -544,9 +544,6 @@ validate_lancache_image_tag() {
     local tag="$1"
 
     case "$tag" in
-        latest|dev|edge)
-            return 0
-            ;;
         sha-*)
             [[ "$tag" =~ ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
                 || die "LANCACHE_IMAGE_TAG must be a valid sha-* image tag."
@@ -555,7 +552,17 @@ validate_lancache_image_tag() {
     esac
 
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
-        || die "LANCACHE_IMAGE_TAG must be latest, dev, edge, sha-*, or a vX.Y.Z / vX.Y.Z-rc.N release tag."
+        || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
+}
+
+validate_lancache_image_channel() {
+    local channel="$1"
+    case "$channel" in
+        latest|dev|edge|pinned)
+            return 0
+            ;;
+    esac
+    die "LANCACHE_IMAGE_CHANNEL must be latest, dev, edge, or pinned."
 }
 
 validate_lancache_image_registry() {
@@ -570,12 +577,138 @@ validate_lancache_image_prefix() {
         || die "LANCACHE_IMAGE_PREFIX must be a slash-separated image namespace."
 }
 
-resolve_lancache_image_tag() {
-    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" version="" in_git_tree=0
+resolve_lancache_image_registry() {
+    local env_file="${1:-}" registry="${LANCACHE_IMAGE_REGISTRY:-}"
+
+    if [[ -z "$registry" && -n "$env_file" && -f "$env_file" ]]; then
+        registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")
+    fi
+
+    registry="${registry:-ghcr.io}"
+    validate_lancache_image_registry "$registry"
+    printf '%s\n' "$registry"
+}
+
+resolve_lancache_image_prefix() {
+    local env_file="${1:-}" prefix="${LANCACHE_IMAGE_PREFIX:-}"
+
+    if [[ -z "$prefix" && -n "$env_file" && -f "$env_file" ]]; then
+        prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")
+    fi
+
+    prefix="${prefix:-wiki-mod/lancache-ng}"
+    validate_lancache_image_prefix "$prefix"
+    printf '%s\n' "$prefix"
+}
+
+resolve_lancache_image_channel() {
+    local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}"
+
+    if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
+        channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file")
+    fi
 
     if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
         tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
     fi
+
+    case "$tag" in
+        latest|dev|edge)
+            channel="${channel:-$tag}"
+            ;;
+        sha-*|v[0-9]*)
+            channel="${channel:-pinned}"
+            ;;
+    esac
+
+    channel="${channel:-latest}"
+    validate_lancache_image_channel "$channel"
+    printf '%s\n' "$channel"
+}
+
+resolve_lancache_stack_channel_tag() {
+    local env_file="$1" channel="$2"
+    local registry prefix stack_image container_id="" resolved_tag=""
+
+    registry=$(resolve_lancache_image_registry "$env_file")
+    prefix=$(resolve_lancache_image_prefix "$env_file")
+    stack_image="${registry}/${prefix}/stack:${channel}"
+
+    command -v docker >/dev/null 2>&1 \
+        || die "Docker is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} through ${stack_image}."
+    command -v tar >/dev/null 2>&1 \
+        || die "tar is required to read the stack channel pointer image ${stack_image}."
+
+    printf "\n${BOLD}${CYAN}▶ Resolving image channel %s${RESET}\n" "$channel" >&2
+    docker pull "$stack_image" >/dev/null \
+        || die "Failed to pull stack channel pointer ${stack_image}. Check GHCR access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+
+    container_id=$(docker create "$stack_image") \
+        || die "Failed to create temporary container from ${stack_image}."
+    resolved_tag=$(docker cp "${container_id}:/stack.env" - \
+        | tar -xO 2>/dev/null \
+        | awk -F= '$1 == "LANCACHE_IMAGE_TAG" {print $2; exit}') \
+        || { docker rm "$container_id" >/dev/null 2>&1 || true; die "Failed to read stack.env from ${stack_image}."; }
+    docker rm "$container_id" >/dev/null \
+        || die "Failed to remove temporary stack pointer container ${container_id}."
+
+    [[ "$resolved_tag" =~ ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+        || die "Stack channel pointer ${stack_image} returned invalid LANCACHE_IMAGE_TAG: ${resolved_tag:-<empty>}."
+
+    printf '%s\n' "$resolved_tag"
+}
+
+resolve_lancache_image_tag() {
+    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" version="" in_git_tree=0 channel=""
+
+    if [[ -n "$tag" ]]; then
+        case "$tag" in
+            latest|dev|edge)
+                resolve_lancache_stack_channel_tag "$env_file" "$tag"
+                return 0
+                ;;
+            sha-*|v[0-9]*)
+                validate_lancache_image_tag "$tag"
+                printf '%s\n' "$tag"
+                return 0
+                ;;
+        esac
+    fi
+
+    channel="${LANCACHE_IMAGE_CHANNEL:-}"
+    if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
+        channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file")
+    fi
+
+    case "$channel" in
+        latest|dev|edge)
+            resolve_lancache_stack_channel_tag "$env_file" "$channel"
+            return 0
+            ;;
+        pinned)
+            ;;
+        "")
+            ;;
+        *)
+            validate_lancache_image_channel "$channel"
+            ;;
+    esac
+
+    if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
+        tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    fi
+
+    case "$tag" in
+        latest|dev|edge)
+            resolve_lancache_stack_channel_tag "$env_file" "$tag"
+            return 0
+            ;;
+        sha-*|v[0-9]*)
+            validate_lancache_image_tag "$tag"
+            printf '%s\n' "$tag"
+            return 0
+            ;;
+    esac
 
     if [[ -z "$tag" ]] && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         in_git_tree=1
@@ -592,7 +725,12 @@ resolve_lancache_image_tag() {
         fi
     fi
 
-    tag="${tag:-latest}"
+    if [[ -z "$tag" ]]; then
+        channel=$(resolve_lancache_image_channel "$env_file")
+        resolve_lancache_stack_channel_tag "$env_file" "$channel"
+        return 0
+    fi
+
     validate_lancache_image_tag "$tag"
     printf '%s\n' "$tag"
 }
@@ -641,7 +779,8 @@ migrate_env_for_update() {
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
     append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "ghcr.io" "$env_file"
     append_env_key_if_missing LANCACHE_IMAGE_PREFIX "wiki-mod/lancache-ng" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
+    set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
@@ -1244,8 +1383,9 @@ cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
     local nats_url nats_user nats_password consumer_name pdns_api_key
-    local response_image_registry response_image_prefix response_image_tag
-    local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_tag
+    local response_image_registry response_image_prefix response_image_channel response_image_tag
+    local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
+    local explicit_lancache_image_tag
 
     usage_secondary() {
         cat <<EOF
@@ -1357,6 +1497,7 @@ EOF
     pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
     response_image_registry=$(echo "$response" | grep -oP '"image_registry"\s*:\s*"\K[^"]*' || true)
     response_image_prefix=$(echo "$response" | grep -oP '"image_prefix"\s*:\s*"\K[^"]*' || true)
+    response_image_channel=$(echo "$response" | grep -oP '"image_channel"\s*:\s*"\K[^"]*' || true)
     response_image_tag=$(echo "$response" | grep -oP '"image_tag"\s*:\s*"\K[^"]*' || true)
 
     missing_fields=()
@@ -1400,13 +1541,39 @@ EOF
     lancache_image_prefix="${lancache_image_prefix:-${response_image_prefix:-wiki-mod/lancache-ng}}"
     validate_lancache_image_prefix "$lancache_image_prefix"
 
-    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$existing_env_file" ]]; then
+    lancache_image_channel="${LANCACHE_IMAGE_CHANNEL:-}"
+    if [[ -z "$lancache_image_channel" && -n "$existing_env_file" ]]; then
+        lancache_image_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$existing_env_file")
+    fi
+    if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
+        lancache_image_channel="$response_image_channel"
+    fi
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(latest|dev|edge)$ ]]; then
+        lancache_image_channel="$response_image_tag"
+    fi
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
+        lancache_image_channel="pinned"
+    fi
+    lancache_image_channel="${lancache_image_channel:-latest}"
+    validate_lancache_image_channel "$lancache_image_channel"
+
+    explicit_lancache_image_tag="${LANCACHE_IMAGE_TAG:-}"
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
         LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
     fi
-    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(latest|dev|edge)$ ]]; then
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
-    lancache_image_tag=$(resolve_lancache_image_tag)
+    if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
+        LANCACHE_IMAGE_TAG=""
+    fi
+    if [[ -z "${LANCACHE_IMAGE_TAG:-}" ]]; then
+        LANCACHE_IMAGE_CHANNEL="$lancache_image_channel"
+    fi
+    lancache_image_tag=$(LANCACHE_IMAGE_REGISTRY="$lancache_image_registry" \
+        LANCACHE_IMAGE_PREFIX="$lancache_image_prefix" \
+        LANCACHE_IMAGE_CHANNEL="$lancache_image_channel" \
+        resolve_lancache_image_tag)
 
     cat > "${secondary_dir}/docker-compose.yml" <<EOF
 # Secondary DNS node — run on a remote host.
@@ -1450,6 +1617,7 @@ NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
 LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
 LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}
+LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}
 LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
@@ -1780,6 +1948,7 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
+LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$env_file")
 LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
@@ -1830,9 +1999,12 @@ CACHE_MAX_GB=${cache_gb}
 
 # First-party service image selector. "latest" is the latest stable release.
 # Use "edge" only when you explicitly want the tested pre-stable channel.
+# setup.sh resolves mutable channels to an immutable sha-* service tag before
+# pulling images so one install cannot consume a mixed stack during promotion.
 # Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
+LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}
 LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 
 # ── DHCP ───────────────────────────────────────────────────────────────────────

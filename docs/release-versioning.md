@@ -22,6 +22,14 @@ The first-party tooling package is:
 
 - `build-tools`
 
+The first-party metadata package is:
+
+- `stack`
+
+`stack` is not a runtime service. It is the single mutable channel pointer used
+by setup/update to resolve `latest`, `edge`, or `dev` to one immutable `sha-*`
+runtime image set.
+
 The authoritative machine-readable inventory is
 `release/stack-images.yml`. Workflows, release notes, setup behavior, and docs
 must stay consistent with that file.
@@ -44,8 +52,14 @@ matching `vX.Y.Z` tag and may move `latest` to the same digest.
 ## Promotion
 
 The release pipeline must build immutable `sha-<commit>` images first. Public
-channel tags are promoted only after the full first-party package set has been
-built and checked.
+service channel tags are promoted only after the full first-party package set
+has been built and checked. The single `stack` channel pointer is moved last.
+
+GHCR does not provide a true transaction that can atomically retag several
+packages. The project therefore treats `ghcr.io/.../stack:<channel>` as the
+authoritative mutable pointer for setup/update. Service channel tags may still
+exist for human inspection, but setup resolves the stack pointer to an immutable
+`sha-*` before pulling services.
 
 The promotion flow is:
 
@@ -59,16 +73,29 @@ If one required image is missing, the channel must not be promoted.
 
 ## Setup And Update Selection
 
-`LANCACHE_IMAGE_TAG` remains the operator-facing selector for first-party
-runtime images.
+`LANCACHE_IMAGE_CHANNEL` is the operator-facing selector for mutable stack
+channels. `LANCACHE_IMAGE_TAG` is the resolved immutable service-image tag that
+Docker Compose actually pulls.
 
 Default behavior:
 
-- fresh stable installs use `LANCACHE_IMAGE_TAG=latest`
-- edge installs must explicitly set `LANCACHE_IMAGE_TAG=edge`
+- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=latest`
+- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
-- `setup.sh update` preserves an existing `LANCACHE_IMAGE_TAG`
-- missing `LANCACHE_IMAGE_TAG` values are added during migration
+- `setup.sh update` preserves the selected channel and refreshes the resolved
+  `LANCACHE_IMAGE_TAG`
+- missing image selector values are added during migration
+
+Mutable channels are resolved through the single stack pointer image:
+
+```text
+ghcr.io/wiki-mod/lancache-ng/stack:<channel>
+```
+
+That image contains `stack.env`, including the immutable `sha-*` tag for the
+coherent first-party image set. Setup resolves `latest`, `edge`, and `dev`
+through this pointer before `docker compose pull`, so a user install/update does
+not consume per-service mutable tags while a promotion is in progress.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` are the registry and image
 namespace selectors. Their defaults are:
@@ -76,6 +103,8 @@ namespace selectors. Their defaults are:
 ```env
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
+LANCACHE_IMAGE_CHANNEL=latest
+LANCACHE_IMAGE_TAG=sha-<commit>
 ```
 
 They exist so operators can later point the stack at a private mirror without
