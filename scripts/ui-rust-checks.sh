@@ -240,6 +240,8 @@ CONTAINER_CMD+=$'    echo "Error: ${message}" >&2\n'
 CONTAINER_CMD+=$'    exit 1\n'
 CONTAINER_CMD+=$'  fi\n'
 CONTAINER_CMD+=$'}\n'
+CONTAINER_CMD+=$'require_tool cargo "cargo is required. Use the build-tools image or provide an image that already includes cargo."\n'
+CONTAINER_CMD+=$'require_tool rustc "rustc is required. Use the build-tools image or provide an image that already includes rustc."\n'
 if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
   CONTAINER_CMD+=$'require_tool sccache "sccache is required when --sccache is enabled. Use the build-tools image or provide an image that already includes sccache."\n'
 fi
