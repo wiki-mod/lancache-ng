@@ -9,8 +9,62 @@ RUN set -eu; \
       command -v "$tool" >/dev/null; \
     done; \
     distcc_bin="$(command -v distcc)"; \
+    distcc_real_bin="/usr/local/bin/distcc-real"; \
+    cp "$distcc_bin" "$distcc_real_bin"; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      'distcc_real="/usr/local/bin/distcc-real"' \
+      'compiler_name="$(basename "$0")"' \
+      'case "$compiler_name" in cc|gcc|c++|g++) real_compiler="$compiler_name" ;; *) real_compiler="cc" ;; esac' \
+      'case "$real_compiler" in cc|gcc|c++|g++) local_compiler="/usr/bin/$real_compiler" ;; *) local_compiler="/usr/bin/cc" ;; esac' \
+      'normalize_argument() {' \
+      '  arg="$1"' \
+      '  case "$arg" in' \
+      '    -I*|-isystem*)' \
+      '      case "$arg" in' \
+      '        -I*) echo "${arg#-I}" ;;' \
+      '        -isystem*) echo "${arg#-isystem}" ;;' \
+      '      esac' \
+      '      return' \
+      '      ;;' \
+      '  esac' \
+      '  printf "%s\n" "$arg"' \
+      '}' \
+      'matches_aws_lc_generated_path() {' \
+      '  arg="$1"' \
+      '  case "$arg" in' \
+      '    *aws-lc-sys*|*aws_lc_sys*)' \
+      '      case "$arg" in' \
+      '        *generated*|*out*|*target*/*/build/*) return 0;;' \
+      '      esac' \
+      '      ;;' \
+      '  esac' \
+      '  return 1' \
+      '}' \
+      'for arg in "$@"; do' \
+      '  normalized_arg="$(normalize_argument "$arg")"' \
+      '  if matches_aws_lc_generated_path "$normalized_arg"; then' \
+      '    matched_arg="$normalized_arg"' \
+      '    break' \
+      '  fi' \
+      'done' \
+      'if [ -n "${matched_arg:-}" ]; then' \
+      '  echo "[INFO] bypassing distcc-pump for generated-header input: $matched_arg" >&2' \
+      '  if [ -n "${DISTCC_HOSTS_NO_PUMP:-}" ]; then' \
+      '    env -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID DISTCC_HOSTS="$DISTCC_HOSTS_NO_PUMP" "$distcc_real" "$real_compiler" "$@"' \
+      '    exit $?' \
+      '  fi' \
+      '  echo "[INFO] no non-pump hosts configured; compiling through local compiler path." >&2' \
+      '  env -u DISTCC_HOSTS -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID -u DISTCC_FALLBACK "$local_compiler" "$@"' \
+      '  exit $?' \
+      'fi' \
+      'exec "$distcc_real" "$real_compiler" "$@"' \
+      > /usr/local/bin/lancache-distcc-wrapper; \
+    chmod +x /usr/local/bin/lancache-distcc-wrapper; \
     mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
+    for wrapper in cc gcc c++ g++; do ln -sf /usr/local/bin/lancache-distcc-wrapper "/usr/local/lib/distcc/$wrapper"; done; \
+    ln -sf /usr/local/bin/lancache-distcc-wrapper "$distcc_bin"; \
     printf '%s\n' \
       '#!/bin/sh' \
       'case "${1:-}" in' \
@@ -47,7 +101,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     disable_distcc() { \
       distcc_enabled=0; \
       trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
       PATH="$original_path"; \
       export PATH; \
     }; \
@@ -65,10 +119,19 @@ RUN --mount=type=secret,id=sccache_redis_url \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
         export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
-        distcc_hosts="$(grep -v ',cpp' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d' || true)"; \
-        if [ -z "$distcc_hosts" ]; then \
-          distcc_hosts="$(sed 's/,.*//' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d')"; \
-        fi; \
+        distcc_hosts=""; \
+        distcc_hosts_with_pump=""; \
+        distcc_hosts_without_pump=""; \
+        for distcc_host_spec in $DISTCC_POTENTIAL_HOSTS; do \
+          distcc_host_base="${distcc_host_spec%%,*}"; \
+          if [ -n "$distcc_host_base" ]; then \
+            distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"; \
+          fi; \
+          case "$distcc_host_spec" in \
+            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_spec" ;; \
+            *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;; \
+          esac; \
+        done; \
         if [ -z "$distcc_hosts" ]; then \
           rm -rf "$distcc_probe_dir"; \
           echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
@@ -76,8 +139,20 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
         echo "[INFO] trying distcc path." >&2; \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS="$distcc_hosts" PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
+        export DISTCC_HOSTS="${distcc_hosts_with_pump:-$distcc_hosts}"; \
+        export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
+        export PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
+        if [ -n "$distcc_hosts_with_pump" ]; then \
+          if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+            disable_distcc; \
+            rm -rf "$distcc_probe_dir"; \
+            echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
+            return 0; \
+          fi; \
+          eval "$distcc_pump_env"; \
+          trap 'distcc-pump --shutdown' EXIT; \
+        fi; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
           disable_distcc; \
@@ -146,7 +221,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     disable_distcc() { \
       distcc_enabled=0; \
       trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
       PATH="$original_path"; \
       export PATH; \
     }; \
@@ -164,10 +239,19 @@ RUN --mount=type=secret,id=sccache_redis_url \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
         export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
-        distcc_hosts="$(grep -v ',cpp' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d' || true)"; \
-        if [ -z "$distcc_hosts" ]; then \
-          distcc_hosts="$(sed 's/,.*//' /run/secrets/distcc_potential_hosts | sed '/^[[:space:]]*$/d')"; \
-        fi; \
+        distcc_hosts=""; \
+        distcc_hosts_with_pump=""; \
+        distcc_hosts_without_pump=""; \
+        for distcc_host_spec in $DISTCC_POTENTIAL_HOSTS; do \
+          distcc_host_base="${distcc_host_spec%%,*}"; \
+          if [ -n "$distcc_host_base" ]; then \
+            distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"; \
+          fi; \
+          case "$distcc_host_spec" in \
+            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_spec" ;; \
+            *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;; \
+          esac; \
+        done; \
         if [ -z "$distcc_hosts" ]; then \
           rm -rf "$distcc_probe_dir"; \
           echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
@@ -175,8 +259,20 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
         echo "[INFO] trying distcc path." >&2; \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS="$distcc_hosts" PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
+        export DISTCC_HOSTS="${distcc_hosts_with_pump:-$distcc_hosts}"; \
+        export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
+        export PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
+        if [ -n "$distcc_hosts_with_pump" ]; then \
+          if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+            disable_distcc; \
+            rm -rf "$distcc_probe_dir"; \
+            echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
+            return 0; \
+          fi; \
+          eval "$distcc_pump_env"; \
+          trap 'distcc-pump --shutdown' EXIT; \
+        fi; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
           disable_distcc; \
