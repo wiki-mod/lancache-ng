@@ -402,3 +402,4 @@ mod tests {
         env::remove_var("LANCACHE_IMAGE_TAG");
     }
 }
+// TODO(#369): Add NATS config escaping helper for username and password values
