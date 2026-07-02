@@ -2,7 +2,7 @@ use crate::docker_client::exec_in_container;
 use crate::AppState;
 use axum::extract::{Form, State};
 use axum::http::StatusCode;
-use axum::response::{Html, Redirect, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -182,8 +182,7 @@ pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
@@ -232,8 +231,7 @@ pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
@@ -286,8 +284,7 @@ pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -310,8 +307,7 @@ pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, DhcpError> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
@@ -343,8 +339,7 @@ pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, DhcpError> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
@@ -486,22 +481,24 @@ where
         .await;
 
         match rollback_result {
-            Ok(resp) => match kea_result(&resp) {
-                Ok(_) => {
-                    let msg = "Config change failed to persist and was rolled back; no change was made.".to_string();
-                    tracing::warn!("DHCP config rollback succeeded: {}", msg);
-                    Err(msg.into())
-                }
-                Err(rollback_err) => {
-                    let msg = format!(
+            Ok(resp) => {
+                match kea_result(&resp) {
+                    Ok(_) => {
+                        let msg = "Config change failed to persist and was rolled back; no change was made.".to_string();
+                        tracing::warn!("DHCP config rollback succeeded: {}", msg);
+                        Err(msg.into())
+                    }
+                    Err(rollback_err) => {
+                        let msg = format!(
                         "Config applied at runtime but NOT persisted to disk — runtime and persisted config may now differ. \
                          Write failed: {}. Rollback also failed: {}",
                         write_err, rollback_err
                     );
-                    tracing::error!("DHCP config rollback failed: {}", msg);
-                    Err(msg.into())
+                        tracing::error!("DHCP config rollback failed: {}", msg);
+                        Err(msg.into())
+                    }
                 }
-            },
+            }
             Err(rollback_err) => {
                 let msg = format!(
                     "Config applied at runtime but NOT persisted to disk — runtime and persisted config may now differ. \
