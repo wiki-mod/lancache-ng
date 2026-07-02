@@ -117,6 +117,20 @@ Rollback should use immutable `sha-<commit>` or `vX.Y.Z` tags whenever possible.
 Backups record image revisions before updates so operators can recover from a
 bad pull without guessing which image was running.
 
+## Retention
+
+`release/stack-images.yml` defines the retention contract. The project must keep
+at least the current stable release and two previous stable releases for the
+full first-party image set. Release digests, rollback digests, and `sha-*` tags
+referenced by supported releases must not be deleted.
+
+Mutable channels such as `latest` and `edge` may move, but the digests they
+pointed to remain protected when they are also referenced by a supported
+release, rollback path, or published deployment document.
+
+Automated cleanup must be opt-in and must read the manifest retention section.
+It must not delete release or rollback digests by pattern alone.
+
 ## CI Guardrails
 
 The CI guardrails must fail closed when:
@@ -128,3 +142,6 @@ The CI guardrails must fail closed when:
 - a release job uses mutable `build-tools:latest`
 - release notes omit a first-party package
 - a public channel would be promoted before the full package set exists
+- retention rules are missing from the stack image manifest
+- stable release promotion would move `latest` while supported external images
+  are still floating

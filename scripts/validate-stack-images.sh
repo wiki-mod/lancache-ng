@@ -50,6 +50,10 @@ require_file "${manifest#$repo_root/}"
 require_grep '^schema: stack-images/v1$' "${manifest#$repo_root/}" 'manifest schema must be stack-images/v1'
 require_grep '^registry: ghcr\.io$' "${manifest#$repo_root/}" 'manifest registry must be ghcr.io'
 require_grep '^image_prefix: wiki-mod/lancache-ng$' "${manifest#$repo_root/}" 'manifest image_prefix must be wiki-mod/lancache-ng'
+require_grep '^retention:$' "${manifest#$repo_root/}" 'manifest must define retention rules'
+require_grep '^  minimum_stable_releases: 3$' "${manifest#$repo_root/}" 'retention must keep at least current plus two previous stable releases'
+require_grep '^  protect_release_and_rollback_digests: true$' "${manifest#$repo_root/}" 'retention must protect release and rollback digests'
+require_grep '^  deletion_policy: manual-or-approved-automation-only$' "${manifest#$repo_root/}" 'retention deletion policy must be explicit'
 require_grep '^concurrency:$' .github/workflows/build-push.yml 'build workflow must serialize write-capable package publishing'
 
 runtime_names=$(collect_names runtime)
@@ -167,9 +171,12 @@ require_grep 'rust:latest ->' \
 require_grep 'golang:latest ->' \
   .github/workflows/build-push.yml \
   'release notes must include the resolved golang:latest base digest for build-tools'
-require_grep 'Stable releases must pin, mirror, or explicitly exclude release-relevant external images before moving latest' \
-  .github/workflows/build-push.yml \
+require_grep 'stable releases require external images in supported profiles to be pinned by digest, mirrored, or explicitly removed from the stable profile' \
+  scripts/check-stable-external-images.sh \
   'stable release promotion must fail closed while release-relevant external images are floating'
+require_grep 'bash scripts/check-stable-external-images.sh' \
+  .github/workflows/build-push.yml \
+  'stable release promotion must call the external image gate before moving latest'
 require_grep 'expected_prerelease=' \
   .github/workflows/build-push.yml \
   'release job must derive RC prerelease status from the tag'

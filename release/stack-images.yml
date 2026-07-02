@@ -2,6 +2,14 @@ schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io
 image_prefix: wiki-mod/lancache-ng
+retention:
+  minimum_stable_releases: 3
+  keep_mutable_channels:
+    - latest
+    - edge
+  keep_sha_tags_for_supported_releases: true
+  protect_release_and_rollback_digests: true
+  deletion_policy: manual-or-approved-automation-only
 channels:
   sha:
     tag: sha-<commit>

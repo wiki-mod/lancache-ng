@@ -1328,10 +1328,7 @@ jobs:
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
             if [[ ! "$GITHUB_REF_NAME" =~ -rc\.[0-9]+$ ]]; then
-              if grep -RInE 'image:[[:space:]]+(nats:2-alpine|fluent/fluent-bit:3|tecnativa/docker-socket-proxy|netdata/netdata|ghcr.io/nicholas-fedor/watchtower:latest)([[:space:]]|$)' deploy/prod deploy/quickstart; then
-                echo "::error::Stable releases must pin, mirror, or explicitly exclude release-relevant external images before moving latest."
-                exit 1
-              fi
+              bash scripts/check-stable-external-images.sh
               channel_tags+=(latest)
             fi
           fi

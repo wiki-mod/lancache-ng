@@ -54,3 +54,8 @@ Do not delete digests that are referenced by a supported release, rollback
 procedure, or published deployment document. Keep at least the current stable
 release and two previous stable release digests for first-party images and any
 mirrored external image they depend on.
+
+The stable release workflow enforces this conservatively: supported deployment
+profiles must not move `latest` while external image references are still
+floating. Pin by digest, mirror, or remove the external helper from the stable
+profile before publishing a stable release.
