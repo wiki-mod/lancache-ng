@@ -710,6 +710,8 @@ jobs:
     name: cargo-audit (dns/nats-subscriber)
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Audit Rust dependencies (dns/nats-subscriber)
@@ -722,7 +724,7 @@ jobs:
             -e CARGO_HOME=/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
-            ghcr.io/wiki-mod/lancache-ng/build-tools:latest \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -740,6 +742,8 @@ jobs:
     name: cargo-audit (ui)
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Audit Rust dependencies (ui)
@@ -752,7 +756,7 @@ jobs:
             -e CARGO_HOME=/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
-            ghcr.io/wiki-mod/lancache-ng/build-tools:latest \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
