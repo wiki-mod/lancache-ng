@@ -8,6 +8,27 @@ pub enum HstsMode {
     Never,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DhcpMode {
+    Disabled,
+    Kea,
+    DnsmasqProxy,
+}
+
+impl DhcpMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Kea => "kea",
+            Self::DnsmasqProxy => "dnsmasq-proxy",
+        }
+    }
+
+    pub fn is_kea(self) -> bool {
+        matches!(self, Self::Kea)
+    }
+}
+
 impl HstsMode {
     pub fn should_send(self, is_https: bool) -> bool {
         match self {
@@ -37,6 +58,7 @@ pub struct Config {
     pub ssl_cache_max_gb: f64,
     pub standard_ip: String,
     pub ssl_ip: String,
+    pub dhcp_mode: DhcpMode,
     pub dhcp_api_url: String,
     pub dhcp_api_token: String,
     pub auth_user: Option<String>,
@@ -85,6 +107,7 @@ impl fmt::Debug for Config {
             .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
             .field("standard_ip", &self.standard_ip)
             .field("ssl_ip", &self.ssl_ip)
+            .field("dhcp_mode", &self.dhcp_mode.as_str())
             .field("dhcp_api_url", &self.dhcp_api_url)
             .field("dhcp_api_token", &"***REDACTED***")
             .field(
@@ -142,6 +165,12 @@ impl Config {
         let legacy_cache_max_gb =
             env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0));
         let shared_cache_max_gb = env_f64("CACHE_MAX_GB", legacy_cache_max_gb);
+        let dhcp_mode = env_dhcp_mode("DHCP_MODE", env_bool("DHCP_ENABLED", false));
+        let dhcp_api_url = if dhcp_mode.is_kea() {
+            env_str("DHCP_API_URL", "http://localhost:8000")
+        } else {
+            String::new()
+        };
 
         let lancache_image_tag = env_str("LANCACHE_IMAGE_TAG", "latest");
         let lancache_image_channel = env::var("LANCACHE_IMAGE_CHANNEL")
@@ -168,7 +197,8 @@ impl Config {
             ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb),
             standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
             ssl_ip: env_str("SSL_IP", "192.168.234.11"),
-            dhcp_api_url: env_str("DHCP_API_URL", "http://localhost:8000"),
+            dhcp_mode,
+            dhcp_api_url,
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
@@ -238,6 +268,20 @@ fn env_bool(key: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn env_dhcp_mode(key: &str, legacy_enabled: bool) -> DhcpMode {
+    let raw = env::var(key)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match raw.as_str() {
+        "kea" => DhcpMode::Kea,
+        "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
+        "disabled" => DhcpMode::Disabled,
+        "" if legacy_enabled => DhcpMode::Kea,
+        _ => DhcpMode::Disabled,
+    }
 }
 
 fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
@@ -450,5 +494,62 @@ mod tests {
         env::remove_var("LANCACHE_IMAGE_PREFIX");
         env::remove_var("LANCACHE_IMAGE_CHANNEL");
         env::remove_var("LANCACHE_IMAGE_TAG");
+    }
+
+    #[test]
+    fn dhcp_mode_prefers_explicit_config_when_present() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        env::remove_var("DHCP_ENABLED");
+        assert!(matches!(
+            Config::from_env().dhcp_mode,
+            DhcpMode::DnsmasqProxy
+        ));
+
+        env::set_var("DHCP_MODE", "kea");
+        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Kea));
+
+        env::set_var("DHCP_MODE", "disabled");
+        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Disabled));
+
+        env::set_var("DHCP_MODE", "invalid");
+        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Disabled));
+
+        env::remove_var("DHCP_MODE");
+    }
+
+    #[test]
+    fn dhcp_mode_defaults_from_legacy_enabled_flag() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("DHCP_ENABLED", "1");
+        env::remove_var("DHCP_MODE");
+        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Kea));
+
+        env::set_var("DHCP_ENABLED", "0");
+        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Disabled));
+
+        env::remove_var("DHCP_ENABLED");
+    }
+
+    #[test]
+    fn dhcp_api_url_is_disabled_for_non_kea_modes() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        assert_eq!(Config::from_env().dhcp_api_url, "");
+
+        env::set_var("DHCP_MODE", "disabled");
+        env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        assert_eq!(Config::from_env().dhcp_api_url, "");
+
+        env::set_var("DHCP_MODE", "kea");
+        env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        assert_eq!(Config::from_env().dhcp_api_url, "http://dhcp:8000");
+
+        env::remove_var("DHCP_MODE");
+        env::remove_var("DHCP_API_URL");
     }
 }

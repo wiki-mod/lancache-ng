@@ -156,6 +156,8 @@ services:
   dhcp:
     container_name: lancache-dhcp
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}
+    profiles:
+      - dhcp-kea
     env_file:
       - ../../config/prod/dhcp.env
     environment:
@@ -165,6 +167,7 @@ services:
       - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
+      - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
       - /srv/lancache/kea:/var/lib/kea    # runtime config + leases; create with: mkdir -p /srv/lancache/kea
     network_mode: host
@@ -201,6 +204,12 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dhcp-proxy.env
+    environment:
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL:-${IP_STANDARD}}}
+      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-}}
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -334,6 +343,7 @@ services:
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
+      - DHCP_MODE=${DHCP_MODE:-disabled}
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - PDNS_AUTH_URL=http://dns-standard:8081

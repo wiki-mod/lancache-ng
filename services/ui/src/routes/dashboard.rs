@@ -1,4 +1,4 @@
-use crate::{nginx_client, AppState};
+use crate::{config::DhcpMode, nginx_client, AppState};
 use axum::extract::State;
 use axum::response::{Html, Json};
 use serde_json::json;
@@ -62,6 +62,10 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
     ctx.insert("shared_cache", &shared_cache);
     ctx.insert("ssl_enabled", &cfg.ssl_enabled);
+    let dhcp_mode = cfg.dhcp_mode;
+    let has_kea = matches!(dhcp_mode, DhcpMode::Kea);
+    ctx.insert("dhcp_mode", &dhcp_mode.as_str());
+    ctx.insert("dhcp_mode_has_kea", &has_kea);
     ctx.insert("standard_status", &standard_status);
     ctx.insert("ssl_status", &ssl_status);
     ctx.insert("standard_used_gb", &format!("{:.1}", standard_used_gb));

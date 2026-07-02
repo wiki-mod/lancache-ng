@@ -3,6 +3,21 @@
 {% block content %}
 <div class="space-y-6">
 
+  <div class="bg-slate-800 border border-slate-700 rounded-lg p-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-medium text-white">DHCP mode</h2>
+      <span class="text-xs text-slate-400">{{ dhcp_mode }}</span>
+    </div>
+    {% if not dhcp_has_kea %}
+      {% if dhcp_mode == "dnsmasq-proxy" %}
+      <p class="text-sm text-amber-300 mt-2">dnsmasq proxy mode is active. Kea subnet, reservation, and lease management is disabled for this mode.</p>
+      {% else %}
+      <p class="text-sm text-slate-400 mt-2">DHCP management is disabled. Existing router DHCP remains responsible for clients.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  {% if dhcp_has_kea %}
   <!-- DHCP Conflict Check -->
   <div id="dhcp-check" class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between">
@@ -248,8 +263,10 @@
     </div>
   </div>
 
+  {% endif %}
 </div>
 
+{% if dhcp_has_kea %}
 <script>
 function toggleAddSubnet() {
   const el = document.getElementById('add-subnet-form');
@@ -267,12 +284,15 @@ async function checkDhcpConflict() {
   try {
     const res = await fetch('/api/dhcp/check');
     const data = await res.json();
-    if (data.dhcp_found) {
+    if (data.status === 'found') {
       statusEl.className = 'text-sm text-yellow-400';
-      statusEl.textContent = `⚠ DHCP-Server gefunden: ${data.server_ip ?? ''}`;
-    } else {
+      statusEl.textContent = `⚠ DHCP-Server gefunden: ${data.output ?? ''}`;
+    } else if (data.status === 'not_found') {
       statusEl.className = 'text-sm text-green-400';
       statusEl.textContent = '✓ Kein fremder DHCP-Server gefunden';
+    } else {
+      statusEl.className = 'text-sm text-amber-400';
+      statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${data.reason ?? 'unbekannt'}`;
     }
   } catch (e) {
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
@@ -281,4 +301,5 @@ async function checkDhcpConflict() {
 
 document.addEventListener('DOMContentLoaded', checkDhcpConflict);
 </script>
+{% endif %}
 {% endblock %}
