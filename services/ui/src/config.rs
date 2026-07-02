@@ -55,6 +55,8 @@ pub struct Config {
     pub nats_dns_reader_user: String,
     pub nats_dns_reader_password: String,
     pub secondary_registration_token: String,
+    pub lancache_image_registry: String,
+    pub lancache_image_prefix: String,
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
     pub nats_service: String,
@@ -103,6 +105,8 @@ impl fmt::Debug for Config {
             .field("nats_dns_reader_user", &self.nats_dns_reader_user)
             .field("nats_dns_reader_password", &"***REDACTED***")
             .field("secondary_registration_token", &"***REDACTED***")
+            .field("lancache_image_registry", &self.lancache_image_registry)
+            .field("lancache_image_prefix", &self.lancache_image_prefix)
             .field("lancache_image_tag", &self.lancache_image_tag)
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_service", &self.nats_service)
@@ -172,6 +176,8 @@ impl Config {
             nats_dns_reader_user: env_str("NATS_DNS_READER_USER", ""),
             nats_dns_reader_password: env_str("NATS_DNS_READER_PASSWORD", ""),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
+            lancache_image_registry: env_str("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
+            lancache_image_prefix: env_str("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
             lancache_image_tag: env_str("LANCACHE_IMAGE_TAG", "latest"),
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
@@ -393,12 +399,24 @@ mod tests {
     fn lancache_image_tag_defaults_to_latest_and_accepts_release_tag() {
         let _guard = env_test_lock().lock().unwrap();
 
+        env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        env::remove_var("LANCACHE_IMAGE_PREFIX");
         env::remove_var("LANCACHE_IMAGE_TAG");
-        assert_eq!(Config::from_env().lancache_image_tag, "latest");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.lancache_image_registry, "ghcr.io");
+        assert_eq!(cfg.lancache_image_prefix, "wiki-mod/lancache-ng");
+        assert_eq!(cfg.lancache_image_tag, "latest");
 
+        env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
         env::set_var("LANCACHE_IMAGE_TAG", "v1.2.3");
-        assert_eq!(Config::from_env().lancache_image_tag, "v1.2.3");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.lancache_image_registry, "registry.example.test:5000");
+        assert_eq!(cfg.lancache_image_prefix, "mirror/lancache-ng");
+        assert_eq!(cfg.lancache_image_tag, "v1.2.3");
 
+        env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        env::remove_var("LANCACHE_IMAGE_PREFIX");
         env::remove_var("LANCACHE_IMAGE_TAG");
     }
 }

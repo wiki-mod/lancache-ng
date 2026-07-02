@@ -27,6 +27,8 @@ pub struct RegisterResponse {
     pub consumer_name: String,
     pub proxy_ip: String,
     pub pdns_api_key: String,
+    pub image_registry: String,
+    pub image_prefix: String,
     pub image_tag: String,
 }
 
@@ -148,6 +150,8 @@ pub async fn register_secondary(
         consumer_name,
         proxy_ip: state.config.standard_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
+        image_registry: state.config.lancache_image_registry.clone(),
+        image_prefix: state.config.lancache_image_prefix.clone(),
         image_tag: state.config.lancache_image_tag.clone(),
     }))
 }
@@ -278,10 +282,14 @@ mod tests {
             consumer_name: "secondary-a".to_string(),
             proxy_ip: "192.168.1.100".to_string(),
             pdns_api_key: "pdns-secret".to_string(),
+            image_registry: "registry.example.test:5000".to_string(),
+            image_prefix: "mirror/lancache-ng".to_string(),
             image_tag: "v1.2.3".to_string(),
         };
 
         let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["image_registry"], "registry.example.test:5000");
+        assert_eq!(value["image_prefix"], "mirror/lancache-ng");
         assert_eq!(value["image_tag"], "v1.2.3");
     }
 }

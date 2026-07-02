@@ -1243,8 +1243,9 @@ cmd_update_ip() {
 cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
-    local nats_url nats_user nats_password consumer_name pdns_api_key response_image_tag
-    local lancache_image_tag
+    local nats_url nats_user nats_password consumer_name pdns_api_key
+    local response_image_registry response_image_prefix response_image_tag
+    local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_tag
 
     usage_secondary() {
         cat <<EOF
@@ -1354,6 +1355,8 @@ EOF
     nats_password=$(echo "$response" | grep -oP '"nats_password"\s*:\s*"\K[^"]*' || true)
     consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || true)
     pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
+    response_image_registry=$(echo "$response" | grep -oP '"image_registry"\s*:\s*"\K[^"]*' || true)
+    response_image_prefix=$(echo "$response" | grep -oP '"image_prefix"\s*:\s*"\K[^"]*' || true)
     response_image_tag=$(echo "$response" | grep -oP '"image_tag"\s*:\s*"\K[^"]*' || true)
 
     missing_fields=()
@@ -1366,11 +1369,6 @@ EOF
         die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
     fi
 
-    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" ]]; then
-        LANCACHE_IMAGE_TAG="$response_image_tag"
-    fi
-    lancache_image_tag=$(resolve_lancache_image_tag)
-
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
         if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
@@ -1382,6 +1380,33 @@ EOF
         die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
     fi
     mkdir -p "$secondary_dir"
+
+    existing_env_file=""
+    if [[ -f "${secondary_dir}/.env" ]]; then
+        existing_env_file="${secondary_dir}/.env"
+    fi
+
+    lancache_image_registry="${LANCACHE_IMAGE_REGISTRY:-}"
+    if [[ -z "$lancache_image_registry" && -n "$existing_env_file" ]]; then
+        lancache_image_registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$existing_env_file")
+    fi
+    lancache_image_registry="${lancache_image_registry:-${response_image_registry:-ghcr.io}}"
+    validate_lancache_image_registry "$lancache_image_registry"
+
+    lancache_image_prefix="${LANCACHE_IMAGE_PREFIX:-}"
+    if [[ -z "$lancache_image_prefix" && -n "$existing_env_file" ]]; then
+        lancache_image_prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$existing_env_file")
+    fi
+    lancache_image_prefix="${lancache_image_prefix:-${response_image_prefix:-wiki-mod/lancache-ng}}"
+    validate_lancache_image_prefix "$lancache_image_prefix"
+
+    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$existing_env_file" ]]; then
+        LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
+    fi
+    if [[ -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" ]]; then
+        LANCACHE_IMAGE_TAG="$response_image_tag"
+    fi
+    lancache_image_tag=$(resolve_lancache_image_tag)
 
     cat > "${secondary_dir}/docker-compose.yml" <<EOF
 # Secondary DNS node — run on a remote host.
@@ -1423,8 +1448,8 @@ NATS_URL=${nats_url}
 NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
-LANCACHE_IMAGE_REGISTRY=ghcr.io
-LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
+LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
+LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}
 LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
