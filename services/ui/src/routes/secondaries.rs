@@ -1,4 +1,4 @@
-use crate::{docker_client, AppState};
+use crate::{docker_client, nats_config, AppState};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
@@ -256,6 +256,23 @@ pub async fn rotate_token(
 pub async fn update_nats_conf(
     state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Validate all NATS credentials before interpolating into config
+    nats_config::validate_nats_credentials(
+        &state.config.nats_ui_user,
+        &state.config.nats_ui_password,
+    )
+    .map_err(|e| format!("Invalid NATS UI credentials: {}", e))?;
+    nats_config::validate_nats_credentials(
+        &state.config.nats_dns_writer_user,
+        &state.config.nats_dns_writer_password,
+    )
+    .map_err(|e| format!("Invalid NATS DNS writer credentials: {}", e))?;
+    nats_config::validate_nats_credentials(
+        &state.config.nats_dns_reader_user,
+        &state.config.nats_dns_reader_password,
+    )
+    .map_err(|e| format!("Invalid NATS DNS reader credentials: {}", e))?;
+
     let nats_conf = format!(
         "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  users = [\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\"lancache.dns.record\", \"lancache.dns.flush\"]\n      }}\n    }}\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\n          \"lancache.dns.record\",\n          \"$JS.API.STREAM.INFO.LANCACHE_DNS\",\n          \"$JS.API.STREAM.CREATE.LANCACHE_DNS\",\n          \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\",\n          \"$JS.ACK.LANCACHE_DNS.>\"\n        ]\n        subscribe = [\"lancache.dns.>\", \"_INBOX.>\"]\n      }}\n    }}\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\n          \"$JS.API.STREAM.INFO.LANCACHE_DNS\",\n          \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\",\n          \"$JS.ACK.LANCACHE_DNS.>\"\n        ]\n        subscribe = [\"lancache.dns.>\", \"_INBOX.>\"]\n      }}\n    }}\n  ]\n}}\n",
         state.config.nats_ui_user,

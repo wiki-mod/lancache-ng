@@ -2,6 +2,7 @@
 
 mod config;
 mod docker_client;
+mod nats_config;
 mod nginx_client;
 mod routes;
 
