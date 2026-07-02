@@ -493,6 +493,23 @@ append_env_assignment_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
+append_env_migrated_assignment_if_missing() {
+    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
+    local source_assignment source_value
+
+    if env_key_exists "$target_key" "$env_file"; then
+        return 0
+    fi
+
+    source_value=$(get_env_var "$source_key" "$env_file")
+    source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
+    if [[ -n "$source_value" && -n "$source_assignment" ]]; then
+        append_env_assignment_if_missing "$target_key" "$source_assignment" "$env_file"
+    else
+        append_env_key_if_missing "$target_key" "$fallback_value" "$env_file"
+    fi
+}
+
 # Full .env rewrites keep the original owner/mode because the file contains
 # runtime tokens and may already be locked down to 0600.
 write_env_file() {
@@ -867,7 +884,7 @@ resolve_lancache_image_tag() {
 
 migrate_env_for_update() {
     local install_dir="$1" env_file
-    local allow_insecure_ui cache_dir cache_dir_assignment cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -887,15 +904,14 @@ migrate_env_for_update() {
     # Cache settings. Older installs may only have CACHE_DIR, so keep that path
     # and map both proxy modes to the same cache directory by default.
     cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
-    cache_dir_assignment=$(get_env_assignment_value_raw CACHE_DIR_STANDARD "$env_file")
+    cache_dir_source=CACHE_DIR_STANDARD
     if [[ -z "$cache_dir" ]]; then
         cache_dir=$(get_env_var CACHE_DIR "$env_file")
-        cache_dir_assignment=$(get_env_assignment_value_raw CACHE_DIR "$env_file")
+        cache_dir_source=CACHE_DIR
     fi
     cache_dir="${cache_dir:-$install_dir/cache/standard}"
-    cache_dir_assignment="${cache_dir_assignment:-$cache_dir}"
-    append_env_assignment_if_missing CACHE_DIR_STANDARD "$cache_dir_assignment" "$env_file"
-    append_env_assignment_if_missing CACHE_DIR_SSL "$cache_dir_assignment" "$env_file"
+    append_env_migrated_assignment_if_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
+    append_env_migrated_assignment_if_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
 
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
     cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
@@ -917,7 +933,7 @@ migrate_env_for_update() {
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
-    append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
+    append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
     # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
     # read one complete runtime configuration.
