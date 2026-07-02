@@ -276,3 +276,4 @@ nginx -t
 
 echo "[lancache] Starting nginx (IP_STANDARD=${IP_STANDARD}, SSL_ENABLED=${SSL_ENABLED})..."
 exec nginx -g "daemon off;"
+# TODO(#373): Add shell-side domain validation in proxy entrypoint before using domain values
