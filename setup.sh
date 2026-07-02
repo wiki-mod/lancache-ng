@@ -388,8 +388,41 @@ get_or_generate_secret() {
     fi
 }
 
+# validate_env_value — Guard against .env value characters that could break parsing.
+#
+# Docker Compose's .env reader is strict: unquoted values with spaces, special
+# characters, or problematic punctuation can silently change their semantics or
+# be interpreted as directive markers (# for comments, $ for substitution, etc.).
+# This function rejects values that contain unescapable characters rather than
+# trying to quote/escape them, to minimize diff and maintain confidence that
+# output values will parse identically to the original unquoted form.
+#
+# Safe characters: empty string, alphanumeric, spaces, common separators and URLs:
+#   . : - _ / + = ,
+# Unsafe characters (REJECTED): newline, $, backtick, double-quote, single-quote,
+#   backslash, hash (comment marker), and other shell metacharacters.
+#
+# Exit 0 if safe; die with message if unsafe.
+validate_env_value() {
+    local key="$1" value="$2"
+
+    # Empty values are allowed (e.g., IP_SSL="", DHCP_SUBNET="").
+    [[ -z "$value" ]] && return 0
+
+    # Use case pattern matching to detect forbidden characters.
+    # Reject if the value contains any of: newline, $, `, ", ', \, #
+    case "$value" in
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
+            die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
+            ;;
+    esac
+
+    return 0
+}
+
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
+    validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
         awk -F= -v key="$key" -v value="$value" '
             $1 == key { print key "=" value; next }
@@ -402,6 +435,7 @@ set_env_key() {
 
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
+    validate_env_value "$key" "$value"
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
 }
 
@@ -2014,6 +2048,12 @@ NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
+# TODO(#374): Validate heredoc values for safe characters. This block writes many
+# values via variable expansion. Currently covered by validate_env_value() in
+# set_env_key() and append_env_key_if_missing() for incremental updates, but
+# the initial heredoc template here does not yet use per-value validation.
+# A conservative approach for future work: wrap each variable with a helper or
+# add validation to the variables before they are substituted into the heredoc.
 write_env_file "$INSTALL_DIR/.env" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
