@@ -13,7 +13,7 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional automatic updates and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional Watchtower helper updates and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
@@ -27,7 +27,7 @@ LanCache NG combines several services into one Docker based stack:
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
 - optional Kea DHCP server
 - optional DHCP proxy helper
-- optional Watchtower updates
+- optional Watchtower helper updates
 - optional watchdog and convergence checks
 - optional secondary DNS nodes synced through NATS
 
@@ -56,7 +56,7 @@ It can:
 - ask for the cache server IP
 - optionally enable SSL caching with a second IP
 - ask for cache directory and cache size
-- optionally enable automatic updates
+- optionally enable Watchtower helper updates
 - create pre-update rollback backups
 - create config-only or full backups
 - restore setup-script backups
@@ -573,10 +573,15 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 
 CACHE_MAX_GB=50
 
-# First-party service image tag.
-# Use "latest" for the default master/edge path.
-# Use the matching vX.Y.Z tag when running from a release archive.
-LANCACHE_IMAGE_TAG=latest
+# First-party service image selector.
+# latest is the latest stable release channel.
+# Use edge only when you explicitly want the tested pre-stable channel.
+# setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
+# Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
+LANCACHE_IMAGE_REGISTRY=ghcr.io
+LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
+LANCACHE_IMAGE_CHANNEL=latest
+LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
 Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
@@ -588,9 +593,13 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. You have to change it, we set by default the LAN-IP ranges for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
-`LANCACHE_IMAGE_TAG` controls which first-party container images are pulled. Keep `latest` when following the default master/edge path. If you install from a tagged release archive or a checked-out `vX.Y.Z` tag, set `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the latest stable release. Use `edge` only when you explicitly want the tested pre-stable channel. `setup.sh` resolves mutable channels through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
+
+`LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
 
 Current prebuilt first-party images are published for `linux/amd64`. Multi-architecture images are tracked separately; non-amd64 production installs should not assume the prebuilt pull-only path is available yet.
+
+Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 

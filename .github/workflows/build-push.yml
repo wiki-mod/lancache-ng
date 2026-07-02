@@ -10,8 +10,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  cancel-in-progress: false
+
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
 
 defaults:
   run:
@@ -22,15 +27,28 @@ jobs:
     runs-on: [self-hosted, linux, lancache]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Run ShellCheck
+      - name: Select build-tools image
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
+            printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
+          else
+            printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run ShellCheck and ActionLint
         run: |
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            ghcr.io/wiki-mod/lancache-ng/build-tools:latest \
-            bash -lc 'find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
   validate-compose:
     runs-on: [self-hosted, linux, lancache]
@@ -38,45 +56,27 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select compose validation image
         env:
-          TRUSTED_BUILD_TOOLS_FALLBACK: >-
-            ${{
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
+            printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
+          else
+            printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate stack image contract
         run: |
           set -euo pipefail
 
-          published_image="ghcr.io/wiki-mod/lancache-ng/build-tools:latest"
-          published_image_pulled=false
-          if published_pull_output="$(docker pull "$published_image" 2>&1)"; then
-            printf '%s\n' "$published_pull_output"
-            published_image_pulled=true
-          else
-            printf '%s\n' "$published_pull_output"
-            if [ "$TRUSTED_BUILD_TOOLS_FALLBACK" != "true" ]; then
-              echo "::error::Published build-tools image could not be pulled and branch-local fallback builds are disabled for untrusted pull requests."
-              exit 1
-            fi
-          fi
-
-          if [ "$published_image_pulled" = "true" ]; then
-            if published_check_output="$(docker run --rm "$published_image" bash -lc 'set -euo pipefail; command -v docker >/dev/null; docker compose version >/dev/null' 2>&1)"; then
-              printf 'BUILD_TOOLS_IMAGE=%s\n' "$published_image" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            printf '%s\n' "$published_check_output"
-          fi
-
-          if [ "$TRUSTED_BUILD_TOOLS_FALLBACK" != "true" ]; then
-            echo "::error::Published build-tools image is not usable and branch-local fallback builds are disabled for untrusted pull requests."
-            exit 1
-          fi
-
-          fallback_image="lancache-ng-build-tools-validation:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          echo "::notice::Published build-tools image does not contain Docker CLI/Compose yet; building a branch-local validation image."
-          docker build --pull -t "$fallback_image" tools/build-tools
-          docker run --rm "$fallback_image" bash -lc 'set -euo pipefail; docker --version; docker compose version'
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$fallback_image" >> "$GITHUB_ENV"
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/validate-stack-images.sh
 
       - name: Validate prebuilt production install path
         run: |
@@ -245,6 +245,24 @@ jobs:
             echo "::error::Release jobs with write permissions must use the tag-scoped build-tools image, not mutable latest."
             exit 1
           fi
+          forbidden_latest_default_branch='type=raw,value=latest,enable={{is_default'
+          forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
+          if grep -Fq "$forbidden_latest_default_branch" .github/workflows/build-push.yml; then
+            echo "::error::Default branch builds must not publish latest; latest is stable-release only."
+            exit 1
+          fi
+          grep -F 'channel_tags+=(edge)' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Master promotion must publish the edge channel."; exit 1; }
+          grep -F 'channel_tags+=(latest)' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Stable release promotion must publish the latest channel."; exit 1; }
+          grep -F 'elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Stable release promotion must only move latest for exact vX.Y.Z tags."; exit 1; }
+          grep -F 'if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Release candidate promotion must only accept exact vX.Y.Z-rc.N tags."; exit 1; }
+          grep -F 'docker buildx imagetools inspect "$source_image"' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Promotion must verify every source sha-* image before moving channel tags."; exit 1; }
+          grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Release notes must run after channel promotion."; exit 1; }
 
           if awk '
             /if \[ "\$status" = "200" \]/ { in_patch=1 }
@@ -310,7 +328,7 @@ jobs:
             || { echo "::error::shellcheck container must run with the runner UID/GID."; exit 1; }
           grep -F -- "-v \"\$PWD:/work:ro\"" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
-          grep -F 'fallback_image="lancache-ng-build-tools-validation:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' .github/workflows/build-push.yml >/dev/null \
+          grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Compose validation fallback image tag must be scoped to the workflow run and attempt."; exit 1; }
           grep -F -- "--env DOCKER_CONFIG=/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
@@ -405,18 +423,68 @@ jobs:
             exit 1
           fi
 
-          grep -F "append_env_key_if_missing LANCACHE_IMAGE_TAG \"\$(resolve_lancache_image_tag \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
-            || { echo "::error::Update migration must derive LANCACHE_IMAGE_TAG with resolve_lancache_image_tag."; exit 1; }
+          grep -F "append_env_key_if_missing LANCACHE_IMAGE_REGISTRY \"\$(resolve_lancache_image_registry \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_REGISTRY."; exit 1; }
+          grep -F "append_env_key_if_missing LANCACHE_IMAGE_PREFIX \"\$(resolve_lancache_image_prefix \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F "append_env_key_if_missing LANCACHE_IMAGE_CHANNEL \"\$(resolve_lancache_image_channel \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F "set_env_key LANCACHE_IMAGE_TAG \"\$(resolve_lancache_image_tag \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must refresh LANCACHE_IMAGE_TAG with resolve_lancache_image_tag."; exit 1; }
+          grep -F 'LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag.' setup.sh >/dev/null \
+            || { echo "::error::Pinned image channel must fail closed when LANCACHE_IMAGE_TAG is missing."; exit 1; }
+          grep -F 'resolve_lancache_stack_channel_tag()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must resolve mutable image channels through the stack pointer image."; exit 1; }
+          grep -F 'docker cp "${container_id}:/stack.env" -' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must read stack.env from the stack pointer image."; exit 1; }
           grep -F 'pub image_tag: String' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must expose image_tag."; exit 1; }
+          grep -F 'pub image_registry: String' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must expose image_registry."; exit 1; }
+          grep -F 'pub image_prefix: String' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must expose image_prefix."; exit 1; }
+          grep -F 'pub image_channel: String' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must expose image_channel."; exit 1; }
           grep -F 'image_tag: state.config.lancache_image_tag.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_TAG."; exit 1; }
+          grep -F 'image_registry: state.config.lancache_image_registry.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_REGISTRY."; exit 1; }
+          grep -F 'image_prefix: state.config.lancache_image_prefix.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F 'image_channel: state.config.lancache_image_channel.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
+            || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F "LANCACHE_IMAGE_REGISTRY=\${LANCACHE_IMAGE_REGISTRY:-ghcr.io}" deploy/quickstart/docker-compose.yml >/dev/null \
+            && grep -F "LANCACHE_IMAGE_REGISTRY=\${LANCACHE_IMAGE_REGISTRY:-ghcr.io}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::UI must receive LANCACHE_IMAGE_REGISTRY."; exit 1; }
+          grep -F "LANCACHE_IMAGE_PREFIX=\${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}" deploy/quickstart/docker-compose.yml >/dev/null \
+            && grep -F "LANCACHE_IMAGE_PREFIX=\${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::UI must receive LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F "LANCACHE_IMAGE_CHANNEL=\${LANCACHE_IMAGE_CHANNEL:-}" deploy/quickstart/docker-compose.yml >/dev/null \
+            && grep -F "LANCACHE_IMAGE_CHANNEL=\${LANCACHE_IMAGE_CHANNEL:-}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::UI must receive LANCACHE_IMAGE_CHANNEL."; exit 1; }
           grep -F "response_image_tag=\$(echo \"\$response\"" setup.sh >/dev/null \
             || { echo "::error::setup.sh secondary must parse the primary image_tag."; exit 1; }
+          grep -F "response_image_registry=\$(echo \"\$response\"" setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must parse the primary image_registry."; exit 1; }
+          grep -F "response_image_prefix=\$(echo \"\$response\"" setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must parse the primary image_prefix."; exit 1; }
+          grep -F "response_image_channel=\$(echo \"\$response\"" setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must parse the primary image_channel."; exit 1; }
           grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::Quickstart UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
           grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/prod/docker-compose.yml >/dev/null \
             || { echo "::error::Prod UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
+          grep -F 'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must write LANCACHE_IMAGE_REGISTRY."; exit 1; }
+          grep -F 'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must write LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F 'LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}' setup.sh >/dev/null \
+            || { echo "::error::setup.sh secondary must write LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F 'derive_release_archive_image_tag()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must preserve release archive image tags before defaulting to latest."; exit 1; }
+          grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
+            || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
+          bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
 
       - name: Remove fallback compose validation image
@@ -988,10 +1056,30 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
             type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Resolve build-tools base image digests
+        id: build-tools-base-digests
+        if: matrix.service == 'build-tools'
+        run: |
+          set -euo pipefail
+
+          digest_for_image() {
+            local image=$1 digest
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            if [[ -z "$digest" || "$digest" = "null" ]]; then
+              echo "::error::Could not read digest for $image."
+              exit 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          {
+            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Prepare local Buildx cache
         id: buildx-cache
@@ -1177,7 +1265,10 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1196,7 +1287,10 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1247,20 +1341,182 @@ jobs:
           subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
           push-to-registry: true
 
+  promote:
+    name: promote stack image channels
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, linux, lancache]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote coherent stack tags
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          short_sha="${COMMIT_SHA::7}"
+          source_tag="sha-${short_sha}"
+          stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
+          channel_tags=()
+          pointer_context=""
+          declare -A previous_refs=()
+          promoted_targets=()
+
+          digest_for_image() {
+            local image=$1
+            local digest
+
+            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]]
+            printf '%s\n' "$digest"
+          }
+
+          rollback_promotions() {
+            local status=$?
+            local target_image previous_digest
+
+            if [[ -n "$pointer_context" ]]; then
+              rm -rf "$pointer_context"
+            fi
+
+            if [[ "$status" = "0" || "${#promoted_targets[@]}" = "0" ]]; then
+              exit "$status"
+            fi
+
+            echo "::error::Promotion failed after public tags were moved; attempting best-effort rollback."
+            for target_image in "${promoted_targets[@]}"; do
+              previous_digest="${previous_refs[$target_image]:-}"
+              if [[ -n "$previous_digest" ]]; then
+                docker buildx imagetools create -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                  || echo "::error::Could not restore previous digest for $target_image."
+              else
+                echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
+              fi
+            done
+            exit "$status"
+          }
+          trap rollback_promotions EXIT
+
+          if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
+            channel_tags+=(edge)
+          elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
+            channel_tags+=("$GITHUB_REF_NAME")
+            if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              :
+            elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              bash scripts/check-stable-external-images.sh
+              channel_tags+=(latest)
+            else
+              echo "::error::Unsupported release tag '${GITHUB_REF_NAME}'. Use vX.Y.Z or vX.Y.Z-rc.N."
+              exit 1
+            fi
+          fi
+
+          if (( ${#channel_tags[@]} == 0 )); then
+            echo "::notice::No public channel tags are configured for $GITHUB_REF."
+            exit 0
+          fi
+
+          missing=0
+          for service in "${services[@]}"; do
+            source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+            if ! docker buildx imagetools inspect "$source_image" >/dev/null; then
+              echo "::error::Cannot promote because required source image is missing: $source_image"
+              missing=1
+            fi
+          done
+          if [[ "$missing" = "1" ]]; then
+            exit 1
+          fi
+
+          pointer_context="$(mktemp -d)"
+          {
+            printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
+            printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
+            printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
+          } > "$pointer_context/stack.env"
+          cat > "$pointer_context/Dockerfile" <<'DOCKERFILE'
+          FROM busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
+          LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
+          LABEL org.opencontainers.image.description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
+          COPY stack.env /stack.env
+          CMD ["true"]
+          DOCKERFILE
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "$stack_pointer_image" \
+            "$pointer_context"
+          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+
+          for service in "${services[@]}"; do
+            source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+            for channel_tag in "${channel_tags[@]}"; do
+              target_image="ghcr.io/${REPOSITORY}/${service}:${channel_tag}"
+              previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+              docker buildx imagetools create -t "$target_image" "$source_image"
+              promoted_targets+=("$target_image")
+            done
+          done
+
+          for channel_tag in "${channel_tags[@]}"; do
+            target_image="ghcr.io/${REPOSITORY}/stack:${channel_tag}"
+            previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+            docker buildx imagetools create -t "$target_image" "$stack_pointer_image"
+            promoted_targets+=("$target_image")
+          done
+
+          for service in "${services[@]}"; do
+            for channel_tag in "${channel_tags[@]}"; do
+              docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/${service}:${channel_tag}" >/dev/null
+            done
+          done
+
+          for channel_tag in "${channel_tags[@]}"; do
+            docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
+          done
+
   release:
     name: publish release source
-    needs: build
+    needs: promote
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, lancache]
-    container:
-      image: ghcr.io/${{ github.repository }}/build-tools:${{ github.ref_name }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
       packages: read
     steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create or update GitHub release for built images
         shell: bash
         env:
@@ -1271,7 +1527,46 @@ jobs:
         run: |
           set -euo pipefail
 
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
+          source_tag="sha-${short_sha}"
+          expected_prerelease=false
+          if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            expected_prerelease=true
+            echo "::notice::Tag $TAG_NAME is a release candidate and will be published as a prerelease."
+          elif [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            expected_prerelease=false
+          else
+            echo "::error::Unsupported release tag '$TAG_NAME'. Use vX.Y.Z or vX.Y.Z-rc.N."
+            exit 1
+          fi
+
+          digest_for_image() {
+            local image=$1
+            local digest
+
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            if [[ -z "$digest" || "$digest" = "null" ]]; then
+              echo "::error::Could not read digest for $image."
+              exit 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+          stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${TAG_NAME}"
+          docker buildx imagetools inspect "$build_tools_image" >/dev/null
+          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          docker pull "$build_tools_image" >/dev/null
+          rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
+          golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
+          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build-tools image is missing build-time base digest labels."
+            exit 1
+          fi
+
           image_notes_start='<!-- lancache-ng-image-tags:start -->'
           image_notes_end='<!-- lancache-ng-image-tags:end -->'
           notes_file="$(mktemp)"
@@ -1279,29 +1574,54 @@ jobs:
             printf '%s\n' "$image_notes_start"
             printf 'This release source is the exact commit used by CI to build and publish the service images for %s.\n\n' "$TAG_NAME"
             printf 'Commit: %s\n\n' "$COMMIT_SHA"
-            printf 'Published image tags:\n\n'
-            printf -- '- ghcr.io/%s/proxy:%s\n' "$REPOSITORY" "$TAG_NAME"
-            printf -- '- ghcr.io/%s/dns:%s\n' "$REPOSITORY" "$TAG_NAME"
-            printf -- '- ghcr.io/%s/watchdog:%s\n' "$REPOSITORY" "$TAG_NAME"
-            printf -- '- ghcr.io/%s/dhcp:%s\n' "$REPOSITORY" "$TAG_NAME"
-            printf -- '- ghcr.io/%s/dhcp-proxy:%s\n' "$REPOSITORY" "$TAG_NAME"
-            printf -- '- ghcr.io/%s/ui:%s\n' "$REPOSITORY" "$TAG_NAME"
-            printf -- '- ghcr.io/%s/build-tools:%s\n\n' "$REPOSITORY" "$TAG_NAME"
-            printf 'Matching SHA image tags:\n\n'
-            printf -- '- ghcr.io/%s/proxy:sha-%s\n' "$REPOSITORY" "$short_sha"
-            printf -- '- ghcr.io/%s/dns:sha-%s\n' "$REPOSITORY" "$short_sha"
-            printf -- '- ghcr.io/%s/watchdog:sha-%s\n' "$REPOSITORY" "$short_sha"
-            printf -- '- ghcr.io/%s/dhcp:sha-%s\n' "$REPOSITORY" "$short_sha"
-            printf -- '- ghcr.io/%s/dhcp-proxy:sha-%s\n' "$REPOSITORY" "$short_sha"
-            printf -- '- ghcr.io/%s/ui:sha-%s\n' "$REPOSITORY" "$short_sha"
-            printf -- '- ghcr.io/%s/build-tools:sha-%s\n' "$REPOSITORY" "$short_sha"
+            printf 'Published image tags and digests:\n\n'
+            for service in "${services[@]}"; do
+              tag_image="ghcr.io/${REPOSITORY}/${service}:${TAG_NAME}"
+              sha_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+              tag_digest="$(digest_for_image "$tag_image")"
+              sha_digest="$(digest_for_image "$sha_image")"
+              if [[ "$tag_digest" != "$sha_digest" ]]; then
+                echo "::error::Release tag digest for $tag_image does not match $sha_image."
+                exit 1
+              fi
+              printf -- '- %s -> %s\n' "$tag_image" "$tag_digest"
+            done
+            printf '\nMatching immutable SHA image tags:\n\n'
+            for service in "${services[@]}"; do
+              sha_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+              sha_digest="$(digest_for_image "$sha_image")"
+              printf -- '- %s -> %s\n' "$sha_image" "$sha_digest"
+            done
+            printf '\nStack channel pointer:\n\n'
+            printf -- '- %s -> %s\n' "$stack_pointer_image" "$(digest_for_image "$stack_pointer_image")"
+            printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
+            printf '\nResolved build-tools base image digests:\n\n'
+            printf -- '- rust:latest -> %s\n' "$rust_base_digest"
+            printf -- '- golang:latest -> %s\n' "$golang_base_digest"
+            printf '\nProvenance and SBOM status:\n\n'
+            printf -- '- Provenance attestations are pushed to GHCR for every first-party image digest by the build job.\n'
+            printf -- '- SBOM artifacts are not generated by this workflow yet; release notes must not claim SBOM coverage until an SBOM-producing job is added.\n'
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
+
+          docker run --rm \
+            -e GITHUB_TOKEN \
+            -e REPOSITORY \
+            -e TAG_NAME \
+            -e COMMIT_SHA \
+            -e EXPECTED_PRERELEASE="$expected_prerelease" \
+            -v "$notes_file:/tmp/lancache-release-notes.md:ro" \
+            "$build_tools_image" \
+            bash -s <<'UPDATE_RELEASE'
+          set -euo pipefail
 
           api_url="https://api.github.com/repos/${REPOSITORY}"
           auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
           accept_header="Accept: application/vnd.github+json"
           version_header="X-GitHub-Api-Version: 2022-11-28"
+          image_notes_start='<!-- lancache-ng-image-tags:start -->'
+          image_notes_end='<!-- lancache-ng-image-tags:end -->'
+          expected_prerelease="$EXPECTED_PRERELEASE"
 
           response_file="$(mktemp)"
           status="$(curl -sS -o "$response_file" -w '%{http_code}' \
@@ -1312,10 +1632,17 @@ jobs:
 
           if [ "$status" = "200" ]; then
             release_id="$(jq -r '.id' "$response_file")"
+            existing_prerelease="$(jq -r '.prerelease' "$response_file")"
+            if [ "$existing_prerelease" != "$expected_prerelease" ]; then
+              echo "Existing GitHub release prerelease state does not match tag policy for $TAG_NAME." >&2
+              echo "Expected prerelease=$expected_prerelease, found prerelease=$existing_prerelease." >&2
+              exit 1
+            fi
             existing_body="$(jq -r '.body // ""' "$response_file")"
+            # shellcheck disable=SC2016
             updated_body="$(jq -nr \
               --arg body "$existing_body" \
-              --arg notes "$(cat "$notes_file")" \
+              --arg notes "$(cat /tmp/lancache-release-notes.md)" \
               --arg start "$image_notes_start" \
               --arg end "$image_notes_end" \
               '
@@ -1340,12 +1667,14 @@ jobs:
               -d @"$response_file.patch" \
               "$api_url/releases/$release_id" >/dev/null
           elif [ "$status" = "404" ]; then
+            # shellcheck disable=SC2016
             jq -n \
               --arg tag_name "$TAG_NAME" \
               --arg target_commitish "$COMMIT_SHA" \
               --arg name "$TAG_NAME" \
-              --arg body "$(cat "$notes_file")" \
-              '{tag_name:$tag_name, target_commitish:$target_commitish, name:$name, body:$body, draft:false, prerelease:false}' \
+              --arg body "$(cat /tmp/lancache-release-notes.md)" \
+              --argjson prerelease "$expected_prerelease" \
+              '{tag_name:$tag_name, target_commitish:$target_commitish, name:$name, body:$body, draft:false, prerelease:$prerelease}' \
               > "$response_file.create"
             curl -fsS -X POST \
               -H "$auth_header" \
@@ -1358,3 +1687,4 @@ jobs:
             echo "Failed to inspect GitHub release for $TAG_NAME; HTTP status $status" >&2
             exit 1
           fi
+          UPDATE_RELEASE
