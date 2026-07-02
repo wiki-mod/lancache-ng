@@ -8,7 +8,6 @@ UI_MANIFEST="services/ui/Cargo.toml"
 # That image is based on rust:latest and preinstalls rustfmt, clippy, sccache,
 # and PATH smoke tests. This is separate from pinned production Dockerfiles.
 RUST_IMAGE="${RUST_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
-SCCACHE_VERSION="${SCCACHE_VERSION:-0.16.0}"
 NETWORK_NAME=""
 REDIS_CONTAINER=""
 REDIS_URL="${SCCACHE_REDIS_URL:-}"
@@ -221,7 +220,8 @@ fi
 CONTAINER_CMD=$'set -euo pipefail\n'
 if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
   CONTAINER_CMD+=$'if ! command -v sccache >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+="  cargo install sccache --version ${SCCACHE_VERSION} --no-default-features --features redis,dist-client >/dev/null"$'\n'
+  CONTAINER_CMD+=$'  echo "sccache is missing in the selected Rust image. Use the build-tools image or another image with preinstalled sccache." >&2\n'
+  CONTAINER_CMD+=$'  exit 1\n'
   CONTAINER_CMD+=$'fi\n'
 fi
 CONTAINER_CMD+=$'cargo --version\n'
