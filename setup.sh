@@ -310,8 +310,32 @@ install_docker() {
     fi
 }
 
+# Approximates Docker Compose's own .env value semantics for a value read back
+# out of an existing file: strips a fully single- or double-quoted value's
+# surrounding quotes, and drops an unquoted inline comment (a '#' preceded by
+# whitespace). Without this, migrating an older but valid Compose value (e.g.
+# `CACHE_DIR=/srv/lancache # nvme` or `CACHE_DIR="/srv/lancache cache"`) into
+# validate_env_value() would reject it for characters Compose itself parses
+# away.
+_compose_parse_env_value() {
+    local value="$1"
+
+    if [[ ${#value} -ge 2 && "$value" == \"*\" ]]; then
+        value="${value:1:${#value}-2}"
+    elif [[ ${#value} -ge 2 && "$value" == \'*\' ]]; then
+        value="${value:1:${#value}-2}"
+    else
+        value="${value%%[[:space:]]\#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+    fi
+
+    printf '%s' "$value"
+}
+
 get_env_var() {
-    awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
+    local raw
+    raw=$(awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null) || true
+    _compose_parse_env_value "$raw"
 }
 
 # .env helpers stay in setup.sh because this script owns install, update, and
