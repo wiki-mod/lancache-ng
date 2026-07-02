@@ -65,14 +65,11 @@ runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
   require_manifest_platform "$image" linux/amd64
-  require_manifest_platform "$image" linux/arm64
 done
 require_name "$tooling_names" build-tools tooling
 require_manifest_platform build-tools linux/amd64
-require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
-require_manifest_platform stack linux/arm64
 for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
   require_name "$external_names" "$image" external
 done
@@ -244,15 +241,9 @@ require_grep 'bash scripts/check-stable-external-images.sh' \
 require_grep 'expected_prerelease=' \
   .github/workflows/build-push.yml \
   'release job must derive RC prerelease status from the tag'
-require_grep '^  RELEASE_PLATFORMS: linux/amd64,linux/arm64$' \
+require_grep '^  RELEASE_PLATFORMS: linux/amd64$' \
   .github/workflows/build-push.yml \
   'build workflow must publish every platform declared by the stack manifest'
-awk '
-  /- name: Set up QEMU/ && !qemu { qemu=NR }
-  /- name: Set up Docker Buildx/ && qemu && !buildx { buildx=NR }
-  END { exit (qemu && buildx && qemu < buildx) ? 0 : 1 }
-' "$repo_root/.github/workflows/build-push.yml" \
-  || fail 'build workflow must set up QEMU before Docker Buildx so arm64 RUN steps can execute'
 require_grep 'awk .*/Platform:.*print \$2' \
   .github/workflows/build-push.yml \
   'release workflow must parse docker buildx imagetools platform output'

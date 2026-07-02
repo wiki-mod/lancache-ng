@@ -17,7 +17,7 @@ concurrency:
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
-  RELEASE_PLATFORMS: linux/amd64,linux/arm64
+  RELEASE_PLATFORMS: linux/amd64
   RUST_ACCELERATION_NETWORK: bridge
 
 defaults:
@@ -876,50 +876,8 @@ jobs:
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
             platform: linux/amd64
             platform_tag: amd64
-          - service: proxy
-            context: services/proxy
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
-            platform: linux/arm64
-            platform_tag: arm64
-          - service: dns
-            context: services/dns
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
-            rust: true
-            platform: linux/arm64
-            platform_tag: arm64
-          - service: watchdog
-            context: services/watchdog
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
-            platform: linux/arm64
-            platform_tag: arm64
-          - service: dhcp
-            context: services/dhcp
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
-            platform: linux/arm64
-            platform_tag: arm64
-          - service: dhcp-proxy
-            context: services/dhcp-proxy
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
-            platform: linux/arm64
-            platform_tag: arm64
-          - service: ui
-            context: services/ui
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
-            rust: true
-            platform: linux/arm64
-            platform_tag: arm64
-          - service: build-tools
-            context: tools/build-tools
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
-            platform: linux/arm64
-            platform_tag: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: ${{ env.RELEASE_PLATFORMS }}
 
       - name: Detect build-tools scan input changes
         id: build-tools-scan-changes
@@ -999,7 +957,6 @@ jobs:
               steps.build-tools-scan-changes.outputs.should-scan == 'true'
             ) &&
             matrix.rust == true &&
-            matrix.platform == 'linux/amd64' &&
             github.actor != 'dependabot[bot]' &&
             (
               github.event_name != 'pull_request' ||
@@ -1311,11 +1268,6 @@ jobs:
             echo "::notice::build-tools image inputs did not change; skipping routine build-tools image rebuild."
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: ${{ env.RELEASE_PLATFORMS }}
 
       - name: Set up Docker Buildx
         if: matrix.service != 'build-tools' || steps.build-tools-changes.outputs.should-build == 'true'
