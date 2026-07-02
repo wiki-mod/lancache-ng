@@ -165,7 +165,10 @@ require_grep 'docker buildx imagetools inspect "\$source_image"' \
   'promotion must verify every sha-* source image before moving a public channel'
 require_grep 'imagetools inspect "\$image" --format' \
   scripts/require-image-platforms.sh \
-  'the shared platform coverage guard must inspect images via JSON format, not text-parsed Platform: lines (breaks on single-platform manifests)'
+  'the shared platform coverage guard must inspect single-platform image metadata before falling back to text Platform lines'
+if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/require-image-platforms.sh"; then
+  fail 'the shared platform coverage guard must not require host jq'
+fi
 require_grep 'bash scripts/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* service image platform before moving public tags'

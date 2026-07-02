@@ -9,28 +9,25 @@ fail() {
   exit 1
 }
 
-# docker buildx imagetools inspect's plain-text output only prints a
-# "Platform:" line per entry for multi-platform manifest lists. A
-# single-platform image (the current amd64-only release contract) has no
-# manifest list to enumerate, so that text-based check silently discovers
-# zero platforms and rejects every valid image. --format '{{json .}}' avoids
-# this: `.image` is a flat object (with .architecture/.os) for a
-# single-platform image, or a map keyed by "os/arch" platform strings for a
-# multi-platform manifest list — either way this covers current amd64-only
-# releases and any future multi-platform (e.g. arm64) release without
-# further changes here.
-inspect_json="$(docker buildx imagetools inspect "$image" --format '{{json .}}' 2>&1)" \
-  || fail "Failed to inspect image manifest for $image: $inspect_json"
+# docker buildx imagetools prints single-platform images differently from
+# multi-platform indexes. Current lancache-ng prebuilt images are amd64-only,
+# so first read the single-platform image fields. If those are not populated,
+# fall back to the plain multi-platform "Platform:" lines. This deliberately
+# avoids external JSON parsers because release/promotion jobs run directly on
+# self-hosted runners.
+single_platform="$(docker buildx imagetools inspect "$image" --format '{{if .Image}}{{.Image.OS}}/{{.Image.Architecture}}{{end}}' 2>&1)" \
+  || fail "Failed to inspect image platform for $image: $single_platform"
 
-discovered_platforms="$(
-  printf '%s' "$inspect_json" | jq -r '
-    if (.image | type) == "object" and (.image | has("architecture")) then
-      "\(.image.os)/\(.image.architecture)"
-    else
-      (.image // {} | keys[])
-    end
-  '
-)"
+if [[ -n "$single_platform" && "$single_platform" != "<no value>/<no value>" && "$single_platform" != "unknown/unknown" ]]; then
+  discovered_platforms="$single_platform"
+else
+  inspect_text="$(docker buildx imagetools inspect "$image" 2>&1)" \
+    || fail "Failed to inspect image manifest for $image: $inspect_text"
+  discovered_platforms="$(printf '%s\n' "$inspect_text" | awk '$1 == "Platform:" && $2 != "unknown/unknown" { print $2 }' | sort -u)"
+fi
+
+[[ -n "$discovered_platforms" ]] \
+  || fail "$image did not expose any usable platform metadata."
 
 for expected in $(printf '%s\n' "$required_platforms" | tr ',' ' '); do
   if ! printf '%s\n' "$discovered_platforms" | grep -Eq "^${expected}(/.*)?$"; then
