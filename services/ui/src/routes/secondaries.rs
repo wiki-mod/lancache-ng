@@ -258,8 +258,11 @@ pub async fn update_nats_conf(
     state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Validate all NATS credentials before interpolating into config
-    nats_config::validate_nats_credentials(&state.config.nats_ui_user, &state.config.nats_ui_password)
-        .map_err(|e| format!("Invalid NATS UI credentials: {}", e))?;
+    nats_config::validate_nats_credentials(
+        &state.config.nats_ui_user,
+        &state.config.nats_ui_password,
+    )
+    .map_err(|e| format!("Invalid NATS UI credentials: {}", e))?;
     nats_config::validate_nats_credentials(
         &state.config.nats_dns_writer_user,
         &state.config.nats_dns_writer_password,
