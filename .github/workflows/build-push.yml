@@ -52,9 +52,12 @@ jobs:
 
   validate-compose:
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    outputs:
+      build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select compose validation image
+        id: select-compose-validation-image
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -63,8 +66,11 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
             printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
+            printf 'build_tools_image=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
           else
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+            build_tools_image="$(bash scripts/select-build-tools-image.sh)"
+            printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
+            printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate stack image contract
@@ -352,6 +358,11 @@ jobs:
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
           grep -F 'steps.docker-build-jobs.outputs.jobs' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
+          grep -F 'build_tools_image:' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must expose the selected build-tools image as a job output."; exit 1; }
+          grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
+            && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
               && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \
@@ -361,15 +372,20 @@ jobs:
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
           fi
-          if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh; then
-            echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
-            exit 1
-          fi
-          if grep -RIn 'cargo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh | grep -v -- '--no-default-features --features redis,dist-client'; then
-            echo "::error::sccache source installs must use the minimal Redis plus dist-client feature set."
-            exit 1
-          fi
           for dockerfile in services/dns/Dockerfile services/ui/Dockerfile; do
+            grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must declare the shared build-tools image as a build argument."; exit 1; }
+            grep -F 'FROM ${BUILD_TOOLS_IMAGE}' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must use the shared build-tools image in the Rust builder stage."; exit 1; }
+            if grep -F 'cargo install sccache' "$dockerfile" >/dev/null || grep -F 'apt-get download "distcc-pump=' "$dockerfile" >/dev/null; then
+              echo "::error::$dockerfile must not bootstrap Rust builder tools locally anymore."
+              exit 1
+            fi
+            grep -F 'for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do' "$dockerfile" >/dev/null \
+              && grep -F 'command -v "$tool" >/dev/null' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must fail closed if the shared build-tools image is missing a required tool."; exit 1; }
+            grep -F 'lancache-rustc-wrapper' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must keep the sccache wrapper in place for Rust compiler invocations."; exit 1; }
             grep -F -- "--mount=type=secret,id=sccache_dist_config" "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must consume sccache-dist config through a BuildKit secret."; exit 1; }
             grep -F -- "--mount=type=secret,id=distcc_potential_hosts" "$dockerfile" >/dev/null \
@@ -402,12 +418,10 @@ jobs:
               || { echo "::error::$dockerfile must disable distcc internal local fallback so project fallback logic can decide explicitly."; exit 1; }
             grep -F 'run_cargo_build()' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must retry once with the normal local compiler when the distcc path is unavailable."; exit 1; }
-            grep -F 'apt-get download "distcc-pump=$DISTCC_PUMP_PACKAGE_VERSION"' "$dockerfile" >/dev/null \
-              || { echo "::error::$dockerfile must unpack the pinned distcc-pump package before patching Debian Python warnings."; exit 1; }
-            grep -F 'python3 -Werror::SyntaxWarning -m py_compile "$distcc_pump_parser"' "$dockerfile" >/dev/null \
-              || { echo "::error::$dockerfile must verify the distcc-pump warning patch with SyntaxWarning as an error."; exit 1; }
-            grep -F 'python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server' "$dockerfile" >/dev/null \
-              || { echo "::error::$dockerfile must compile-check distcc-pump include_server with warnings as errors."; exit 1; }
+            if grep -F 'python3 -Werror::SyntaxWarning -m py_compile "$distcc_pump_parser"' "$dockerfile" >/dev/null; then
+              echo "::error::$dockerfile must not patch distcc-pump locally now that the shared build-tools image provides it."
+              exit 1
+            fi
             grep -F 'cargo build -j "$cargo_jobs"' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must use the resolved cargo job count."; exit 1; }
           done
@@ -778,6 +792,8 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     strategy:
       fail-fast: false
       matrix:
@@ -966,6 +982,7 @@ jobs:
           DOCKER_BUILDKIT=1 docker build \
             --pull \
             --platform linux/amd64 \
+            --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ github.run_id }} \
@@ -1007,6 +1024,8 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     permissions:
       contents: read
       packages: write
@@ -1262,6 +1281,7 @@ jobs:
           context: ${{ matrix.context }}
           secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           build-args: |
+            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -1284,6 +1304,7 @@ jobs:
           context: ${{ matrix.context }}
           secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           build-args: |
+            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
