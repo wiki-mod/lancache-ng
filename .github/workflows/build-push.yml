@@ -392,8 +392,8 @@ jobs:
           grep -F 'SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
-            && grep -F 'network: ${{ env.RUST_ACCELERATION_NETWORK }}' .github/workflows/build-push.yml >/dev/null \
-            && grep -F "allow: \${{ env.RUST_ACCELERATION_NETWORK == 'host' && 'network.host' || '' }}" .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_ACCELERATION_NETWORK' >/dev/null \
+            && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Rust Docker builds must use the same network mode as the acceleration preflight."; exit 1; }
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
