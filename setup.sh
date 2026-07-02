@@ -565,6 +565,40 @@ validate_lancache_image_channel() {
     die "LANCACHE_IMAGE_CHANNEL must be latest, dev, edge, or pinned."
 }
 
+derive_release_archive_image_tag() {
+    local version tag
+
+    if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        tag=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null || true)
+        if [[ -n "$tag" ]]; then
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+                printf 'Invalid release tag from git checkout: %s\n' "$tag" >&2
+                return 2
+            fi
+            printf '%s\n' "$tag"
+            return 0
+        fi
+        return 1
+    fi
+
+    [[ -f "$SCRIPT_DIR/VERSION" ]] || return 1
+    version=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")
+    if [[ -z "$version" ]]; then
+        printf 'VERSION is empty; cannot derive a release image tag.\n' >&2
+        return 2
+    fi
+    if [[ "$version" = v* ]]; then
+        tag="$version"
+    else
+        tag="v$version"
+    fi
+    if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+        printf 'Invalid release image tag derived from VERSION: %s\n' "$tag" >&2
+        return 2
+    fi
+    printf '%s\n' "$tag"
+}
+
 validate_lancache_image_registry() {
     local registry="$1"
     [[ "$registry" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$ ]] \
@@ -602,7 +636,7 @@ resolve_lancache_image_prefix() {
 }
 
 resolve_lancache_image_channel() {
-    local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}"
+    local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag=""
 
     if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
         channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file")
@@ -620,6 +654,15 @@ resolve_lancache_image_channel() {
             channel="${channel:-pinned}"
             ;;
     esac
+
+    if [[ -z "$channel" ]]; then
+        if release_tag=$(derive_release_archive_image_tag); then
+            channel="pinned"
+        elif [[ "$?" = "2" ]]; then
+            die "Cannot derive a valid release image tag from this checkout/archive."
+        fi
+        [[ -n "$release_tag" ]] && channel="pinned"
+    fi
 
     channel="${channel:-latest}"
     validate_lancache_image_channel "$channel"
@@ -659,7 +702,7 @@ resolve_lancache_stack_channel_tag() {
 }
 
 resolve_lancache_image_tag() {
-    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" version="" in_git_tree=0 channel=""
+    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel=""
 
     if [[ -n "$tag" ]]; then
         case "$tag" in
@@ -710,19 +753,13 @@ resolve_lancache_image_tag() {
             ;;
     esac
 
-    if [[ -z "$tag" ]] && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        in_git_tree=1
-        tag=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null || true)
-    fi
-
-    if [[ -z "$tag" && "$in_git_tree" = "0" && -f "$SCRIPT_DIR/VERSION" ]]; then
-        version=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")
-        [[ -n "$version" ]] || die "VERSION is empty; cannot derive a release image tag."
-        if [[ "$version" = v* ]]; then
-            tag="$version"
-        else
-            tag="v$version"
+    if [[ -z "$tag" ]]; then
+        if release_tag=$(derive_release_archive_image_tag); then
+            tag="$release_tag"
+        elif [[ "$?" = "2" ]]; then
+            die "Cannot derive a valid release image tag from this checkout/archive."
         fi
+        [[ -n "$release_tag" ]] && tag="$release_tag"
     fi
 
     if [[ -z "$tag" ]]; then
@@ -1565,7 +1602,11 @@ EOF
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
-        LANCACHE_IMAGE_TAG=""
+        if [[ -n "$response_image_tag" && "$response_image_tag" =~ ^sha- ]]; then
+            LANCACHE_IMAGE_TAG="$response_image_tag"
+        else
+            LANCACHE_IMAGE_TAG=""
+        fi
     fi
     if [[ -z "${LANCACHE_IMAGE_TAG:-}" ]]; then
         LANCACHE_IMAGE_CHANNEL="$lancache_image_channel"
@@ -1948,6 +1989,8 @@ if [[ -f "$env_file" ]]; then
 fi
 
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
+LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
+LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$env_file")
 LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$env_file")
 LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
@@ -2002,8 +2045,8 @@ CACHE_MAX_GB=${cache_gb}
 # setup.sh resolves mutable channels to an immutable sha-* service tag before
 # pulling images so one install cannot consume a mixed stack during promotion.
 # Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.
-LANCACHE_IMAGE_REGISTRY=ghcr.io
-LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
+LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}
+LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}
 LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}
 LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 

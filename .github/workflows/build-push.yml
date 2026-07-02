@@ -243,6 +243,10 @@ jobs:
             || { echo "::error::Master promotion must publish the edge channel."; exit 1; }
           grep -F 'channel_tags+=(latest)' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Stable release promotion must publish the latest channel."; exit 1; }
+          grep -F 'elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Stable release promotion must only move latest for exact vX.Y.Z tags."; exit 1; }
+          grep -F 'if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Release candidate promotion must only accept exact vX.Y.Z-rc.N tags."; exit 1; }
           grep -F 'docker buildx imagetools inspect "$source_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Promotion must verify every source sha-* image before moving channel tags."; exit 1; }
           grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
@@ -431,6 +435,15 @@ jobs:
             || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_PREFIX."; exit 1; }
           grep -F 'image_channel: state.config.lancache_image_channel.clone()' services/ui/src/routes/secondaries.rs >/dev/null \
             || { echo "::error::Secondary registration response must use the primary LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F "LANCACHE_IMAGE_REGISTRY=\${LANCACHE_IMAGE_REGISTRY:-ghcr.io}" deploy/quickstart/docker-compose.yml >/dev/null \
+            && grep -F "LANCACHE_IMAGE_REGISTRY=\${LANCACHE_IMAGE_REGISTRY:-ghcr.io}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::UI must receive LANCACHE_IMAGE_REGISTRY."; exit 1; }
+          grep -F "LANCACHE_IMAGE_PREFIX=\${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}" deploy/quickstart/docker-compose.yml >/dev/null \
+            && grep -F "LANCACHE_IMAGE_PREFIX=\${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::UI must receive LANCACHE_IMAGE_PREFIX."; exit 1; }
+          grep -F "LANCACHE_IMAGE_CHANNEL=\${LANCACHE_IMAGE_CHANNEL:-latest}" deploy/quickstart/docker-compose.yml >/dev/null \
+            && grep -F "LANCACHE_IMAGE_CHANNEL=\${LANCACHE_IMAGE_CHANNEL:-latest}" deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::UI must receive LANCACHE_IMAGE_CHANNEL."; exit 1; }
           grep -F "response_image_tag=\$(echo \"\$response\"" setup.sh >/dev/null \
             || { echo "::error::setup.sh secondary must parse the primary image_tag."; exit 1; }
           grep -F "response_image_registry=\$(echo \"\$response\"" setup.sh >/dev/null \
@@ -443,12 +456,16 @@ jobs:
             || { echo "::error::Quickstart UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
           grep -F "LANCACHE_IMAGE_TAG=\${LANCACHE_IMAGE_TAG:-latest}" deploy/prod/docker-compose.yml >/dev/null \
             || { echo "::error::Prod UI must receive LANCACHE_IMAGE_TAG."; exit 1; }
-          grep -F 'LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}' setup.sh >/dev/null \
+          grep -F 'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}' setup.sh >/dev/null \
             || { echo "::error::setup.sh must write LANCACHE_IMAGE_REGISTRY."; exit 1; }
-          grep -F 'LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}' setup.sh >/dev/null \
+          grep -F 'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}' setup.sh >/dev/null \
             || { echo "::error::setup.sh must write LANCACHE_IMAGE_PREFIX."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}' setup.sh >/dev/null \
             || { echo "::error::setup.sh secondary must write LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F 'derive_release_archive_image_tag()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must preserve release archive image tags before defaulting to latest."; exit 1; }
+          grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
+            || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
 
@@ -1023,6 +1040,29 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short
 
+      - name: Resolve build-tools base image digests
+        id: build-tools-base-digests
+        if: matrix.service == 'build-tools'
+        run: |
+          set -euo pipefail
+
+          digest_for_image() {
+            local image=$1 digest
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            if [[ -z "$digest" || "$digest" = "null" ]]; then
+              echo "::error::Could not read digest for $image."
+              exit 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          {
+            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Prepare local Buildx cache
         id: buildx-cache
         env:
@@ -1207,7 +1247,10 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1226,7 +1269,10 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1359,9 +1405,14 @@ jobs:
             channel_tags+=(edge)
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
-            if [[ ! "$GITHUB_REF_NAME" =~ -rc\.[0-9]+$ ]]; then
+            if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              :
+            elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               bash scripts/check-stable-external-images.sh
               channel_tags+=(latest)
+            else
+              echo "::error::Unsupported release tag '${GITHUB_REF_NAME}'. Use vX.Y.Z or vX.Y.Z-rc.N."
+              exit 1
             fi
           fi
 
@@ -1462,9 +1513,14 @@ jobs:
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
-          if [[ "$TAG_NAME" =~ -rc\.[0-9]+$ ]]; then
+          if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
             expected_prerelease=true
             echo "::notice::Tag $TAG_NAME is a release candidate and will be published as a prerelease."
+          elif [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            expected_prerelease=false
+          else
+            echo "::error::Unsupported release tag '$TAG_NAME'. Use vX.Y.Z or vX.Y.Z-rc.N."
+            exit 1
           fi
 
           digest_for_image() {
@@ -1481,12 +1537,17 @@ jobs:
             printf '%s\n' "$digest"
           }
 
-          rust_base_digest="$(digest_for_image rust:latest)"
-          golang_base_digest="$(digest_for_image golang:latest)"
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${TAG_NAME}"
           docker buildx imagetools inspect "$build_tools_image" >/dev/null
           docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          docker pull "$build_tools_image" >/dev/null
+          rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
+          golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
+          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build-tools image is missing build-time base digest labels."
+            exit 1
+          fi
 
           image_notes_start='<!-- lancache-ng-image-tags:start -->'
           image_notes_end='<!-- lancache-ng-image-tags:end -->'

@@ -73,7 +73,7 @@ fi
 
 if [[ "$event_name" != "pull_request" ]]; then
   printf '::notice::Building a branch-local build-tools validation image for a trusted ref.\n' >&2
-  docker build --pull -t "$fallback_image" "$build_tools_context"
+  docker build --pull -t "$fallback_image" "$build_tools_context" >&2
   smoke_test_image "$fallback_image"
   printf '%s\n' "$fallback_image"
   exit 0
@@ -102,6 +102,6 @@ if [[ "$trusted_fallback_allowed" != "true" ]]; then
 fi
 
 printf '::notice::Building a branch-local build-tools validation image.\n' >&2
-docker build --pull -t "$fallback_image" "$build_tools_context"
+docker build --pull -t "$fallback_image" "$build_tools_context" >&2
 smoke_test_image "$fallback_image"
 printf '%s\n' "$fallback_image"
