@@ -569,4 +569,3 @@ mod tests {
         assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
     }
 }
-// TODO(#375): Return generic template error message in production mode instead of full error details
