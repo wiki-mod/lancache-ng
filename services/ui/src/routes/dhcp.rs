@@ -183,7 +183,7 @@ pub async fn add_subnet(
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(|status| DhcpError::from(status))?;
+        .map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
@@ -191,7 +191,7 @@ pub async fn add_subnet(
         &form.gateway,
         &form.lease_time,
     )
-    .map_err(|status| DhcpError::from(status))?;
+    .map_err(DhcpError::from)?;
 
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -233,7 +233,7 @@ pub async fn update_subnet(
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(|status| DhcpError::from(status))?;
+        .map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
@@ -241,7 +241,7 @@ pub async fn update_subnet(
         &form.gateway,
         &form.lease_time,
     )
-    .map_err(|status| DhcpError::from(status))?;
+    .map_err(DhcpError::from)?;
     let subnet_id = form.id;
 
     kea_config_modify(&state, move |config| {
@@ -287,7 +287,7 @@ pub async fn remove_subnet(
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(|status| DhcpError::from(status))?;
+        .map_err(DhcpError::from)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -311,7 +311,7 @@ pub async fn add_reservation(
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, DhcpError> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(|status| DhcpError::from(status))?;
+        .map_err(DhcpError::from)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
@@ -344,7 +344,7 @@ pub async fn remove_reservation(
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, DhcpError> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)
-        .map_err(|status| DhcpError::from(status))?;
+        .map_err(DhcpError::from)?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
@@ -477,8 +477,7 @@ where
 
     if let Err(write_err) = write_ok {
         // config-write failed - attempt rollback to restore previous runtime state
-        eprintln!("DHCP: config-write failed: {}", write_err);
-        eprintln!("DHCP: attempting rollback to restore previous config...");
+        tracing::warn!(error = %write_err, "DHCP config-write failed; attempting rollback to previous config");
 
         let rollback_result = kea_post(
             state,
@@ -490,7 +489,7 @@ where
             Ok(resp) => match kea_result(&resp) {
                 Ok(_) => {
                     let msg = "Config change failed to persist and was rolled back; no change was made.".to_string();
-                    eprintln!("DHCP: rollback succeeded - {}", msg);
+                    tracing::warn!("DHCP config rollback succeeded: {}", msg);
                     Err(msg.into())
                 }
                 Err(rollback_err) => {
@@ -499,7 +498,7 @@ where
                          Write failed: {}. Rollback also failed: {}",
                         write_err, rollback_err
                     );
-                    eprintln!("DHCP CRITICAL: {}", msg);
+                    tracing::error!("DHCP config rollback failed: {}", msg);
                     Err(msg.into())
                 }
             },
@@ -509,7 +508,7 @@ where
                      Write failed: {}. Rollback request also failed: {}",
                     write_err, rollback_err
                 );
-                eprintln!("DHCP CRITICAL: {}", msg);
+                tracing::error!("DHCP config rollback request failed: {}", msg);
                 Err(msg.into())
             }
         }
@@ -1568,4 +1567,3 @@ mod tests {
         }
     }
 }
-// TODO(#371): Implement config backup and rollback logic if config-write fails after config-set succeeds
