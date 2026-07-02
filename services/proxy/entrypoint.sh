@@ -65,14 +65,20 @@ _is_valid_domain_label() {
     return 0
 }
 
-_is_valid_domain() {
+# Prints the normalized form (trimmed, lowercased, leading dot stripped) of a
+# domain to stdout. Callers must capture this and use it instead of the raw
+# input for anything written to disk/config — _is_valid_domain() only reports
+# whether a value validates, it does not mutate the caller's variable.
+_normalize_domain() {
     local domain="$1"
-
-    # Trim whitespace and convert to lowercase
     domain=$(echo "$domain" | xargs | tr '[:upper:]' '[:lower:]')
-
-    # Strip leading dot if present (optional notation)
     domain="${domain#.}"
+    printf '%s' "$domain"
+}
+
+_is_valid_domain() {
+    local domain
+    domain="$(_normalize_domain "$1")"
 
     # Must not be empty after normalization
     [ -n "$domain" ] || return 1
@@ -244,11 +250,12 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
 
-        # Validate domain before using it in cert generation or filenames
+        # Validate and normalize domain before using it in cert generation or filenames
         if ! _is_valid_domain "$domain"; then
             echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
             continue
         fi
+        domain="$(_normalize_domain "$domain")"
 
         [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
 
@@ -283,11 +290,12 @@ fi
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
 
-        # Validate domain before using it in nginx map entries
+        # Validate and normalize domain before using it in nginx map entries
         if ! _is_valid_domain "$domain"; then
             echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
             continue
         fi
+        domain="$(_normalize_domain "$domain")"
 
         printf "    %-45s %s;\n" ".$domain"  "$domain"
     done < "$DOMAINS_FILE"
@@ -302,11 +310,12 @@ fi
         while IFS= read -r domain || [ -n "$domain" ]; do
             [[ -z "$domain" || "$domain" == \#* ]] && continue
 
-            # Validate domain before using it in nginx map entries
+            # Validate and normalize domain before using it in nginx map entries
             if ! _is_valid_domain "$domain"; then
                 echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
                 continue
             fi
+            domain="$(_normalize_domain "$domain")"
 
             printf "    %-45s 1;\n" ".$domain"
         done < "$DOMAINS_FILE"
@@ -341,11 +350,12 @@ mkdir -p /etc/nginx/stream.d
         while IFS= read -r domain || [ -n "$domain" ]; do
             [[ -z "$domain" || "$domain" == \#* ]] && continue
 
-            # Validate domain before using it in stream target entries
+            # Validate and normalize domain before using it in stream target entries
             if ! _is_valid_domain "$domain"; then
                 echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
                 continue
             fi
+            domain="$(_normalize_domain "$domain")"
 
             printf "    %-45s %s:443;\n" ".$domain" "$domain"
         done < "$DOMAINS_FILE"
