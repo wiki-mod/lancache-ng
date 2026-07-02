@@ -64,12 +64,12 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
           if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
-            printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
-            printf 'build_tools_image=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
+            printf 'BUILD_TOOLS_IMAGE=%s\n' "$downstream_build_tools_image" >> "$GITHUB_ENV"
+            printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
           else
             build_tools_image="$(bash scripts/select-build-tools-image.sh)"
-            downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
             printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
             printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
           fi
