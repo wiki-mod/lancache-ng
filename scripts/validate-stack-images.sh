@@ -123,6 +123,28 @@ fi
 for image in "${runtime_images[@]}" build-tools; do
   require_grep "- service: ${image}$" .github/workflows/build-push.yml "build matrix must include $image"
 done
+for dockerfile in \
+  services/proxy/Dockerfile \
+  services/dns/Dockerfile \
+  services/watchdog/Dockerfile \
+  services/dhcp/Dockerfile \
+  services/dhcp-proxy/Dockerfile \
+  services/ui/Dockerfile \
+  tools/build-tools/Dockerfile
+do
+  require_grep 'LABEL org\.opencontainers\.image\.description=' \
+    "$dockerfile" \
+    "$dockerfile must define an OCI image description label"
+done
+require_grep 'description: .+' \
+  .github/workflows/build-push.yml \
+  'build matrix entries must define OCI image descriptions'
+require_grep 'org\.opencontainers\.image\.description=\$\{\{ matrix\.description \}\}' \
+  .github/workflows/build-push.yml \
+  'build workflow must publish OCI image description labels'
+require_grep 'annotations:' \
+  .github/workflows/build-push.yml \
+  'build workflow must publish OCI image description annotations'
 require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
@@ -159,9 +181,12 @@ require_grep 'FROM busybox:stable-musl' \
 require_grep 'CMD \["true"\]' \
   .github/workflows/build-push.yml \
   'stack pointer image must have a harmless command so docker create works consistently'
-require_grep 'docker buildx imagetools create -t "\$target_image" "\$stack_pointer_image"' \
+require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$stack_pointer_image"' \
   .github/workflows/build-push.yml \
-  'promotion must move the single stack channel pointer after service channel tags'
+  'promotion must preserve single-platform manifest metadata when moving the stack channel pointer'
+require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$source_image"' \
+  .github/workflows/build-push.yml \
+  'promotion must preserve single-platform service image metadata when moving channel tags'
 require_grep 'actions/attest@' \
   .github/workflows/build-push.yml \
   'release workflow must create provenance attestations for published first-party images'

@@ -785,20 +785,27 @@ jobs:
         include:
           - service: proxy
             context: services/proxy
+            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
           - service: dns
             context: services/dns
+            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
             rust: true
           - service: watchdog
             context: services/watchdog
+            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
           - service: dhcp
             context: services/dhcp
+            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
           - service: dhcp-proxy
             context: services/dhcp-proxy
+            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
           - service: ui
             context: services/ui
+            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
             rust: true
           - service: build-tools
             context: tools/build-tools
+            description: Prebuilt lancache-ng CI and developer validation toolchain image.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -1087,20 +1094,27 @@ jobs:
         include:
           - service: proxy
             context: services/proxy
+            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
           - service: dns
             context: services/dns
+            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
             rust: true
           - service: watchdog
             context: services/watchdog
+            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
           - service: dhcp
             context: services/dhcp
+            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
           - service: dhcp-proxy
             context: services/dhcp-proxy
+            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
           - service: ui
             context: services/ui
+            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
             rust: true
           - service: build-tools
             context: tools/build-tools
+            description: Prebuilt lancache-ng CI and developer validation toolchain image.
 
     steps:
       - name: Checkout
@@ -1402,8 +1416,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+          annotations: |
+            org.opencontainers.image.description=${{ matrix.description }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1432,8 +1449,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+          annotations: |
+            org.opencontainers.image.description=${{ matrix.description }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -1570,7 +1590,7 @@ jobs:
             for target_image in "${promoted_targets[@]}"; do
               previous_digest="${previous_refs[$target_image]:-}"
               if [[ -n "$previous_digest" ]]; then
-                docker buildx imagetools create -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
                   || echo "::error::Could not restore previous digest for $target_image."
               else
                 echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
@@ -1637,7 +1657,7 @@ jobs:
             for channel_tag in "${channel_tags[@]}"; do
               target_image="ghcr.io/${REPOSITORY}/${service}:${channel_tag}"
               previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-              docker buildx imagetools create -t "$target_image" "$source_image"
+              docker buildx imagetools create --prefer-index=false -t "$target_image" "$source_image"
               promoted_targets+=("$target_image")
             done
           done
@@ -1645,7 +1665,7 @@ jobs:
           for channel_tag in "${channel_tags[@]}"; do
             target_image="ghcr.io/${REPOSITORY}/stack:${channel_tag}"
             previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-            docker buildx imagetools create -t "$target_image" "$stack_pointer_image"
+            docker buildx imagetools create --prefer-index=false -t "$target_image" "$stack_pointer_image"
             promoted_targets+=("$target_image")
           done
 
