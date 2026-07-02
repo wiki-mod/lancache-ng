@@ -63,7 +63,12 @@ pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("active_page", "domains");
     crate::routes::insert_csrf_token(&mut ctx, &state);
 
-    crate::routes::render(&state.templates, "domains.html", &ctx)
+    crate::routes::render(
+        &state.templates,
+        "domains.html",
+        &ctx,
+        state.config.dev_mode,
+    )
 }
 
 pub async fn add_dns(
