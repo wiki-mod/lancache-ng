@@ -125,3 +125,5 @@ async fn find_container_id(
         .and_then(|c| c.id)
         .with_context(|| format!("No container found for service '{}'", service_name))
 }
+
+// TODO(#368): Narrow Docker socket proxy API surface and remove EXEC capability
