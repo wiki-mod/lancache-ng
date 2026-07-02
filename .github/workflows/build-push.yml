@@ -1389,7 +1389,7 @@ jobs:
             printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
           } > "$pointer_context/stack.env"
           cat > "$pointer_context/Dockerfile" <<'DOCKERFILE'
-          FROM busybox:stable-musl
+          FROM busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
           LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
           LABEL org.opencontainers.image.description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
           COPY stack.env /stack.env

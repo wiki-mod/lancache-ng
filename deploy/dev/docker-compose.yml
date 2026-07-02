@@ -115,7 +115,7 @@ services:
   # socket-proxy limits Docker access to Admin UI/watchdog operations:
   # container inspect/list, restart, and exec; no image/volume/system access.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -202,7 +202,7 @@ services:
 
   # ── NATS (message bus for DNS record sync) ────────────────────────────────
   nats:
-    image: nats:2-alpine
+    image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     # On first start: copy default conf (no auth) into the shared volume,
     # then exec nats-server. The UI overwrites nats.conf with auth on startup
     # and sends SIGHUP to reload without a container restart.
@@ -288,7 +288,7 @@ services:
 
   # ── Log aggregator (optional, start with: docker compose --profile logging up) ──
   syslog:
-    image: fluent/fluent-bit:3
+    image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     profiles: [logging]
     volumes:
       - proxy-logs:/var/log/nginx:ro
@@ -355,7 +355,7 @@ services:
 
   # ── Netdata (system metrics backend, kein externer Port) ──────────────────
   netdata:
-    image: netdata/netdata
+    image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata
     cap_add:
       - SYS_PTRACE

@@ -23,12 +23,12 @@ Mutable external tags are not authoritative release records.
 
 | Image | Role | Current policy |
 | --- | --- | --- |
-| `nats:2-alpine` | DNS record sync message bus | Pin or mirror before stable release |
-| `fluent/fluent-bit:3` | Optional log forwarding helper | Pin before stable release when profile is supported |
-| `tecnativa/docker-socket-proxy` | Docker API guard for UI/watchdog | Pin or mirror before stable release |
-| `netdata/netdata` | Optional monitoring helper | Pin before stable release when profile is supported |
-| `ghcr.io/nicholas-fedor/watchtower:latest` | Optional automatic update helper | Not release-authoritative; avoid relying on `latest` for stable profiles |
-| `busybox:stable-musl` | Minimal base for the stack channel pointer image | Pin before stable release |
+| `nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0` | DNS record sync message bus | Digest-pinned |
+| `cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562` | Optional log forwarding helper | Digest-pinned; replaces the non-pullable `fluent/fluent-bit:3` reference |
+| `tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476` | Docker API guard for UI/watchdog | Digest-pinned |
+| `netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74` | Optional monitoring helper | Digest-pinned |
+| `ghcr.io/nicholas-fedor/watchtower:latest@sha256:c1dfdf27fe805dcfefe1cf048cee6960a511c097a99aa355b0bc4be6e6bb3bdf` | Optional automatic update helper | Digest-pinned even though it remains optional and not release-authoritative |
+| `busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213` | Minimal base for the stack channel pointer image | Digest-pinned |
 | `rust:latest` | Build-tools base image | Allowed for build-tools only when provenance records the resolved base digest |
 
 ## Provenance And SBOM Expectations
