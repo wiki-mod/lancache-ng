@@ -34,6 +34,92 @@ _normalize_resolver_token() {
     printf '%s' "$token"
 }
 
+# ────────────────────────────────────────────────────────────────────────────
+# Domain validation: Mirrors the label-strict rules from Admin UI (domains.rs)
+# to prevent invalid domains from being used in nginx maps, cert generation,
+# and stream targets. Validation follows RFC 1035 and DNS best practices:
+#
+#   - Max 253 chars total length
+#   - Min 2 labels (no single-label domains like "localhost")
+#   - Each label: 1-63 chars, start/end with alphanumeric, contain only a-z/0-9/-
+#   - Leading dot is stripped (optional in file notation)
+#   - Input is trimmed and lowercased before validation
+#   - Control characters and special chars are rejected
+# ────────────────────────────────────────────────────────────────────────────
+
+_is_valid_domain_label() {
+    local label="$1"
+
+    # Label must not be empty
+    [ -n "$label" ] || return 1
+
+    # Label must be <= 63 chars
+    [ ${#label} -le 63 ] || return 1
+
+    # Label must not start or end with hyphen
+    [[ "$label" != -* ]] && [[ "$label" != *- ]] || return 1
+
+    # Label must only contain lowercase ASCII a-z, digits 0-9, or hyphen
+    [[ "$label" =~ ^[a-z0-9-]+$ ]] || return 1
+
+    return 0
+}
+
+# Prints the normalized form (trimmed, lowercased, leading dot stripped) of a
+# domain to stdout. Callers must capture this and use it instead of the raw
+# input for anything written to disk/config — _is_valid_domain() only reports
+# whether a value validates, it does not mutate the caller's variable.
+_normalize_domain() {
+    local domain="$1"
+    # Trim whitespace via pure parameter expansion, not xargs — xargs applies
+    # shell-style unquoting/escaping first, which would let malformed manual
+    # entries like a quoted "Example.COM" slip through as a clean example.com.
+    domain="${domain#"${domain%%[![:space:]]*}"}"
+    domain="${domain%"${domain##*[![:space:]]}"}"
+    domain="${domain,,}"
+    domain="${domain#.}"
+    printf '%s' "$domain"
+}
+
+_is_valid_domain() {
+    local domain
+    domain="$(_normalize_domain "$1")"
+
+    # Must not be empty after normalization
+    [ -n "$domain" ] || return 1
+
+    # Must be <= 253 chars total
+    [ ${#domain} -le 253 ] || return 1
+
+    # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)
+    [[ "$domain" != *. ]] || return 1
+
+    # Validate each label using a loop to properly handle empty labels
+    # (bash word splitting would silently drop trailing empty labels,
+    # but we want to reject domains like "example.com." explicitly)
+    local label
+    local remaining="$domain"
+
+    while [ -n "$remaining" ]; do
+        # Extract label up to next dot
+        if [[ "$remaining" == *.* ]]; then
+            label="${remaining%%.*}"
+            remaining="${remaining#*.}"
+        else
+            label="$remaining"
+            remaining=""
+        fi
+
+        _is_valid_domain_label "$label" || return 1
+    done
+
+    # Must have at least 2 labels (so the loop must execute at least twice)
+    # We can check this by ensuring the domain contains at least one dot
+    [[ "$domain" == *.* ]] || return 1
+
+    return 0
+}
+
 for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
     resolver="$(_normalize_resolver_token "$resolver")"
     if [ "$resolver" = "$IP_STANDARD" ] || { [ -n "$IP_SSL" ] && [ "$resolver" = "$IP_SSL" ]; }; then
@@ -168,6 +254,14 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     fi
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
+
+        # Validate and normalize domain before using it in cert generation or filenames
+        if ! _is_valid_domain "$domain"; then
+            echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
+            continue
+        fi
+        domain="$(_normalize_domain "$domain")"
+
         [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
 
         echo "[lancache] Generating cert for $domain..."
@@ -200,6 +294,14 @@ fi
     echo "    hostnames;"
     while IFS= read -r domain || [ -n "$domain" ]; do
         [[ -z "$domain" || "$domain" == \#* ]] && continue
+
+        # Validate and normalize domain before using it in nginx map entries
+        if ! _is_valid_domain "$domain"; then
+            echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
+            continue
+        fi
+        domain="$(_normalize_domain "$domain")"
+
         printf "    %-45s %s;\n" ".$domain"  "$domain"
     done < "$DOMAINS_FILE"
     echo "    default default;"
@@ -212,6 +314,14 @@ fi
         echo "    default 0;"
         while IFS= read -r domain || [ -n "$domain" ]; do
             [[ -z "$domain" || "$domain" == \#* ]] && continue
+
+            # Validate and normalize domain before using it in nginx map entries
+            if ! _is_valid_domain "$domain"; then
+                echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
+                continue
+            fi
+            domain="$(_normalize_domain "$domain")"
+
             printf "    %-45s 1;\n" ".$domain"
         done < "$DOMAINS_FILE"
     else
@@ -244,6 +354,14 @@ mkdir -p /etc/nginx/stream.d
         echo "    default 127.0.0.1:9;"
         while IFS= read -r domain || [ -n "$domain" ]; do
             [[ -z "$domain" || "$domain" == \#* ]] && continue
+
+            # Validate and normalize domain before using it in stream target entries
+            if ! _is_valid_domain "$domain"; then
+                echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
+                continue
+            fi
+            domain="$(_normalize_domain "$domain")"
+
             printf "    %-45s %s:443;\n" ".$domain" "$domain"
         done < "$DOMAINS_FILE"
     fi
