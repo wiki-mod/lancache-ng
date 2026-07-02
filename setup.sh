@@ -318,12 +318,21 @@ install_docker() {
 # validate_env_value() would reject it for characters Compose itself parses
 # away.
 _compose_parse_env_value() {
-    local value="$1"
+    local value="$1" rest
 
-    if [[ ${#value} -ge 2 && "$value" == \"*\" ]]; then
-        value="${value:1:${#value}-2}"
-    elif [[ ${#value} -ge 2 && "$value" == \'*\' ]]; then
-        value="${value:1:${#value}-2}"
+    # Trim leading whitespace before checking for a quote so a value like
+    # ` "foo"` is still recognized as quoted.
+    value="${value#"${value%%[![:space:]]*}"}"
+
+    if [[ "$value" == \"* ]]; then
+        # Take everything up to the FIRST closing quote, not the end of the
+        # string — a trailing inline comment like `"foo" # bar` is valid
+        # Compose syntax and must not be treated as part of the value.
+        rest="${value#\"}"
+        value="${rest%%\"*}"
+    elif [[ "$value" == \'* ]]; then
+        rest="${value#\'}"
+        value="${rest%%\'*}"
     else
         value="${value%%[[:space:]]\#*}"
         value="${value%"${value##*[![:space:]]}"}"
