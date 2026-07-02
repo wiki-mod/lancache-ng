@@ -28,8 +28,9 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
+    # CodeQL can compile Rust and is memory-heavy enough to avoid the light runner tier.
     # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
-    runs-on: [self-hosted, linux, lancache, codeql]
+    runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
     timeout-minutes: 120
     strategy:
       fail-fast: false

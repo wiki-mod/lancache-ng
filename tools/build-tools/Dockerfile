@@ -15,6 +15,8 @@ RUN set -euo pipefail; \
 
 FROM rust:latest
 
+LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
+
 ARG SCCACHE_VERSION=0.16.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12

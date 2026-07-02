@@ -1,0 +1,144 @@
+schema: stack-images/v1
+generated_from: origin/master
+registry: ghcr.io
+image_prefix: wiki-mod/lancache-ng
+retention:
+  minimum_stable_releases: 3
+  keep_mutable_channels:
+    - latest
+    - edge
+  keep_sha_tags_for_supported_releases: true
+  protect_release_and_rollback_digests: true
+  deletion_policy: manual-or-approved-automation-only
+channels:
+  sha:
+    tag: sha-<commit>
+    mutable: false
+    description: Immutable build identity tag for every first-party image.
+  dev:
+    tag: dev
+    mutable: true
+    description: Explicit development and test channel only.
+  edge:
+    tag: edge
+    mutable: true
+    description: Tested pre-stable integration channel produced from master.
+  release_candidate:
+    tag: vX.Y.Z-rc.N
+    mutable: false
+    description: Release candidate tag. GitHub releases must be prereleases.
+  stable_release:
+    tag: vX.Y.Z
+    mutable: false
+    description: Stable release tag.
+  latest:
+    tag: latest
+    mutable: true
+    description: Latest stable release only. Master and edge builds must not move this tag.
+runtime:
+  - name: proxy
+    image: ghcr.io/wiki-mod/lancache-ng/proxy
+    source: services/proxy/Dockerfile
+    platforms:
+      - linux/amd64
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+  - name: dns
+    image: ghcr.io/wiki-mod/lancache-ng/dns
+    source: services/dns/Dockerfile
+    platforms:
+      - linux/amd64
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/secondary/docker-compose.yml
+  - name: watchdog
+    image: ghcr.io/wiki-mod/lancache-ng/watchdog
+    source: services/watchdog/Dockerfile
+    platforms:
+      - linux/amd64
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+  - name: dhcp
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp
+    source: services/dhcp/Dockerfile
+    platforms:
+      - linux/amd64
+    compose:
+      - deploy/prod/docker-compose.yml
+  - name: dhcp-proxy
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
+    source: services/dhcp-proxy/Dockerfile
+    platforms:
+      - linux/amd64
+    compose:
+      - deploy/prod/docker-compose.yml
+  - name: ui
+    image: ghcr.io/wiki-mod/lancache-ng/ui
+    source: services/ui/Dockerfile
+    platforms:
+      - linux/amd64
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+tooling:
+  - name: build-tools
+    image: ghcr.io/wiki-mod/lancache-ng/build-tools
+    source: tools/build-tools/Dockerfile
+    platforms:
+      - linux/amd64
+    consumers:
+      - .github/workflows/build-push.yml
+      - docs/self-hosted-actions-runner.md
+      - docs/ui-rust-dev-checks.md
+metadata:
+  - name: stack
+    image: ghcr.io/wiki-mod/lancache-ng/stack
+    source: .github/workflows/build-push.yml
+    platforms:
+      - linux/amd64
+    description: Single channel pointer that resolves mutable stack channels to an immutable sha-* image set.
+legacy:
+  - name: proxy-standard
+    status: retired
+    replacement: proxy
+    note: The unified proxy image replaced the old split proxy-standard package.
+external:
+  - name: docker-socket-proxy
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    policy: digest-pinned
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: nats
+    image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
+    policy: digest-pinned
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: fluent-bit
+    image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
+    policy: digest-pinned
+    compose:
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: netdata
+    image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
+    policy: digest-pinned
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: watchtower
+    image: ghcr.io/nicholas-fedor/watchtower:latest@sha256:c1dfdf27fe805dcfefe1cf048cee6960a511c097a99aa355b0bc4be6e6bb3bdf
+    policy: digest-pinned-optional-auto-update-helper
+    compose:
+      - deploy/quickstart/docker-compose.yml
+  - name: busybox
+    image: busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
+    policy: digest-pinned
+    compose: []
