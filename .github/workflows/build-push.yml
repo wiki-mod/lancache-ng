@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  cancel-in-progress: false
+
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
@@ -1281,6 +1285,43 @@ jobs:
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           channel_tags=()
+          declare -A previous_refs=()
+          promoted_targets=()
+
+          digest_for_image() {
+            local image=$1
+            local digest
+
+            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]]
+            printf '%s\n' "$digest"
+          }
+
+          rollback_promotions() {
+            local status=$?
+            local target_image previous_digest
+
+            if [[ "$status" = "0" || "${#promoted_targets[@]}" = "0" ]]; then
+              exit "$status"
+            fi
+
+            echo "::error::Promotion failed after public tags were moved; attempting best-effort rollback."
+            for target_image in "${promoted_targets[@]}"; do
+              previous_digest="${previous_refs[$target_image]:-}"
+              if [[ -n "$previous_digest" ]]; then
+                docker buildx imagetools create -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                  || echo "::error::Could not restore previous digest for $target_image."
+              else
+                echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
+              fi
+            done
+            exit "$status"
+          }
+          trap rollback_promotions EXIT
 
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(edge)
@@ -1316,7 +1357,9 @@ jobs:
             source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
             for channel_tag in "${channel_tags[@]}"; do
               target_image="ghcr.io/${REPOSITORY}/${service}:${channel_tag}"
+              previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
               docker buildx imagetools create -t "$target_image" "$source_image"
+              promoted_targets+=("$target_image")
             done
           done
 
@@ -1378,6 +1421,8 @@ jobs:
             printf '%s\n' "$digest"
           }
 
+          rust_base_digest="$(digest_for_image rust:latest)"
+          golang_base_digest="$(digest_for_image golang:latest)"
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
           docker buildx imagetools inspect "$build_tools_image" >/dev/null
 
@@ -1406,6 +1451,9 @@ jobs:
               sha_digest="$(digest_for_image "$sha_image")"
               printf -- '- %s -> %s\n' "$sha_image" "$sha_digest"
             done
+            printf '\nResolved build-tools base image digests:\n\n'
+            printf -- '- rust:latest -> %s\n' "$rust_base_digest"
+            printf -- '- golang:latest -> %s\n' "$golang_base_digest"
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 

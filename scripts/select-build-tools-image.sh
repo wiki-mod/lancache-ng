@@ -23,7 +23,44 @@ fail() {
 smoke_test_image() {
   local image="$1"
 
-  docker run --rm "$image" bash -lc 'set -euo pipefail; docker --version >/dev/null; docker compose version >/dev/null; shellcheck --version >/dev/null; actionlint --version >/dev/null'
+  docker run --rm "$image" bash -lc '
+    set -euo pipefail
+
+    required_tools=(
+      bash
+      cargo
+      rustc
+      rustup
+      rustfmt
+      clippy-driver
+      sccache
+      cargo-audit
+      shellcheck
+      actionlint
+      distcc
+      distcc-pump
+      docker
+      jq
+      dig
+      ip
+      openssl
+      rsync
+      envsubst
+    )
+
+    for tool in "${required_tools[@]}"; do
+      command -v "$tool" >/dev/null
+    done
+
+    docker --version >/dev/null
+    docker compose version >/dev/null
+    shellcheck --version >/dev/null
+    actionlint --version >/dev/null
+    cargo-audit --version >/dev/null
+    sccache --version >/dev/null
+    distcc --version >/dev/null
+    distcc-pump --help >/dev/null
+  '
 }
 
 trusted_fallback_allowed=false

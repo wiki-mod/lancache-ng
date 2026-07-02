@@ -50,6 +50,7 @@ require_file "${manifest#$repo_root/}"
 require_grep '^schema: stack-images/v1$' "${manifest#$repo_root/}" 'manifest schema must be stack-images/v1'
 require_grep '^registry: ghcr\.io$' "${manifest#$repo_root/}" 'manifest registry must be ghcr.io'
 require_grep '^image_prefix: wiki-mod/lancache-ng$' "${manifest#$repo_root/}" 'manifest image_prefix must be wiki-mod/lancache-ng'
+require_grep '^concurrency:$' .github/workflows/build-push.yml 'build workflow must serialize write-capable package publishing'
 
 runtime_names=$(collect_names runtime)
 tooling_names=$(collect_names tooling)
@@ -133,6 +134,12 @@ require_grep 'channel_tags\+=\(latest\)' \
 require_grep 'docker buildx imagetools inspect "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* source image before moving a public channel'
+require_grep 'rollback_promotions\(\)' \
+  .github/workflows/build-push.yml \
+  'promotion must attempt rollback if a public channel move fails midway'
+require_grep 'previous_refs\["\$target_image"\]' \
+  .github/workflows/build-push.yml \
+  'promotion must remember previous channel digests before moving public tags'
 require_grep 'actions/attest@' \
   .github/workflows/build-push.yml \
   'release workflow must create provenance attestations for published first-party images'
@@ -151,6 +158,15 @@ require_grep 'tag_digest.*!=.*sha_digest|sha_digest.*!=.*tag_digest' \
 require_grep 'Published image tags and digests' \
   .github/workflows/build-push.yml \
   'release notes must include published image digests'
+require_grep 'Resolved build-tools base image digests' \
+  .github/workflows/build-push.yml \
+  'release notes must include resolved build-tools base image digests'
+require_grep 'rust:latest ->' \
+  .github/workflows/build-push.yml \
+  'release notes must include the resolved rust:latest base digest for build-tools'
+require_grep 'golang:latest ->' \
+  .github/workflows/build-push.yml \
+  'release notes must include the resolved golang:latest base digest for build-tools'
 require_grep 'Stable releases must pin, mirror, or explicitly exclude release-relevant external images before moving latest' \
   .github/workflows/build-push.yml \
   'stable release promotion must fail closed while release-relevant external images are floating'
