@@ -2,7 +2,7 @@ use crate::docker_client::exec_in_container;
 use crate::AppState;
 use axum::extract::{Form, State};
 use axum::http::StatusCode;
-use axum::response::{Html, Redirect};
+use axum::response::{Html, Redirect, IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -10,6 +10,63 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 use tera::Context;
+
+// ─── Error Handling ───
+
+/// Error type for DHCP configuration operations that carries a message
+/// and HTTP status code, suitable for surfacing to HTTP responses.
+#[derive(Debug)]
+pub struct DhcpError {
+    status: StatusCode,
+    message: String,
+}
+
+impl DhcpError {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn config_error(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
+}
+
+impl From<StatusCode> for DhcpError {
+    fn from(status: StatusCode) -> Self {
+        Self::new(status, format!("HTTP {}", status.as_u16()))
+    }
+}
+
+impl std::fmt::Display for DhcpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for DhcpError {}
+
+impl IntoResponse for DhcpError {
+    fn into_response(self) -> Response {
+        let body = format!(
+            "<!DOCTYPE html>\n<html>\n<head><title>DHCP Configuration Error</title></head>\n\
+             <body><h1>DHCP Configuration Error</h1>\n<p>{}</p>\n\
+             <p><a href=\"/dhcp\">Return to DHCP settings</a></p>\n</body>\n</html>",
+            html_escape(&self.message)
+        );
+        (self.status, Html(body)).into_response()
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
 
 // ─── Data Structures ───
 
@@ -124,15 +181,17 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
 pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
-) -> Result<Redirect, StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)
+        .map_err(|status| DhcpError::from(status))?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
         &form.pool_end,
         &form.gateway,
         &form.lease_time,
-    )?;
+    )
+    .map_err(|status| DhcpError::from(status))?;
 
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -164,7 +223,7 @@ pub async fn add_subnet(
         Ok(())
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -172,15 +231,17 @@ pub async fn add_subnet(
 pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
-) -> Result<Redirect, StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)
+        .map_err(|status| DhcpError::from(status))?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
         &form.pool_end,
         &form.gateway,
         &form.lease_time,
-    )?;
+    )
+    .map_err(|status| DhcpError::from(status))?;
     let subnet_id = form.id;
 
     kea_config_modify(&state, move |config| {
@@ -216,7 +277,7 @@ pub async fn update_subnet(
         Ok(())
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -224,8 +285,9 @@ pub async fn update_subnet(
 pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
-) -> Result<Redirect, StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)
+        .map_err(|status| DhcpError::from(status))?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -239,7 +301,7 @@ pub async fn remove_subnet(
         Ok(())
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -247,10 +309,11 @@ pub async fn remove_subnet(
 pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
-) -> Result<Redirect, StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)
+        .map_err(|status| DhcpError::from(status))?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
@@ -272,15 +335,16 @@ pub async fn add_reservation(
         Ok(())
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
     Ok(Redirect::to("/dhcp"))
 }
 
 pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
-) -> Result<Redirect, StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&state, &form.csrf_token)
+        .map_err(|status| DhcpError::from(status))?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
@@ -293,7 +357,7 @@ pub async fn remove_reservation(
         Ok(())
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -352,6 +416,8 @@ fn kea_result(resp: &Value) -> Result<(), Box<dyn std::error::Error + Send + Syn
 }
 
 // config-get → modify → config-test → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
+// This function implements config rollback logic: if config-write fails after config-set succeeds,
+// it attempts to restore the previous config to maintain consistency between runtime and persisted state.
 async fn kea_config_modify<F>(
     state: &AppState,
     modify: F,
@@ -361,6 +427,7 @@ where
 {
     let _guard = state.kea_config_lock.lock().await;
 
+    // Step 1: Fetch current config
     let resp = kea_post(
         state,
         &json!({"command": "config-get", "service": ["dhcp4"]}),
@@ -374,8 +441,13 @@ where
         .cloned()
         .ok_or("config-get: missing arguments")?;
 
+    // Step 2: Save old config for potential rollback
+    let old_config = config.clone();
+
+    // Step 3: Apply modifications
     modify(&mut config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
+    // Step 4: Validate new config
     let test_resp = kea_post(
         state,
         &json!({"command": "config-test", "service": ["dhcp4"], "arguments": config.clone()}),
@@ -383,6 +455,7 @@ where
     .await?;
     kea_result(&test_resp)?;
 
+    // Step 5: Apply new config at runtime
     let set_resp = kea_post(
         state,
         &json!({"command": "config-set", "service": ["dhcp4"], "arguments": config}),
@@ -390,14 +463,59 @@ where
     .await?;
     kea_result(&set_resp)?;
 
-    let write_resp = kea_post(
+    // Step 6: Persist config to disk - CRITICAL: proper error detection for rollback
+    let write_result = kea_post(
         state,
         &json!({"command": "config-write", "service": ["dhcp4"]}),
     )
-    .await?;
-    kea_result(&write_resp)?;
+    .await;
 
-    Ok(())
+    let write_ok = match write_result {
+        Ok(resp) => kea_result(&resp),
+        Err(e) => Err(e),
+    };
+
+    if let Err(write_err) = write_ok {
+        // config-write failed - attempt rollback to restore previous runtime state
+        eprintln!("DHCP: config-write failed: {}", write_err);
+        eprintln!("DHCP: attempting rollback to restore previous config...");
+
+        let rollback_result = kea_post(
+            state,
+            &json!({"command": "config-set", "service": ["dhcp4"], "arguments": old_config}),
+        )
+        .await;
+
+        match rollback_result {
+            Ok(resp) => match kea_result(&resp) {
+                Ok(_) => {
+                    let msg = "Config change failed to persist and was rolled back; no change was made.".to_string();
+                    eprintln!("DHCP: rollback succeeded - {}", msg);
+                    Err(msg.into())
+                }
+                Err(rollback_err) => {
+                    let msg = format!(
+                        "Config applied at runtime but NOT persisted to disk — runtime and persisted config may now differ. \
+                         Write failed: {}. Rollback also failed: {}",
+                        write_err, rollback_err
+                    );
+                    eprintln!("DHCP CRITICAL: {}", msg);
+                    Err(msg.into())
+                }
+            },
+            Err(rollback_err) => {
+                let msg = format!(
+                    "Config applied at runtime but NOT persisted to disk — runtime and persisted config may now differ. \
+                     Write failed: {}. Rollback request also failed: {}",
+                    write_err, rollback_err
+                );
+                eprintln!("DHCP CRITICAL: {}", msg);
+                Err(msg.into())
+            }
+        }
+    } else {
+        Ok(())
+    }
 }
 
 // ─── Data Fetchers ───
