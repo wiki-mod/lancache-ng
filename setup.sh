@@ -310,7 +310,44 @@ install_docker() {
     fi
 }
 
+# Approximates Docker Compose's own .env value semantics for a value read back
+# out of an existing file: strips a fully single- or double-quoted value's
+# surrounding quotes, and drops an unquoted inline comment (a '#' preceded by
+# whitespace). Without this, migrating an older but valid Compose value (e.g.
+# `CACHE_DIR=/srv/lancache # nvme` or `CACHE_DIR="/srv/lancache cache"`) into
+# validate_env_value() would reject it for characters Compose itself parses
+# away.
+_compose_parse_env_value() {
+    local value="$1" rest
+
+    # Trim leading whitespace before checking for a quote so a value like
+    # ` "foo"` is still recognized as quoted.
+    value="${value#"${value%%[![:space:]]*}"}"
+
+    if [[ "$value" == \"* ]]; then
+        # Take everything up to the FIRST closing quote, not the end of the
+        # string — a trailing inline comment like `"foo" # bar` is valid
+        # Compose syntax and must not be treated as part of the value.
+        rest="${value#\"}"
+        value="${rest%%\"*}"
+    elif [[ "$value" == \'* ]]; then
+        rest="${value#\'}"
+        value="${rest%%\'*}"
+    else
+        value="${value%%[[:space:]]\#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+    fi
+
+    printf '%s' "$value"
+}
+
 get_env_var() {
+    local raw
+    raw=$(awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null) || true
+    _compose_parse_env_value "$raw"
+}
+
+get_env_assignment_value_raw() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
 
@@ -388,8 +425,41 @@ get_or_generate_secret() {
     fi
 }
 
+# validate_env_value — Guard against .env value characters that could break parsing.
+#
+# Docker Compose's .env reader is strict: unquoted values with spaces, special
+# characters, or problematic punctuation can silently change their semantics or
+# be interpreted as directive markers (# for comments, $ for substitution, etc.).
+# This function rejects values that contain unescapable characters rather than
+# trying to quote/escape them, to minimize diff and maintain confidence that
+# output values will parse identically to the original unquoted form.
+#
+# Safe characters: empty string, alphanumeric, spaces, common separators and URLs:
+#   . : - _ / + = ,
+# Unsafe characters (REJECTED): newline, $, backtick, double-quote, single-quote,
+#   backslash, hash (comment marker), and other shell metacharacters.
+#
+# Exit 0 if safe; die with message if unsafe.
+validate_env_value() {
+    local key="$1" value="$2"
+
+    # Empty values are allowed (e.g., IP_SSL="", DHCP_SUBNET="").
+    [[ -z "$value" ]] && return 0
+
+    # Use case pattern matching to detect forbidden characters.
+    # Reject if the value contains any of: newline, $, `, ", ', \, #
+    case "$value" in
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
+            die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
+            ;;
+    esac
+
+    return 0
+}
+
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
+    validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
         awk -F= -v key="$key" -v value="$value" '
             $1 == key { print key "=" value; next }
@@ -402,7 +472,42 @@ set_env_key() {
 
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
+    validate_env_value "$key" "$value"
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+}
+
+append_env_assignment_if_missing() {
+    local key="$1" assignment_value="$2" env_file="$3"
+    case "$key" in
+        ""|*[!A-Za-z0-9_]*|[0-9]*)
+            die "Invalid .env key: $key"
+            ;;
+    esac
+    case "$assignment_value" in
+        *$'\n'*)
+            die "$key contains a newline and cannot be copied into .env."
+            ;;
+    esac
+    # Migration-only helper: duplicate an existing Compose .env assignment
+    # without destroying supported interpolation such as ${LAN_CACHE_ROOT:-...}.
+    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+}
+
+append_env_migrated_assignment_if_missing() {
+    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
+    local source_assignment source_value
+
+    if env_key_exists "$target_key" "$env_file"; then
+        return 0
+    fi
+
+    source_value=$(get_env_var "$source_key" "$env_file")
+    source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
+    if [[ -n "$source_value" && -n "$source_assignment" ]]; then
+        append_env_assignment_if_missing "$target_key" "$source_assignment" "$env_file"
+    else
+        append_env_key_if_missing "$target_key" "$fallback_value" "$env_file"
+    fi
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -779,7 +884,7 @@ resolve_lancache_image_tag() {
 
 migrate_env_for_update() {
     local install_dir="$1" env_file
-    local allow_insecure_ui cache_dir cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -799,12 +904,14 @@ migrate_env_for_update() {
     # Cache settings. Older installs may only have CACHE_DIR, so keep that path
     # and map both proxy modes to the same cache directory by default.
     cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    cache_dir_source=CACHE_DIR_STANDARD
     if [[ -z "$cache_dir" ]]; then
         cache_dir=$(get_env_var CACHE_DIR "$env_file")
+        cache_dir_source=CACHE_DIR
     fi
     cache_dir="${cache_dir:-$install_dir/cache/standard}"
-    append_env_key_if_missing CACHE_DIR_STANDARD "$cache_dir" "$env_file"
-    append_env_key_if_missing CACHE_DIR_SSL "$cache_dir" "$env_file"
+    append_env_migrated_assignment_if_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
+    append_env_migrated_assignment_if_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
 
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
     cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
@@ -826,7 +933,7 @@ migrate_env_for_update() {
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
-    append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
+    append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
     # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
     # read one complete runtime configuration.
@@ -2014,6 +2121,12 @@ NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
+# TODO(#374): Validate heredoc values for safe characters. This block writes many
+# values via variable expansion. Currently covered by validate_env_value() in
+# set_env_key() and append_env_key_if_missing() for incremental updates, but
+# the initial heredoc template here does not yet use per-value validation.
+# A conservative approach for future work: wrap each variable with a helper or
+# add validation to the variables before they are substituted into the heredoc.
 write_env_file "$INSTALL_DIR/.env" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
