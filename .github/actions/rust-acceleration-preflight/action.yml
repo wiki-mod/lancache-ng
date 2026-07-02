@@ -21,6 +21,10 @@ inputs:
     description: Build tools image that provides rustc, sccache, distcc, and distcc-pump.
     required: false
     default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+  build-network:
+    description: Docker network mode shared with the real Rust image builds.
+    required: false
+    default: host
 
 runs:
   using: composite
@@ -33,6 +37,7 @@ runs:
         DIST_CONFIG_FILE: ${{ inputs.dist-config-file }}
         DISTCC_HOSTS_FILE: ${{ inputs.distcc-hosts-file }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
+        BUILD_NETWORK: ${{ inputs.build-network }}
       run: |
         set -euo pipefail
 
@@ -55,7 +60,9 @@ runs:
           exit 0
         fi
 
-        docker run --rm -i --network host \
+        docker pull "$BUILD_TOOLS_IMAGE" >/dev/null
+
+        docker run --rm -i --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
@@ -117,16 +124,41 @@ runs:
               fi
             }
 
+            require_sccache_dist_activity() {
+              local stats_file="$1"
+
+              if ! jq -e '(.stats.dist_errors // 0) == 0' "$stats_file" >/dev/null; then
+                echo "[ERROR] sccache-dist recorded distributed compile errors." >&2
+                cat "$stats_file" >&2
+                exit 1
+              fi
+
+              if ! jq -e '
+                (.stats.dist_compiles // {}) as $dist
+                | if ($dist | type) == "object" then
+                    (($dist | to_entries | map(.value // 0) | add) // 0) > 0
+                  else
+                    (($dist | tonumber?) // 0) > 0
+                  end
+              ' "$stats_file" >/dev/null; then
+                echo "[ERROR] sccache-dist did not record a successful distributed compile." >&2
+                cat "$stats_file" >&2
+                exit 1
+              fi
+            }
+
             if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
               export SCCACHE_NO_DAEMON=1
               export SCCACHE_REDIS_KEY_PREFIX="lancache-preflight-${LANCACHE_SERVICE:-rust}"
               require_cache_write=0
+              require_dist_activity=0
               if [ -s /run/lancache/sccache-redis-url ]; then
                 export SCCACHE_REDIS="$(cat /run/lancache/sccache-redis-url)"
                 require_cache_write=1
               fi
               if [ -s /run/lancache/sccache-dist-config ]; then
                 export SCCACHE_CONF=/run/lancache/sccache-dist-config
+                require_dist_activity=1
                 dist_log="$preflight_dir/sccache-dist-status.log"
                 run_logged "$dist_log" sccache --dist-status
                 require_sccache_dist_connected "$dist_log"
@@ -142,6 +174,9 @@ runs:
               stats_log="$preflight_dir/sccache-stats.log"
               run_logged "$stats_log" sccache --show-stats --stats-format=json
               require_sccache_activity "$stats_log" "$require_cache_write"
+              if [ "$require_dist_activity" = "1" ]; then
+                require_sccache_dist_activity "$stats_log"
+              fi
               echo "[INFO] sccache preflight completed."
             fi
 
