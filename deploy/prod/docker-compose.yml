@@ -8,7 +8,7 @@ services:
   # Port 443 (SSL): HTTPS caching via TLS interception (CA cert required)
   proxy:
     container_name: lancache-proxy
-    image: ghcr.io/wiki-mod/lancache-ng/proxy:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/proxy.env
     environment:
@@ -40,7 +40,7 @@ services:
 
   dns-standard:
     container_name: lancache-dns-standard
-    image: ghcr.io/wiki-mod/lancache-ng/dns:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dns-standard.env
     environment:
@@ -77,7 +77,7 @@ services:
 
   dns-ssl:
     container_name: lancache-dns-ssl
-    image: ghcr.io/wiki-mod/lancache-ng/dns:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dns-ssl.env
     environment:
@@ -132,7 +132,7 @@ services:
         max-file: "2"
 
   watchdog:
-    image: ghcr.io/wiki-mod/lancache-ng/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
@@ -155,7 +155,7 @@ services:
   # network_mode: host allows DHCP broadcast (port 67/udp)
   dhcp:
     container_name: lancache-dhcp
-    image: ghcr.io/wiki-mod/lancache-ng/dhcp:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dhcp.env
     environment:
@@ -198,7 +198,7 @@ services:
   # Activate with: docker compose --profile dhcp-proxy up -d
   dhcp-proxy:
     container_name: lancache-dhcp-proxy
-    image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dhcp-proxy.env
     network_mode: host
@@ -301,7 +301,7 @@ services:
 
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
-    image: ghcr.io/wiki-mod/lancache-ng/ui:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt

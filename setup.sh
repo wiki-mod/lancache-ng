@@ -542,8 +542,32 @@ resume_lancache_convergence_after_update() {
 
 validate_lancache_image_tag() {
     local tag="$1"
-    [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
-        || die "LANCACHE_IMAGE_TAG must be a valid Docker image tag."
+
+    case "$tag" in
+        latest|dev|edge)
+            return 0
+            ;;
+        sha-*)
+            [[ "$tag" =~ ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+                || die "LANCACHE_IMAGE_TAG must be a valid sha-* image tag."
+            return 0
+            ;;
+    esac
+
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
+        || die "LANCACHE_IMAGE_TAG must be latest, dev, edge, sha-*, or a vX.Y.Z / vX.Y.Z-rc.N release tag."
+}
+
+validate_lancache_image_registry() {
+    local registry="$1"
+    [[ "$registry" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$ ]] \
+        || die "LANCACHE_IMAGE_REGISTRY must be a registry hostname with an optional port."
+}
+
+validate_lancache_image_prefix() {
+    local prefix="$1"
+    [[ "$prefix" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] \
+        || die "LANCACHE_IMAGE_PREFIX must be a slash-separated image namespace."
 }
 
 resolve_lancache_image_tag() {
@@ -615,7 +639,11 @@ migrate_env_for_update() {
     append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "ghcr.io" "$env_file"
+    append_env_key_if_missing LANCACHE_IMAGE_PREFIX "wiki-mod/lancache-ng" "$env_file"
     append_env_key_if_missing LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
+    validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
+    validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
     append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_key_if_missing UI_BIND_IP "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
@@ -1050,7 +1078,7 @@ cmd_update() {
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
 
-    print_step "Pulling latest images"
+    print_step "Pulling selected images"
     docker compose pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
@@ -1362,7 +1390,7 @@ EOF
 
 services:
   dns-secondary:
-    image: ghcr.io/wiki-mod/lancache-ng/dns:\${LANCACHE_IMAGE_TAG:-latest}
+    image: \${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/\${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:\${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=\${PROXY_IP}
       - PDNS_API_KEY=\${PDNS_API_KEY}
@@ -1395,6 +1423,8 @@ NATS_URL=${nats_url}
 NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
+LANCACHE_IMAGE_REGISTRY=ghcr.io
+LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
 LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
@@ -1773,8 +1803,11 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 # For Admin UI (GB as number for progress bar)
 CACHE_MAX_GB=${cache_gb}
 
-# First-party service image tag. Keep "latest" for the default master/edge path.
-# When running from a tagged release archive, set this to the matching vX.Y.Z tag.
+# First-party service image selector. "latest" is the latest stable release.
+# Use "edge" only when you explicitly want the tested pre-stable channel.
+# Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.
+LANCACHE_IMAGE_REGISTRY=ghcr.io
+LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
 LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 
 # ── DHCP ───────────────────────────────────────────────────────────────────────

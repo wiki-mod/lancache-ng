@@ -1,0 +1,111 @@
+schema: stack-images/v1
+generated_from: origin/master
+registry: ghcr.io
+image_prefix: wiki-mod/lancache-ng
+channels:
+  sha:
+    tag: sha-<commit>
+    mutable: false
+    description: Immutable build identity tag for every first-party image.
+  dev:
+    tag: dev
+    mutable: true
+    description: Explicit development and test channel only.
+  edge:
+    tag: edge
+    mutable: true
+    description: Tested pre-stable integration channel produced from master.
+  release_candidate:
+    tag: vX.Y.Z-rc.N
+    mutable: false
+    description: Release candidate tag. GitHub releases must be prereleases.
+  stable_release:
+    tag: vX.Y.Z
+    mutable: false
+    description: Stable release tag.
+  latest:
+    tag: latest
+    mutable: true
+    description: Latest stable release only. Master and edge builds must not move this tag.
+runtime:
+  - name: proxy
+    image: ghcr.io/wiki-mod/lancache-ng/proxy
+    source: services/proxy/Dockerfile
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+  - name: dns
+    image: ghcr.io/wiki-mod/lancache-ng/dns
+    source: services/dns/Dockerfile
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/secondary/docker-compose.yml
+  - name: watchdog
+    image: ghcr.io/wiki-mod/lancache-ng/watchdog
+    source: services/watchdog/Dockerfile
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+  - name: dhcp
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp
+    source: services/dhcp/Dockerfile
+    compose:
+      - deploy/prod/docker-compose.yml
+  - name: dhcp-proxy
+    image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
+    source: services/dhcp-proxy/Dockerfile
+    compose:
+      - deploy/prod/docker-compose.yml
+  - name: ui
+    image: ghcr.io/wiki-mod/lancache-ng/ui
+    source: services/ui/Dockerfile
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+tooling:
+  - name: build-tools
+    image: ghcr.io/wiki-mod/lancache-ng/build-tools
+    source: tools/build-tools/Dockerfile
+    consumers:
+      - .github/workflows/build-push.yml
+      - docs/self-hosted-actions-runner.md
+      - docs/ui-rust-dev-checks.md
+legacy:
+  - name: proxy-standard
+    status: retired
+    replacement: proxy
+    note: The unified proxy image replaced the old split proxy-standard package.
+external:
+  - name: docker-socket-proxy
+    image: tecnativa/docker-socket-proxy
+    policy: pin-or-mirror-before-stable
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: nats
+    image: nats:2-alpine
+    policy: pin-or-mirror-before-stable
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: fluent-bit
+    image: fluent/fluent-bit:3
+    policy: optional-helper-pin-before-stable
+    compose:
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: netdata
+    image: netdata/netdata
+    policy: optional-helper-pin-before-stable
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
+      - deploy/dev/docker-compose.yml
+  - name: watchtower
+    image: ghcr.io/nicholas-fedor/watchtower:latest
+    policy: optional-auto-update-helper-not-release-authoritative
+    compose:
+      - deploy/quickstart/docker-compose.yml

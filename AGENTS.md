@@ -26,6 +26,7 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Treat review findings as failure classes, not isolated line comments. Before marking a finding fixed, check matching install, update, secondary, release, CI, documentation, and test paths for the same class of issue.
 - Treat warnings as errors for repository work. Do not list a check as successful when it emitted warnings, failed setup, or used a broken fallback.
 - Treat standard failures such as `command not found`, missing files, missing environment variables, permission denied, malformed commands, empty required outputs, and failed tool setup as hard failures.
+- Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
 - Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
 - Use local Bash tools such as `rg` for text searches; do not rely on vague manual inspection when a deterministic search is possible.
 - Do not add Python scripts, Python dependencies, or another runtime language to the project without explicit maintainer approval.
