@@ -24,7 +24,7 @@ defaults:
 
 jobs:
   shellcheck:
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select build-tools image
@@ -51,7 +51,7 @@ jobs:
             bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
   validate-compose:
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select compose validation image
@@ -500,7 +500,7 @@ jobs:
 
   dns_rust_quality:
     name: rust-quality (dns/nats-subscriber)
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -546,7 +546,7 @@ jobs:
 
   ui_rust_quality:
     name: rust-quality (ui)
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -593,7 +593,7 @@ jobs:
   dns_test:
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality]
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -630,7 +630,7 @@ jobs:
   ui_test:
     name: test (ui)
     needs: [validate-compose, ui_rust_quality]
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -667,7 +667,7 @@ jobs:
   watchdog_test:
     name: test (watchdog)
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: test (watchdog)
@@ -678,7 +678,7 @@ jobs:
   dns_cargo_audit:
     name: cargo-audit (dns/nats-subscriber)
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -726,7 +726,7 @@ jobs:
   ui_cargo_audit:
     name: cargo-audit (ui)
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -777,7 +777,7 @@ jobs:
     # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
     if: github.event_name != 'pull_request'
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     strategy:
       fail-fast: false
       matrix:
@@ -1005,7 +1005,7 @@ jobs:
         needs.ui_cargo_audit.result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success')
       }}
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
     permissions:
       contents: read
@@ -1345,7 +1345,7 @@ jobs:
     name: promote stack image channels
     needs: build
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read
       packages: write
@@ -1502,7 +1502,7 @@ jobs:
     name: publish release source
     needs: promote
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: write
       packages: read

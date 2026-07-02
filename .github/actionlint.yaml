@@ -1,4 +1,6 @@
 self-hosted-runner:
   labels:
     - lancache
+    - lancache-heavy
+    - lancache-light
     - codeql
