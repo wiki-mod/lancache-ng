@@ -352,12 +352,12 @@ jobs:
                   printf '::error file=%s::NATS must stage the shared config in a temp file inside /etc/nats.\n' "$path"
                   return 1
                 }
-              grep -Fq 'chown 10001:10001 "$tmp_nats_conf"' "$path" \
+              grep -Fq 'chown 10001:10001 "$$tmp_nats_conf"' "$path" \
                 || {
                   printf '::error file=%s::NATS must restore shared config ownership to UID/GID 10001 after writing.\n' "$path"
                   return 1
                 }
-              grep -Fq 'mv "$tmp_nats_conf" /etc/nats/nats.conf' "$path" \
+              grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "$path" \
                 || {
                   printf '::error file=%s::NATS must atomically replace the shared nats.conf after fixing ownership.\n' "$path"
                   return 1
@@ -1176,11 +1176,6 @@ jobs:
           dns_rust_required=false
           ui_required=false
           watchdog_required=false
-          if [ "$WORKFLOW_CHANGED" = "true" ]; then
-            dns_rust_required=true
-            ui_required=true
-            watchdog_required=true
-          fi
           if [ "$DNS_RUST_CHANGED" = "true" ]; then
             dns_rust_required=true
           fi
