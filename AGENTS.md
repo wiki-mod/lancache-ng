@@ -121,6 +121,15 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 - When documenting a known limitation or deliberately deferred fix (not a bug you're fixing now), prefer a structured note over a one-liner: state the problem, the mitigation/fix direction if one exists, and a dated status line describing the current real-world state (e.g. "STATUS: as of 2026-07-02, X still uses the old path; once Y migrates, this fallback becomes dead code"). This lets a future reader tell a documented tradeoff apart from an accidental gap.
 - Placeholder/scaffold markers (e.g. `TODO(#123): ...`) must be removed the moment the referenced work is actually implemented in that same change. A stale TODO claiming work is still needed, sitting next to code that already does it, is worse than no comment — it actively misleads the next reader/reviewer. Before finishing a fix that started from a TODO/scaffold marker, grep for and delete the marker it replaces.
 
+## File Headers
+
+- Every source/config file (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) should open with a short header: the project name and repo URL (`lancache-ng — https://github.com/wiki-mod/lancache-ng`), followed by a purpose description of that specific file. Use `//!` inner doc comments in Rust and `#`/shebang-adjacent line comments elsewhere.
+- Scale the header's detail to the file's actual complexity — a file with several distinct responsibilities (e.g. a multi-role entrypoint script, a large route-wiring module) should name them; a simple, single-purpose file (e.g. an install-and-copy Dockerfile) should stay short. Do not pad a simple file's header just to match a fixed line count.
+- Every technical claim in a header must be verified against the actual file content and, where relevant, git history — do not assert an unconfirmed reason for a design choice (e.g. why a particular base image or repo is used) if no documented rationale exists; state the observable fact instead.
+- Excluded: `.md` files, `.env`/`.env.example` files, lockfiles (`Cargo.lock`), and `.gitkeep`.
+- No license line — the project has not adopted a license yet; that is a separate, not-yet-started decision and must not be conflated with file headers.
+- This is an active rollout (tracked in issue #409); not every file has this header yet. When touching a file that doesn't have one, add it as part of that change rather than treating the absence as a reason to skip it.
+
 ## Runtime Behavior
 
 - Lazy proxy/cache behavior is the intended default.
