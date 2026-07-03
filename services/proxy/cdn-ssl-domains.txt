@@ -1,4 +1,5 @@
-# Root CDN domains — one per line.
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Root CDN domains for TLS interception — one per line
 # At startup, a wildcard cert is generated for each (covers domain and *.domain).
 # IMPORTANT: wildcards only cover ONE subdomain level.
 # Example: for foo.bar.example.com, add bar.example.com (not example.com).

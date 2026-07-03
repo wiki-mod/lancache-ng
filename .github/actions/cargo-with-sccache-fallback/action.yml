@@ -1,3 +1,5 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# GitHub Action for cargo invocation with automatic sccache-fallback retry on failure or timeout
 name: Run cargo with sccache fallback
 description: Run one cargo command and retry without sccache if the cache wrapper fails.
 

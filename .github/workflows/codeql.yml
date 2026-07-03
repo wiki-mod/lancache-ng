@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CI workflow that runs CodeQL static analysis (GitHub Actions and Rust languages)
+# on pushes, pull requests, and a daily schedule, uploading SARIF results as security alerts.
 name: CodeQL
 
 on:

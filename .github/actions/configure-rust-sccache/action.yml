@@ -1,3 +1,5 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# GitHub Action for configuring Rust sccache with Redis and optional sccache-dist support
 name: Configure Rust sccache
 description: Configure Redis-backed sccache for trusted Rust CI jobs.
 

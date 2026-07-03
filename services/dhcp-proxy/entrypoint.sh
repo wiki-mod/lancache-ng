@@ -1,4 +1,9 @@
 #!/bin/bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# dnsmasq DHCP proxy entrypoint. Validates required env vars, renders
+# dnsmasq.conf.template via envsubst, and starts dnsmasq in proxy mode.
+
 set -e
 
 : "${DHCP_SUBNET_START:?DHCP_SUBNET_START is required for dnsmasq proxy mode.}"

@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Validates release/stack-images.yml (the release manifest) against the
+# actual repo: required schema/retention fields, that every first-party
+# runtime/tooling/metadata image and Dockerfile is declared with the right
+# platforms, that compose files reference images only through the
+# registry/prefix/tag variables, and that .github/workflows/build-push.yml
+# implements the promotion/release/provenance/rollback contract the manifest
+# describes. Intended as a CI gate on release infrastructure changes.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

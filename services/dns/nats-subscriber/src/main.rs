@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! NATS JetStream subscriber: consumes DNS record updates and applies them to PowerDNS API.
+
 use async_nats::jetstream;
 use futures::StreamExt;
 use reqwest::Client;

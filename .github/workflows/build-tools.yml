@@ -1,3 +1,7 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CI workflow that builds and publishes the multi-arch build-tools container image
+# (providing rustc, sccache, distcc) to GHCR on a weekly schedule, on relevant pushes,
+# and on manual dispatch.
 name: Build Tools Image
 
 on:

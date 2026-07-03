@@ -1,3 +1,5 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Configuration for actionlint GitHub Actions linter
 self-hosted-runner:
   labels:
     - lancache

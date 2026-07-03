@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Shared release/promotion guard: inspects a published image with
+# `docker buildx imagetools` and fails closed if it does not expose all of
+# the given comma-separated required platforms. Avoids external JSON parsers
+# since this runs directly on self-hosted release/promotion runners.
 set -euo pipefail
 
 image=${1:?usage: require-image-platforms.sh <image> <comma-separated-platforms>}

@@ -1,3 +1,10 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Admin UI secondary-node routes: lists registered secondaries, issues and
+//! rotates their NATS registration tokens, handles removal, and rewrites
+//! `nats.conf` (then restarts the NATS service) whenever the set of
+//! secondary credentials changes.
+
 use crate::{docker_client, nats_config, AppState};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};

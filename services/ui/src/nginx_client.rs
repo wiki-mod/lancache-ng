@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! HTTP client for querying nginx stub_status metrics and parsing access logs.
+
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};

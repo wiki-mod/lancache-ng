@@ -1,3 +1,9 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Admin UI route modules, plus shared helpers used across them: Tera
+//! template rendering with dev/prod error detail, and CSRF token
+//! insertion/verification against the process-wide token in `AppState`.
+
 pub mod dashboard;
 pub mod dhcp;
 pub mod domains;

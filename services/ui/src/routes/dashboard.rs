@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! Main dashboard route displaying cache statistics and connection metrics.
+
 use crate::{config::DhcpMode, nginx_client, AppState};
 use axum::extract::State;
 use axum::response::{Html, Json};

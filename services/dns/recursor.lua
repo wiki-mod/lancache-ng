@@ -1,3 +1,6 @@
+-- lancache-ng (https://github.com/wiki-mod/lancache-ng)
+-- PowerDNS recursor Lua hooks: RPZ policy loading and optional root zone caching.
+
 -- RPZ: CDN-Domains → Proxy-IP
 rpzFile("/var/lib/powerdns/rpz.zone", { policyName="lancache-rpz" })
 

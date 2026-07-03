@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Build context excludes for the dnsmasq-based DHCP proxy/relay image.
+
 # Keep Docker build contexts small and deterministic.
 .git
 .gitignore

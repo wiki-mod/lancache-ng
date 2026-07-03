@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! Route for viewing and filtering nginx access logs.
+
 use crate::{nginx_client, AppState};
 use axum::extract::{Query, State};
 use axum::response::Html;

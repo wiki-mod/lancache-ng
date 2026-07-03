@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Docker build context exclusions.
+
 # Keep Docker build contexts small and deterministic.
 .git
 .gitignore

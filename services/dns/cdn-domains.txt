@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CDN domain list for DNS spoofing. One domain per line; leading dot auto-added to cover subdomains.
+
 # LanCache DNS — CDN domain list
 # One domain per line. The leading dot is added automatically (covers all subdomains).
 # Lines starting with # are ignored.

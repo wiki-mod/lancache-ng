@@ -1,3 +1,12 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Multi-stage build for the Admin UI service. The builder stage compiles the
+# Rust binary against the shared build-tools image, opportunistically
+# accelerating the build with sccache and/or distcc when the corresponding
+# BuildKit secrets are present (falling back to a plain local build
+# otherwise). The runtime stage is a minimal Debian image that only carries
+# the compiled binary, its Tera templates, and the entrypoint script.
+
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 

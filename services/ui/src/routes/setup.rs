@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! First-run setup wizard displaying network configuration details.
+
 use crate::AppState;
 use axum::extract::State;
 use axum::response::Html;
