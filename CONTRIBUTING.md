@@ -31,16 +31,29 @@ safe for non-expert operators.
 
 ## Pull request expectations
 
-Each pull request should explain:
+Opening a PR pre-fills `.github/pull_request_template.md`. Fill in every
+section rather than deleting the ones that feel redundant for a small
+change — a short "N/A, this is a one-line typo fix" is fine, but the
+section headings themselves should stay so reviewers always know where to
+look. At minimum, each pull request should explain:
 
+- whether AI assistance was used, using the optional transparency notice when applicable
 - what changed
-- why the change is needed
+- what the PR actually changes in before/after terms, with a concrete example where possible
+- why the change is needed and what it fixes or adds
 - how users or operators are affected
-- which checks were run
+- what the PR deliberately does NOT touch (scope boundaries)
+- which files were actually touched (scope evidence)
+- which checks were run, with the exact commands
 - any remaining risk or follow-up work
 
 Prefer focused pull requests. For example, do not mix documentation rewrites,
 CI fixes and runtime behavior changes unless they must land together.
+
+As the PR evolves (new commits, findings fixed, scope changes), update the
+PR body directly rather than adding new comments to track progress. Comments
+are for review-thread replies and discussion, not for changelog/status
+updates that belong in the body.
 
 ### PR and issue linking
 
@@ -48,6 +61,7 @@ Track related work explicitly in the PR body:
 
 - Use `Refs #123` for parent issues, umbrella issues, and follow-up references.
 - Use `Closes #123` only when this PR should also close that issue.
+- If no issue exists, explain why in the PR body instead of leaving the relationship unclear.
 - Open PRs should include links for relevant review context (for example tracking and umbrella issue).
 
 ### Changelog expectations
@@ -58,7 +72,8 @@ This summary should be reused in the final release notes text when available.
 Every pull request should include a changelog section that explains user-visible
 behavior, operational impact, validation performed, and any explicit follow-up
 issue. Silent changes are not acceptable for release, setup, CI, or runtime
-behavior.
+behavior. Keep this section current by editing it directly as the PR changes,
+not by appending new comments each time something is fixed or added.
 
 ### Quality and release process expectations
 
