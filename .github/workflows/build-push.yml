@@ -1,7 +1,8 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# CI pipeline that detects changed paths on PRs, builds and tests each Rust/Docker
-# service (dns, ui, watchdog, dhcp, dhcp-proxy, proxy), and pushes multi-arch images
-# to GHCR on master pushes and version tags.
+# CI pipeline that detects changed paths on PRs, builds, tests, and scans each
+# Rust/Docker service (dns, ui, watchdog, dhcp, dhcp-proxy, proxy), and publishes
+# multi-arch images to GHCR on master pushes and version tags.
+
 name: Build & Push
 
 on:
@@ -195,6 +196,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve compose validation image
         id: select-compose-validation-image
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
 
