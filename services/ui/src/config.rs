@@ -53,6 +53,8 @@ pub struct Config {
     pub ssl_log: String,
     pub standard_cache_dir: String,
     pub ssl_cache_dir: String,
+    pub dns_standard_state_dir: String,
+    pub dns_ssl_state_dir: String,
     pub proxy_standard_url: String,
     pub proxy_ssl_url: String,
     pub netdata_url: String,
@@ -102,6 +104,8 @@ impl fmt::Debug for Config {
             .field("ssl_log", &self.ssl_log)
             .field("standard_cache_dir", &self.standard_cache_dir)
             .field("ssl_cache_dir", &self.ssl_cache_dir)
+            .field("dns_standard_state_dir", &self.dns_standard_state_dir)
+            .field("dns_ssl_state_dir", &self.dns_ssl_state_dir)
             .field("proxy_standard_url", &self.proxy_standard_url)
             .field("proxy_ssl_url", &self.proxy_ssl_url)
             .field("netdata_url", &self.netdata_url)
@@ -192,6 +196,8 @@ impl Config {
             ssl_log,
             standard_cache_dir,
             ssl_cache_dir,
+            dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
+            dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
             proxy_standard_url,
             proxy_ssl_url,
             netdata_url: env_str("NETDATA_URL", "http://netdata:19999"),

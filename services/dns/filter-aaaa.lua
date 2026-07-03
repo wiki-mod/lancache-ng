@@ -2,11 +2,11 @@
 --
 -- PowerDNS Recursor Lua script (preresolve hook): AAAA filter that suppresses
 -- IPv6 DNS responses for all domains. Enabled by the presence of
--- /var/lib/powerdns/aaaa-filter-enabled. The UI toggles this file via docker
--- exec — no recursor restart needed. dq.variable=true prevents caching so
--- toggling takes effect immediately.
+-- /var/lib/powerdns-state/aaaa-filter-enabled. The UI toggles this file
+-- through the shared PowerDNS state volume; dq.variable=true prevents caching
+-- so toggling takes effect immediately.
 
-local MARKER = "/var/lib/powerdns/aaaa-filter-enabled"
+local MARKER = "/var/lib/powerdns-state/aaaa-filter-enabled"
 
 local function filter_active()
     local f = io.open(MARKER, "r")

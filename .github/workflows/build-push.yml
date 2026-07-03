@@ -394,6 +394,11 @@ jobs:
 
           validate_nats_config_ownership
 
+          if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+            echo "::error::Docker socket proxy must not expose EXEC."
+            exit 1
+          fi
+
           missing_required=0
           while IFS= read -r key; do
             if ! grep -Eq "^${key}=[^[:space:]]+" deploy/quickstart/.env; then

@@ -61,6 +61,7 @@ services:
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-standard:/var/lib/powerdns
+      - pdns-filter-state:/var/lib/powerdns-state:ro
     ports:
       # NOTE (Windows): Port 53 is used by the Windows DNS client.
       # Stop "DNS Client" in services.msc, or test the proxy directly:
@@ -99,6 +100,7 @@ services:
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-ssl:/var/lib/powerdns
+      - pdns-filter-state:/var/lib/powerdns-state:ro
     ports:
       - "${IP_SSL}:5353:53/udp"
       - "${IP_SSL}:5353:53/tcp"
@@ -120,7 +122,7 @@ services:
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
   # socket-proxy limits Docker access to Admin UI/watchdog operations:
-  # container inspect/list, restart, and exec; no image/volume/system access.
+  # container inspect/list, restart, and helper-container probes; no image/volume/system access.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     volumes:
@@ -128,7 +130,6 @@ services:
     environment:
       CONTAINERS: "1"
       POST: "1"
-      EXEC: "1"
     networks:
       - docker-api
     restart: unless-stopped
@@ -215,7 +216,7 @@ services:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     # On first start: copy default conf (no auth) into the shared volume,
     # then exec nats-server. The UI overwrites nats.conf with auth on startup
-    # and sends SIGHUP to reload without a container restart.
+    # and restarts NATS to reload the new authorization file.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -323,6 +324,7 @@ services:
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
       - proxy-cache:/var/cache/proxy:ro
+      - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats          # shared with NATS: UI writes nats.conf here
     ports:
       - "9090:8080"
@@ -343,6 +345,8 @@ services:
       - CACHE_MAX_GB=10
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
+      - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
+      - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
@@ -414,5 +418,6 @@ volumes:
   netdatacache:
   pdns-data-standard:
   pdns-data-ssl:
+  pdns-filter-state:
   logs:
   syslog-data:

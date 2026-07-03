@@ -6,10 +6,8 @@
 //! exec.
 
 use anyhow::{Context, Result};
-use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};
 use bollard::Docker;
-use futures_util::StreamExt;
 use std::collections::HashMap;
 
 pub fn connect_from_env() -> Result<Docker> {
@@ -44,58 +42,16 @@ pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn exec_in_container(
-    docker: &Docker,
-    service_name: &str,
-    cmd: Vec<&str>,
-) -> Result<String> {
+pub async fn container_image_for_service(docker: &Docker, service_name: &str) -> Result<String> {
     let id = find_container_id(docker, service_name, false).await?;
-
-    let exec = docker
-        .create_exec(
-            &id,
-            CreateExecOptions {
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                cmd: Some(cmd),
-                ..Default::default()
-            },
-        )
-        .await
-        .context("Failed to create exec")?;
-
-    let mut output = String::new();
-    if let StartExecResults::Attached {
-        output: mut stream, ..
-    } = docker
-        .start_exec(&exec.id, None)
-        .await
-        .context("Failed to start exec")?
-    {
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bollard::container::LogOutput::StdOut { message }) => {
-                    output.push_str(&String::from_utf8_lossy(&message));
-                }
-                Ok(bollard::container::LogOutput::StdErr { message }) => {
-                    output.push_str(&String::from_utf8_lossy(&message));
-                }
-                _ => {}
-            }
-        }
-    }
-
     let inspect = docker
-        .inspect_exec(&exec.id)
+        .inspect_container(&id, None)
         .await
-        .context("Failed to inspect exec")?;
-    if let Some(code) = inspect.exit_code {
-        if code != 0 {
-            return Err(anyhow::anyhow!("Command exited with code {}", code));
-        }
-    }
+        .with_context(|| format!("Failed to inspect container for service '{}'", service_name))?;
 
-    Ok(output)
+    inspect
+        .image
+        .with_context(|| format!("No image recorded for service '{}'", service_name))
 }
 
 async fn find_container_id(
@@ -125,5 +81,3 @@ async fn find_container_id(
         .and_then(|c| c.id)
         .with_context(|| format!("No container found for service '{}'", service_name))
 }
-
-// TODO(#368): Narrow Docker socket proxy API surface and remove EXEC capability

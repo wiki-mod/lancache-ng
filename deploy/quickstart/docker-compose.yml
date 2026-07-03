@@ -181,6 +181,7 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
     volumes:
       - pdns-data-standard:/var/lib/powerdns
+      - pdns-filter-state:/var/lib/powerdns-state:ro
     depends_on:
       - nats
     ports:
@@ -213,6 +214,7 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
     volumes:
       - pdns-data-ssl:/var/lib/powerdns
+      - pdns-filter-state:/var/lib/powerdns-state:ro
     depends_on:
       - nats
     ports:
@@ -233,16 +235,15 @@ services:
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
   # socket-proxy provides scoped Docker API access for UI and watchdog only.
-  # CONTAINERS=1 + EXEC=1 + POST=1 permits container inspect/restart/exec
-  # without granting image, volume, network, or host-management endpoints.
-  # It is isolated on docker-api so other services cannot reach its EXEC-enabled API.
+  # CONTAINERS=1 + POST=1 permits container inspect/restart and helper-container
+  # probes without granting image, volume, network, or host-management endpoints.
+  # It is isolated on docker-api so other services cannot reach the proxy API.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       CONTAINERS: "1"
-      EXEC: "1"
       POST: "1"
     networks:
       - docker-api
@@ -359,6 +360,7 @@ services:
     volumes:
       - proxy-logs:/var/log/nginx:ro
       - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
+      - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
@@ -387,6 +389,8 @@ services:
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
       - DHCP_MODE=${DHCP_MODE:-disabled}
+      - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
+      - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
       - NATS_URL=nats://nats:4222
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
@@ -471,3 +475,4 @@ volumes:
   syslog-data:
   pdns-data-standard:
   pdns-data-ssl:
+  pdns-filter-state:

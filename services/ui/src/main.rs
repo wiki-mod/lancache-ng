@@ -448,16 +448,11 @@ async fn main() -> Result<()> {
         csrf_token: generate_csrf_token(),
     });
 
-    // Write initial nats.conf with auth tokens and reload NATS
+    // Write initial nats.conf with auth tokens and restart NATS so it picks up the new config.
     if let Err(e) = routes::secondaries::update_nats_conf(&state).await {
         tracing::warn!("Could not write initial nats.conf: {}", e);
     } else {
-        let _ = docker_client::exec_in_container(
-            &state.docker,
-            &state.config.nats_service,
-            vec!["kill", "-HUP", "1"],
-        )
-        .await;
+        let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
     }
 
     // Routes that are always public (protected by their own token).

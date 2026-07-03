@@ -61,6 +61,7 @@ services:
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - /srv/lancache/pdns-standard:/var/lib/powerdns
+      - /srv/lancache/pdns-filter-state:/var/lib/powerdns-state:ro
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
@@ -97,6 +98,7 @@ services:
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - /srv/lancache/pdns-ssl:/var/lib/powerdns
+      - /srv/lancache/pdns-filter-state:/var/lib/powerdns-state:ro
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
@@ -120,7 +122,7 @@ services:
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
   # socket-proxy limits Docker access to Admin UI/watchdog operations:
-  # container inspect/list, restart, and exec; no image/volume/system access.
+  # container inspect/list, restart, and helper-container probes; no image/volume/system access.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     volumes:
@@ -128,7 +130,6 @@ services:
     environment:
       CONTAINERS: "1"
       POST: "1"
-      EXEC: "1"
     networks:
       - docker-api
     restart: always
@@ -324,6 +325,7 @@ services:
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
       - proxy-cache:/var/cache/proxy:ro
+      - /srv/lancache/pdns-filter-state:/var/lib/powerdns-state
       - /srv/lancache/nats-conf:/etc/nats   # shared with NATS: UI writes nats.conf here
     ports:
       - "127.0.0.1:8080:8080"
@@ -344,6 +346,8 @@ services:
       - CACHE_MAX_GB=50
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
+      - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
+      - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
       - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
       - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}

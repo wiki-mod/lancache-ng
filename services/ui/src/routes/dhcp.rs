@@ -4,12 +4,18 @@
 //! conflict checks, and applies guarded DHCP config mutations through the Kea
 //! control-agent with rollback handling for failed persistence.
 
-use crate::docker_client::exec_in_container;
-use crate::AppState;
+use crate::{docker_client, AppState};
+use anyhow::Context as AnyhowContext;
 use axum::extract::{Form, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
+use bollard::container::LogOutput;
+use bollard::models::{ContainerCreateBody, HostConfig};
+use bollard::query_parameters::{
+    AttachContainerOptionsBuilder, CreateContainerOptions, RemoveContainerOptionsBuilder,
+};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
@@ -706,37 +712,20 @@ async fn fetch_all_reservations(
 }
 
 async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
-    let output = match exec_in_container(
-        &state.docker,
-        "dhcp",
-        vec![
-            "nmap",
-            "--script",
-            "broadcast-dhcp-discover",
-            "-e",
-            "any",
-            "--script-args",
-            "broadcast-dhcp-discover.timeout=5",
-        ],
-    )
-    .await
-    {
+    let helper_image = match docker_client::container_image_for_service(&state.docker, "ui").await {
+        Ok(image) => image,
+        Err(e) => {
+            return DhcpCheckStatus::Unavailable(format!(
+                "Failed to inspect helper image for DHCP check: {}",
+                e
+            ));
+        }
+    };
+
+    let output = match run_dhcp_conflict_probe(&state.docker, helper_image).await {
         Ok(out) => out,
         Err(e) => {
-            // Check if the error is due to nmap not being found
-            let err_msg = e.to_string();
-            if err_msg.contains("nmap")
-                || err_msg.contains("not found")
-                || err_msg.contains("No such file")
-            {
-                return DhcpCheckStatus::Unavailable(
-                    "nmap is not installed in the DHCP container".to_string(),
-                );
-            }
-            return DhcpCheckStatus::Unavailable(format!(
-                "Failed to execute DHCP check: {}",
-                err_msg
-            ));
+            return DhcpCheckStatus::Unavailable(format!("Failed to execute DHCP check: {}", e));
         }
     };
 
@@ -751,6 +740,103 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
         }
     }
     DhcpCheckStatus::NotFound
+}
+
+async fn run_dhcp_conflict_probe(
+    docker: &bollard::Docker,
+    image: String,
+) -> Result<String, anyhow::Error> {
+    // Run the probe in a temporary host-network helper container so the UI does
+    // not need generic exec access to the DHCP service.
+    let created = docker
+        .create_container(
+            None::<CreateContainerOptions>,
+            dhcp_conflict_probe_container(image),
+        )
+        .await
+        .context("create DHCP probe container")?;
+
+    let id = created.id;
+    let result = async {
+        docker
+            .start_container(&id, None)
+            .await
+            .context("start DHCP probe container")?;
+
+        let mut attach = docker
+            .attach_container(
+                &id,
+                Some(
+                    AttachContainerOptionsBuilder::default()
+                        .stdout(true)
+                        .stderr(true)
+                        .stream(true)
+                        .build(),
+                ),
+            )
+            .await
+            .context("attach DHCP probe container")?;
+
+        let mut output = String::new();
+        while let Some(chunk) = attach.output.next().await {
+            match chunk.context("read DHCP probe output")? {
+                LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                }
+                _ => {}
+            }
+        }
+
+        let inspect = docker
+            .inspect_container(&id, None)
+            .await
+            .context("inspect DHCP probe container")?;
+
+        if let Some(exit_code) = inspect.state.and_then(|state| state.exit_code) {
+            if exit_code != 0 {
+                return Err(anyhow::anyhow!(
+                    "DHCP probe container exited with code {}: {}",
+                    exit_code,
+                    output.trim()
+                ));
+            }
+        }
+
+        Ok(output)
+    }
+    .await;
+
+    let _ = docker
+        .remove_container(
+            &id,
+            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+        )
+        .await;
+
+    result
+}
+
+fn dhcp_conflict_probe_container(image: String) -> ContainerCreateBody {
+    ContainerCreateBody {
+        image: Some(image),
+        entrypoint: Some(vec!["nmap".to_string()]),
+        cmd: Some(vec![
+            "--script".to_string(),
+            "broadcast-dhcp-discover".to_string(),
+            "-e".to_string(),
+            "any".to_string(),
+            "--script-args".to_string(),
+            "broadcast-dhcp-discover.timeout=5".to_string(),
+        ]),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        host_config: Some(HostConfig {
+            network_mode: Some("host".to_string()),
+            ..Default::default()
+        }),
+        tty: Some(false),
+        ..Default::default()
+    }
 }
 
 // ─── Validators ───
@@ -1279,6 +1365,29 @@ mod tests {
             crate::config::DhcpMode::DnsmasqProxy,
             "http://dhcp:8000"
         ));
+    }
+
+    #[test]
+    fn dhcp_conflict_probe_container_runs_host_network_nmap() {
+        let spec = dhcp_conflict_probe_container("example-image".to_string());
+
+        assert_eq!(spec.image.as_deref(), Some("example-image"));
+        assert_eq!(spec.entrypoint, Some(vec!["nmap".to_string()]));
+        assert_eq!(
+            spec.cmd,
+            Some(vec![
+                "--script".to_string(),
+                "broadcast-dhcp-discover".to_string(),
+                "-e".to_string(),
+                "any".to_string(),
+                "--script-args".to_string(),
+                "broadcast-dhcp-discover.timeout=5".to_string(),
+            ])
+        );
+        assert_eq!(
+            spec.host_config.and_then(|host| host.network_mode),
+            Some("host".to_string())
+        );
     }
 
     #[test]

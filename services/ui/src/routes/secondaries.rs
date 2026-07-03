@@ -143,13 +143,8 @@ pub async fn register_secondary(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Send SIGHUP to NATS container
-    let _ = docker_client::exec_in_container(
-        &state.docker,
-        &state.config.nats_service,
-        vec!["kill", "-HUP", "1"],
-    )
-    .await;
+    // Restart NATS so it picks up the rewritten authorization file.
+    let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
 
     Ok(Json(RegisterResponse {
         nats_url: state.config.nats_url.clone(),
@@ -191,13 +186,8 @@ pub async fn remove_secondary(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Send SIGHUP to NATS container
-    let _ = docker_client::exec_in_container(
-        &state.docker,
-        &state.config.nats_service,
-        vec!["kill", "-HUP", "1"],
-    )
-    .await;
+    // Restart NATS so it picks up the rewritten authorization file.
+    let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -244,13 +234,8 @@ pub async fn rotate_token(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Send SIGHUP to NATS container
-    let _ = docker_client::exec_in_container(
-        &state.docker,
-        &state.config.nats_service,
-        vec!["kill", "-HUP", "1"],
-    )
-    .await;
+    // Restart NATS so it picks up the rewritten authorization file.
+    let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
 
     Ok(Json(serde_json::json!({
         "nats_user": nats_user,
