@@ -203,14 +203,12 @@ jobs:
 
           validation_build_tools_image="$(bash scripts/select-build-tools-image.sh)"
           downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          docker pull "$downstream_build_tools_image" >/dev/null
 
-          downstream_build_tools_image="$(docker image inspect "$downstream_build_tools_image" --format '{{index .RepoDigests 0}}')"
           case "$downstream_build_tools_image" in
             *@sha256:*)
               ;;
             *)
-              echo "::error::Expected a digest-qualified build-tools image after pulling the published build-tools image, got '$downstream_build_tools_image'."
+              echo "::error::Expected a digest-qualified build-tools image from the published build-tools selector, got '$downstream_build_tools_image'."
               exit 1
               ;;
           esac
@@ -615,10 +613,19 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
-          grep -F 'docker pull "$build_tools_ref" >/dev/null' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Downstream build-tools job output must pull the exact image before exporting its digest."; exit 1; }
-          grep -F 'RepoDigests 0' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Downstream build-tools job output must resolve a digest-qualified image reference."; exit 1; }
+          grep -F 'smoked_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'docker image inspect "$image" --format' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'smoked_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
+            || { echo "::error::Build-tools selector must export the exact image reference that passed smoke validation."; exit 1; }
+          if awk '
+            index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)\"") { in_resolve = 1 }
+            in_resolve && index($0, "printf '\''build_tools_image=%s\\n'\'' \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
+            in_resolve && index($0, "docker pull \"$downstream_build_tools_image\"") { found = 1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::validate-compose must not re-pull mutable build-tools tags after selector smoke validation."
+            exit 1
+          fi
           grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
             && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }
