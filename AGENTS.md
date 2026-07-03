@@ -1,4 +1,8 @@
-# Repository Governance
+# lancache-ng — Repository Governance
+
+**Project**: lancache-ng — a local download cache for home networks, LAN parties, labs, schools, offices, or gaming rooms. Stores game/software downloads locally so repeat downloads on the LAN run at LAN speed instead of re-fetching from the internet. Adds SSL interception (MITM via a custom CA) and full IPv6 dual-stack support on top of the original lancachenet concept.
+**Repository**: https://github.com/wiki-mod/lancache-ng
+**See also**: `CLAUDE.md` (Claude Code project instructions, auto-loaded every session) for architecture details and dev/prod setup; `README.md` for end-user-facing documentation.
 
 This file contains repository-wide agent rules. It applies to all paths in this repository, including `.github/**`, `setup.sh`, `deploy/**`, `config/**`, `scripts/**`, and `services/**`.
 
