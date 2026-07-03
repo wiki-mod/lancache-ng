@@ -1,3 +1,6 @@
+# lancache-ng — https://github.com/wiki-mod/lancache-ng
+# Development Compose stack for local service builds and fixture configuration.
+
 name: lancache-ng
 
 services:
@@ -218,6 +221,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        set -e
         mkdir -p /etc/nats
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'

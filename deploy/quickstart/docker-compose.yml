@@ -1,4 +1,5 @@
-# LanCache-NG — Quickstart (no repo clone needed)
+# lancache-ng — https://github.com/wiki-mod/lancache-ng
+# Quickstart Compose stack for a no-repo-clone install.
 #
 # Prerequisites:
 #   1. Run setup.sh — configures .env and starts everything automatically
@@ -64,6 +65,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        set -e
         mkdir -p /etc/nats
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
