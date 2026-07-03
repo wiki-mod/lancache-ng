@@ -1,3 +1,15 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Admin UI service entry point. Wires up the axum HTTP server, shared
+//! `AppState` (Docker client, NATS connection, SQLite handle, Tera templates),
+//! and the full route table: dashboard, DHCP subnet/reservation management,
+//! DNS/SSL/LAN domain records, stats, logs, the first-run setup wizard, a
+//! Netdata metrics proxy, and secondary-node management. Also implements this
+//! service's own CSRF protection, HTTP Basic auth, and security-header
+//! middleware rather than pulling in an external auth/CSRF crate.
+//!
+//! See `routes/` for the individual page/API handlers this file wires
+//! together, and `config.rs` for how runtime settings are loaded.
 #![deny(warnings)]
 
 mod config;

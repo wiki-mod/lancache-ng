@@ -1,3 +1,12 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# nginx-based caching proxy image: unified standard (SNI passthrough) and
+# SSL/MITM (TLS-interception) mode, selected at runtime by entrypoint.sh.
+# Installs nginx from the nginx.org mainline repo (not Debian's own nginx
+# package) and includes libnginx-mod-stream for standard mode's SNI
+# passthrough; see CLAUDE.md's "Key Design Decisions" for the stream-module
+# load order requirement.
+
 FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
