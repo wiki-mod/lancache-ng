@@ -18,6 +18,8 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
 ## Governance
 
+**Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
+
 See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
 - **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
