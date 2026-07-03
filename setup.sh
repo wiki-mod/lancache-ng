@@ -1543,8 +1543,8 @@ cmd_update() {
     UPDATE_CONVERGENCE_PAUSED=0
     UPDATE_CONVERGENCE_COMPLETED=0
     trap resume_lancache_convergence_after_failed_update EXIT
-    pause_lancache_convergence_for_update
     UPDATE_CONVERGENCE_PAUSED=1
+    pause_lancache_convergence_for_update
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
