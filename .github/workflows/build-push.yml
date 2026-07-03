@@ -495,6 +495,26 @@ jobs:
             || { echo "::error::Docker Rust builds must pass sccache-dist config through a BuildKit secret."; exit 1; }
           grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
+          if awk '
+            /^      - name: Prepare Rust build secret files$/ { in_block=1; saw_pr_gate=0; next }
+            in_block && /^      - name: / {
+              if (!saw_pr_gate) {
+                print FILENAME ":" FNR ":" "missing pull_request gate in Rust BuildKit secret preparation."
+                bad=1
+              }
+              in_block=0
+              next
+            }
+            in_block && /github.event_name != '\''pull_request'\''/ { saw_pr_gate=1 }
+            in_block && /github.event.pull_request.head.repo.full_name == github.repository/ { print FILENAME ":" FNR ":" $0; bad=1 }
+            END {
+              if (in_block && !saw_pr_gate) bad=1
+              exit bad ? 0 : 1
+            }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::Rust Docker builds must not prepare BuildKit secret-files on pull_request runs."
+            exit 1
+          fi
           grep -F 'uses: ./.github/actions/rust-acceleration-preflight' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must run an external acceleration preflight outside BuildKit cache."; exit 1; }
           if grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+host[[:space:]]*$' .github/workflows/build-push.yml >/dev/null; then
@@ -1331,16 +1351,10 @@ jobs:
             ) &&
             matrix.rust == true &&
             github.actor != 'dependabot[bot]' &&
-            (
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            )
+            github.event_name != 'pull_request'
           }}
         id: sccache-secret
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPOSITORY: ${{ github.repository }}
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
           SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
           SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
@@ -1371,11 +1385,6 @@ jobs:
             sccache_enabled=0
             redis_enabled=0
             echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
-          fi
-
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$BASE_REPOSITORY" ]; then
-            echo "Skipping Redis-backed sccache for an untrusted fork pull request."
-            exit 0
           fi
 
           if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -z "$SCCACHE_DIST_AUTH_TOKEN" ]; then
@@ -1784,16 +1793,10 @@ jobs:
             ) &&
             matrix.rust == true &&
             github.actor != 'dependabot[bot]' &&
-            (
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            )
+            github.event_name != 'pull_request'
           }}
         id: sccache-secret
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPOSITORY: ${{ github.repository }}
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
           SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
           SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
@@ -1825,11 +1828,6 @@ jobs:
             sccache_enabled=0
             redis_enabled=0
             echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
-          fi
-
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$BASE_REPOSITORY" ]; then
-            echo "Skipping Redis-backed sccache for an untrusted fork pull request."
-            exit 0
           fi
 
           if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -z "$SCCACHE_DIST_AUTH_TOKEN" ]; then
