@@ -1,3 +1,9 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
+//! conflict checks, and applies guarded DHCP config mutations through the Kea
+//! control-agent with rollback handling for failed persistence.
+
 use crate::docker_client::exec_in_container;
 use crate::AppState;
 use axum::extract::{Form, State};
@@ -1507,6 +1513,120 @@ mod tests {
         assert_eq!(calls[4]["arguments"], initial_config);
         assert_eq!(calls[1]["arguments"], expected_modified);
         assert_eq!(calls[2]["arguments"], expected_modified);
+    }
+
+    #[tokio::test]
+    async fn kea_config_modify_accepts_successful_write_retry_after_ambiguous_failure() {
+        let initial_config = json!({
+            "Dhcp4": {
+                "subnet4": [
+                    {
+                        "id": 1,
+                        "valid-lifetime": 3600
+                    }
+                ]
+            }
+        });
+        let expected_modified = json!({
+            "Dhcp4": {
+                "subnet4": [
+                    {
+                        "id": 1,
+                        "valid-lifetime": 3600
+                    },
+                    {
+                        "id": 2,
+                        "valid-lifetime": 7200
+                    }
+                ]
+            }
+        });
+
+        let (result, calls) = run_kea_config_modify_with_steps(
+            vec![
+                MockStep::Response(kea_config_get_response(initial_config.clone())),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Transport("config-write transport failure"),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
+                let subnets = dhcp4
+                    .get_mut("subnet4")
+                    .ok_or("subnet4 missing")?
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?;
+                subnets.push(json!({
+                    "id": 2,
+                    "valid-lifetime": 7200
+                }));
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[0]["command"], "config-get");
+        assert_eq!(calls[3]["command"], "config-write");
+        assert_eq!(calls[4]["command"], "config-write");
+        assert!(
+            !calls.iter().any(|cmd| cmd["command"] == "config-set"
+                && cmd.get("arguments") == Some(&initial_config)),
+            "successful write retry should not rollback",
+        );
+        assert_eq!(calls[1]["arguments"], expected_modified);
+        assert_eq!(calls[2]["arguments"], expected_modified);
+    }
+
+    #[tokio::test]
+    async fn kea_config_modify_rolls_back_when_write_retry_confirms_failure() {
+        let initial_config = json!({
+            "Dhcp4": {
+                "subnet4": [
+                    {
+                        "id": 1,
+                        "valid-lifetime": 3600
+                    }
+                ]
+            }
+        });
+
+        let (result, calls) = run_kea_config_modify_with_steps(
+            vec![
+                MockStep::Response(kea_config_get_response(initial_config.clone())),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Transport("config-write transport failure"),
+                MockStep::Response(json!([{ "result": 1, "text": "write failed on retry" }])),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
+                let subnets = dhcp4
+                    .get_mut("subnet4")
+                    .ok_or("subnet4 missing")?
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?;
+                subnets.push(json!({
+                    "id": 2,
+                    "valid-lifetime": 7200
+                }));
+                Ok(())
+            },
+        )
+        .await;
+
+        let error = result.expect_err("confirmed write retry failure should rollback");
+        let error_message = error.to_string();
+
+        assert!(error_message.contains("rolled back"));
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[3]["command"], "config-write");
+        assert_eq!(calls[4]["command"], "config-write");
+        assert_eq!(calls[5]["command"], "config-set");
+        assert_eq!(calls[5]["arguments"], initial_config);
     }
 
     #[tokio::test]
