@@ -1,3 +1,8 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# dnsmasq proxy-mode config template, rendered by entrypoint.sh via envsubst.
+# Disables DNS (port=0) and runs dnsmasq purely as a DHCP proxy that injects
+# the lancache-ng DNS servers via PXE option 6 alongside an existing DHCP server.
+
 port=0
 dhcp-range=${DHCP_SUBNET_START},proxy
 dhcp-option-pxe=6,${DHCP_DNS_PRIMARY},${DHCP_DNS_SECONDARY}

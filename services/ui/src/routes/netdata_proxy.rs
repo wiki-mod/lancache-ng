@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! Proxy route for forwarding requests to Netdata monitoring endpoints.
+
 use crate::AppState;
 use axum::{
     body::Body,

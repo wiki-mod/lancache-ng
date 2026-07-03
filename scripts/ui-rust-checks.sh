@@ -1,6 +1,9 @@
 #!/bin/bash
-# lancache-ng — https://github.com/wiki-mod/lancache-ng
-# Runs Docker-based Rust quality checks for the Admin UI without requiring host Rust tooling.
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Runs Docker-based Rust quality checks (fmt, check, clippy, test, build) for
+# the Admin UI without requiring host Rust tooling. Uses the repo's
+# build-tools image by default and can optionally enable sccache, including
+# starting a temporary Redis container for cache sharing.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

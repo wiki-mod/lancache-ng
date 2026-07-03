@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
+
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 

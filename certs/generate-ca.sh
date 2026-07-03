@@ -1,4 +1,8 @@
 #!/bin/bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Generates the LAN cache's root CA (ca.key/ca.crt) used to sign per-domain
+# wildcard certs for SSL interception (MITM) mode.
+#
 # Run this once to generate a CA certificate for SSL interception.
 # The proxy auto-generates one if this is missing (dev convenience).
 # In prod, use this to generate a dedicated CA and keep ca.key secret.

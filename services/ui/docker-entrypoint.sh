@@ -1,4 +1,9 @@
 #!/bin/sh
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Admin UI container entrypoint: fixes up ownership on shared/bind-mounted
+# data paths when started as root, then drops privileges to the unprivileged
+# `lancache` user before exec-ing the real command.
 set -eu
 
 # Bind mounts and shared volumes are often created as root-owned paths at

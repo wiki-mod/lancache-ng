@@ -1,3 +1,6 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! Route for rendering the cache statistics page.
+
 use crate::AppState;
 use axum::extract::State;
 use axum::response::Html;

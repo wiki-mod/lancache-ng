@@ -1,3 +1,7 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Optional compose override that publishes the primary's NATS control-plane
+# port so remote secondary DNS nodes can connect to it directly.
+#
 # Optional NATS host binding for remote secondary DNS nodes.
 #
 # This file is intentionally separate from docker-compose.yml so the primary

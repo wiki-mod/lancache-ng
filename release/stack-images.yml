@@ -1,3 +1,10 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Release manifest: declares the first-party runtime/tooling/metadata images,
+# their supported platforms and source Dockerfiles, the external
+# (third-party) images used by supported deploy profiles, the mutable/
+# immutable tag channels (sha, dev, edge, release candidate, stable, latest),
+# and the image retention policy. Consumed by the release/promotion CI
+# workflow and validated by scripts/validate-stack-images.sh.
 schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io

@@ -1,3 +1,5 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CodeQL configuration for security and quality scanning of GitHub Actions, Rust source, and web UI
 name: lancache-ng-codeql
 
 queries:

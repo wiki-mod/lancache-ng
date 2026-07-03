@@ -1,5 +1,9 @@
-# lancache-ng — https://github.com/wiki-mod/lancache-ng
-# Development Compose stack for local service builds and fixture configuration.
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Local development stack: proxy, DNS, DHCP, Admin UI, and supporting
+# services (NATS, docker-socket-proxy) wired up with dev-sized defaults
+# (small cache volume, offset DNS ports, query logging on). See CLAUDE.md's
+# "Dev vs Prod Split" for the differences from deploy/prod.
 
 name: lancache-ng
 

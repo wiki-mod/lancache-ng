@@ -1,4 +1,7 @@
 #!/bin/bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Health monitor, auto-restart on failure, and periodic cache-age purge daemon.
+
 set -euo pipefail
 
 DOCKER_PROXY_URL="${DOCKER_PROXY_URL:-http://docker-socket-proxy:2375}"

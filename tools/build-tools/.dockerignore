@@ -1,2 +1,5 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Docker build context — include only Dockerfile.
+
 *
 !Dockerfile

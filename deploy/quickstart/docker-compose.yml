@@ -1,5 +1,6 @@
-# lancache-ng — https://github.com/wiki-mod/lancache-ng
-# Quickstart Compose stack for a no-repo-clone install.
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# LanCache-NG — Quickstart (no repo clone needed)
 #
 # Prerequisites:
 #   1. Run setup.sh — configures .env and starts everything automatically

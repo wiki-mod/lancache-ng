@@ -1,3 +1,4 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! NATS configuration validation helpers.
 //!
 //! Runtime NATS config generation interpolates credentials into double-quoted

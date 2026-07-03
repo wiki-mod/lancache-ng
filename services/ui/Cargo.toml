@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Manifest for the lancache-ui monitoring dashboard.
+
 [package]
 name = "lancache-ui"
 version = "0.1.0"

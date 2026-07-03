@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# PowerDNS recursor config template: LAN zone forwarding to local authoritative server.
+
 incoming:
   listen:
     - 0.0.0.0

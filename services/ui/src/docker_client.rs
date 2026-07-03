@@ -1,3 +1,10 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Docker API access for the Admin UI: connecting to the proxy/socket,
+//! restarting a compose service by its `com.docker.compose.service` label,
+//! and running a one-off command inside a service's container via Docker
+//! exec.
+
 use anyhow::{Context, Result};
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};

@@ -1,3 +1,6 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Git ignore patterns for build artifacts, secrets, and generated files
+
 # Cache data - never commit
 data/
 
@@ -29,6 +32,7 @@ Thumbs.db
 
 # Rust build artifacts
 services/ui/target/
+services/dns/nats-subscriber/target/
 
 # Editor
 *.swp

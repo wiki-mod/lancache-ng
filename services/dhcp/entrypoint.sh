@@ -1,4 +1,12 @@
 #!/bin/bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Kea DHCP entrypoint. Validates required secrets, renders Kea config
+# templates from env vars on first boot, migrates existing runtime configs
+# (DDNS, lease lifetimes, NTP options) on upgrade, restricts the Control
+# Agent API to Docker-internal networks via iptables, and starts the Kea
+# DHCPv4, control-agent, and DHCP-DDNS processes.
+
 set -e
 
 install -d -m 750 /run/kea

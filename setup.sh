@@ -1,4 +1,6 @@
 #!/bin/bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
 # LanCache-NG — Guided setup script
 # Usage: ./setup.sh [command] [install-dir]
 set -euo pipefail

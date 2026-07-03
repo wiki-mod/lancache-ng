@@ -1,3 +1,9 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Runtime configuration for the Admin UI service: loads and validates
+//! settings from the process environment (auth, DHCP mode, HSTS mode, and
+//! related toggles) into a typed `Config`.
+
 use std::env;
 use std::fmt;
 

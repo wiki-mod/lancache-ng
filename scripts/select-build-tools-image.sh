@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CI helper that picks which build-tools image a job should use: prefers the
+# published ghcr.io build-tools image (smoke-tested for the required Rust/CI
+# tooling), and falls back to building a branch-local image only for trusted
+# refs (pushes, or same-repo pull requests) — untrusted forked pull requests
+# never trigger a fallback build. Prints the chosen image reference on stdout.
 set -euo pipefail
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
