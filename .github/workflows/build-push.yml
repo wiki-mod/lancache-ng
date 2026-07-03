@@ -198,21 +198,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          build_tools_ref="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          docker pull "$build_tools_ref" >/dev/null
+          validation_build_tools_image="$(bash scripts/select-build-tools-image.sh)"
+          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          docker pull "$downstream_build_tools_image" >/dev/null
 
-          build_tools_image="$(docker image inspect "$build_tools_ref" --format '{{index .RepoDigests 0}}')"
-          case "$build_tools_image" in
+          downstream_build_tools_image="$(docker image inspect "$downstream_build_tools_image" --format '{{index .RepoDigests 0}}')"
+          case "$downstream_build_tools_image" in
             *@sha256:*)
               ;;
             *)
-              echo "::error::Expected a digest-qualified build-tools image after pulling $build_tools_ref, got '$build_tools_image'."
+              echo "::error::Expected a digest-qualified build-tools image after pulling the published build-tools image, got '$downstream_build_tools_image'."
               exit 1
               ;;
           esac
 
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-          printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
+          printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
       - name: Validate stack image contract
         run: |
