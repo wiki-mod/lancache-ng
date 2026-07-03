@@ -1086,10 +1086,28 @@ migrate_env_for_update() {
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
 
-    is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start="10.0.0.0"
-    is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
-    is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_ssl:-$ip_standard}"
-    is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip="${dhcp_gateway:-$ip_standard}"
+    case "$dhcp_mode" in
+        dnsmasq-proxy)
+            is_valid_ipv4 "$dhcp_subnet_start" \
+                || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_SUBNET_START in $env_file. Set the proxy-DHCP subnet start for your LAN, then rerun setup.sh update."
+            is_valid_ipv4 "$dhcp_dns_primary" \
+                || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_DNS_PRIMARY in $env_file. Set the DNS option that proxy-DHCP/PXE clients should receive, then rerun setup.sh update."
+            if [[ -z "$dhcp_dns_secondary" ]]; then
+                dhcp_dns_secondary="$dhcp_dns_primary"
+            else
+                is_valid_ipv4 "$dhcp_dns_secondary" \
+                    || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty to reuse DHCP_DNS_PRIMARY."
+            fi
+            is_valid_ipv4 "$upstream_dhcp_ip" \
+                || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
+            ;;
+        *)
+            is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
+            is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
+            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_ssl:-$ip_standard}"
+            is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip=""
+            ;;
+    esac
 
     set_env_key DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
     set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
@@ -2420,10 +2438,10 @@ DHCP_SUBNET=${DHCP_SUBNET}
 DHCP_GATEWAY=${DHCP_GATEWAY}
 DHCP_RANGE_START=${DHCP_RANGE_START}
 DHCP_RANGE_END=${DHCP_RANGE_END}
-DHCP_SUBNET_START=${DHCP_SUBNET_START:-10.0.0.0}
-DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-$IP_STANDARD}
-DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-$IP_STANDARD}
-UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-$IP_STANDARD}}
+DHCP_SUBNET_START=${DHCP_SUBNET_START}
+DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
+DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
+UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
