@@ -1,10 +1,12 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Docker API access for the Admin UI, scoped to the narrow CONTAINERS/POST
-//! surface exposed by the docker-socket-proxy (no EXEC): connecting to the
-//! proxy/socket, restarting a compose service by its
-//! `com.docker.compose.service` label, and reading back a running
-//! container's image reference.
+//! surface exposed by the docker-socket-proxy (no EXEC, no container
+//! create/remove): connecting to the proxy/socket, restarting a compose
+//! service by its `com.docker.compose.service` label, and looking up a
+//! service's container ID (used by `routes::dhcp` to restart and attach to
+//! the predeclared `dhcp-probe` service instead of creating a container
+//! per check).
 
 use anyhow::{Context, Result};
 use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};
@@ -43,19 +45,7 @@ pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn container_image_for_service(docker: &Docker, service_name: &str) -> Result<String> {
-    let id = find_container_id(docker, service_name, false).await?;
-    let inspect = docker
-        .inspect_container(&id, None)
-        .await
-        .with_context(|| format!("Failed to inspect container for service '{}'", service_name))?;
-
-    inspect
-        .image
-        .with_context(|| format!("No image recorded for service '{}'", service_name))
-}
-
-async fn find_container_id(
+pub async fn find_container_id(
     docker: &Docker,
     service_name: &str,
     include_stopped: bool,

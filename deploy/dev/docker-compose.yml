@@ -61,7 +61,7 @@ services:
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-standard:/var/lib/powerdns
-      - pdns-filter-state:/var/lib/powerdns-state:ro
+      - pdns-filter-state:/var/lib/powerdns-state
     ports:
       # NOTE (Windows): Port 53 is used by the Windows DNS client.
       # Stop "DNS Client" in services.msc, or test the proxy directly:
@@ -100,7 +100,7 @@ services:
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-ssl:/var/lib/powerdns
-      - pdns-filter-state:/var/lib/powerdns-state:ro
+      - pdns-filter-state:/var/lib/powerdns-state
     ports:
       - "${IP_SSL}:5353:53/udp"
       - "${IP_SSL}:5353:53/tcp"
@@ -210,6 +210,28 @@ services:
     profiles:
       - dhcp-proxy
     restart: unless-stopped
+
+  # ── DHCP conflict probe ────────────────────────────────────────────────────
+  # Predeclared, start/restart-only helper for the Admin UI's "check for other
+  # DHCP servers" feature. Reuses the UI image (already has nmap installed).
+  # The Admin UI restarts this container on demand and reads its output —
+  # it never creates or removes it — so the narrowed docker-socket-proxy only
+  # needs to permit start/restart, the same capability class already used for
+  # the NATS and proxy-ssl reload flows, not generic container creation.
+  dhcp-probe:
+    container_name: lancache-dhcp-probe
+    build:
+      context: ../../services/ui
+    entrypoint: ["nmap"]
+    command:
+      - --script
+      - broadcast-dhcp-discover
+      - -e
+      - any
+      - --script-args
+      - broadcast-dhcp-discover.timeout=5
+    network_mode: host
+    restart: "no"
 
   # ── NATS (message bus for DNS record sync) ────────────────────────────────
   nats:

@@ -193,7 +193,7 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
     volumes:
       - pdns-data-standard:/var/lib/powerdns
-      - pdns-filter-state:/var/lib/powerdns-state:ro
+      - pdns-filter-state:/var/lib/powerdns-state
     depends_on:
       - nats
     ports:
@@ -226,7 +226,7 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
     volumes:
       - pdns-data-ssl:/var/lib/powerdns
-      - pdns-filter-state:/var/lib/powerdns-state:ro
+      - pdns-filter-state:/var/lib/powerdns-state
     depends_on:
       - nats
     ports:
@@ -361,6 +361,28 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+  # ── DHCP conflict probe ────────────────────────────────────────────────────
+  # Predeclared, start/restart-only helper for the Admin UI's "check for other
+  # DHCP servers" feature. Reuses the UI image (already has nmap installed).
+  # The Admin UI restarts this container on demand and reads its output —
+  # it never creates or removes it — so the narrowed docker-socket-proxy only
+  # needs to permit start/restart, the same capability class already used for
+  # the NATS and proxy-ssl reload flows, not generic container creation.
+  dhcp-probe:
+    container_name: lancache-dhcp-probe
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
+    entrypoint: ["nmap"]
+    command:
+      - --script
+      - broadcast-dhcp-discover
+      - -e
+      - any
+      - --script-args
+      - broadcast-dhcp-discover.timeout=5
+    network_mode: host
+    restart: "no"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   # ── Admin UI ───────────────────────────────────────────────────────────────
   # UI is LAN-reachable by default for the quickstart workflow. Password protection

@@ -130,7 +130,24 @@ if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     chown pdns:pdns /var/lib/powerdns/pdns.sqlite3
 fi
 
-# ── 4. Create LAN Zones ──────────────────────────────────────────────────────
+# ── 4. Migrate Legacy AAAA Filter Marker ─────────────────────────────────────
+# The AAAA filter marker moved from this container's own data volume
+# (toggled via `docker exec` before the Docker socket proxy was narrowed) to
+# the shared /var/lib/powerdns-state volume the Admin UI now toggles instead.
+# This container is the only one that can ever see the old marker (it lived
+# in this container's own /var/lib/powerdns), so it owns migrating it forward
+# one time; the Admin UI has no access to /var/lib/powerdns to do this itself.
+LEGACY_AAAA_FILTER_MARKER="/var/lib/powerdns/aaaa-filter-enabled"
+AAAA_FILTER_STATE_DIR="/var/lib/powerdns-state"
+AAAA_FILTER_MARKER="${AAAA_FILTER_STATE_DIR}/aaaa-filter-enabled"
+if [ -f "$LEGACY_AAAA_FILTER_MARKER" ] && [ ! -f "$AAAA_FILTER_MARKER" ]; then
+    echo "[lancache-dns] Migrating legacy AAAA filter marker to shared state volume..."
+    mkdir -p "$AAAA_FILTER_STATE_DIR"
+    touch "$AAAA_FILTER_MARKER"
+    rm -f "$LEGACY_AAAA_FILTER_MARKER"
+fi
+
+# ── 5. Create LAN Zones ──────────────────────────────────────────────────────
 echo "[lancache-dns] Creating LAN zones in authoritative database..."
 
 # Create LAN zones (will not error if already exist)
@@ -145,7 +162,7 @@ done
 
 configure_ddns_tsig
 
-# ── 5. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
+# ── 6. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
 SERIAL=$(date +%s | tail -c 11)
 RPZ_FILE="/var/lib/powerdns/rpz.zone"
@@ -192,7 +209,7 @@ count=$(grep -c "^[a-zA-Z*]" "$RPZ_FILE" 2>/dev/null || true)
 echo "[lancache-dns] RPZ zone: ${count:-0} records written."
 chown pdns:pdns "$RPZ_FILE"
 
-# ── 6. Start Both Processes (with restart loops) ─────────────────────────────
+# ── 7. Start Both Processes (with restart loops) ─────────────────────────────
 echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
@@ -234,7 +251,7 @@ fi
 run_recursor &
 REC_PID=$!
 
-# ── 7. Start NATS Subscriber ────────────────────────────────────────────────
+# ── 8. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
         nats-subscriber || true
