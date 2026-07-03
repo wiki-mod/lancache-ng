@@ -1,6 +1,10 @@
 {# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 
-   Base HTML layout template for all pages. #}
+   Root Tera layout every other template under this directory extends. Defines
+   the sidebar navigation (Dashboard/DHCP/Domains/Statistiken/Logs/Einrichtung/
+   Secondaries, active-page highlighting via the `active_page` context var),
+   links the compiled Tailwind output (/static/admin.css), and declares the
+   `title`, `content`, and `scripts` blocks that child templates override. #}
 <!DOCTYPE html>
 <html lang="de" class="h-full">
 <head>

@@ -1,7 +1,15 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# LanCache-NG — Guided setup script
+# Guided lifecycle CLI for a lancache-ng installation. Subcommands: install
+# (interactive first-time setup — installs Docker/Compose if missing on
+# Debian/Ubuntu/RHEL-family hosts, writes .env with generated secrets,
+# configures DHCP mode/cache sizing/DNS IPs, enables the systemd
+# service+converge timer, and starts the stack), update, update-ip, debug,
+# secondary (register/rotate a secondary DNS node against a primary),
+# backup, and restore. Also hosts the shared .env helpers (read/write/
+# generate secret values, validate CIDR/DHCP-mode input) reused by the
+# secondary registration flow.
 # Usage: ./setup.sh [command] [install-dir]
 set -euo pipefail
 export LANG=C LC_ALL=C
