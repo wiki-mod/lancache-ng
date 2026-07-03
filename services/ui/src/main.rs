@@ -369,18 +369,11 @@ async fn main() -> Result<()> {
         );
         std::process::exit(1);
     }
-    if cfg.nats_ui_user.is_empty()
-        || cfg.nats_ui_password.is_empty()
-        || cfg.nats_dns_writer_user.is_empty()
-        || cfg.nats_dns_writer_password.is_empty()
-        || cfg.nats_dns_reader_user.is_empty()
-        || cfg.nats_dns_reader_password.is_empty()
-    {
-        tracing::error!(
-            "NATS role credentials are incomplete — refusing to start. \
-             Set NATS_UI_USER/NATS_UI_PASSWORD, NATS_DNS_WRITER_USER/NATS_DNS_WRITER_PASSWORD, \
-             and NATS_DNS_READER_USER/NATS_DNS_READER_PASSWORD."
-        );
+
+    // Validate before the retry loop so bad env overrides fail closed instead
+    // of leaving the UI waiting for a NATS container with an invalid config.
+    if let Err(message) = nats_config::validate_runtime_nats_credentials(&cfg) {
+        tracing::error!("{message}");
         std::process::exit(1);
     }
 

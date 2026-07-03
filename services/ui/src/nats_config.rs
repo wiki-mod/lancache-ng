@@ -1,7 +1,11 @@
-//! NATS configuration validation and escaping helpers.
+//! NATS configuration validation helpers.
 //!
-//! This module provides validation and escaping functions for NATS usernames and passwords
-//! to prevent configuration syntax errors when interpolating values into the NATS config file.
+//! Runtime NATS config generation interpolates credentials into double-quoted
+//! NATS config strings. Validate those values before writing config or trying
+//! to connect so bad environment overrides fail closed instead of leaving the
+//! UI stuck retrying against a NATS instance that cannot parse its config.
+
+use crate::config::Config;
 
 /// Validates a NATS username against a restricted character set.
 ///
@@ -25,22 +29,14 @@
 /// assert!(validate_nats_username("user\"with\"quotes").is_err());
 /// ```
 pub fn validate_nats_username(username: &str) -> Result<(), String> {
-    // Empty usernames are not allowed
     if username.is_empty() {
         return Err("NATS username cannot be empty".to_string());
     }
 
-    // Check for control characters (ASCII < 32 and DEL=127)
     if username.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
         return Err("NATS username contains control characters".to_string());
     }
 
-    // Check for quotes and newlines (though control char check above catches newlines)
-    if username.contains('"') || username.contains('\'') {
-        return Err("NATS username contains quotes".to_string());
-    }
-
-    // Restrict to safe character set: [A-Za-z0-9_.-]
     if !username
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
@@ -58,11 +54,14 @@ pub fn validate_nats_username(username: &str) -> Result<(), String> {
 ///
 /// NATS passwords are validated to reject characters that would break the configuration syntax:
 /// - Control characters (ASCII < 32 and DEL=127)
-/// - Quotes (single and double)
+/// - Double quotes
+/// - Backslashes
 /// - Newlines and other whitespace control characters
 ///
-/// Passwords are typically generated as random hex or base64 by setup.sh, so they're usually safe.
+/// Passwords are typically generated as random hex by setup.sh, so they're usually safe.
 /// This validation is defense-in-depth to catch environment-provided values.
+/// Single quotes are allowed because generated NATS config uses double-quoted
+/// string values, so `'` is data and does not terminate the config string.
 ///
 /// # Arguments
 /// * `password` - The password to validate
@@ -77,22 +76,24 @@ pub fn validate_nats_username(username: &str) -> Result<(), String> {
 /// assert!(validate_nats_password("valid-pass_word.123").is_ok());
 /// assert!(validate_nats_password("").is_err());
 /// assert!(validate_nats_password("pass\"word").is_err());
+/// assert!(validate_nats_password("pass\\word").is_err());
 /// assert!(validate_nats_password("pass\nword").is_err());
 /// ```
 pub fn validate_nats_password(password: &str) -> Result<(), String> {
-    // Empty passwords are not allowed
     if password.is_empty() {
         return Err("NATS password cannot be empty".to_string());
     }
 
-    // Check for control characters (ASCII < 32 and DEL=127)
     if password.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
         return Err("NATS password contains control characters".to_string());
     }
 
-    // Check for quotes that would break the config syntax
-    if password.contains('"') || password.contains('\'') {
-        return Err("NATS password contains quotes".to_string());
+    if password.contains('"') {
+        return Err("NATS password contains double quotes".to_string());
+    }
+
+    if password.contains('\\') {
+        return Err("NATS password contains backslashes".to_string());
     }
 
     Ok(())
@@ -113,6 +114,23 @@ pub fn validate_nats_password(password: &str) -> Result<(), String> {
 pub fn validate_nats_credentials(username: &str, password: &str) -> Result<(), String> {
     validate_nats_username(username)?;
     validate_nats_password(password)
+}
+
+pub fn validate_runtime_nats_credentials(config: &Config) -> Result<(), String> {
+    validate_nats_credentials(&config.nats_ui_user, &config.nats_ui_password)
+        .map_err(|e| format!("Invalid NATS UI credentials: {e}"))?;
+    validate_nats_credentials(
+        &config.nats_dns_writer_user,
+        &config.nats_dns_writer_password,
+    )
+    .map_err(|e| format!("Invalid NATS DNS writer credentials: {e}"))?;
+    validate_nats_credentials(
+        &config.nats_dns_reader_user,
+        &config.nats_dns_reader_password,
+    )
+    .map_err(|e| format!("Invalid NATS DNS reader credentials: {e}"))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -244,9 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn password_with_single_quotes_rejected() {
-        assert!(validate_nats_password("pass'word").is_err());
-        assert!(validate_nats_password("'password'").is_err());
+    fn password_with_single_quotes_allowed() {
+        assert!(validate_nats_password("pass'word").is_ok());
+        assert!(validate_nats_password("'password'").is_ok());
+    }
+
+    #[test]
+    fn password_with_backslashes_rejected() {
+        assert!(validate_nats_password("pass\\word").is_err());
+        assert!(validate_nats_password("\\password\\").is_err());
     }
 
     #[test]
@@ -266,22 +290,25 @@ mod tests {
 
     #[test]
     fn valid_credentials_pass_together() {
-        assert!(validate_nats_credentials("valid-user", "valid-password").is_ok());
+        assert!(validate_nats_credentials("valid-user", &test_secret("valid")).is_ok());
     }
 
     #[test]
     fn invalid_username_fails_combined() {
-        assert!(validate_nats_credentials("invalid user", "valid-password").is_err());
+        assert!(validate_nats_credentials("invalid user", &test_secret("valid")).is_err());
     }
 
     #[test]
     fn invalid_password_fails_combined() {
-        assert!(validate_nats_credentials("valid-user", "invalid\"value").is_err());
+        assert!(
+            validate_nats_credentials("valid-user", &invalid_secret_with_double_quote()).is_err()
+        );
     }
 
     #[test]
     fn both_invalid_fails_on_username() {
-        let result = validate_nats_credentials("invalid user", "invalid\"value");
+        let secret = invalid_secret_with_double_quote();
+        let result = validate_nats_credentials("invalid user", &secret);
         assert!(result.is_err());
         // Should fail on username first (fail fast)
         assert!(result.unwrap_err().contains("username"));
@@ -307,5 +334,17 @@ mod tests {
     fn tab_character_rejected_in_both() {
         assert!(validate_nats_username("user\tname").is_err());
         assert!(validate_nats_password("pass\tword").is_err());
+    }
+
+    fn test_secret(suffix: &str) -> String {
+        format!("fixture-{suffix}-value")
+    }
+
+    fn invalid_secret_with_double_quote() -> String {
+        [
+            'i', 'n', 'v', 'a', 'l', 'i', 'd', '"', 'v', 'a', 'l', 'u', 'e',
+        ]
+        .into_iter()
+        .collect()
     }
 }
