@@ -479,6 +479,10 @@ jobs:
             echo "::error::Rust CI jobs must not disable RUSTC_WRAPPER directly; use cargo-with-sccache-fallback for controlled fallback."
             exit 1
           fi
+          if grep -RIn -- 'timeout --foreground' .github/actions/cargo-with-sccache-fallback/action.yml; then
+            echo "::error::cargo-with-sccache-fallback must not use timeout --foreground because it can leave Cargo child processes alive and bypass the fallback."
+            exit 1
+          fi
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'dist-scheduler-url:' "$workflow" >/dev/null \
               && grep -F 'SCCACHE_DIST_SCHEDULER_URL' "$workflow" >/dev/null \
@@ -779,7 +783,7 @@ jobs:
         with:
           command: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
-        timeout-minutes: 15
+        timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
@@ -835,7 +839,7 @@ jobs:
         with:
           command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
-        timeout-minutes: 15
+        timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings

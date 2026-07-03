@@ -82,7 +82,7 @@ runs:
           local status
 
           set +e
-          timeout --foreground "${timeout_seconds}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
+          timeout --kill-after=30s "${timeout_seconds}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
           status="${PIPESTATUS[0]}"
           set -e
 
