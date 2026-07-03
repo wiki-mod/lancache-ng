@@ -84,6 +84,13 @@ not by appending new comments each time something is fixed or added.
   - explain any intentional risk,
   - and include PR links to all impacted issue threads.
 
+## Code comments and file headers
+
+These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
+
+- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
+- **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
+
 ## Local checks
 
 Run the checks that match your change.
