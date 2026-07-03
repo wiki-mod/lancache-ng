@@ -990,7 +990,7 @@ resolve_lancache_image_tag() {
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
-    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_gateway dhcp_subnet_start ip_standard upstream_dhcp_ip
+    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -1080,7 +1080,6 @@ migrate_env_for_update() {
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
     ip_standard=$(get_env_var IP_STANDARD "$env_file")
     ip_ssl=$(get_env_var IP_SSL "$env_file")
-    dhcp_gateway=$(get_env_var DHCP_GATEWAY "$env_file")
     dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file")
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
