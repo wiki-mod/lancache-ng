@@ -168,6 +168,8 @@ fi
     echo "@ NS localhost."
     echo ""
     while IFS= read -r domain || [ -n "$domain" ]; do
+        domain="${domain#"${domain%%[![:space:]]*}"}"
+        domain="${domain%"${domain##*[![:space:]]}"}"
         [[ -z "$domain" || "$domain" == \#* ]] && continue
         is_wildcard_only=0
         if [[ "$domain" == .* ]]; then

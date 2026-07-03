@@ -1,4 +1,9 @@
 #!/bin/bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Nginx proxy entrypoint. Generates TLS interception certificates, renders
+# request policy maps from cdn-ssl-domains.txt, and starts the combined HTTP
+# plus HTTPS proxy configuration.
 set -euo pipefail
 
 CA_DIR="/etc/nginx/ssl/ca"
@@ -125,24 +130,27 @@ _is_valid_domain() {
 # normalized domains) and _DOMAIN_IS_ROOT (domain -> 1 if root coverage is
 # needed, 0 if wildcard-only). This exists because the domains file can now
 # legitimately list both "example.com" (root) and ".example.com"
-# (wildcard-only) as separate lines for the same base domain (#354/CR leading
-# dot). Without deduplicating by normalized domain first, each map-generation
+# (wildcard-only) as separate lines for the same base domain. Without
+# deduplicating by normalized domain first, each map-generation
 # loop would emit the identical "*.example.com" map key twice — one per
 # source line — and nginx's map directive rejects duplicate keys at
 # "nginx -t" time, leaving the SSL proxy unable to start. When a domain
-# appears as both forms, root wins (root coverage already implies the
-# wildcard rows, so this is a safe, lossless merge, not a silent drop).
+# appears as both forms, root wins because the root entry explicitly allows
+# both the exact root and wildcard subdomains.
 declare -a _UNIQUE_DOMAINS=()
 declare -A _DOMAIN_IS_ROOT=()
 _collect_domain_rows() {
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
-    local domain is_wildcard_only
+    local raw_domain domain is_wildcard_only
 
-    while IFS= read -r domain || [ -n "$domain" ]; do
+    while IFS= read -r raw_domain || [ -n "$raw_domain" ]; do
+        domain="${raw_domain#"${raw_domain%%[![:space:]]*}"}"
+        domain="${domain%"${domain##*[![:space:]]}"}"
         [[ -z "$domain" || "$domain" == \#* ]] && continue
 
-        # Track wildcard-only intent BEFORE normalization
+        # Track wildcard-only intent after trimming, but before normalization
+        # strips the leading dot.
         is_wildcard_only=0
         if [[ "$domain" == .* ]]; then
             is_wildcard_only=1
@@ -334,7 +342,7 @@ fi
     for domain in "${_UNIQUE_DOMAINS[@]}"; do
         printf "    %-45s %s;\n" "*.${domain}"  "$domain"
         if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
-            printf "    %-45s %s;\n" ".$domain" "$domain"
+            printf "    %-45s %s;\n" "$domain" "$domain"
         fi
     done
     echo "    default default;"
@@ -348,7 +356,7 @@ fi
         for domain in "${_UNIQUE_DOMAINS[@]}"; do
             printf "    %-45s 1;\n" "*.${domain}"
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
-                printf "    %-45s 1;\n" ".$domain"
+                printf "    %-45s 1;\n" "$domain"
             fi
         done
     else
@@ -382,7 +390,7 @@ mkdir -p /etc/nginx/stream.d
         for domain in "${_UNIQUE_DOMAINS[@]}"; do
             printf "    %-45s %s:443;\n" "*.${domain}" "$domain"
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
-                printf "    %-45s %s:443;\n" ".$domain" "$domain"
+                printf "    %-45s %s:443;\n" "$domain" "$domain"
             fi
         done
     fi

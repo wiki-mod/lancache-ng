@@ -1,3 +1,8 @@
+//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! Admin UI domain routes. Handles CDN domain lists, SSL wildcard scope, and
+//! LAN DNS records while preserving the on-disk domain-file semantics.
+
 use crate::{docker_client, AppState};
 use axum::extract::{Form, State};
 use axum::response::{Html, Redirect};
@@ -790,6 +795,10 @@ mod tests {
         assert_eq!(
             normalize_domain_entry(".SteamContent.COM").as_deref(),
             Some("steamcontent.com")
+        );
+        assert_eq!(
+            parse_domain_entry(" .SteamContent.COM "),
+            Some(domain_spec("steamcontent.com", true))
         );
 
         assert!(!is_valid_domain("localhost"));
