@@ -1,3 +1,6 @@
+# lancache-ng — https://github.com/wiki-mod/lancache-ng
+# Builds, tests, scans, and publishes lancache-ng service images.
+
 name: Build & Push
 
 on:
@@ -338,6 +341,34 @@ jobs:
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
+
+          validate_nats_config_ownership() {
+            local path
+
+            for path in \
+              deploy/dev/docker-compose.yml \
+              deploy/prod/docker-compose.yml \
+              deploy/quickstart/docker-compose.yml
+            do
+              grep -Fq 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"' "$path" \
+                || {
+                  printf '::error file=%s::NATS must stage the shared config in a temp file inside /etc/nats.\n' "$path"
+                  return 1
+                }
+              grep -Fq 'chown 10001:10001 "$$tmp_nats_conf"' "$path" \
+                || {
+                  printf '::error file=%s::NATS must restore shared config ownership to UID/GID 10001 after writing.\n' "$path"
+                  return 1
+                }
+              grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "$path" \
+                || {
+                  printf '::error file=%s::NATS must atomically replace the shared nats.conf after fixing ownership.\n' "$path"
+                  return 1
+                }
+            done
+          }
+
+          validate_nats_config_ownership
 
           missing_required=0
           while IFS= read -r key; do
