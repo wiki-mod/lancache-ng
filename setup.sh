@@ -218,6 +218,28 @@ apt_compose_package() {
 # Docker bootstrap is a first-install convenience, not a build environment
 # contract. Changes here affect production setup directly and must stay separate
 # from future dev-mode/compiler-farm decisions.
+verify_docker_installation() {
+    command -v docker >/dev/null 2>&1 \
+        || die "Docker client binary is missing after installation."
+
+    docker compose version >/dev/null 2>&1 \
+        || die "Docker Compose v2 is missing after installation."
+}
+
+ensure_apt_docker_client() {
+    if command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if apt_package_available docker-cli; then
+        print_warn "docker.io did not provide /usr/bin/docker; installing docker-cli for the Docker client."
+        apt-get install -y --no-install-recommends docker-cli
+    fi
+
+    command -v docker >/dev/null 2>&1 \
+        || die "Docker client binary is missing after installation. Install docker-cli or docker-ce-cli manually, then rerun setup.sh."
+}
+
 install_docker_apt_repo() {
     local os_id="" codename="" repo_file=""
 
@@ -268,7 +290,12 @@ install_docker_apt() {
         apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io "$compose_package"
     else
         apt-get install -y --no-install-recommends docker.io "$compose_package"
+        # Debian Trixie splits the Docker client into docker-cli, so install it
+        # only when docker.io did not already provide /usr/bin/docker.
+        ensure_apt_docker_client
     fi
+
+    verify_docker_installation
 }
 
 install_docker_compose_apt() {
@@ -283,6 +310,32 @@ install_docker_compose_apt() {
     fi
 
     apt-get install -y --no-install-recommends "$compose_package"
+    verify_docker_installation
+}
+
+rpm_installed_package_list() {
+    local package
+
+    for package in "$@"; do
+        rpm -q "$package" >/dev/null 2>&1 && printf '%s\n' "$package"
+    done
+}
+
+rpm_conflicting_docker_packages() {
+    rpm_installed_package_list podman-docker podman runc
+}
+
+guard_rpm_docker_conflicts() {
+    local package
+    local -a conflicts=()
+
+    while IFS= read -r package; do
+        [[ -n "$package" ]] && conflicts+=("$package")
+    done < <(rpm_conflicting_docker_packages)
+
+    (( ${#conflicts[@]} == 0 )) && return 0
+
+    die "Docker's RPM packages conflict with these installed packages: ${conflicts[*]}. Remove them first (for example: dnf remove ${conflicts[*]}), then rerun setup.sh."
 }
 
 docker_rpm_repo_url() {
@@ -306,11 +359,23 @@ docker_rpm_repo_url() {
 install_docker_rpm() {
     local manager="$1"
     shift
-    local repo_url
+    local repo_url needs_engine=0 package
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
         packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+    fi
+
+    for package in "${packages[@]}"; do
+        case "$package" in
+            docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin)
+                needs_engine=1
+                break
+                ;;
+        esac
+    done
+    if (( needs_engine )); then
+        guard_rpm_docker_conflicts
     fi
 
     repo_url=$(docker_rpm_repo_url)
@@ -324,6 +389,8 @@ install_docker_rpm() {
         yum-config-manager --add-repo "$repo_url"
         yum install -y "${packages[@]}"
     fi
+
+    verify_docker_installation
 }
 
 install_docker_compose() {
@@ -563,7 +630,8 @@ set_env_key() {
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
-    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    # Empty existing values are treated as missing so update can heal `KEY=`.
+    env_key_has_value "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
 }
 
 append_env_assignment_if_missing() {
@@ -580,14 +648,17 @@ append_env_assignment_if_missing() {
     esac
     # Migration-only helper: duplicate an existing Compose .env assignment
     # without destroying supported interpolation such as ${LAN_CACHE_ROOT:-...}.
-    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+    # Empty existing values are treated as missing so update can repair them.
+    env_key_has_value "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
 append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local source_assignment source_value
 
-    if env_key_exists "$target_key" "$env_file"; then
+    # Treat empty migrated values as missing so update can repair broken
+    # installs that were left with `KEY=` placeholders.
+    if env_key_has_value "$target_key" "$env_file"; then
         return 0
     fi
 
