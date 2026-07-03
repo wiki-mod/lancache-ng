@@ -33,12 +33,14 @@ The script runs, in this order:
 You can override the image for investigation:
 
 ```bash
-./scripts/ui-rust-checks.sh --rust-image rust:latest
+./scripts/ui-rust-checks.sh --rust-image rust:latest --no-fmt --no-clippy
 ```
 
 If you override the image, it must already contain `rustfmt`, `clippy`, and
 `sccache` when you use the corresponding checks. The script no longer installs
-missing Rust tooling inside the container.
+missing Rust tooling inside the container. Plain `rust:latest` is useful for
+limited investigation, but it does not provide the full default check contract
+unless you prepare an image with the required components installed.
 
 ### Optional sccache with Redis
 

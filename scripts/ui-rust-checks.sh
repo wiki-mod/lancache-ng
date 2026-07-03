@@ -1,4 +1,6 @@
 #!/bin/bash
+# lancache-ng — https://github.com/wiki-mod/lancache-ng
+# Runs Docker-based Rust quality checks for the Admin UI without requiring host Rust tooling.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,14 +47,15 @@ Options:
 
 Examples:
   $0
-  $0 --rust-image rust:latest
+  $0 --rust-image rust:latest --no-fmt --no-clippy
   SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 $0 --sccache
   $0 --with-redis --sccache
 
 Notes:
   The build-tools image is the default contract for local and CI-style checks.
   Custom images must already include the Rust tools needed by the requested
-  checks; this script no longer bootstraps them.
+  checks; plain rust:latest needs --no-fmt --no-clippy unless you prepare an
+  image with rustfmt and clippy installed.
 EOF
 }
 
