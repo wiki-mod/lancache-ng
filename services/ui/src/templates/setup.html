@@ -22,7 +22,7 @@
     {% elif dhcp_mode == "kea" %}
       <p class="text-xs text-slate-500">Kea is active in full mode: DNS, options, reservations, and leases can be managed here.</p>
     {% else %}
-      <p class="text-xs text-amber-300">dnsmasq proxy mode is active in limited mode: only DHCP relay and DNS overrides are configured.</p>
+      <p class="text-xs text-amber-300">dnsmasq proxy mode is active in limited mode: it only serves proxy-DHCP/PXE clients and does not reliably replace DNS options from a normal router DHCP server.</p>
       <p class="text-xs text-slate-500">Kea configuration pages are intentionally limited in this mode.</p>
     {% endif %}
   </div>

@@ -1085,10 +1085,16 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
-    append_env_key_if_missing DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
-    append_env_key_if_missing DHCP_DNS_PRIMARY "${dhcp_dns_primary:-$ip_standard}" "$env_file"
-    append_env_key_if_missing DHCP_DNS_SECONDARY "${dhcp_dns_secondary:-${ip_ssl:-$ip_standard}}" "$env_file"
-    append_env_key_if_missing UPSTREAM_DHCP_IP "${upstream_dhcp_ip:-$dhcp_gateway}" "$env_file"
+
+    is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start="10.0.0.0"
+    is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
+    is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_ssl:-$ip_standard}"
+    is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip="${dhcp_gateway:-$ip_standard}"
+
+    set_env_key DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
+    set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
+    set_env_key DHCP_DNS_SECONDARY "$dhcp_dns_secondary" "$env_file"
+    set_env_key UPSTREAM_DHCP_IP "$upstream_dhcp_ip" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -2183,7 +2189,7 @@ fi
 print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
-printf "  dnsmasq-proxy: experimental proxy-DHCP helper; normal clients usually keep router DNS\n"
+printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
