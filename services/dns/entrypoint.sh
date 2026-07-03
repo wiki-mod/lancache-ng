@@ -3,11 +3,9 @@
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
 # (with monotonic serial handling), renders the recursor/authoritative config
-# templates, configures DDNS TSIG auth (configure_ddns_tsig), and starts one
-# of three roles depending on how this container was invoked: the
-# authoritative server (run_auth), the recursor (run_recursor), or this
-# service's own NATS subscriber process (run_nats_subscriber) that keeps DNS
-# records in sync with changes made via the Admin UI.
+# templates, configures DDNS TSIG auth (configure_ddns_tsig), and starts the
+# authoritative server, recursor, and NATS subscriber in one container so DNS
+# records stay aligned with Admin UI changes.
 set -euo pipefail
 
 # ── Setup Variables ──────────────────────────────────────────────────────────
