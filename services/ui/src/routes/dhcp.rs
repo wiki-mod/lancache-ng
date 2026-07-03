@@ -763,11 +763,16 @@ async fn run_dhcp_conflict_probe(
             .await
             .context("start DHCP probe container")?;
 
+        // `logs(true)` replays output the probe already wrote between
+        // start_container above and this attach call — without it, a fast
+        // probe that answers and exits before the attach is established
+        // would have its "Server Identifier" line silently dropped.
         let mut attach = docker
             .attach_container(
                 &id,
                 Some(
                     AttachContainerOptionsBuilder::default()
+                        .logs(true)
                         .stdout(true)
                         .stderr(true)
                         .stream(true)

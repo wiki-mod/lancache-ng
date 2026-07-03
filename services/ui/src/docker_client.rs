@@ -1,9 +1,10 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
-//! Docker API access for the Admin UI: connecting to the proxy/socket,
-//! restarting a compose service by its `com.docker.compose.service` label,
-//! and running a one-off command inside a service's container via Docker
-//! exec.
+//! Docker API access for the Admin UI, scoped to the narrow CONTAINERS/POST
+//! surface exposed by the docker-socket-proxy (no EXEC): connecting to the
+//! proxy/socket, restarting a compose service by its
+//! `com.docker.compose.service` label, and reading back a running
+//! container's image reference.
 
 use anyhow::{Context, Result};
 use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};

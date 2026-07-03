@@ -1,7 +1,9 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# CI pipeline that detects changed paths on PRs, builds, tests, and scans each
-# Rust/Docker service (dns, ui, watchdog, dhcp, dhcp-proxy, proxy), and publishes
-# multi-arch images to GHCR on master pushes and version tags.
+#
+# Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
+# crates and shell scripts, validates the docker-compose files, scans
+# container images, then builds, pushes, promotes, and releases the stack
+# images on the relevant triggers.
 
 name: Build & Push
 

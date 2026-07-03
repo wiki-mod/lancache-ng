@@ -449,6 +449,10 @@ async fn main() -> Result<()> {
     });
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up the new config.
+    // restart_container() does not refresh the NATS container's own environment, so its
+    // startup script now only (re)generates nats.conf when the shared file doesn't exist yet
+    // (see the `nats` service's `command` in the compose files) — it will not clobber the
+    // file we just wrote here.
     if let Err(e) = routes::secondaries::update_nats_conf(&state).await {
         tracing::warn!("Could not write initial nats.conf: {}", e);
     } else {
