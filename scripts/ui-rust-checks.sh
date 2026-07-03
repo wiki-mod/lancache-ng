@@ -1,12 +1,15 @@
 #!/bin/bash
+# lancache-ng — https://github.com/wiki-mod/lancache-ng
+# Runs Docker-based Rust quality checks for the Admin UI without requiring host Rust tooling.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
 UI_MANIFEST="services/ui/Cargo.toml"
 # Intentional developer/check default: use the repository build-tools image.
-# That image is based on rust:latest and preinstalls rustfmt, clippy, sccache,
-# and PATH smoke tests. This is separate from pinned production Dockerfiles.
+# That image is the contract for local and CI-style UI checks and preinstalls
+# rustfmt, clippy, sccache, and PATH smoke tests. This is separate from pinned
+# production Dockerfiles.
 RUST_IMAGE="${RUST_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
 NETWORK_NAME=""
 REDIS_CONTAINER=""
@@ -44,9 +47,15 @@ Options:
 
 Examples:
   $0
-  $0 --rust-image rust:latest
+  $0 --rust-image rust:latest --no-fmt --no-clippy
   SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 $0 --sccache
   $0 --with-redis --sccache
+
+Notes:
+  The build-tools image is the default contract for local and CI-style checks.
+  Custom images must already include the Rust tools needed by the requested
+  checks; plain rust:latest needs --no-fmt --no-clippy unless you prepare an
+  image with rustfmt and clippy installed.
 EOF
 }
 
@@ -184,7 +193,7 @@ if [[ ${ENABLE_SCCACHE} -eq 1 && ${START_REDIS} -eq 1 ]]; then
 fi
 
 if [[ "${UI_MANIFEST_ABS}" == "${ROOT_DIR}"/* ]]; then
-  UI_MANIFEST="${UI_MANIFEST_ABS#${ROOT_DIR}/}"
+  UI_MANIFEST="${UI_MANIFEST_ABS#"$ROOT_DIR"/}"
 else
   fail "Manifest path ${UI_MANIFEST} is outside the current repository root"
 fi
@@ -218,34 +227,34 @@ if [[ -n "${NETWORK_NAME}" ]]; then
 fi
 
 CONTAINER_CMD=$'set -euo pipefail\n'
+CONTAINER_CMD+=$'require_tool() {\n'
+CONTAINER_CMD+=$'  local tool="$1"\n'
+CONTAINER_CMD+=$'  local message="$2"\n'
+CONTAINER_CMD+=$'  if ! command -v "$tool" >/dev/null 2>&1; then\n'
+CONTAINER_CMD+=$'    echo "Error: ${message}" >&2\n'
+CONTAINER_CMD+=$'    exit 1\n'
+CONTAINER_CMD+=$'  fi\n'
+CONTAINER_CMD+=$'}\n'
+CONTAINER_CMD+=$'require_cargo_subcommand() {\n'
+CONTAINER_CMD+=$'  local subcommand="$1"\n'
+CONTAINER_CMD+=$'  local message="$2"\n'
+CONTAINER_CMD+=$'  if ! cargo "$subcommand" --version >/dev/null 2>&1; then\n'
+CONTAINER_CMD+=$'    echo "Error: ${message}" >&2\n'
+CONTAINER_CMD+=$'    exit 1\n'
+CONTAINER_CMD+=$'  fi\n'
+CONTAINER_CMD+=$'}\n'
+CONTAINER_CMD+=$'require_tool cargo "cargo is required. Use the build-tools image or provide an image that already includes cargo."\n'
+CONTAINER_CMD+=$'require_tool rustc "rustc is required. Use the build-tools image or provide an image that already includes rustc."\n'
 if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
-  CONTAINER_CMD+=$'if ! command -v sccache >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'  echo "sccache is missing in the selected Rust image. Use the build-tools image or another image with preinstalled sccache." >&2\n'
-  CONTAINER_CMD+=$'  exit 1\n'
-  CONTAINER_CMD+=$'fi\n'
+  CONTAINER_CMD+=$'require_tool sccache "sccache is required when --sccache is enabled. Use the build-tools image or provide an image that already includes sccache."\n'
 fi
 CONTAINER_CMD+=$'cargo --version\n'
 CONTAINER_CMD+=$'rustc --version\n'
-
 if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
-  CONTAINER_CMD+=$'if ! cargo fmt --version >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'  if command -v rustup >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'    rustup component add rustfmt >/dev/null\n'
-  CONTAINER_CMD+=$'  else\n'
-  CONTAINER_CMD+=$'    echo "rustfmt is missing in the selected Rust image. Use the build-tools image or an image with rustfmt." >&2\n'
-  CONTAINER_CMD+=$'    exit 1\n'
-  CONTAINER_CMD+=$'  fi\n'
-  CONTAINER_CMD+=$'fi\n'
+  CONTAINER_CMD+=$'require_cargo_subcommand fmt "rustfmt is required for cargo fmt. Use the build-tools image or provide an image that already includes rustfmt."\n'
 fi
 if [[ ${RUN_CLIPPY} -eq 1 ]]; then
-  CONTAINER_CMD+=$'if ! cargo clippy --version >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'  if command -v rustup >/dev/null 2>&1; then\n'
-  CONTAINER_CMD+=$'    rustup component add clippy >/dev/null\n'
-  CONTAINER_CMD+=$'  else\n'
-  CONTAINER_CMD+=$'    echo "clippy is missing in the selected Rust image. Use the build-tools image or an image with clippy." >&2\n'
-  CONTAINER_CMD+=$'    exit 1\n'
-  CONTAINER_CMD+=$'  fi\n'
-  CONTAINER_CMD+=$'fi\n'
+  CONTAINER_CMD+=$'require_cargo_subcommand clippy "clippy is required for cargo clippy. Use the build-tools image or provide an image that already includes clippy."\n'
 fi
 CONTAINER_CMD+=$'\n'
 
