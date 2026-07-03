@@ -44,6 +44,10 @@ impl DhcpError {
     fn config_error(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, message)
+    }
 }
 
 impl From<StatusCode> for DhcpError {
@@ -200,10 +204,25 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
     crate::routes::render(&state.templates, "dhcp.html", &ctx, state.config.dev_mode)
 }
 
+fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
+    if kea_api_available(state.config.dhcp_mode, &state.config.dhcp_api_url) {
+        Ok(())
+    } else {
+        Err(DhcpError::conflict(
+            "DHCP mutations require Kea mode with a configured Kea API URL.",
+        ))
+    }
+}
+
+fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
+    mode.is_kea() && !api_url.is_empty()
+}
+
 pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
@@ -253,6 +272,7 @@ pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
@@ -306,6 +326,7 @@ pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
@@ -329,6 +350,7 @@ pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
@@ -361,6 +383,7 @@ pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
@@ -496,11 +519,17 @@ where
             match kea_write_config(&mut post).await {
                 KeaWriteOutcome::Success => Ok(()),
                 KeaWriteOutcome::ConfirmedFailure(retry_err) => {
-                    tracing::warn!(
-                        error = %retry_err,
-                        "DHCP config-write retry failed; attempting rollback to previous config"
+                    let msg = format!(
+                        "Config applied at runtime but the first config-write result was ambiguous, \
+                         and a retry returned a Kea failure. Runtime and persisted config may now differ. \
+                         First error: {}. Retry error: {}",
+                        write_err, retry_err
                     );
-                    rollback_kea_config(&mut post, old_config, &retry_err).await
+                    tracing::error!(
+                        error = %msg,
+                        "DHCP config-write retry failed after ambiguous first write; not rolling back blindly"
+                    );
+                    Err(msg.into())
                 }
                 KeaWriteOutcome::AmbiguousFailure(retry_err) => {
                     let msg = format!(
@@ -1236,6 +1265,23 @@ mod tests {
     }
 
     #[test]
+    fn kea_mutation_guard_requires_kea_mode_and_api_url() {
+        assert!(kea_api_available(
+            crate::config::DhcpMode::Kea,
+            "http://dhcp:8000"
+        ));
+        assert!(!kea_api_available(crate::config::DhcpMode::Kea, ""));
+        assert!(!kea_api_available(
+            crate::config::DhcpMode::Disabled,
+            "http://dhcp:8000"
+        ));
+        assert!(!kea_api_available(
+            crate::config::DhcpMode::DnsmasqProxy,
+            "http://dhcp:8000"
+        ));
+    }
+
+    #[test]
     fn accepts_valid_dhcp_form() {
         let lease_time = validate_dhcp_form(
             "198.51.100.0/24",
@@ -1581,7 +1627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kea_config_modify_rolls_back_when_write_retry_confirms_failure() {
+    async fn kea_config_modify_does_not_rollback_when_write_retry_confirms_failure() {
         let initial_config = json!({
             "Dhcp4": {
                 "subnet4": [
@@ -1600,7 +1646,6 @@ mod tests {
                 MockStep::Response(kea_success_response()),
                 MockStep::Transport("config-write transport failure"),
                 MockStep::Response(json!([{ "result": 1, "text": "write failed on retry" }])),
-                MockStep::Response(kea_success_response()),
             ],
             |config| {
                 let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -1618,15 +1663,18 @@ mod tests {
         )
         .await;
 
-        let error = result.expect_err("confirmed write retry failure should rollback");
+        let error = result.expect_err("confirmed retry failure after ambiguous write should error");
         let error_message = error.to_string();
 
-        assert!(error_message.contains("rolled back"));
-        assert_eq!(calls.len(), 6);
+        assert!(error_message.contains("first config-write result was ambiguous"));
+        assert_eq!(calls.len(), 5);
         assert_eq!(calls[3]["command"], "config-write");
         assert_eq!(calls[4]["command"], "config-write");
-        assert_eq!(calls[5]["command"], "config-set");
-        assert_eq!(calls[5]["arguments"], initial_config);
+        assert!(
+            !calls.iter().any(|cmd| cmd["command"] == "config-set"
+                && cmd.get("arguments") == Some(&initial_config)),
+            "confirmed retry failure after ambiguous first write should not rollback blindly",
+        );
     }
 
     #[tokio::test]
