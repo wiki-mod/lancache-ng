@@ -481,6 +481,7 @@ fn parse_domain_entry(domain: &str) -> Option<DomainSpec> {
     })
 }
 
+#[cfg(test)]
 fn normalize_domain_entry(domain: &str) -> Option<String> {
     parse_domain_entry(domain).map(|entry| entry.domain)
 }
