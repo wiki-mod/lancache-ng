@@ -37,6 +37,7 @@ change — a short "N/A, this is a one-line typo fix" is fine, but the
 section headings themselves should stay so reviewers always know where to
 look. At minimum, each pull request should explain:
 
+- whether AI assistance was used, using the optional transparency notice when applicable
 - what changed
 - what the PR actually changes in before/after terms, with a concrete example where possible
 - why the change is needed and what it fixes or adds
@@ -60,6 +61,7 @@ Track related work explicitly in the PR body:
 
 - Use `Refs #123` for parent issues, umbrella issues, and follow-up references.
 - Use `Closes #123` only when this PR should also close that issue.
+- If no issue exists, explain why in the PR body instead of leaving the relationship unclear.
 - Open PRs should include links for relevant review context (for example tracking and umbrella issue).
 
 ### Changelog expectations

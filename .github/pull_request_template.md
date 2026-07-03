@@ -1,7 +1,7 @@
-> **Transparency notice:** I am not a programmer. This contribution was developed with AI assistance. I reviewed and tested the result, but the implementation was/will (be) largely AI-generated.
+<!-- Optional: keep and edit this notice if AI assistance was used; delete it when it is not applicable. Do not leave incorrect personal statements in place. -->
+> **Transparency notice:** This contribution was developed with AI assistance. I reviewed and tested the result, but the implementation may be partly or largely AI-generated.
 
-<!-- Use `Refs #...` for tracking/parent/umbrella issues. Use `Closes #...` only if merging this PR should close that issue. -->
-Refs #
+<!-- Add the relevant issue link. Use `Refs #...` for tracking/parent/umbrella issues. Use `Closes #...` only if merging this PR should close that issue. If no issue exists, explain why. -->
 
 ## Summary
 <!-- One or two sentences: what does this PR do? -->
