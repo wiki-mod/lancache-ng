@@ -127,7 +127,13 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 ## File Headers
 
-- Every source/config file (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) should open with a short header: the project name and repo URL (`lancache-ng — https://github.com/wiki-mod/lancache-ng`), followed by a purpose description of that specific file. Use `//!` inner doc comments in Rust and `#`/shebang-adjacent line comments elsewhere.
+- Every source/config file (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) should open with a short header: the project name and repo URL (`lancache-ng — https://github.com/wiki-mod/lancache-ng`), followed by a purpose description of that specific file. Use the comment syntax valid for that specific file's language — do not default to `#` for every non-Rust file, since that is invalid syntax in some of them:
+  - Rust: `//!` inner doc comments.
+  - Shell, YAML, Dockerfiles, `.conf`/template files: `#` line comments (after the shebang line, if there is one).
+  - HTML (`.html`, including Tera templates under `services/ui/src/templates/`): `<!-- ... -->` comments.
+  - CSS (`.css`): `/* ... */` comments.
+  - JavaScript (`.js`): `//` line comments (or `/* ... */` for a multi-line block).
+  - If a file's language isn't listed here, use that language's own standard comment syntax — never `#` by default without checking it's actually valid for that file type.
 - Scale the header's detail to the file's actual complexity — a file with several distinct responsibilities (e.g. a multi-role entrypoint script, a large route-wiring module) should name them; a simple, single-purpose file (e.g. an install-and-copy Dockerfile) should stay short. Do not pad a simple file's header just to match a fixed line count.
 - Every technical claim in a header must be verified against the actual file content and, where relevant, git history — do not assert an unconfirmed reason for a design choice (e.g. why a particular base image or repo is used) if no documented rationale exists; state the observable fact instead.
 - Excluded: `.md` files, `.env`/`.env.example` files, lockfiles (`Cargo.lock`), and `.gitkeep`.
