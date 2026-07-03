@@ -259,15 +259,17 @@ runs:
 
               if [ -n "$distcc_pump_hosts" ]; then
                 export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"
+                export DISTCC_HOSTS="$distcc_pump_hosts"
                 pump_env="$(distcc-pump --startup)"
                 eval "$pump_env"
                 PATH="$wrapper_dir:$PATH"
                 export PATH
+                export DISTCC_HOSTS="$distcc_pump_hosts"
                 pump_started=1
                 pump_log="$preflight_dir/distcc-pump.log"
                 run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
                 distcc-pump --shutdown >/dev/null 2>&1 || true
-                unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS
+                unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
               fi
 
               export DISTCC_HOSTS="$distcc_hosts_without_pump"
