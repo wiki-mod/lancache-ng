@@ -39,7 +39,7 @@ defaults:
 
 jobs:
   build-tools:
-    runs-on: [self-hosted, linux, lancache]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -110,6 +110,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
           load: true
+          pull: true
           tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
           platforms: linux/amd64
           provenance: false
@@ -178,6 +179,12 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
+      - name: Note arm64 scan coverage deferral
+        run: |
+          set -euo pipefail
+
+          echo "::notice::The build-tools workflow validates the amd64 scan image before publishing multi-architecture tags. Arm64 scan coverage is deferred for v0.1.0-alpha."
+
       - name: Build and push multi-architecture build-tools image
         id: build
         if: github.event_name != 'pull_request'
@@ -186,6 +193,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
+          pull: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

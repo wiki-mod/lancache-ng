@@ -170,21 +170,12 @@ jobs:
         run: bash scripts/check-file-headers.sh
 
   shellcheck:
+    needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Select build-tools image
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
-            printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
-          else
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-          fi
 
       - name: Run ShellCheck and ActionLint
         run: |
@@ -202,23 +193,26 @@ jobs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Select compose validation image
+      - name: Resolve compose validation image
         id: select-compose-validation-image
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$downstream_build_tools_image" >> "$GITHUB_ENV"
-            printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
-          else
-            build_tools_image="$(bash scripts/select-build-tools-image.sh)"
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-            printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
-          fi
+
+          build_tools_ref="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          docker pull "$build_tools_ref" >/dev/null
+
+          build_tools_image="$(docker image inspect "$build_tools_ref" --format '{{index .RepoDigests 0}}')"
+          case "$build_tools_image" in
+            *@sha256:*)
+              ;;
+            *)
+              echo "::error::Expected a digest-qualified build-tools image after pulling $build_tools_ref, got '$build_tools_image'."
+              exit 1
+              ;;
+          esac
+
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
+          printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
       - name: Validate stack image contract
         run: |
@@ -617,9 +611,21 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
+          grep -F 'docker pull "$build_tools_ref" >/dev/null' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Downstream build-tools job output must pull the exact image before exporting its digest."; exit 1; }
+          grep -F 'RepoDigests 0' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Downstream build-tools job output must resolve a digest-qualified image reference."; exit 1; }
           grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
             && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }
+          grep -F 'needs: validate-compose' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
+          grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must run on the heavy runner tier."; exit 1; }
+          grep -F 'pull: true' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must pull fresh mutable bases before scan and publish builds."; exit 1; }
+          grep -F 'Note arm64 scan coverage deferral' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must make its arm64 scan deferral explicit."; exit 1; }
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
               && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \
@@ -1312,44 +1318,14 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Detect build-tools scan input changes
+      - name: Enable build-tools publish scan
         id: build-tools-scan-changes
         if: matrix.service == 'build-tools'
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          should_scan=false
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              should_scan=true
-              ;;
-          esac
-
-          if [ "$should_scan" = "false" ]; then
-            if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-              should_scan=true
-              changed_files="initial-or-unknown-history"
-            else
-              git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_scan=true
-              if [ "$should_scan" = "false" ]; then
-                changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml .github/workflows/build-tools.yml)"
-              else
-                changed_files="previous-commit-unavailable"
-              fi
-            fi
-
-            if [ "${changed_files:-}" != "" ]; then
-              should_scan=true
-            fi
-          fi
-
-          if [ "$should_scan" = "true" ]; then
-            echo "::notice::build-tools scan inputs changed or a release tag is being built; image scan remains enabled."
-          else
-            echo "::notice::build-tools scan inputs did not change; skipping routine build-tools scan image rebuild."
-          fi
+          should_scan=true
+          echo "::notice::build-tools scan remains enabled on trusted refs so publish coverage includes the sha-* source image. Arm64 scan coverage is deferred separately."
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
@@ -1639,7 +1615,6 @@ jobs:
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
@@ -1666,33 +1641,9 @@ jobs:
               should_build=true
             fi
           elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
-            # Keep build-tools aligned with the container-scan gate: do not
-            # publish a fresh build-tools image on routine master pushes when
-            # the corresponding Trivy scan was intentionally skipped.
-            should_build=false
-            case "$GITHUB_REF" in
-              refs/tags/v*)
-                should_build=true
-                ;;
-            esac
-
-            if [ "$should_build" = "false" ]; then
-              if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-                should_build=true
-                changed_files="initial-or-unknown-history"
-              else
-                git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_build=true
-                if [ "$should_build" = "false" ]; then
-                  changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml .github/workflows/build-tools.yml)"
-                else
-                  changed_files="previous-commit-unavailable"
-                fi
-              fi
-
-              if [ "${changed_files:-}" != "" ]; then
-                should_build=true
-              fi
-            fi
+            # Build-tools publishes the sha-* source image on every trusted ref
+            # so the promotion job always has a source image to move.
+            should_build=true
           fi
 
           case "$should_build" in

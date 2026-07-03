@@ -5,8 +5,9 @@ The repository workflows are configured to run the build, container checks and C
 - `self-hosted`
 - `linux`
 - `lancache`
+- `lancache-light` or `lancache-heavy`, depending on the job tier
 
-Register at least one runner with the `lancache` label before enabling the workflows. The runner user must be able to run Docker builds; project validation tools are supplied by the repository build-tools image instead of being installed ad hoc on the runner.
+Register at least one runner for each tier before enabling the workflows. Light runners handle shell and compose validation, while heavy runners handle Docker builds, scans, promotion, release, and the dedicated build-tools publish workflow. The runner user must be able to run Docker builds; project validation tools are supplied by the repository build-tools image instead of being installed ad hoc on the runner.
 
 The workflow also builds and publishes `ghcr.io/wiki-mod/lancache-ng/build-tools`.
 That image is used by local developer checks and is intentionally based on
@@ -19,6 +20,9 @@ separate.
 Workflow jobs that only need these bundled validation tools should run them from
 the prebuilt image instead of compiling or installing them per job. For example,
 the Cargo Audit jobs use the image-provided `cargo-audit` binary.
+
+The dedicated `Build Tools Image` workflow runs on `lancache-heavy` because it
+builds and scans Docker images before publishing multi-architecture tags.
 
 Routine pull requests skip the `build-tools` image build when neither
 `tools/build-tools` nor the build workflow changed. Release tags always build the
@@ -61,10 +65,19 @@ Replace `actions-runner` with the actual Linux user that runs the GitHub Actions
 
 ## Runner labels
 
-When configuring the runner, include the custom `lancache` label. For example:
+When configuring the runner, include the custom `lancache` label plus the
+appropriate tier label. For example:
 
 ```bash
-./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache
+./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-light
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+Heavy runners use the same base labels with `lancache-heavy` instead:
+
+```bash
+./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-heavy
 sudo ./svc.sh install
 sudo ./svc.sh start
 ```
