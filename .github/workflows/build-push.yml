@@ -25,7 +25,7 @@ env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64
-  RUST_ACCELERATION_NETWORK: default
+  RUST_ACCELERATION_NETWORK: bridge
 
 defaults:
   run:
@@ -601,9 +601,9 @@ jobs:
             echo "::error::Rust acceleration network must not be globally pinned to host; trusted secret-backed builds select host per job."
             exit 1
           fi
-          grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+default[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Rust acceleration network must default to default for untrusted and non-accelerated builds."; exit 1; }
-          grep -F 'rust_network=default' .github/workflows/build-push.yml >/dev/null \
+          grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+bridge[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Rust acceleration network must default to bridge for untrusted and non-accelerated builds."; exit 1; }
+          grep -F 'rust_network=bridge' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'buildx_network=default' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'rust_network=host' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'buildx_network=host' .github/workflows/build-push.yml >/dev/null \
@@ -632,6 +632,7 @@ jobs:
             && grep -F 'DISTCC_FALLBACK=0' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'PATH="$wrapper_dir:$PATH"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'unset DISTCC_HOSTS' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
@@ -1572,7 +1573,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          rust_network=default
+          rust_network=bridge
           buildx_network=default
           if [ -n "$SECRET_FILES" ]; then
             rust_network=host
@@ -1998,7 +1999,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          rust_network=default
+          rust_network=bridge
           buildx_network=default
           if [ -n "$SECRET_FILES" ]; then
             rust_network=host

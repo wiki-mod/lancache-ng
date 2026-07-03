@@ -26,7 +26,7 @@ inputs:
   build-network:
     description: Docker network mode shared with the real Rust image builds.
     required: false
-    default: default
+    default: bridge
   platform:
     description: Docker platform shared with the real Rust image builds.
     required: false
@@ -259,12 +259,11 @@ runs:
 
               if [ -n "$distcc_pump_hosts" ]; then
                 export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"
-                export DISTCC_HOSTS="$distcc_pump_hosts"
+                unset DISTCC_HOSTS
                 pump_env="$(distcc-pump --startup)"
                 eval "$pump_env"
                 PATH="$wrapper_dir:$PATH"
                 export PATH
-                export DISTCC_HOSTS="$distcc_pump_hosts"
                 pump_started=1
                 pump_log="$preflight_dir/distcc-pump.log"
                 run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
