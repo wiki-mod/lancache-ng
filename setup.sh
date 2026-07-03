@@ -322,7 +322,29 @@ rpm_installed_package_list() {
 }
 
 rpm_conflicting_docker_packages() {
-    rpm_installed_package_list podman-docker
+    local os_id=""
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_id="${ID:-}"
+    fi
+
+    if [[ "$os_id" = fedora ]]; then
+        rpm_installed_package_list podman-docker
+    else
+        rpm_installed_package_list \
+            docker \
+            docker-client \
+            docker-client-latest \
+            docker-common \
+            docker-latest \
+            docker-latest-logrotate \
+            docker-logrotate \
+            docker-engine \
+            podman \
+            runc
+    fi
 }
 
 guard_rpm_docker_conflicts() {
@@ -655,6 +677,16 @@ append_env_key_if_missing() {
     validate_env_value "$key" "$value"
     # Preserve intentional empty placeholders; only add the key when it is absent.
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+}
+
+set_env_key_if_empty_or_missing() {
+    local key="$1" value="$2" env_file="$3"
+    validate_env_value "$key" "$value"
+    if env_key_exists "$key" "$env_file"; then
+        [[ -n "$(get_env_var "$key" "$env_file")" ]] || set_env_key "$key" "$value" "$env_file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    fi
 }
 
 append_env_assignment_if_missing() {
@@ -1132,15 +1164,15 @@ migrate_env_for_update() {
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
     cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
 
-    append_env_key_if_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
-    append_env_key_if_missing CACHE_MEM_MB "512" "$env_file"
-    append_env_key_if_missing CACHE_SLICE_SIZE "8m" "$env_file"
-    append_env_key_if_missing CACHE_VALID_HIT "365d" "$env_file"
-    append_env_key_if_missing CACHE_VALID_ANY "1m" "$env_file"
-    append_env_key_if_missing CACHE_INACTIVE "365d" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_MEM_MB "512" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_SLICE_SIZE "8m" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_VALID_HIT "365d" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_VALID_ANY "1m" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_INACTIVE "365d" "$env_file"
 
-    append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
-    append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
+    set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
+    set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
     append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
     append_env_key_if_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
@@ -1148,7 +1180,7 @@ migrate_env_for_update() {
     set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
-    append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
     # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
