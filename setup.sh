@@ -676,6 +676,8 @@ systemd_unit_exists() {
 CONVERGENCE_TIMER_WAS_ACTIVE=0
 CONVERGENCE_TIMER_WAS_ENABLED=0
 CONVERGENCE_SERVICE_WAS_ACTIVE=0
+UPDATE_CONVERGENCE_PAUSED=0
+UPDATE_CONVERGENCE_COMPLETED=0
 
 # The convergence timer may start `docker compose up` while update is migrating
 # files. Pause and remember exact state so update can restore the previous timer
@@ -742,6 +744,19 @@ resume_lancache_convergence_after_update() {
         systemctl start lancache-converge.timer \
             || die "Failed to restart lancache-converge.timer after update."
     fi
+}
+
+resume_lancache_convergence_after_failed_update() {
+    local exit_code=$?
+
+    trap - EXIT
+    if [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" = "1" ]] \
+        && [[ "${UPDATE_CONVERGENCE_COMPLETED:-0}" != "1" ]]; then
+        print_warn "Update failed after pausing convergence; restoring convergence state."
+        resume_lancache_convergence_after_update true
+    fi
+
+    exit "$exit_code"
 }
 
 # Image selection is part of the release safety contract: mutable channels such
@@ -1525,11 +1540,17 @@ cmd_update() {
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
 
+    UPDATE_CONVERGENCE_PAUSED=0
+    UPDATE_CONVERGENCE_COMPLETED=0
+    trap resume_lancache_convergence_after_failed_update EXIT
     pause_lancache_convergence_for_update
+    UPDATE_CONVERGENCE_PAUSED=1
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
+        trap - EXIT
         resume_lancache_convergence_after_update true
+        UPDATE_CONVERGENCE_COMPLETED=1
         die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
     fi
 
@@ -1553,7 +1574,9 @@ cmd_update() {
 
     print_step "Restarting containers"
     docker compose up -d --remove-orphans
+    trap - EXIT
     resume_lancache_convergence_after_update
+    UPDATE_CONVERGENCE_COMPLETED=1
     print_ok "Stack updated"
 }
 
