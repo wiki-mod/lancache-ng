@@ -1176,6 +1176,11 @@ jobs:
           dns_rust_required=false
           ui_required=false
           watchdog_required=false
+          if [ "$WORKFLOW_CHANGED" = "true" ]; then
+            dns_rust_required=true
+            ui_required=true
+            watchdog_required=true
+          fi
           if [ "$DNS_RUST_CHANGED" = "true" ]; then
             dns_rust_required=true
           fi
