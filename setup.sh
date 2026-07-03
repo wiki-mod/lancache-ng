@@ -322,7 +322,7 @@ rpm_installed_package_list() {
 }
 
 rpm_conflicting_docker_packages() {
-    rpm_installed_package_list podman-docker podman runc
+    rpm_installed_package_list podman-docker
 }
 
 guard_rpm_docker_conflicts() {
@@ -627,11 +627,34 @@ set_env_key() {
     fi
 }
 
+set_env_assignment() {
+    local key="$1" assignment_value="$2" env_file="$3"
+    case "$key" in
+        ""|*[!A-Za-z0-9_]*|[0-9]*)
+            die "Invalid .env key: $key"
+            ;;
+    esac
+    case "$assignment_value" in
+        *$'\n'*)
+            die "$key contains a newline and cannot be copied into .env."
+            ;;
+    esac
+
+    if env_key_exists "$key" "$env_file"; then
+        awk -F= -v key="$key" -v value="$assignment_value" '
+            $1 == key { print key "=" value; next }
+            { print }
+        ' "$env_file" | write_env_file "$env_file"
+    else
+        printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+    fi
+}
+
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
-    # Empty existing values are treated as missing so update can heal `KEY=`.
-    env_key_has_value "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    # Preserve intentional empty placeholders; only add the key when it is absent.
+    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
 }
 
 append_env_assignment_if_missing() {
@@ -648,8 +671,7 @@ append_env_assignment_if_missing() {
     esac
     # Migration-only helper: duplicate an existing Compose .env assignment
     # without destroying supported interpolation such as ${LAN_CACHE_ROOT:-...}.
-    # Empty existing values are treated as missing so update can repair them.
-    env_key_has_value "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
 append_env_migrated_assignment_if_missing() {
@@ -665,9 +687,11 @@ append_env_migrated_assignment_if_missing() {
     source_value=$(get_env_var "$source_key" "$env_file")
     source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
     if [[ -n "$source_value" && -n "$source_assignment" ]]; then
-        append_env_assignment_if_missing "$target_key" "$source_assignment" "$env_file"
-    else
-        append_env_key_if_missing "$target_key" "$fallback_value" "$env_file"
+        # Rewrite empty migrated targets in place so updates do not append
+        # duplicate KEY= lines.
+        set_env_assignment "$target_key" "$source_assignment" "$env_file"
+    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
+        set_env_key "$target_key" "$fallback_value" "$env_file"
     fi
 }
 
