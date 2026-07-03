@@ -1586,6 +1586,7 @@ jobs:
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
@@ -1610,6 +1611,34 @@ jobs:
             esac
             if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ]; then
               should_build=true
+            fi
+          elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
+            # Keep build-tools aligned with the container-scan gate: do not
+            # publish a fresh build-tools image on routine master pushes when
+            # the corresponding Trivy scan was intentionally skipped.
+            should_build=false
+            case "$GITHUB_REF" in
+              refs/tags/v*)
+                should_build=true
+                ;;
+            esac
+
+            if [ "$should_build" = "false" ]; then
+              if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+                should_build=true
+                changed_files="initial-or-unknown-history"
+              else
+                git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_build=true
+                if [ "$should_build" = "false" ]; then
+                  changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml .github/workflows/build-tools.yml)"
+                else
+                  changed_files="previous-commit-unavailable"
+                fi
+              fi
+
+              if [ "${changed_files:-}" != "" ]; then
+                should_build=true
+              fi
             fi
           fi
 
