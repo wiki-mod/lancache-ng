@@ -757,7 +757,8 @@ jobs:
             if [ "$dockerfile" = "services/ui/Dockerfile" ]; then
               grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must fall back to stripped distcc hosts when no plain hosts are configured."; exit 1; }
-              grep -F 'DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts" distcc-pump --startup' "$dockerfile" >/dev/null \
+              grep -F 'export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts";' "$dockerfile" >/dev/null \
+                && grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must start distcc-pump with pump-capable hosts only."; exit 1; }
               grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must use distcc-pump for compatible generated-header bypass cases."; exit 1; }
