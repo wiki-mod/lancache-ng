@@ -222,6 +222,9 @@ services:
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
         }
+        # Keep the shared config writable by the Admin UI user (UID/GID 10001) after NATS restarts.
+        tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"
+        trap 'rm -f "$$tmp_nats_conf"' EXIT
         cat > /tmp/nats.conf.template <<'EOF'
         jetstream {
           store_dir: /data
@@ -277,7 +280,10 @@ services:
           -e "s|__NATS_DNS_WRITER_PASSWORD__|$$(escape_sed "$$NATS_DNS_WRITER_PASSWORD")|g" \
           -e "s|__NATS_DNS_READER_USER__|$$(escape_sed "$$NATS_DNS_READER_USER")|g" \
           -e "s|__NATS_DNS_READER_PASSWORD__|$$(escape_sed "$$NATS_DNS_READER_PASSWORD")|g" \
-          /tmp/nats.conf.template > /etc/nats/nats.conf
+          /tmp/nats.conf.template > "$$tmp_nats_conf"
+        chown 10001:10001 "$$tmp_nats_conf"
+        mv "$$tmp_nats_conf" /etc/nats/nats.conf
+        trap - EXIT
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - nats-data:/data
