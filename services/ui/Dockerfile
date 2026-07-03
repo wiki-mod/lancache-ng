@@ -150,12 +150,13 @@ RUN --mount=type=secret,id=sccache_redis_url \
         distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"; \
         echo "[INFO] trying distcc path." >&2; \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS="${distcc_pump_hosts:-$distcc_hosts}"; \
         export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
         export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
         if [ -n "$distcc_pump_hosts" ]; then \
-          if ! distcc_pump_env="$(DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts" distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+          export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"; \
+          unset DISTCC_HOSTS; \
+          if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
             disable_distcc; \
             rm -rf "$distcc_probe_dir"; \
             echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
@@ -163,9 +164,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
           fi; \
           eval "$distcc_pump_env"; \
           PATH="$distcc_wrapper_dir:$PATH"; \
-          export PATH; \
-          export DISTCC_HOSTS="$distcc_pump_hosts" DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump" CC=cc GCC=gcc CXX=c++ GXX=g++; \
+          export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
+        else \
+          export DISTCC_HOSTS="$distcc_hosts"; \
         fi; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
@@ -275,12 +277,13 @@ RUN --mount=type=secret,id=sccache_redis_url \
         distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"; \
         echo "[INFO] trying distcc path." >&2; \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS="${distcc_pump_hosts:-$distcc_hosts}"; \
         export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
         export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
         if [ -n "$distcc_pump_hosts" ]; then \
-          if ! distcc_pump_env="$(DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts" distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
+          export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"; \
+          unset DISTCC_HOSTS; \
+          if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
             disable_distcc; \
             rm -rf "$distcc_probe_dir"; \
             echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
@@ -288,9 +291,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
           fi; \
           eval "$distcc_pump_env"; \
           PATH="$distcc_wrapper_dir:$PATH"; \
-          export PATH; \
-          export DISTCC_HOSTS="$distcc_pump_hosts" DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump" CC=cc GCC=gcc CXX=c++ GXX=g++; \
+          export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
+        else \
+          export DISTCC_HOSTS="$distcc_hosts"; \
         fi; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
