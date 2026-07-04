@@ -200,6 +200,8 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GOVERNANCE_PR_NUMBER: ${{ github.event.pull_request.number }}
           GOVERNANCE_PR_TITLE: ${{ github.event.pull_request.title }}
           GOVERNANCE_PR_BODY: ${{ github.event.pull_request.body }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -208,6 +210,11 @@ jobs:
 
           changed_files="$(mktemp "$PWD/.governance-changed-files.XXXXXX")"
           trap 'rm -f "$changed_files"' EXIT
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}" \
+            "+refs/pull/${GOVERNANCE_PR_NUMBER}/head:refs/remotes/origin/pr/${GOVERNANCE_PR_NUMBER}/head"
+          git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}"
+          git cat-file -e "${GOVERNANCE_HEAD_SHA}^{commit}"
           git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GOVERNANCE_HEAD_SHA" > "$changed_files"
 
           docker run --rm \
