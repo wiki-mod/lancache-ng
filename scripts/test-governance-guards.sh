@@ -95,11 +95,11 @@ mkdir -p "$repo"
 : > "$repo/pr-title.txt"
 : > "$repo/pr-body.txt"
 
-closed_marker="# TO""DO(#366): stale marker"
+closed_marker="# TO""DO(#999001): stale marker"
 make_fixture "$repo" \
   --path "setup.sh" --content "$closed_marker" \
   --changed "setup.sh" \
-  --state "366=closed"
+  --state "999001=closed"
 expect_failure "closed TODO marker" run_checker "$repo"
 
 repo="$tmp_root/repo-open"
@@ -108,11 +108,11 @@ mkdir -p "$repo"
 : > "$repo/issue-state.txt"
 : > "$repo/pr-title.txt"
 : > "$repo/pr-body.txt"
-open_marker="# TO""DO(#433): tracked follow-up"
+open_marker="# TO""DO(#999002): tracked follow-up"
 make_fixture "$repo" \
   --path "setup.sh" --content "$open_marker" \
   --changed "setup.sh" \
-  --state "433=open"
+  --state "999002=open"
 expect_success "open TODO marker" run_checker "$repo"
 
 repo="$tmp_root/repo-partial-fail"
