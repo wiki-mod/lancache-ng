@@ -22,40 +22,46 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
     };
 
-    let standard_used_gb = tokio::task::spawn_blocking({
+    // Start the blocking collectors together so cache scans and log parsing
+    // can overlap instead of serializing the dashboard render path.
+    let standard_used_gb_task = tokio::task::spawn_blocking({
         let d = cfg.standard_cache_dir.clone();
         move || nginx_client::get_cache_size_gb(&d)
-    })
-    .await
-    .unwrap_or(0.0);
-    let ssl_used_gb = if cfg.standard_cache_dir == cfg.ssl_cache_dir {
-        standard_used_gb
+    });
+    let ssl_used_gb_task = if shared_cache {
+        None
     } else {
-        tokio::task::spawn_blocking({
+        Some(tokio::task::spawn_blocking({
             let d = cfg.ssl_cache_dir.clone();
             move || nginx_client::get_cache_size_gb(&d)
-        })
-        .await
-        .unwrap_or(0.0)
+        }))
     };
-    let log_stats = tokio::task::spawn_blocking({
+    let log_stats_task = tokio::task::spawn_blocking({
         let sl = cfg.standard_log.clone();
         let xl = cfg.ssl_log.clone();
         move || nginx_client::get_log_stats(&sl, &xl)
-    })
-    .await
-    .unwrap_or_default();
+    });
 
-    let recent_logs = tokio::task::spawn_blocking({
+    let recent_logs_task = tokio::task::spawn_blocking({
         let path = if cfg.standard_log == cfg.ssl_log {
             cfg.standard_log.clone()
         } else {
             cfg.ssl_log.clone()
         };
         move || nginx_client::parse_log_tail(&path, 10)
-    })
-    .await
-    .unwrap_or_default();
+    });
+
+    let standard_used_gb = standard_used_gb_task.await.unwrap_or(0.0);
+    let ssl_used_gb = if shared_cache {
+        standard_used_gb
+    } else {
+        ssl_used_gb_task
+            .expect("ssl cache collector is only skipped when caches are shared")
+            .await
+            .unwrap_or(0.0)
+    };
+    let log_stats = log_stats_task.await.unwrap_or_default();
+    let recent_logs = recent_logs_task.await.unwrap_or_default();
 
     let shared_cache_max_gb = cfg.standard_cache_max_gb;
     let standard_pct = cache_usage_pct(standard_used_gb, cfg.standard_cache_max_gb);

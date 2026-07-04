@@ -172,9 +172,12 @@ impl Config {
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
         let ssl_enabled = env_bool("SSL_ENABLED", true);
-        let legacy_cache_max_gb =
-            env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0));
-        let shared_cache_max_gb = env_f64("CACHE_MAX_GB", legacy_cache_max_gb);
+        let cache_max_gb_set = env_present("CACHE_MAX_GB");
+        let shared_cache_max_gb = if cache_max_gb_set {
+            env_f64("CACHE_MAX_GB", 50.0)
+        } else {
+            env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0))
+        };
         let dhcp_mode = env_dhcp_mode("DHCP_MODE", env_bool("DHCP_ENABLED", false));
         let dhcp_api_url = if dhcp_mode.is_kea() {
             env_str("DHCP_API_URL", "http://localhost:8000")
@@ -205,8 +208,16 @@ impl Config {
             dns_ssl_service: env_str("DNS_SSL_SERVICE", "dns-ssl"),
             proxy_ssl_service,
             ssl_enabled,
-            standard_cache_max_gb: env_f64("STANDARD_CACHE_MAX_GB", shared_cache_max_gb),
-            ssl_cache_max_gb: env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb),
+            standard_cache_max_gb: if cache_max_gb_set {
+                shared_cache_max_gb
+            } else {
+                env_f64("STANDARD_CACHE_MAX_GB", shared_cache_max_gb)
+            },
+            ssl_cache_max_gb: if cache_max_gb_set {
+                shared_cache_max_gb
+            } else {
+                env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb)
+            },
             standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
             ssl_ip: env_str("SSL_IP", "192.168.234.11"),
             dhcp_mode,
@@ -262,6 +273,13 @@ fn env_or(key: &str, default: String) -> String {
 
 fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn env_present(key: &str) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
@@ -431,18 +449,20 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_limit_fallback_drives_both_modes() {
+    fn shared_cache_limit_env_wins_over_legacy_values() {
         let _guard = env_test_lock().lock().unwrap();
 
+        env::set_var("STANDARD_CACHE_MAX_GB", "77");
+        env::set_var("SSL_CACHE_MAX_GB", "88");
         env::set_var("CACHE_MAX_GB", "42.5");
-        env::remove_var("STANDARD_CACHE_MAX_GB");
-        env::remove_var("SSL_CACHE_MAX_GB");
 
         let cfg = Config::from_env();
         assert_eq!(cfg.standard_cache_max_gb, 42.5);
         assert_eq!(cfg.ssl_cache_max_gb, 42.5);
 
         env::remove_var("CACHE_MAX_GB");
+        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::remove_var("SSL_CACHE_MAX_GB");
     }
 
     #[test]
