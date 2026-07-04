@@ -406,10 +406,15 @@ jobs:
           fi
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
             grep -Fq 'acl safe_container_action' "$compose_file" \
+              && grep -Fq 'acl lancache_container' "$compose_file" \
+              && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
+              && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
               && grep -Fq 'http-request deny' "$compose_file" \
               && ! grep -Fq '/containers/create' "$compose_file" \
+              && ! grep -Fq '/containers/json' "$compose_file" \
+              && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::Docker socket proxy must deny generic container creation and only allow explicit container actions."
+                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions."
                 exit 1
               }
           done

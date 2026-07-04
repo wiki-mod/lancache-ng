@@ -1,16 +1,14 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Docker API access for the Admin UI, scoped to the explicit
-//! docker-socket-proxy allowlist (no EXEC, no container create/remove):
-//! connecting to the proxy/socket, restarting a compose service by its
-//! `com.docker.compose.service` label, and looking up a service's container
-//! ID (used by `routes::dhcp` to start/stop/attach to the predeclared
-//! `dhcp-probe` service instead of creating a container per check).
+//! docker-socket-proxy allowlist (no EXEC, no container list/create/remove):
+//! connecting to the proxy/socket, restarting explicitly named lancache
+//! containers, and looking up fixed container names used by the predeclared
+//! compose services.
 
 use anyhow::{Context, Result};
-use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};
+use bollard::query_parameters::RestartContainerOptionsBuilder;
 use bollard::Docker;
-use std::collections::HashMap;
 
 pub fn connect_from_env() -> Result<Docker> {
     if let Ok(proxy_url) = std::env::var("DOCKER_PROXY_URL") {
@@ -34,40 +32,26 @@ pub fn connect_from_env() -> Result<Docker> {
 }
 
 pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> {
-    let id = find_container_id(docker, service_name, true).await?;
+    let id = container_name_for_service(service_name)?;
     let options = RestartContainerOptionsBuilder::default().t(5).build();
     docker
-        .restart_container(&id, Some(options))
+        .restart_container(id, Some(options))
         .await
         .with_context(|| format!("Failed to restart '{}'", service_name))?;
     tracing::info!("Restarted service '{}'", service_name);
     Ok(())
 }
 
-pub async fn find_container_id(
-    docker: &Docker,
-    service_name: &str,
-    include_stopped: bool,
-) -> Result<String> {
-    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
-    filters.insert(
-        "label".to_string(),
-        vec![format!("com.docker.compose.service={}", service_name)],
-    );
-
-    let options = ListContainersOptionsBuilder::default()
-        .all(include_stopped)
-        .filters(&filters)
-        .build();
-
-    let containers = docker
-        .list_containers(Some(options))
-        .await
-        .context("Docker socket not reachable")?;
-
-    containers
-        .into_iter()
-        .next()
-        .and_then(|c| c.id)
-        .with_context(|| format!("No container found for service '{}'", service_name))
+pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
+    match service_name {
+        "proxy" | "lancache-proxy" => Ok("lancache-proxy"),
+        "dns-standard" | "lancache-dns-standard" => Ok("lancache-dns-standard"),
+        "dns-ssl" | "lancache-dns-ssl" => Ok("lancache-dns-ssl"),
+        "dhcp-probe" | "lancache-dhcp-probe" => Ok("lancache-dhcp-probe"),
+        "nats" | "lancache-nats" => Ok("lancache-nats"),
+        _ => anyhow::bail!(
+            "Docker service '{}' is not in the lancache-ng socket-proxy allowlist",
+            service_name
+        ),
+    }
 }

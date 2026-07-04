@@ -12,7 +12,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use bollard::container::LogOutput;
 use bollard::query_parameters::{
-    AttachContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    LogsOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    WaitContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ use std::future::Future;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
 
 // ─── Constants ───
@@ -737,49 +739,69 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
 }
 
 const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
+const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
 
 async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
-    // Stop, attach, then start the predeclared, compose-managed
-    // `dhcp-probe` helper service (see the `dhcp-probe` service definition
-    // in the compose files for its nmap command and host-network config).
-    // This keeps the UI's Docker API usage limited to the same
-    // start/restart-only capability class already used for the NATS and
-    // proxy-ssl reload flows, rather than requiring generic
-    // `/containers/create` (broad host-compromise surface if the UI were
-    // ever compromised) or `/containers/{id}` DELETE (which the narrowed
-    // docker-socket-proxy does not permit anyway).
-    let id = docker_client::find_container_id(docker, DHCP_PROBE_SERVICE, true)
-        .await
-        .context("find DHCP probe container")?;
+    let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
+        .context("resolve DHCP probe container")?;
 
     stop_container_if_running(docker, &id).await?;
-
-    // Attach before start with logs(false). This captures only the current
-    // probe run while avoiding stale stdout/stderr from previous executions of
-    // the reused helper container.
-    let mut attach = docker
-        .attach_container(
-            &id,
-            Some(
-                AttachContainerOptionsBuilder::default()
-                    .logs(false)
-                    .stdout(true)
-                    .stderr(true)
-                    .stream(true)
-                    .build(),
-            ),
-        )
-        .await
-        .context("attach DHCP probe container")?;
+    let started_since = unix_timestamp_seconds();
 
     docker
         .start_container(&id, Some(StartContainerOptionsBuilder::default().build()))
         .await
         .context("start DHCP probe container")?;
 
+    let mut wait = docker.wait_container(
+        id,
+        Some(
+            WaitContainerOptionsBuilder::default()
+                .condition("not-running")
+                .build(),
+        ),
+    );
+    let wait_result = wait
+        .next()
+        .await
+        .context("wait for DHCP probe container")?
+        .context("read DHCP probe wait response")?;
+
+    let output = collect_container_logs_since(docker, id, started_since)
+        .await
+        .context("read DHCP probe logs")?;
+    let output = current_probe_output(&output);
+
+    if wait_result.status_code != 0 {
+        return Err(anyhow::anyhow!(
+            "DHCP probe container exited with code {}: {}",
+            wait_result.status_code,
+            output.trim()
+        ));
+    }
+
+    Ok(output)
+}
+
+async fn collect_container_logs_since(
+    docker: &bollard::Docker,
+    id: &str,
+    since: i32,
+) -> Result<String, anyhow::Error> {
+    let mut logs = docker.logs(
+        id,
+        Some(
+            LogsOptionsBuilder::default()
+                .stdout(true)
+                .stderr(true)
+                .since(since)
+                .build(),
+        ),
+    );
+
     let mut output = String::new();
-    while let Some(chunk) = attach.output.next().await {
-        match chunk.context("read DHCP probe output")? {
+    while let Some(chunk) = logs.next().await {
+        match chunk.context("read container log chunk")? {
             LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
                 output.push_str(&String::from_utf8_lossy(&message));
             }
@@ -787,22 +809,21 @@ async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, any
         }
     }
 
-    let inspect = docker
-        .inspect_container(&id, None)
-        .await
-        .context("inspect DHCP probe container")?;
-
-    if let Some(exit_code) = inspect.state.and_then(|state| state.exit_code) {
-        if exit_code != 0 {
-            return Err(anyhow::anyhow!(
-                "DHCP probe container exited with code {}: {}",
-                exit_code,
-                output.trim()
-            ));
-        }
-    }
-
     Ok(output)
+}
+
+fn current_probe_output(output: &str) -> String {
+    output
+        .rsplit_once(DHCP_PROBE_START_MARKER)
+        .map(|(_, current)| current.to_string())
+        .unwrap_or_else(|| output.to_string())
+}
+
+fn unix_timestamp_seconds() -> i32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i32::MAX as u64) as i32)
+        .unwrap_or_default()
 }
 
 async fn stop_container_if_running(
