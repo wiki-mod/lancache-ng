@@ -19,6 +19,7 @@ services:
       - DDNS_ALLOW_FROM=127.0.0.1
     volumes:
       - pdns-data:/var/lib/powerdns
+      - pdns-filter-state:/var/lib/powerdns-state
     ports:
       - "${LISTEN_IP:-0.0.0.0}:53:53/udp"
       - "${LISTEN_IP:-0.0.0.0}:53:53/tcp"
@@ -37,3 +38,4 @@ services:
 
 volumes:
   pdns-data:
+  pdns-filter-state:

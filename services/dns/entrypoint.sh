@@ -140,10 +140,14 @@ fi
 LEGACY_AAAA_FILTER_MARKER="/var/lib/powerdns/aaaa-filter-enabled"
 AAAA_FILTER_STATE_DIR="/var/lib/powerdns-state"
 AAAA_FILTER_MARKER="${AAAA_FILTER_STATE_DIR}/aaaa-filter-enabled"
-if [ -f "$LEGACY_AAAA_FILTER_MARKER" ] && [ ! -f "$AAAA_FILTER_MARKER" ]; then
-    echo "[lancache-dns] Migrating legacy AAAA filter marker to shared state volume..."
+if [ -f "$LEGACY_AAAA_FILTER_MARKER" ]; then
     mkdir -p "$AAAA_FILTER_STATE_DIR"
-    touch "$AAAA_FILTER_MARKER"
+    if [ ! -f "$AAAA_FILTER_MARKER" ]; then
+        echo "[lancache-dns] Migrating legacy AAAA filter marker to shared state volume..."
+        touch "$AAAA_FILTER_MARKER"
+    else
+        echo "[lancache-dns] Removing already-migrated legacy AAAA filter marker..."
+    fi
     rm -f "$LEGACY_AAAA_FILTER_MARKER"
 fi
 

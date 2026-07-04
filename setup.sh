@@ -1191,6 +1191,7 @@ backup_manifest() {
     printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
     [[ -d /srv/lancache/pdns-standard ]] && printf '%s\n' /srv/lancache/pdns-standard
     [[ -d /srv/lancache/pdns-ssl ]] && printf '%s\n' /srv/lancache/pdns-ssl
+    [[ -d /srv/lancache/pdns-filter-state ]] && printf '%s\n' /srv/lancache/pdns-filter-state
     [[ -d /srv/lancache/kea ]] && printf '%s\n' /srv/lancache/kea
     [[ -d /srv/lancache/nats ]] && printf '%s\n' /srv/lancache/nats
     [[ -d /srv/lancache/nats-conf ]] && printf '%s\n' /srv/lancache/nats-conf
@@ -1956,6 +1957,7 @@ services:
       - DDNS_ALLOW_FROM=127.0.0.1
     volumes:
       - pdns-data:/var/lib/powerdns
+      - pdns-filter-state:/var/lib/powerdns-state
     ports:
       - "\${LISTEN_IP:-0.0.0.0}:53:53/udp"
       - "\${LISTEN_IP:-0.0.0.0}:53:53/tcp"
@@ -1968,6 +1970,7 @@ services:
 
 volumes:
   pdns-data:
+  pdns-filter-state:
 EOF
 
     cat > "${secondary_dir}/.env" <<EOF

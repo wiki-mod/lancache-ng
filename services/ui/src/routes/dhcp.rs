@@ -11,7 +11,9 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use bollard::container::LogOutput;
-use bollard::query_parameters::{AttachContainerOptionsBuilder, RestartContainerOptionsBuilder};
+use bollard::query_parameters::{
+    AttachContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -737,7 +739,7 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
 const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
 
 async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
-    // Restart (never create/remove) the predeclared, compose-managed
+    // Stop, attach, then start the predeclared, compose-managed
     // `dhcp-probe` helper service (see the `dhcp-probe` service definition
     // in the compose files for its nmap command and host-network config).
     // This keeps the UI's Docker API usage limited to the same
@@ -750,24 +752,17 @@ async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, any
         .await
         .context("find DHCP probe container")?;
 
-    docker
-        .restart_container(
-            &id,
-            Some(RestartContainerOptionsBuilder::default().t(5).build()),
-        )
-        .await
-        .context("restart DHCP probe container")?;
+    stop_container_if_running(docker, &id).await?;
 
-    // `logs(true)` replays output the probe already wrote between the
-    // restart above and this attach call — without it, a fast probe that
-    // answers and exits before the attach is established would have its
-    // "Server Identifier" line silently dropped.
+    // Attach before start with logs(false). This captures only the current
+    // probe run while avoiding stale stdout/stderr from previous executions of
+    // the reused helper container.
     let mut attach = docker
         .attach_container(
             &id,
             Some(
                 AttachContainerOptionsBuilder::default()
-                    .logs(true)
+                    .logs(false)
                     .stdout(true)
                     .stderr(true)
                     .stream(true)
@@ -776,6 +771,11 @@ async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, any
         )
         .await
         .context("attach DHCP probe container")?;
+
+    docker
+        .start_container(&id, Some(StartContainerOptionsBuilder::default().build()))
+        .await
+        .context("start DHCP probe container")?;
 
     let mut output = String::new();
     while let Some(chunk) = attach.output.next().await {
@@ -803,6 +803,28 @@ async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, any
     }
 
     Ok(output)
+}
+
+async fn stop_container_if_running(
+    docker: &bollard::Docker,
+    id: &str,
+) -> Result<(), anyhow::Error> {
+    if let Err(e) = docker
+        .stop_container(
+            id,
+            Some(StopContainerOptionsBuilder::default().t(5).build()),
+        )
+        .await
+    {
+        // Docker returns "not modified" if the one-shot helper is already
+        // stopped. That is the expected steady state before a probe run.
+        let message = e.to_string();
+        if !message.contains("304") && !message.to_ascii_lowercase().contains("not modified") {
+            return Err(e).context("stop DHCP probe container");
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Validators ───
