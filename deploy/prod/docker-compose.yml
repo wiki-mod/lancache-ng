@@ -283,7 +283,7 @@ services:
     command:
       - |
         echo "__LANCACHE_DHCP_PROBE_START__ $$(date +%s%N)"
-        exec nmap --script broadcast-dhcp-discover -e any --script-args broadcast-dhcp-discover.timeout=5
+        exec nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5
     network_mode: host
     restart: "no"
 
