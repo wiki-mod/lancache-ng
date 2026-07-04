@@ -48,6 +48,9 @@ curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.s
 ```
 
 The setup script guides you through the installation. If required tools are missing, it asks before installing packages, installs missing requirements such as Docker, curl and git through the host package manager, and prints the package names to install manually if you abort.
+It is a pull-only installer: it resolves and pulls prebuilt first-party images,
+so Redis-backed sccache, distcc and other build accelerators do not affect
+normal setup or update paths.
 
 It can:
 
@@ -286,6 +289,10 @@ The update command can:
 - update the compose file
 - pull newer images
 - restart the stack
+
+Setup and update always consume prebuilt runtime images. They do not build the
+production stack locally, so host-side build acceleration is never a runtime
+or install dependency.
 
 Create a manual backup with:
 
@@ -614,11 +621,13 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 - `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
 - `strict` NOT RECOMMENDED! Only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until missing CDN root domains are added. That means, you need to add manually all domains by hand!
 
-`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. You have to change it, we set by default the LAN-IP ranges for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
+`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the latest stable release. Use `edge` only when you explicitly want the tested pre-stable channel. `setup.sh` resolves mutable channels through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
+The resulting install/update path still stays pull-only and does not depend on
+local compiler caches or remote compiler services.
 
 Current prebuilt first-party images are published for `linux/amd64`. Multi-architecture images are tracked separately; non-amd64 production installs should not assume the prebuilt pull-only path is available yet.
 

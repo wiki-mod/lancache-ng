@@ -218,6 +218,28 @@ apt_compose_package() {
 # Docker bootstrap is a first-install convenience, not a build environment
 # contract. Changes here affect production setup directly and must stay separate
 # from future dev-mode/compiler-farm decisions.
+verify_docker_installation() {
+    command -v docker >/dev/null 2>&1 \
+        || die "Docker client binary is missing after installation."
+
+    docker compose version >/dev/null 2>&1 \
+        || die "Docker Compose v2 is missing after installation."
+}
+
+ensure_apt_docker_client() {
+    if command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if apt_package_available docker-cli; then
+        print_warn "docker.io did not provide /usr/bin/docker; installing docker-cli for the Docker client."
+        apt-get install -y --no-install-recommends docker-cli
+    fi
+
+    command -v docker >/dev/null 2>&1 \
+        || die "Docker client binary is missing after installation. Install docker-cli or docker-ce-cli manually, then rerun setup.sh."
+}
+
 install_docker_apt_repo() {
     local os_id="" codename="" repo_file=""
 
@@ -265,10 +287,15 @@ install_docker_apt() {
     fi
 
     if [[ "$compose_package" = docker-compose-plugin ]]; then
-        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin "$compose_package"
+        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io "$compose_package"
     else
         apt-get install -y --no-install-recommends docker.io "$compose_package"
+        # Debian Trixie splits the Docker client into docker-cli, so install it
+        # only when docker.io did not already provide /usr/bin/docker.
+        ensure_apt_docker_client
     fi
+
+    verify_docker_installation
 }
 
 install_docker_compose_apt() {
@@ -283,6 +310,66 @@ install_docker_compose_apt() {
     fi
 
     apt-get install -y --no-install-recommends "$compose_package"
+    verify_docker_installation
+}
+
+rpm_installed_package_list() {
+    local package
+
+    for package in "$@"; do
+        rpm -q "$package" >/dev/null 2>&1 && printf '%s\n' "$package"
+    done
+}
+
+rpm_legacy_docker_package_list() {
+    rpm_installed_package_list \
+        docker \
+        docker-client \
+        docker-client-latest \
+        docker-common \
+        docker-latest \
+        docker-latest-logrotate \
+        docker-logrotate \
+        docker-selinux \
+        docker-engine-selinux \
+        docker-engine
+}
+
+rpm_conflicting_docker_packages() {
+    local os_id=""
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_id="${ID:-}"
+    fi
+
+    if [[ "$os_id" = fedora ]]; then
+        # Fedora's supported Docker install path only requires removing
+        # Docker-family packages. Stock podman/runc must remain allowed.
+        rpm_installed_package_list podman-docker
+        rpm_legacy_docker_package_list
+    else
+        # RHEL-family Docker packages additionally conflict with stock
+        # podman/runc, so fail before mutating repository configuration.
+        rpm_legacy_docker_package_list
+        rpm_installed_package_list \
+            podman \
+            runc
+    fi
+}
+
+guard_rpm_docker_conflicts() {
+    local package
+    local -a conflicts=()
+
+    while IFS= read -r package; do
+        [[ -n "$package" ]] && conflicts+=("$package")
+    done < <(rpm_conflicting_docker_packages)
+
+    (( ${#conflicts[@]} == 0 )) && return 0
+
+    die "Docker's RPM packages conflict with these installed packages: ${conflicts[*]}. Remove them first (for example: dnf remove ${conflicts[*]}), then rerun setup.sh."
 }
 
 docker_rpm_repo_url() {
@@ -306,11 +393,23 @@ docker_rpm_repo_url() {
 install_docker_rpm() {
     local manager="$1"
     shift
-    local repo_url
+    local repo_url needs_engine=0 package
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+    fi
+
+    for package in "${packages[@]}"; do
+        case "$package" in
+            docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin|docker-compose-plugin)
+                needs_engine=1
+                break
+                ;;
+        esac
+    done
+    if (( needs_engine )); then
+        guard_rpm_docker_conflicts
     fi
 
     repo_url=$(docker_rpm_repo_url)
@@ -324,6 +423,8 @@ install_docker_rpm() {
         yum-config-manager --add-repo "$repo_url"
         yum install -y "${packages[@]}"
     fi
+
+    verify_docker_installation
 }
 
 install_docker_compose() {
@@ -374,7 +475,7 @@ install_docker() {
         fi
         install_docker_apt || die "Failed to install Docker."
     elif command -v dnf >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -383,7 +484,7 @@ install_docker() {
         fi
         install_docker_rpm dnf || die "Failed to install Docker."
     elif command -v yum >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -435,6 +536,17 @@ get_env_var() {
     local raw
     raw=$(awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null) || true
     _compose_parse_env_value "$raw"
+}
+
+get_env_var_nonempty() {
+    local key="$1" env_file="$2" raw value
+    while IFS= read -r raw; do
+        value=$(_compose_parse_env_value "$raw")
+        if [[ -n "$value" ]]; then
+            printf '%s' "$value"
+            return 0
+        fi
+    done < <(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print}' "$env_file" 2>/dev/null)
 }
 
 get_env_assignment_value_raw() {
@@ -552,7 +664,13 @@ set_env_key() {
     validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
         awk -F= -v key="$key" -v value="$value" '
-            $1 == key { print key "=" value; next }
+            $1 == key {
+                if (!seen) {
+                    print key "=" value
+                    seen=1
+                }
+                next
+            }
             { print }
         ' "$env_file" | write_env_file "$env_file"
     else
@@ -560,10 +678,55 @@ set_env_key() {
     fi
 }
 
+set_env_assignment() {
+    local key="$1" assignment_value="$2" env_file="$3"
+    case "$key" in
+        ""|*[!A-Za-z0-9_]*|[0-9]*)
+            die "Invalid .env key: $key"
+            ;;
+    esac
+    case "$assignment_value" in
+        *$'\n'*)
+            die "$key contains a newline and cannot be copied into .env."
+            ;;
+    esac
+
+    if env_key_exists "$key" "$env_file"; then
+        awk -F= -v key="$key" -v value="$assignment_value" '
+            $1 == key {
+                if (!seen) {
+                    print key "=" value
+                    seen=1
+                }
+                next
+            }
+            { print }
+        ' "$env_file" | write_env_file "$env_file"
+    else
+        printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+    fi
+}
+
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
+    # Preserve intentional empty placeholders; only add the key when it is absent.
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+}
+
+set_env_key_if_empty_or_missing() {
+    local key="$1" value="$2" env_file="$3" existing_value
+    validate_env_value "$key" "$value"
+    if env_key_exists "$key" "$env_file"; then
+        existing_value=$(get_env_var_nonempty "$key" "$env_file")
+        if [[ -n "$existing_value" ]]; then
+            set_env_key "$key" "$existing_value" "$env_file"
+        else
+            set_env_key "$key" "$value" "$env_file"
+        fi
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    fi
 }
 
 append_env_assignment_if_missing() {
@@ -587,6 +750,8 @@ append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local source_assignment source_value
 
+    # Preserve intentionally empty optional targets. UI_BIND_IP=, for example,
+    # deliberately keeps Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback alive.
     if env_key_exists "$target_key" "$env_file"; then
         return 0
     fi
@@ -594,9 +759,31 @@ append_env_migrated_assignment_if_missing() {
     source_value=$(get_env_var "$source_key" "$env_file")
     source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
     if [[ -n "$source_value" && -n "$source_assignment" ]]; then
-        append_env_assignment_if_missing "$target_key" "$source_assignment" "$env_file"
-    else
-        append_env_key_if_missing "$target_key" "$fallback_value" "$env_file"
+        # Rewrite empty migrated targets in place so updates do not append
+        # duplicate KEY= lines.
+        set_env_assignment "$target_key" "$source_assignment" "$env_file"
+    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
+        set_env_key "$target_key" "$fallback_value" "$env_file"
+    fi
+}
+
+append_required_env_migrated_assignment_if_empty_or_missing() {
+    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
+    local source_assignment source_value
+
+    # Required migrated paths cannot stay empty: Compose would turn KEY= into an
+    # invalid bind mount. This helper repairs only those required keys and keeps
+    # the optional migration helper above from changing deliberate empty values.
+    if env_key_has_value "$target_key" "$env_file"; then
+        return 0
+    fi
+
+    source_value=$(get_env_var "$source_key" "$env_file")
+    source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
+    if [[ -n "$source_value" && -n "$source_assignment" ]]; then
+        set_env_assignment "$target_key" "$source_assignment" "$env_file"
+    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
+        set_env_key "$target_key" "$fallback_value" "$env_file"
     fi
 }
 
@@ -1004,7 +1191,7 @@ resolve_lancache_image_tag() {
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
-    local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_dir_source cache_max_gb cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     env_file="$install_dir/.env"
 
@@ -1031,29 +1218,34 @@ migrate_env_for_update() {
         cache_dir_source=CACHE_DIR
     fi
     cache_dir="${cache_dir:-$install_dir/cache/standard}"
-    append_env_migrated_assignment_if_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
-    append_env_migrated_assignment_if_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
+    append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
+    append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
 
-    cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
-    cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
+    cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file")
+    cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file")
+    if [[ -n "$cache_max_size" ]]; then
+        cache_gb=$(cache_size_gb_from_env "$cache_max_size")
+    else
+        cache_gb=$(cache_size_gb_from_env "${cache_max_gb:-50}")
+    fi
 
-    append_env_key_if_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
-    append_env_key_if_missing CACHE_MEM_MB "512" "$env_file"
-    append_env_key_if_missing CACHE_SLICE_SIZE "8m" "$env_file"
-    append_env_key_if_missing CACHE_VALID_HIT "365d" "$env_file"
-    append_env_key_if_missing CACHE_VALID_ANY "1m" "$env_file"
-    append_env_key_if_missing CACHE_INACTIVE "365d" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_MEM_MB "512" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_SLICE_SIZE "8m" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_VALID_HIT "365d" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_VALID_ANY "1m" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_INACTIVE "365d" "$env_file"
 
-    append_env_key_if_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
-    append_env_key_if_missing PROXY_SECURITY_MODE "lazy" "$env_file"
+    set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
+    set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
     set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
-    append_env_key_if_missing CACHE_MAX_GB "$cache_gb" "$env_file"
+    set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
     # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
@@ -1133,11 +1325,11 @@ migrate_env_for_update() {
     ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
     ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
     ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
-    append_env_key_if_missing NATS_UI_USER "lancache-ui" "$env_file"
+    set_env_key_if_empty_or_missing NATS_UI_USER "lancache-ui" "$env_file"
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
-    append_env_key_if_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
+    set_env_key_if_empty_or_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
     ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
-    append_env_key_if_missing NATS_DNS_READER_USER "lancache-dns-reader" "$env_file"
+    set_env_key_if_empty_or_missing NATS_DNS_READER_USER "lancache-dns-reader" "$env_file"
     ensure_secret_env_key NATS_DNS_READER_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 

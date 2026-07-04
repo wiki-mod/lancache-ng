@@ -1,7 +1,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # GitHub Action for configuring Rust sccache with Redis and optional sccache-dist support
 name: Configure Rust sccache
-description: Configure Redis-backed sccache for trusted Rust CI jobs.
+description: Configure Redis-backed sccache for trusted Rust CI jobs while keeping the fallback path explicit.
 
 inputs:
   mode:
@@ -55,6 +55,7 @@ runs:
             ;;
         esac
 
+        # Optional or off modes let CI keep running on runners without LAN-only acceleration.
         if [ "$mode" = "off" ]; then
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."

@@ -99,7 +99,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
         export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
-          export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
+          SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; \
         fi; \
         if [ -s /run/secrets/sccache_dist_config ]; then \
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
@@ -127,7 +127,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
-        export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
+        DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
         distcc_hosts=""; \
         distcc_hosts_with_pump=""; \
         distcc_hosts_without_pump=""; \
@@ -146,13 +146,16 @@ RUN --mount=type=secret,id=sccache_redis_url \
           echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
           exit 1; \
         fi; \
+        distcc_pump_hosts="${distcc_hosts_with_pump:-}"; \
+        distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"; \
         echo "[INFO] trying distcc path." >&2; \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS="${distcc_hosts_with_pump:-$distcc_hosts}"; \
         export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
-        export PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
+        export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
-        if [ -n "$distcc_hosts_with_pump" ]; then \
+        if [ -n "$distcc_pump_hosts" ]; then \
+          export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"; \
+          unset DISTCC_HOSTS; \
           if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
             disable_distcc; \
             rm -rf "$distcc_probe_dir"; \
@@ -160,7 +163,12 @@ RUN --mount=type=secret,id=sccache_redis_url \
             return 0; \
           fi; \
           eval "$distcc_pump_env"; \
+          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
+          PATH="$distcc_wrapper_dir:$PATH"; \
+          export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
+        else \
+          export DISTCC_HOSTS="$distcc_hosts"; \
         fi; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
@@ -219,7 +227,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
         export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
-          export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; \
+          SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; \
         fi; \
         if [ -s /run/secrets/sccache_dist_config ]; then \
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
@@ -247,7 +255,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
-        export DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; \
+        DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
         distcc_hosts=""; \
         distcc_hosts_with_pump=""; \
         distcc_hosts_without_pump=""; \
@@ -266,13 +274,16 @@ RUN --mount=type=secret,id=sccache_redis_url \
           echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
           exit 1; \
         fi; \
+        distcc_pump_hosts="${distcc_hosts_with_pump:-}"; \
+        distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"; \
         echo "[INFO] trying distcc path." >&2; \
         distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS="${distcc_hosts_with_pump:-$distcc_hosts}"; \
         export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
-        export PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc GXX=distcc DISTCC_FALLBACK=0; \
+        export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
         distcc_enabled=1; \
-        if [ -n "$distcc_hosts_with_pump" ]; then \
+        if [ -n "$distcc_pump_hosts" ]; then \
+          export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"; \
+          unset DISTCC_HOSTS; \
           if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
             disable_distcc; \
             rm -rf "$distcc_probe_dir"; \
@@ -280,7 +291,12 @@ RUN --mount=type=secret,id=sccache_redis_url \
             return 0; \
           fi; \
           eval "$distcc_pump_env"; \
+          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
+          PATH="$distcc_wrapper_dir:$PATH"; \
+          export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
+        else \
+          export DISTCC_HOSTS="$distcc_hosts"; \
         fi; \
         printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
         if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
