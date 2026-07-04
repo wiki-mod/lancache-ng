@@ -561,6 +561,20 @@ jobs:
             echo "::error::Acceleration infrastructure checks must not disable RUSTC_WRAPPER directly; use cargo-with-sccache-fallback for controlled fallback."
             exit 1
           fi
+          grep -F 'rpm_legacy_docker_package_list()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must keep a shared legacy Docker RPM conflict list."; exit 1; }
+          grep -F 'docker-selinux' setup.sh >/dev/null \
+            && grep -F 'docker-engine-selinux' setup.sh >/dev/null \
+            || { echo "::error::Fedora/RHEL Docker RPM conflict guard must include legacy Docker selinux packages."; exit 1; }
+          if awk '
+            /\[\[ "\$os_id" = fedora \]\]/ { in_fedora=1; next }
+            /^    else$/ { in_fedora=0 }
+            in_fedora && /( podman([[:space:]\\]|$)| runc([[:space:]\\]|$))/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' setup.sh; then
+            echo "::error::Fedora Docker conflict guard must not block stock podman or runc."
+            exit 1
+          fi
           if grep -RIn -- 'timeout --foreground' .github/actions/cargo-with-sccache-fallback/action.yml; then
             echo "::error::cargo-with-sccache-fallback must not use timeout --foreground because it can leave Cargo child processes alive and bypass the fallback."
             exit 1

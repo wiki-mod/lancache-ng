@@ -321,6 +321,20 @@ rpm_installed_package_list() {
     done
 }
 
+rpm_legacy_docker_package_list() {
+    rpm_installed_package_list \
+        docker \
+        docker-client \
+        docker-client-latest \
+        docker-common \
+        docker-latest \
+        docker-latest-logrotate \
+        docker-logrotate \
+        docker-selinux \
+        docker-engine-selinux \
+        docker-engine
+}
+
 rpm_conflicting_docker_packages() {
     local os_id=""
 
@@ -331,17 +345,15 @@ rpm_conflicting_docker_packages() {
     fi
 
     if [[ "$os_id" = fedora ]]; then
+        # Fedora's supported Docker install path only requires removing
+        # Docker-family packages. Stock podman/runc must remain allowed.
         rpm_installed_package_list podman-docker
+        rpm_legacy_docker_package_list
     else
+        # RHEL-family Docker packages additionally conflict with stock
+        # podman/runc, so fail before mutating repository configuration.
+        rpm_legacy_docker_package_list
         rpm_installed_package_list \
-            docker \
-            docker-client \
-            docker-client-latest \
-            docker-common \
-            docker-latest \
-            docker-latest-logrotate \
-            docker-logrotate \
-            docker-engine \
             podman \
             runc
     fi
