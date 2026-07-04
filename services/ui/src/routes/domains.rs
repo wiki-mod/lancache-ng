@@ -11,7 +11,7 @@ use serde_json::json;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
@@ -258,19 +258,26 @@ pub async fn toggle_aaaa_filter(
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let enable = form.enabled.as_deref() == Some("1");
-    let cmd = if enable {
-        vec!["touch", "/var/lib/powerdns/aaaa-filter-enabled"]
-    } else {
-        vec!["rm", "-f", "/var/lib/powerdns/aaaa-filter-enabled"]
-    };
-    for svc in [
-        &state.config.dns_standard_service,
-        &state.config.dns_ssl_service,
-    ] {
-        if let Err(e) = docker_client::exec_in_container(&state.docker, svc, cmd.clone()).await {
-            tracing::error!("AAAA filter toggle on {}: {}", svc, e);
+    let mut failed_paths = Vec::new();
+
+    for marker_path in aaaa_filter_marker_paths(&state) {
+        if let Err(e) = set_aaaa_filter_marker(&marker_path, enable) {
+            tracing::error!(
+                path = %marker_path.display(),
+                enabled = enable,
+                error = %e,
+                "AAAA filter toggle failed"
+            );
+            failed_paths.push(marker_path);
         }
     }
+
+    if !failed_paths.is_empty() {
+        // The UI must not report success if any DNS instance cannot observe the
+        // requested marker state.
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     Ok(Redirect::to("/domains"))
 }
 
@@ -296,13 +303,9 @@ async fn flush_recursor_cache(state: &AppState) {
 }
 
 async fn is_aaaa_filter_enabled(state: &AppState) -> bool {
-    let result = docker_client::exec_in_container(
-        &state.docker,
-        &state.config.dns_standard_service,
-        vec!["test", "-f", "/var/lib/powerdns/aaaa-filter-enabled"],
-    )
-    .await;
-    result.is_ok()
+    aaaa_filter_marker_paths(state)
+        .into_iter()
+        .any(|path| aaaa_filter_enabled_at(&path))
 }
 
 async fn restart_ssl(state: &AppState) {
@@ -311,6 +314,29 @@ async fn restart_ssl(state: &AppState) {
     {
         tracing::error!("Restart proxy service failed: {}", e);
     }
+}
+
+fn aaaa_filter_marker_paths(state: &AppState) -> [PathBuf; 2] {
+    [
+        Path::new(&state.config.dns_standard_state_dir).join("aaaa-filter-enabled"),
+        Path::new(&state.config.dns_ssl_state_dir).join("aaaa-filter-enabled"),
+    ]
+}
+
+fn set_aaaa_filter_marker(path: &Path, enabled: bool) -> std::io::Result<()> {
+    if enabled {
+        fs::write(path, b"1")
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+fn aaaa_filter_enabled_at(path: &Path) -> bool {
+    fs::metadata(path).is_ok()
 }
 
 const MIN_TTL: u32 = 1;
@@ -729,6 +755,15 @@ fn normalize_lan_name(name: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lancache-ng-{name}-{stamp}"))
+    }
 
     #[test]
     fn validates_supported_lan_record_edge_cases() {
@@ -821,7 +856,37 @@ mod tests {
     }
 
     #[test]
+    fn aaaa_filter_marker_write_and_remove_are_idempotent() {
+        let dir = temp_dir("aaaa-filter");
+        fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("aaaa-filter-enabled");
+
+        assert!(!aaaa_filter_enabled_at(&marker));
+        set_aaaa_filter_marker(&marker, true).unwrap();
+        assert!(aaaa_filter_enabled_at(&marker));
+        set_aaaa_filter_marker(&marker, true).unwrap();
+        assert!(aaaa_filter_enabled_at(&marker));
+        set_aaaa_filter_marker(&marker, false).unwrap();
+        assert!(!aaaa_filter_enabled_at(&marker));
+        set_aaaa_filter_marker(&marker, false).unwrap();
+        assert!(!aaaa_filter_enabled_at(&marker));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn aaaa_filter_marker_write_fails_when_state_dir_is_missing() {
+        let marker = temp_dir("aaaa-filter-missing").join("missing/aaaa-filter-enabled");
+
+        assert!(set_aaaa_filter_marker(&marker, true).is_err());
+    }
+
+    #[test]
     fn append_and_remove_domain_use_atomic_rewrites() {
+        // Domain list edits drive live DNS/proxy behavior, so this test proves
+        // the update helpers rewrite files atomically without losing comments,
+        // blank lines, or the distinction between root-domain and wildcard-only
+        // entries.
         let base = std::env::temp_dir().join(format!(
             "lancache-domains-test-{}",
             SystemTime::now()

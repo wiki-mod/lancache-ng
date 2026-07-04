@@ -12,7 +12,7 @@ set -eu
 # writes keep working. If an operator overrides the container user, do not try
 # to chown or call setpriv from an unprivileged account.
 if [ "$(id -u)" = "0" ]; then
-    for path in /data /etc/nats; do
+    for path in /data /etc/nats /var/lib/powerdns-state; do
         if [ -e "$path" ]; then
             chown -R lancache:lancache "$path"
         fi

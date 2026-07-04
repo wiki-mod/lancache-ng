@@ -3,19 +3,33 @@
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
 //! conflict checks, and applies guarded DHCP config mutations through the Kea
 //! control-agent with rollback handling for failed persistence.
+//!
+//! Docker exec is intentionally not used here. The UI talks to a narrowed
+//! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
+//! one-shot helper container that can only be started, waited on, and logged.
 
-use crate::docker_client::exec_in_container;
-use crate::AppState;
+use crate::{docker_client, AppState};
+use anyhow::Context as AnyhowContext;
 use axum::extract::{Form, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
+use bollard::container::LogOutput;
+// The DHCP probe path deliberately uses only start/stop/wait/logs operations
+// because Docker exec and generic container creation are banned from the UI's
+// Docker API surface for security reasons.
+use bollard::query_parameters::{
+    LogsOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    WaitContainerOptionsBuilder,
+};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
 
 // ─── Constants ───
@@ -706,37 +720,15 @@ async fn fetch_all_reservations(
 }
 
 async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
-    let output = match exec_in_container(
-        &state.docker,
-        "dhcp",
-        vec![
-            "nmap",
-            "--script",
-            "broadcast-dhcp-discover",
-            "-e",
-            "any",
-            "--script-args",
-            "broadcast-dhcp-discover.timeout=5",
-        ],
-    )
-    .await
-    {
+    // Serializes probe requests against the single predeclared dhcp-probe
+    // container — concurrent /api/dhcp/check calls would otherwise race to
+    // restart/attach/inspect the same container.
+    let _guard = state.dhcp_probe_lock.lock().await;
+
+    let output = match run_dhcp_conflict_probe(&state.docker).await {
         Ok(out) => out,
         Err(e) => {
-            // Check if the error is due to nmap not being found
-            let err_msg = e.to_string();
-            if err_msg.contains("nmap")
-                || err_msg.contains("not found")
-                || err_msg.contains("No such file")
-            {
-                return DhcpCheckStatus::Unavailable(
-                    "nmap is not installed in the DHCP container".to_string(),
-                );
-            }
-            return DhcpCheckStatus::Unavailable(format!(
-                "Failed to execute DHCP check: {}",
-                err_msg
-            ));
+            return DhcpCheckStatus::Unavailable(format!("Failed to execute DHCP check: {}", e));
         }
     };
 
@@ -753,14 +745,130 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
     DhcpCheckStatus::NotFound
 }
 
+const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
+const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
+
+async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
+    let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
+        .context("resolve DHCP probe container")?;
+
+    stop_container_if_running(docker, id).await?;
+    let started_since = unix_timestamp_seconds();
+
+    docker
+        .start_container(id, Some(StartContainerOptionsBuilder::default().build()))
+        .await
+        .context("start DHCP probe container")?;
+
+    let mut wait = docker.wait_container(
+        id,
+        Some(
+            WaitContainerOptionsBuilder::default()
+                .condition("not-running")
+                .build(),
+        ),
+    );
+    let wait_result = wait
+        .next()
+        .await
+        .context("wait for DHCP probe container")?
+        .context("read DHCP probe wait response")?;
+
+    let output = collect_container_logs_since(docker, id, started_since)
+        .await
+        .context("read DHCP probe logs")?;
+    let output = current_probe_output(&output);
+
+    if wait_result.status_code != 0 {
+        return Err(anyhow::anyhow!(
+            "DHCP probe container exited with code {}: {}",
+            wait_result.status_code,
+            output.trim()
+        ));
+    }
+
+    Ok(output)
+}
+
+async fn collect_container_logs_since(
+    docker: &bollard::Docker,
+    id: &str,
+    since: i32,
+) -> Result<String, anyhow::Error> {
+    let mut logs = docker.logs(
+        id,
+        Some(
+            LogsOptionsBuilder::default()
+                .stdout(true)
+                .stderr(true)
+                .since(since)
+                .build(),
+        ),
+    );
+
+    let mut output = String::new();
+    while let Some(chunk) = logs.next().await {
+        match chunk.context("read container log chunk")? {
+            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
+                output.push_str(&String::from_utf8_lossy(&message));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(output)
+}
+
+fn current_probe_output(output: &str) -> String {
+    output
+        .rsplit_once(DHCP_PROBE_START_MARKER)
+        .map(|(_, current)| current.to_string())
+        .unwrap_or_else(|| output.to_string())
+}
+
+fn unix_timestamp_seconds() -> i32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i32::MAX as u64) as i32)
+        .unwrap_or_default()
+}
+
+async fn stop_container_if_running(
+    docker: &bollard::Docker,
+    id: &str,
+) -> Result<(), anyhow::Error> {
+    if let Err(e) = docker
+        .stop_container(
+            id,
+            Some(StopContainerOptionsBuilder::default().t(5).build()),
+        )
+        .await
+    {
+        // Docker returns "not modified" if the one-shot helper is already
+        // stopped. That is the expected steady state before a probe run.
+        let message = e.to_string();
+        if !message.contains("304") && !message.to_ascii_lowercase().contains("not modified") {
+            return Err(e).context("stop DHCP probe container");
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Validators ───
 
 fn normalize_mac(mac: &str) -> String {
+    // Accept common operator input styles (`aa:bb`, `aa-bb`, `aabb`) by keeping
+    // only hex digits, then rebuild the canonical colon-separated form used by
+    // Kea reservations. Validation remains separate below, so this helper does
+    // not silently accept malformed lengths.
     let hex: String = mac
         .to_lowercase()
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
         .collect();
+
+    // Reinsert a colon before every byte boundary after the first byte.
     hex.chars()
         .enumerate()
         .flat_map(|(i, c)| {

@@ -42,6 +42,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub file_lock: std::sync::Mutex<()>,
     pub kea_config_lock: tokio::sync::Mutex<()>,
+    pub dhcp_probe_lock: tokio::sync::Mutex<()>,
     pub nats: async_nats::Client,
     pub db: Mutex<Connection>,
     pub csrf_token: String,
@@ -443,21 +444,16 @@ async fn main() -> Result<()> {
         http_client,
         file_lock: std::sync::Mutex::new(()),
         kea_config_lock: tokio::sync::Mutex::new(()),
+        dhcp_probe_lock: tokio::sync::Mutex::new(()),
         nats,
         db,
         csrf_token: generate_csrf_token(),
     });
 
-    // Write initial nats.conf with auth tokens and reload NATS
-    if let Err(e) = routes::secondaries::update_nats_conf(&state).await {
-        tracing::warn!("Could not write initial nats.conf: {}", e);
-    } else {
-        let _ = docker_client::exec_in_container(
-            &state.docker,
-            &state.config.nats_service,
-            vec!["kill", "-HUP", "1"],
-        )
-        .await;
+    // Write initial nats.conf with auth tokens and restart NATS so it picks up
+    // the shared config without requiring Docker exec.
+    if let Err(e) = routes::secondaries::reload_nats_conf(&state).await {
+        tracing::warn!("Could not reload initial nats.conf: {}", e);
     }
 
     // Routes that are always public (protected by their own token).

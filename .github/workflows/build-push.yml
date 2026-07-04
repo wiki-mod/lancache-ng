@@ -1,7 +1,9 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# CI pipeline that detects changed paths on PRs, builds, tests, and scans each
-# Rust/Docker service (dns, ui, watchdog, dhcp, dhcp-proxy, proxy), and publishes
-# multi-arch images to GHCR on master pushes and version tags.
+#
+# Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
+# crates and shell scripts, validates the docker-compose files, scans
+# container images, then builds, pushes, promotes, and releases the stack
+# images on the relevant triggers.
 
 name: Build & Push
 
@@ -393,6 +395,29 @@ jobs:
           }
 
           validate_nats_config_ownership
+
+          if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+            echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
+            exit 1
+          fi
+          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+            echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
+            exit 1
+          fi
+          for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+            grep -Fq 'acl safe_container_action' "$compose_file" \
+              && grep -Fq 'acl lancache_container' "$compose_file" \
+              && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
+              && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
+              && grep -Fq 'http-request deny' "$compose_file" \
+              && ! grep -Fq '/containers/create' "$compose_file" \
+              && ! grep -Fq '/containers/json' "$compose_file" \
+              && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$compose_file" \
+              || {
+                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions."
+                exit 1
+              }
+          done
 
           missing_required=0
           while IFS= read -r key; do
