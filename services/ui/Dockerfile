@@ -163,6 +163,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
             return 0; \
           fi; \
           eval "$distcc_pump_env"; \
+          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
           PATH="$distcc_wrapper_dir:$PATH"; \
           export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
@@ -290,6 +291,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
             return 0; \
           fi; \
           eval "$distcc_pump_env"; \
+          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
           PATH="$distcc_wrapper_dir:$PATH"; \
           export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \

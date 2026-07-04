@@ -238,6 +238,7 @@ runs:
               distcc_hosts=""
               distcc_pump_hosts=""
               distcc_hosts_without_pump=""
+              distcc_pump_filtered_hosts=""
               for distcc_host_spec in $(cat /run/lancache/distcc-potential-hosts); do
                 distcc_host_base="${distcc_host_spec%%,*}"
                 if [ -n "$distcc_host_base" ]; then
@@ -262,6 +263,7 @@ runs:
                 unset DISTCC_HOSTS
                 pump_env="$(distcc-pump --startup)"
                 eval "$pump_env"
+                distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"
                 PATH="$wrapper_dir:$PATH"
                 export PATH
                 pump_started=1
@@ -271,6 +273,7 @@ runs:
                 unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
               fi
 
+              distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
               export DISTCC_HOSTS="$distcc_hosts_without_pump"
               distcc_log="$preflight_dir/distcc.log"
               run_logged "$distcc_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"

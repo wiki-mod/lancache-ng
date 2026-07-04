@@ -634,6 +634,8 @@ jobs:
             && grep -F 'DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'unset DISTCC_HOSTS' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
           grep -F 'docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -757,6 +759,8 @@ jobs:
             if [ "$dockerfile" = "services/ui/Dockerfile" ]; then
               grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must fall back to stripped distcc hosts when no plain hosts are configured."; exit 1; }
+              grep -F 'DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}";' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must reuse the lsdistcc-filtered pump host list for no-pump compiler probes."; exit 1; }
               grep -F 'export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts";' "$dockerfile" >/dev/null \
                 && grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must start distcc-pump with pump-capable hosts only."; exit 1; }
