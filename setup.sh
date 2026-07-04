@@ -14,6 +14,10 @@
 set -euo pipefail
 export LANG=C LC_ALL=C
 
+# Keep the normal installer as the production path: collect runtime settings,
+# generate or preserve secrets, write the quickstart .env/compose files, pull
+# prebuilt images, and start the stack. Development-only behavior belongs behind
+# an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 
@@ -87,6 +91,9 @@ is_valid_dhcp_mode() {
     esac
 }
 
+# Centralize runtime profile calculation so install and update cannot drift:
+# SSL, Kea DHCP, and dnsmasq proxy mode are represented once in COMPOSE_PROFILES
+# while unrelated profiles are preserved.
 compose_profiles_for_runtime() {
     local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}"
     local profile result="" trimmed
@@ -156,6 +163,9 @@ install_packages() {
     fi
 }
 
+# Package installation is intentionally interactive because setup.sh mutates the
+# host. Missing prerequisites are offered to DAU users, but unsupported package
+# managers fail closed instead of guessing.
 install_required_command() {
     local command_name="$1" reason="$2"
     shift 2
@@ -205,6 +215,9 @@ apt_compose_package() {
     fi
 }
 
+# Docker bootstrap is a first-install convenience, not a build environment
+# contract. Changes here affect production setup directly and must stay separate
+# from future dev-mode/compiler-farm decisions.
 install_docker_apt_repo() {
     local os_id="" codename="" repo_file=""
 
@@ -639,6 +652,9 @@ cache_size_gb_from_env() {
     printf '%s\n' "$cache_max_size"
 }
 
+# Production installs consume prebuilt service images. Until multi-arch images
+# are explicitly published and tested, reject unsupported host architectures
+# before writing or mutating runtime state.
 assert_prebuilt_image_platform_supported() {
     local arch
     arch=$(uname -m)
@@ -661,6 +677,9 @@ CONVERGENCE_TIMER_WAS_ACTIVE=0
 CONVERGENCE_TIMER_WAS_ENABLED=0
 CONVERGENCE_SERVICE_WAS_ACTIVE=0
 
+# The convergence timer may start `docker compose up` while update is migrating
+# files. Pause and remember exact state so update can restore the previous timer
+# behavior after success or pre-mutation failure.
 pause_lancache_convergence_for_update() {
     CONVERGENCE_TIMER_WAS_ACTIVE=0
     CONVERGENCE_TIMER_WAS_ENABLED=0
@@ -697,6 +716,9 @@ pause_lancache_convergence_for_update() {
     fi
 }
 
+# Resume only what was active/enabled before the update. This keeps manual
+# operator choices intact and avoids enabling convergence on systems that did
+# not use it before.
 resume_lancache_convergence_after_update() {
     local restart_service="${1:-false}"
 
@@ -722,6 +744,9 @@ resume_lancache_convergence_after_update() {
     fi
 }
 
+# Image selection is part of the release safety contract: mutable channels such
+# as latest/edge/dev must resolve to one immutable stack tag before the compose
+# pull, so one installation cannot accidentally mix image versions.
 validate_lancache_image_tag() {
     local tag="$1"
 
@@ -959,6 +984,9 @@ resolve_lancache_image_tag() {
     printf '%s\n' "$tag"
 }
 
+# Update migrations must be idempotent. They add keys introduced after an older
+# install, preserve real operator secrets, replace placeholders, and normalize
+# legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
@@ -1098,6 +1126,8 @@ migrate_env_for_update() {
     print_ok ".env is complete for the current quickstart template"
 }
 
+# Backup/restore may run on minimal hosts. Install only the missing tools needed
+# for the requested operation instead of expanding the base installer footprint.
 install_missing_tools() {
     local -a missing=() tools=("$@")
     local tool
@@ -1135,6 +1165,8 @@ backup_manifest() {
     true
 }
 
+# Prevent recursive backups such as /var/backups being archived into itself.
+# That case can fill disks and produce archives that cannot be restored safely.
 path_is_inside() {
     local child="$1" parent="$2"
     child=$(realpath -m "$child")
@@ -1142,6 +1174,8 @@ path_is_inside() {
     [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
 }
 
+# Compose helpers are deliberately no-ops when the stack is unavailable so
+# config-only backup/restore can still handle partial or damaged installs.
 compose_stack_available() {
     local install_dir="$1"
     [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1
@@ -1217,6 +1251,8 @@ record_image_revisions() {
         || print_warn "Could not record current image revisions"
 }
 
+# Config backups are the update rollback path. Full backups additionally include
+# cache payloads and may be huge, so they stay an explicit operator choice.
 cmd_backup() {
     local mode="config" install_dir="/opt/lancache-ng" backup_root="/var/backups/lancache-ng"
     while [[ $# -gt 0 ]]; do
@@ -1350,6 +1386,8 @@ cmd_restore() {
     restore_cleanup
 }
 
+# Keep user-facing help compact. Detailed behavior should live in command help
+# blocks and comments near the implementation, not in the top-level output.
 print_usage() {
     cat <<EOF
 LanCache-NG setup
@@ -1454,6 +1492,9 @@ EOF
 }
 
 # ── update subcommand ─────────────────────────────────────────────────────────
+# Update order is deliberate: pause convergence, create a rollback backup,
+# migrate/validate config, pull images, validate again, restart, then resume
+# convergence. Reordering can leave a half-migrated stack running.
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
@@ -1494,6 +1535,8 @@ cmd_update() {
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
+# Debug is read-only diagnostics. It must not repair, update, or rewrite config;
+# operators use it when the stack is already in an unknown state.
 cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     [[ -f "$install_dir/docker-compose.yml" ]] \
@@ -1552,6 +1595,9 @@ cmd_debug() {
 }
 
 # ── update-ip subcommand ───────────────────────────────────────────────────────
+# update-ip is the compatibility reconfiguration path for existing installs. It
+# changes only listener/DNS IP references and restarts the current production
+# compose stack.
 cmd_update_ip() {
     printf "\n"
     printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
@@ -1643,6 +1689,9 @@ cmd_update_ip() {
 }
 
 # ── secondary subcommand ──────────────────────────────────────────────────────
+# Secondary setup is intentionally separate from primary install: it consumes
+# credentials returned by the primary UI/API, writes a small DNS-only compose
+# directory, and must not modify the primary host configuration.
 cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
     local response_file http_status response secondary_dir
@@ -1956,6 +2005,9 @@ esac
 # ══════════════════════════════════════════════════════════════════════════════
 # Main setup
 # ══════════════════════════════════════════════════════════════════════════════
+# This is the first-user production flow. Keep it linear and readable: prompt
+# for runtime choices, write the config once, install watchdog units, show the
+# final summary, then pull/start prebuilt containers.
 
 printf "\n"
 printf "${BOLD}╔══════════════════════════════════════════╗${RESET}\n"
@@ -2420,6 +2472,8 @@ if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
 fi
 
 # ── 10. Installing systemd watchdog ───────────────────────────────────────────
+# The systemd service owns boot startup; the timer is a convergence guard that
+# re-applies compose state if containers drift. It is not an update mechanism.
 print_step "Installing systemd watchdog"
 
 SYSTEMD_AVAILABLE=0
@@ -2522,6 +2576,8 @@ ask "Start now? [Y/n]" "Y"
     || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
 # ── 12. Starting stack ───────────────────────────────────────────────────────
+# Pull before starting so GHCR/auth/platform failures happen while systemd units
+# are installed but not yet enabled, keeping failed first installs reversible.
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
