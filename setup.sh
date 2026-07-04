@@ -676,6 +676,8 @@ systemd_unit_exists() {
 CONVERGENCE_TIMER_WAS_ACTIVE=0
 CONVERGENCE_TIMER_WAS_ENABLED=0
 CONVERGENCE_SERVICE_WAS_ACTIVE=0
+UPDATE_CONVERGENCE_PAUSED=0
+UPDATE_CONVERGENCE_COMPLETED=0
 
 # The convergence timer may start `docker compose up` while update is migrating
 # files. Pause and remember exact state so update can restore the previous timer
@@ -742,6 +744,19 @@ resume_lancache_convergence_after_update() {
         systemctl start lancache-converge.timer \
             || die "Failed to restart lancache-converge.timer after update."
     fi
+}
+
+resume_lancache_convergence_after_failed_update() {
+    local exit_code=$?
+
+    trap - EXIT
+    if [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" = "1" ]] \
+        && [[ "${UPDATE_CONVERGENCE_COMPLETED:-0}" != "1" ]]; then
+        print_warn "Update failed after pausing convergence; restoring convergence state."
+        resume_lancache_convergence_after_update true
+    fi
+
+    exit "$exit_code"
 }
 
 # Image selection is part of the release safety contract: mutable channels such
@@ -990,7 +1005,7 @@ resolve_lancache_image_tag() {
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
-    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_gateway dhcp_subnet_start ip_standard upstream_dhcp_ip
+    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -1080,15 +1095,38 @@ migrate_env_for_update() {
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
     ip_standard=$(get_env_var IP_STANDARD "$env_file")
     ip_ssl=$(get_env_var IP_SSL "$env_file")
-    dhcp_gateway=$(get_env_var DHCP_GATEWAY "$env_file")
     dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file")
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
-    append_env_key_if_missing DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
-    append_env_key_if_missing DHCP_DNS_PRIMARY "${dhcp_dns_primary:-$ip_standard}" "$env_file"
-    append_env_key_if_missing DHCP_DNS_SECONDARY "${dhcp_dns_secondary:-${ip_ssl:-$ip_standard}}" "$env_file"
-    append_env_key_if_missing UPSTREAM_DHCP_IP "${upstream_dhcp_ip:-$dhcp_gateway}" "$env_file"
+
+    case "$dhcp_mode" in
+        dnsmasq-proxy)
+            is_valid_ipv4 "$dhcp_subnet_start" \
+                || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_SUBNET_START in $env_file. Set the proxy-DHCP subnet start for your LAN, then rerun setup.sh update."
+            is_valid_ipv4 "$dhcp_dns_primary" \
+                || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_DNS_PRIMARY in $env_file. Set the DNS option that proxy-DHCP/PXE clients should receive, then rerun setup.sh update."
+            if [[ -z "$dhcp_dns_secondary" ]]; then
+                dhcp_dns_secondary="$dhcp_dns_primary"
+            else
+                is_valid_ipv4 "$dhcp_dns_secondary" \
+                    || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty to reuse DHCP_DNS_PRIMARY."
+            fi
+            is_valid_ipv4 "$upstream_dhcp_ip" \
+                || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
+            ;;
+        *)
+            is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
+            is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
+            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_ssl:-$ip_standard}"
+            is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip=""
+            ;;
+    esac
+
+    set_env_key DHCP_SUBNET_START "$dhcp_subnet_start" "$env_file"
+    set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
+    set_env_key DHCP_DNS_SECONDARY "$dhcp_dns_secondary" "$env_file"
+    set_env_key UPSTREAM_DHCP_IP "$upstream_dhcp_ip" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -1502,11 +1540,17 @@ cmd_update() {
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
 
+    UPDATE_CONVERGENCE_PAUSED=0
+    UPDATE_CONVERGENCE_COMPLETED=0
+    trap resume_lancache_convergence_after_failed_update EXIT
+    UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
+        trap - EXIT
         resume_lancache_convergence_after_update true
+        UPDATE_CONVERGENCE_COMPLETED=1
         die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
     fi
 
@@ -1530,7 +1574,9 @@ cmd_update() {
 
     print_step "Restarting containers"
     docker compose up -d --remove-orphans
+    trap - EXIT
     resume_lancache_convergence_after_update
+    UPDATE_CONVERGENCE_COMPLETED=1
     print_ok "Stack updated"
 }
 
@@ -2183,7 +2229,7 @@ fi
 print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
-printf "  dnsmasq-proxy: experimental proxy-DHCP helper; normal clients usually keep router DNS\n"
+printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
@@ -2414,10 +2460,10 @@ DHCP_SUBNET=${DHCP_SUBNET}
 DHCP_GATEWAY=${DHCP_GATEWAY}
 DHCP_RANGE_START=${DHCP_RANGE_START}
 DHCP_RANGE_END=${DHCP_RANGE_END}
-DHCP_SUBNET_START=${DHCP_SUBNET_START:-10.0.0.0}
-DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-$IP_STANDARD}
-DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-$IP_STANDARD}
-UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-$IP_STANDARD}}
+DHCP_SUBNET_START=${DHCP_SUBNET_START}
+DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
+DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
+UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}

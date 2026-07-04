@@ -23,7 +23,7 @@
       <p class="text-xs text-slate-500">DHCP API configuration is available in the Admin UI.</p>
       {% endif %}
     {% else %}
-      <p class="text-sm text-slate-400">dnsmasq proxy mode only runs DHCP relay behavior and can set DNS options.</p>
+      <p class="text-sm text-slate-400">dnsmasq proxy mode only serves proxy-DHCP/PXE clients and does not reliably replace DNS options from a normal router DHCP server.</p>
       <p class="text-xs text-amber-400">Kea-specific UI configuration is inactive in this mode.</p>
     {% endif %}
   </div>

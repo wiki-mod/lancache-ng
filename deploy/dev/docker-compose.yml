@@ -194,7 +194,7 @@ services:
 
 
   # ── DHCP Proxy (dnsmasq) ──────────────────────────────────────────────────
-  # Proxy mode: sits next to existing DHCP server, overrides DNS options only.
+  # Proxy mode: sits next to an existing DHCP server and serves proxy-DHCP/PXE clients.
   # Mutually exclusive with Kea mode (both want port 67/udp).
   # Activate with: docker compose --profile dhcp-proxy up
   dhcp-proxy:
@@ -204,12 +204,6 @@ services:
     env_file:
       - ../../config/dev/dhcp-proxy.env
     network_mode: host
-    environment:
-      - DHCP_MODE=${DHCP_MODE:-disabled}
-      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL:-${IP_STANDARD}}}
-      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-${DHCP_GATEWAY:-}}
     cap_add:
       - NET_BIND_SERVICE
     profiles:
