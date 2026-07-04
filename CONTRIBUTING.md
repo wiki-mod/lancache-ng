@@ -68,6 +68,8 @@ Track related work explicitly in the PR body:
 
 - Use `Refs #123` for parent issues, umbrella issues, and follow-up references.
 - Use `Closes #123` only when this PR should also close that issue.
+- If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
+- When a PR is merged, completion claims must be checked against the merged code on `github/master`, not just the PR head or narrative.
 - If no issue exists, explain why in the PR body instead of leaving the relationship unclear.
 - Open PRs should include links for relevant review context (for example tracking and umbrella issue).
 

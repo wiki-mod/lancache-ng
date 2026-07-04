@@ -195,6 +195,31 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
+      - name: Run governance guardrails
+        if: github.event_name == 'pull_request'
+        env:
+          GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GOVERNANCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GOVERNANCE_PR_TITLE: ${{ github.event.pull_request.title }}
+          GOVERNANCE_PR_BODY: ${{ github.event.pull_request.body }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          changed_files="$(mktemp "$PWD/.governance-changed-files.XXXXXX")"
+          trap 'rm -f "$changed_files"' EXIT
+          git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GOVERNANCE_HEAD_SHA" > "$changed_files"
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e GITHUB_REPOSITORY \
+            -e GOVERNANCE_PR_TITLE \
+            -e GOVERNANCE_PR_BODY \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
     # contracts and exports one smoke-tested build-tools image reference for all
