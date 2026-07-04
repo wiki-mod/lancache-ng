@@ -883,6 +883,10 @@ mod tests {
 
     #[test]
     fn append_and_remove_domain_use_atomic_rewrites() {
+        // Domain list edits drive live DNS/proxy behavior, so this test proves
+        // the update helpers rewrite files atomically without losing comments,
+        // blank lines, or the distinction between root-domain and wildcard-only
+        // entries.
         let base = std::env::temp_dir().join(format!(
             "lancache-domains-test-{}",
             SystemTime::now()

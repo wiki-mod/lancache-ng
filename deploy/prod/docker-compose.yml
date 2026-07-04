@@ -9,6 +9,11 @@ name: lancache-ng
 
 x-docker-socket-proxy-command: &docker-socket-proxy-command |
   cat > /tmp/lancache-haproxy.cfg <<'EOF'
+  # Docker exec and generic container creation are intentionally banned here:
+  # the Admin UI and watchdog only need narrowly scoped lifecycle operations for
+  # known lancache-ng containers. A compromised UI should not gain a general
+  # Docker API that can create privileged containers or attach to unrelated
+  # workloads on the host.
   global
       log stdout format raw daemon info
       pidfile /run/haproxy.pid
@@ -30,6 +35,8 @@ x-docker-socket-proxy-command: &docker-socket-proxy-command |
 
   frontend dockerfrontend
       bind [::]:2375 v4v6
+      # Permit only Docker daemon health/version checks plus a small set of
+      # container operations for fixed lancache-ng container names.
       acl safe_get method GET
       acl safe_head method HEAD
       acl safe_post method POST
@@ -166,9 +173,9 @@ services:
         max-file: "2"
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
-  # socket-proxy limits Docker access to Admin UI/watchdog operations:
-  # container inspect/list plus start/stop/restart/attach for predeclared
-  # compose services. Generic container creation remains blocked.
+  # socket-proxy limits Docker access to Admin UI/watchdog operations. The
+  # custom HAProxy config above replaces Tecnativa's broad CONTAINERS/POST
+  # toggles with a deny-by-default allowlist for named lancache-ng containers.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     entrypoint: ["/bin/sh", "-ec"]

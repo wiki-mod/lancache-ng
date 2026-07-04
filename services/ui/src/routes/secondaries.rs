@@ -236,6 +236,10 @@ pub async fn rotate_token(
 }
 
 // ─── Helper Functions ───
+// Secondary registration changes must keep NATS credentials, the shared
+// `nats.conf`, and the running NATS process in sync. Docker exec is banned, so
+// the safe reload path is: write the full config atomically, then restart only
+// the predeclared NATS container through the narrowed Docker proxy.
 
 pub async fn reload_nats_conf(
     state: &AppState,

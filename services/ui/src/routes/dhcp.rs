@@ -3,6 +3,10 @@
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
 //! conflict checks, and applies guarded DHCP config mutations through the Kea
 //! control-agent with rollback handling for failed persistence.
+//!
+//! Docker exec is intentionally not used here. The UI talks to a narrowed
+//! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
+//! one-shot helper container that can only be started, waited on, and logged.
 
 use crate::{docker_client, AppState};
 use anyhow::Context as AnyhowContext;
@@ -11,6 +15,9 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use bollard::container::LogOutput;
+// The DHCP probe path deliberately uses only start/stop/wait/logs operations
+// because Docker exec and generic container creation are banned from the UI's
+// Docker API surface for security reasons.
 use bollard::query_parameters::{
     LogsOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
     WaitContainerOptionsBuilder,
@@ -851,11 +858,17 @@ async fn stop_container_if_running(
 // ─── Validators ───
 
 fn normalize_mac(mac: &str) -> String {
+    // Accept common operator input styles (`aa:bb`, `aa-bb`, `aabb`) by keeping
+    // only hex digits, then rebuild the canonical colon-separated form used by
+    // Kea reservations. Validation remains separate below, so this helper does
+    // not silently accept malformed lengths.
     let hex: String = mac
         .to_lowercase()
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
         .collect();
+
+    // Reinsert a colon before every byte boundary after the first byte.
     hex.chars()
         .enumerate()
         .flat_map(|(i, c)| {

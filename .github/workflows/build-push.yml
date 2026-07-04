@@ -397,11 +397,11 @@ jobs:
           validate_nats_config_ownership
 
           if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
-            echo "::error::Docker socket proxy must not expose EXEC."
+            echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
             exit 1
           fi
           if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
-            echo "::error::Docker socket proxy must use the explicit HAProxy allowlist, not broad CONTAINERS=1/POST=1."
+            echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
