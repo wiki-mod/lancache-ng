@@ -402,7 +402,7 @@ install_docker_rpm() {
 
     for package in "${packages[@]}"; do
         case "$package" in
-            docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin)
+            docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin|docker-compose-plugin)
                 needs_engine=1
                 break
                 ;;
@@ -538,6 +538,17 @@ get_env_var() {
     _compose_parse_env_value "$raw"
 }
 
+get_env_var_nonempty() {
+    local key="$1" env_file="$2" raw value
+    while IFS= read -r raw; do
+        value=$(_compose_parse_env_value "$raw")
+        if [[ -n "$value" ]]; then
+            printf '%s' "$value"
+            return 0
+        fi
+    done < <(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print}' "$env_file" 2>/dev/null)
+}
+
 get_env_assignment_value_raw() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
@@ -653,7 +664,13 @@ set_env_key() {
     validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
         awk -F= -v key="$key" -v value="$value" '
-            $1 == key { print key "=" value; next }
+            $1 == key {
+                if (!seen) {
+                    print key "=" value
+                    seen=1
+                }
+                next
+            }
             { print }
         ' "$env_file" | write_env_file "$env_file"
     else
@@ -676,7 +693,13 @@ set_env_assignment() {
 
     if env_key_exists "$key" "$env_file"; then
         awk -F= -v key="$key" -v value="$assignment_value" '
-            $1 == key { print key "=" value; next }
+            $1 == key {
+                if (!seen) {
+                    print key "=" value
+                    seen=1
+                }
+                next
+            }
             { print }
         ' "$env_file" | write_env_file "$env_file"
     else
@@ -692,10 +715,15 @@ append_env_key_if_missing() {
 }
 
 set_env_key_if_empty_or_missing() {
-    local key="$1" value="$2" env_file="$3"
+    local key="$1" value="$2" env_file="$3" existing_value
     validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
-        [[ -n "$(get_env_var "$key" "$env_file")" ]] || set_env_key "$key" "$value" "$env_file"
+        existing_value=$(get_env_var_nonempty "$key" "$env_file")
+        if [[ -n "$existing_value" ]]; then
+            set_env_key "$key" "$existing_value" "$env_file"
+        else
+            set_env_key "$key" "$value" "$env_file"
+        fi
     else
         printf '%s=%s\n' "$key" "$value" >> "$env_file"
     fi
@@ -1163,7 +1191,7 @@ resolve_lancache_image_tag() {
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
-    local allow_insecure_ui cache_dir cache_dir_source cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_dir_source cache_max_gb cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     env_file="$install_dir/.env"
 
@@ -1193,8 +1221,13 @@ migrate_env_for_update() {
     append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
     append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
 
-    cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
-    cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
+    cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file")
+    cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file")
+    if [[ -n "$cache_max_size" ]]; then
+        cache_gb=$(cache_size_gb_from_env "$cache_max_size")
+    else
+        cache_gb=$(cache_size_gb_from_env "${cache_max_gb:-50}")
+    fi
 
     set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
     set_env_key_if_empty_or_missing CACHE_MEM_MB "512" "$env_file"
