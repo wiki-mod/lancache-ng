@@ -1,9 +1,9 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI secondary-node routes: lists registered secondaries, issues and
-//! rotates their NATS registration tokens, handles removal, and rewrites
-//! `nats.conf` (then restarts the NATS service) whenever the set of
-//! secondary credentials changes.
+//! rotates their shared NATS reader credentials, handles removal, and keeps the
+//! shared `nats.conf` write/reload contract intact for the v0.1.0 shared-token
+//! model.
 
 use crate::{docker_client, nats_config, AppState};
 use axum::extract::{Path, State};
@@ -138,13 +138,10 @@ pub async fn register_secondary(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    // Update NATS conf (regenerate if needed, though configuration is unchanged)
-    update_nats_conf(&state)
+    // Keep the shared NATS config write/reload path exercised for v0.1.0.
+    reload_nats_conf(&state)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Restart NATS so it picks up the rewritten authorization file.
-    let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
 
     Ok(Json(RegisterResponse {
         nats_url: state.config.nats_url.clone(),
@@ -181,13 +178,10 @@ pub async fn remove_secondary(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Update NATS conf
-    update_nats_conf(&state)
+    // Keep the shared NATS config write/reload path exercised for v0.1.0.
+    reload_nats_conf(&state)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Restart NATS so it picks up the rewritten authorization file.
-    let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -229,13 +223,10 @@ pub async fn rotate_token(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Update NATS conf (regenerate if needed, though configuration is unchanged)
-    update_nats_conf(&state)
+    // Keep the shared NATS config write/reload path exercised for v0.1.0.
+    reload_nats_conf(&state)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Restart NATS so it picks up the rewritten authorization file.
-    let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
 
     Ok(Json(serde_json::json!({
         "nats_user": nats_user,
@@ -245,6 +236,15 @@ pub async fn rotate_token(
 }
 
 // ─── Helper Functions ───
+
+pub async fn reload_nats_conf(
+    state: &AppState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    update_nats_conf(state).await?;
+    docker_client::restart_service(&state.docker, &state.config.nats_service)
+        .await
+        .map_err(|e| format!("Failed to restart NATS service: {e}").into())
+}
 
 pub async fn update_nats_conf(
     state: &AppState,

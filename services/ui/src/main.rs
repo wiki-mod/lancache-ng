@@ -450,15 +450,10 @@ async fn main() -> Result<()> {
         csrf_token: generate_csrf_token(),
     });
 
-    // Write initial nats.conf with auth tokens and restart NATS so it picks up the new config.
-    // restart_container() does not refresh the NATS container's own environment, so its
-    // startup script now only (re)generates nats.conf when the shared file doesn't exist yet
-    // (see the `nats` service's `command` in the compose files) — it will not clobber the
-    // file we just wrote here.
-    if let Err(e) = routes::secondaries::update_nats_conf(&state).await {
-        tracing::warn!("Could not write initial nats.conf: {}", e);
-    } else {
-        let _ = docker_client::restart_service(&state.docker, &state.config.nats_service).await;
+    // Write initial nats.conf with auth tokens and restart NATS so it picks up
+    // the shared config without requiring Docker exec.
+    if let Err(e) = routes::secondaries::reload_nats_conf(&state).await {
+        tracing::warn!("Could not reload initial nats.conf: {}", e);
     }
 
     // Routes that are always public (protected by their own token).

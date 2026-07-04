@@ -236,23 +236,16 @@ services:
   # ── NATS (message bus for DNS record sync) ────────────────────────────────
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
-    # On first start: generate nats.conf from this container's own
-    # credentials into the shared volume, then exec nats-server. The UI
-    # overwrites nats.conf with (normally identical) auth on its own startup
-    # and restarts this container to reload it. Skip regeneration if the
-    # file already exists — a plain restart_container() call does not
-    # refresh this container's environment, so unconditionally regenerating
-    # here would silently discard a UI-written file whenever the UI's
-    # in-process config and this container's baked-in environment diverge
-    # (e.g. after a credential rotation that restarts without recreating).
+    # On every start: generate nats.conf from this container's own credentials
+    # into the shared volume, chown it back to the Admin UI user, then exec
+    # nats-server. In the v0.1.0 shared-token model the UI writes the same
+    # shared config and restarts this service to reload it; regenerating here
+    # keeps full recreates with rotated .env credentials convergent.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
         mkdir -p /etc/nats
-        if [ -f /etc/nats/nats.conf ]; then
-          exec nats-server -c /etc/nats/nats.conf
-        fi
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
         }
