@@ -46,6 +46,8 @@ look. At minimum, each pull request should explain:
 - which files were actually touched (scope evidence)
 - which checks were run, with the exact commands
 - any remaining risk or follow-up work
+- if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
+- whether a GitHub-hosted fallback still works without LAN-only cache assumptions
 
 Prefer focused pull requests. For example, do not mix documentation rewrites,
 CI fixes and runtime behavior changes unless they must land together.
@@ -135,6 +137,9 @@ explain why.
 
 The setup flow is part of the product. Treat `setup.sh` changes as runtime
 changes, not only as installer changes.
+
+Setup and update are pull-only flows that consume prebuilt first-party images.
+They must not depend on local build accelerators or host-specific cache state.
 
 Setup and update changes must preserve these rules:
 

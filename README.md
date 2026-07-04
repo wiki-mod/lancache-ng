@@ -48,6 +48,9 @@ curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.s
 ```
 
 The setup script guides you through the installation. If required tools are missing, it asks before installing packages, installs missing requirements such as Docker, curl and git through the host package manager, and prints the package names to install manually if you abort.
+It is a pull-only installer: it resolves and pulls prebuilt first-party images,
+so Redis-backed sccache, distcc and other build accelerators do not affect
+normal setup or update paths.
 
 It can:
 
@@ -286,6 +289,10 @@ The update command can:
 - update the compose file
 - pull newer images
 - restart the stack
+
+Setup and update always consume prebuilt runtime images. They do not build the
+production stack locally, so host-side build acceleration is never a runtime
+or install dependency.
 
 Create a manual backup with:
 
@@ -619,6 +626,8 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the latest stable release. Use `edge` only when you explicitly want the tested pre-stable channel. `setup.sh` resolves mutable channels through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
+The resulting install/update path still stays pull-only and does not depend on
+local compiler caches or remote compiler services.
 
 Current prebuilt first-party images are published for `linux/amd64`. Multi-architecture images are tracked separately; non-amd64 production installs should not assume the prebuilt pull-only path is available yet.
 

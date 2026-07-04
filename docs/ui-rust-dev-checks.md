@@ -48,6 +48,8 @@ To speed up repeated builds in containers, pass `--sccache` together with Redis.
 The build-tools image already includes `sccache`. If you override the image and
 the replacement image does not contain `sccache`, the script fails closed
 instead of bootstrapping it.
+This is a contributor/CI optimization only; setup, update, and runtime image
+pulls do not depend on it.
 
 ```bash
 SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/ui-rust-checks.sh --sccache

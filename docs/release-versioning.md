@@ -76,6 +76,9 @@ If one required image is missing, the channel must not be promoted.
 `LANCACHE_IMAGE_CHANNEL` is the operator-facing selector for mutable stack
 channels. `LANCACHE_IMAGE_TAG` is the resolved immutable service-image tag that
 Docker Compose actually pulls.
+Setup and update are pull-only consumers of prebuilt first-party images; they
+do not build the runtime stack locally, so Dev/CI accelerators are not part of
+the install contract.
 
 Default behavior:
 
@@ -174,3 +177,7 @@ The CI guardrails must fail closed when:
 - retention rules are missing from the stack image manifest
 - stable release promotion would move `latest` while supported external images
   are still floating
+- release or release-adjacent jobs that mention build acceleration do not state
+  whether that accelerator is optional, preferred, or a gate
+- normal setup/update validation would inherit LAN-only cache assumptions from
+  a self-hosted runner path
