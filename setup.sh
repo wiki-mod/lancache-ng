@@ -2613,7 +2613,7 @@ NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
-# TODO(#374): Validate heredoc values for safe characters. This block writes many
+# TODO(#467): Validate heredoc values for safe characters. This block writes many
 # values via variable expansion. Currently covered by validate_env_value() in
 # set_env_key() and append_env_key_if_missing() for incremental updates, but
 # the initial heredoc template here does not yet use per-value validation.
