@@ -282,9 +282,10 @@ mod tests {
 
     #[test]
     fn password_with_control_characters_rejected() {
-        assert!(validate_nats_password("pass\x00word").is_err());
-        assert!(validate_nats_password("pass\x1fword").is_err());
-        assert!(validate_nats_password("pass\x7fword").is_err()); // DEL character
+        for control in ['\0', '\x1f', '\x7f'] {
+            let password = format!("pass{control}word");
+            assert!(validate_nats_password(&password).is_err());
+        }
     }
 
     // ─── Combined Credentials Tests ───
