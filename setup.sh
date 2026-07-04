@@ -710,9 +710,9 @@ append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local source_assignment source_value
 
-    # Treat empty migrated values as missing so update can repair broken
-    # installs that were left with `KEY=` placeholders.
-    if env_key_has_value "$target_key" "$env_file"; then
+    # Preserve intentionally empty optional targets. UI_BIND_IP=, for example,
+    # deliberately keeps Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback alive.
+    if env_key_exists "$target_key" "$env_file"; then
         return 0
     fi
 
@@ -721,6 +721,26 @@ append_env_migrated_assignment_if_missing() {
     if [[ -n "$source_value" && -n "$source_assignment" ]]; then
         # Rewrite empty migrated targets in place so updates do not append
         # duplicate KEY= lines.
+        set_env_assignment "$target_key" "$source_assignment" "$env_file"
+    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
+        set_env_key "$target_key" "$fallback_value" "$env_file"
+    fi
+}
+
+append_required_env_migrated_assignment_if_empty_or_missing() {
+    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
+    local source_assignment source_value
+
+    # Required migrated paths cannot stay empty: Compose would turn KEY= into an
+    # invalid bind mount. This helper repairs only those required keys and keeps
+    # the optional migration helper above from changing deliberate empty values.
+    if env_key_has_value "$target_key" "$env_file"; then
+        return 0
+    fi
+
+    source_value=$(get_env_var "$source_key" "$env_file")
+    source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
+    if [[ -n "$source_value" && -n "$source_assignment" ]]; then
         set_env_assignment "$target_key" "$source_assignment" "$env_file"
     elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
         set_env_key "$target_key" "$fallback_value" "$env_file"
@@ -1158,8 +1178,8 @@ migrate_env_for_update() {
         cache_dir_source=CACHE_DIR
     fi
     cache_dir="${cache_dir:-$install_dir/cache/standard}"
-    append_env_migrated_assignment_if_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
-    append_env_migrated_assignment_if_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
+    append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
+    append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
 
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file")
     cache_gb=$(cache_size_gb_from_env "${cache_max_size:-50g}")
