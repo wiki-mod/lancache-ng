@@ -604,7 +604,7 @@ jobs:
           grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+bridge[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Rust acceleration network must default to bridge for untrusted and non-accelerated builds."; exit 1; }
           grep -F 'rust_network=bridge' .github/workflows/build-push.yml >/dev/null \
-            && grep -F 'buildx_network=""' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'buildx_network=default' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'rust_network=host' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'buildx_network=host' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'printf '\''RUST_ACCELERATION_NETWORK=%s\n'\'' "$rust_network" >> "$GITHUB_ENV"' .github/workflows/build-push.yml >/dev/null \
@@ -630,6 +630,13 @@ jobs:
             && grep -F 'require_sccache_dist_activity' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc-pump --startup' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'DISTCC_FALLBACK=0' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'PATH="$wrapper_dir:$PATH"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'unset DISTCC_HOSTS' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::External Rust acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
           grep -F 'docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -729,12 +736,14 @@ jobs:
               && grep -F 'for wrapper in cc gcc c++ g++; do' "$dockerfile" >/dev/null \
               && grep -F '"/usr/local/lib/distcc/$wrapper"' "$dockerfile" >/dev/null \
               && grep -F '/usr/local/lib/distcc /usr/lib/distcc' "$dockerfile" >/dev/null \
-              && grep -F 'PATH="$distcc_wrapper_dir:$PATH" CC=distcc GCC=distcc CXX=distcc' "$dockerfile" >/dev/null \
+              && grep -F 'PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must discover the distcc wrapper directory and route cc/gcc/c++/g++ through it."; exit 1; }
             grep -F 'original_path="$PATH"' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must save the original PATH before enabling distcc."; exit 1; }
             grep -F 'PATH="$original_path"' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must restore the original PATH before local compiler fallback."; exit 1; }
+            grep -F 'PATH="$distcc_wrapper_dir:$PATH";' "$dockerfile" >/dev/null \
+              || { echo "::error::$dockerfile must re-prepend the wrapper directory after distcc-pump startup."; exit 1; }
             grep -F 'lancache-rustc-wrapper' "$dockerfile" >/dev/null \
               && grep -F 'distcc|*/distcc) exec "$@" ;;' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must keep distcc out of the sccache Rust wrapper path."; exit 1; }
@@ -748,11 +757,20 @@ jobs:
                 fi
               }
             if [ "$dockerfile" = "services/ui/Dockerfile" ]; then
+              grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must fall back to stripped distcc hosts when no plain hosts are configured."; exit 1; }
+              grep -F 'DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}";' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must reuse the lsdistcc-filtered pump host list for no-pump compiler probes."; exit 1; }
+              grep -F 'export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts";' "$dockerfile" >/dev/null \
+                && grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must start distcc-pump with pump-capable hosts only."; exit 1; }
               grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must use distcc-pump for compatible generated-header bypass cases."; exit 1; }
               grep -F 'matches_aws_lc_generated_path' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must document aws-lc-sys generated-header bypass patterns in wrapper logic."; exit 1; }
             else
+              grep -F 'DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"' "$dockerfile" >/dev/null \
+                || { echo "::error::$dockerfile must keep distcc-pump host discovery local to the builder."; exit 1; }
               grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must use distcc-pump unless the builder is documented as incompatible with generated C headers."; exit 1; }
             fi
@@ -1561,7 +1579,7 @@ jobs:
           set -euo pipefail
 
           rust_network=bridge
-          buildx_network=""
+          buildx_network=default
           if [ -n "$SECRET_FILES" ]; then
             rust_network=host
             buildx_network=host
@@ -1987,7 +2005,7 @@ jobs:
           set -euo pipefail
 
           rust_network=bridge
-          buildx_network=""
+          buildx_network=default
           if [ -n "$SECRET_FILES" ]; then
             rust_network=host
             buildx_network=host

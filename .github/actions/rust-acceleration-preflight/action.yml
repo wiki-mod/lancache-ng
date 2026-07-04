@@ -26,7 +26,7 @@ inputs:
   build-network:
     description: Docker network mode shared with the real Rust image builds.
     required: false
-    default: host
+    default: bridge
   platform:
     description: Docker platform shared with the real Rust image builds.
     required: false
@@ -188,11 +188,12 @@ runs:
             if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
               export SCCACHE_NO_DAEMON=1
               export SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"
-              export SCCACHE_REDIS_KEY_PREFIX="lancache-preflight-${LANCACHE_SERVICE:-rust}"
+              export SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"
               require_cache_write=0
               require_dist_activity=0
               if [ -s /run/lancache/sccache-redis-url ]; then
-                export SCCACHE_REDIS="$(cat /run/lancache/sccache-redis-url)"
+                SCCACHE_REDIS="$(cat /run/lancache/sccache-redis-url)"
+                export SCCACHE_REDIS
                 require_cache_write=1
               fi
               if [ -s /run/lancache/sccache-dist-config ]; then
@@ -234,28 +235,46 @@ runs:
 
               printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/distcc-probe.c"
 
+              distcc_hosts=""
+              distcc_pump_hosts=""
+              distcc_hosts_without_pump=""
+              distcc_pump_filtered_hosts=""
+              for distcc_host_spec in $(cat /run/lancache/distcc-potential-hosts); do
+                distcc_host_base="${distcc_host_spec%%,*}"
+                if [ -n "$distcc_host_base" ]; then
+                  distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"
+                fi
+                case "$distcc_host_spec" in
+                  *,cpp*) distcc_pump_hosts="${distcc_pump_hosts:+$distcc_pump_hosts }$distcc_host_spec" ;;
+                  *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;;
+                esac
+              done
+              if [ -z "$distcc_hosts" ]; then
+                echo "[ERROR] DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts." >&2
+                exit 1
+              fi
+              distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
+
               export PATH="$wrapper_dir:$PATH"
               export DISTCC_FALLBACK=0
 
-              export DISTCC_POTENTIAL_HOSTS="$(cat /run/lancache/distcc-potential-hosts)"
-              pump_env="$(distcc-pump --startup)"
-              eval "$pump_env"
-              pump_started=1
-              pump_log="$preflight_dir/distcc-pump.log"
-              run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
-              distcc-pump --shutdown >/dev/null 2>&1 || true
-              unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS
-
-              distcc_hosts="$(grep -v ",cpp" /run/lancache/distcc-potential-hosts | sed "/^[[:space:]]*$/d" || true)"
-              if [ -z "$distcc_hosts" ]; then
-                distcc_hosts="$(sed "s/,.*//" /run/lancache/distcc-potential-hosts | sed "/^[[:space:]]*$/d")"
-              fi
-              if [ -z "$distcc_hosts" ]; then
-                echo "[ERROR] DISTCC_POTENTIAL_HOSTS does not contain usable non-pump distcc hosts." >&2
-                exit 1
+              if [ -n "$distcc_pump_hosts" ]; then
+                export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"
+                unset DISTCC_HOSTS
+                pump_env="$(distcc-pump --startup)"
+                eval "$pump_env"
+                distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"
+                PATH="$wrapper_dir:$PATH"
+                export PATH
+                pump_started=1
+                pump_log="$preflight_dir/distcc-pump.log"
+                run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
+                distcc-pump --shutdown >/dev/null 2>&1 || true
+                unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
               fi
 
-              export DISTCC_HOSTS="$distcc_hosts"
+              distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
+              export DISTCC_HOSTS="$distcc_hosts_without_pump"
               distcc_log="$preflight_dir/distcc.log"
               run_logged "$distcc_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
               echo "[INFO] distcc preflight completed."
