@@ -400,6 +400,19 @@ jobs:
             echo "::error::Docker socket proxy must not expose EXEC."
             exit 1
           fi
+          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+            echo "::error::Docker socket proxy must use the explicit HAProxy allowlist, not broad CONTAINERS=1/POST=1."
+            exit 1
+          fi
+          for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+            grep -Fq 'acl safe_container_action' "$compose_file" \
+              && grep -Fq 'http-request deny' "$compose_file" \
+              && ! grep -Fq '/containers/create' "$compose_file" \
+              || {
+                echo "::error file=${compose_file}::Docker socket proxy must deny generic container creation and only allow explicit container actions."
+                exit 1
+              }
+          done
 
           missing_required=0
           while IFS= read -r key; do

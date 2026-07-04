@@ -1,12 +1,11 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
-//! Docker API access for the Admin UI, scoped to the narrow CONTAINERS/POST
-//! surface exposed by the docker-socket-proxy (no EXEC, no container
-//! create/remove): connecting to the proxy/socket, restarting a compose
-//! service by its `com.docker.compose.service` label, and looking up a
-//! service's container ID (used by `routes::dhcp` to restart and attach to
-//! the predeclared `dhcp-probe` service instead of creating a container
-//! per check).
+//! Docker API access for the Admin UI, scoped to the explicit
+//! docker-socket-proxy allowlist (no EXEC, no container create/remove):
+//! connecting to the proxy/socket, restarting a compose service by its
+//! `com.docker.compose.service` label, and looking up a service's container
+//! ID (used by `routes::dhcp` to start/stop/attach to the predeclared
+//! `dhcp-probe` service instead of creating a container per check).
 
 use anyhow::{Context, Result};
 use bollard::query_parameters::{ListContainersOptionsBuilder, RestartContainerOptionsBuilder};

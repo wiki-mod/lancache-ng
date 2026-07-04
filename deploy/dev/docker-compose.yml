@@ -7,6 +7,48 @@
 
 name: lancache-ng
 
+x-docker-socket-proxy-command: &docker-socket-proxy-command |
+  cat > /tmp/lancache-haproxy.cfg <<'EOF'
+  global
+      log stdout format raw daemon info
+      pidfile /run/haproxy.pid
+      maxconn 4000
+
+  defaults
+      mode http
+      log global
+      option httplog
+      option dontlognull
+      option http-server-close
+      timeout http-request 10s
+      timeout connect 10s
+      timeout client 10m
+      timeout server 10m
+
+  backend dockerbackend
+      server dockersocket /var/run/docker.sock
+
+  frontend dockerfrontend
+      bind [::]:2375 v4v6
+      acl safe_get method GET
+      acl safe_head method HEAD
+      acl safe_post method POST
+      acl safe_ping path,url_dec -m reg -i ^(/v[0-9.]+)?/_ping$
+      acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
+      acl safe_container_list path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/json$
+      acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/[A-Za-z0-9_.-]+/json$
+      acl safe_container_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/[A-Za-z0-9_.-]+/(start|stop|restart|attach)$
+      http-request allow if safe_get safe_ping
+      http-request allow if safe_head safe_ping
+      http-request allow if safe_get safe_version
+      http-request allow if safe_get safe_container_list
+      http-request allow if safe_get safe_container_inspect
+      http-request allow if safe_post safe_container_action
+      http-request deny
+      default_backend dockerbackend
+  EOF
+  exec haproxy -f /tmp/lancache-haproxy.cfg
+
 services:
 
   # ── Unified proxy (standard + SSL mode in one container) ─────────────────
@@ -122,14 +164,14 @@ services:
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
   # socket-proxy limits Docker access to Admin UI/watchdog operations:
-  # container inspect/list, restart, and helper-container probes; no image/volume/system access.
+  # container inspect/list plus start/stop/restart/attach for predeclared
+  # compose services. Generic container creation remains blocked.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    entrypoint: ["/bin/sh", "-ec"]
+    command: *docker-socket-proxy-command
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      CONTAINERS: "1"
-      POST: "1"
     networks:
       - docker-api
     restart: unless-stopped
