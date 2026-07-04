@@ -1206,9 +1206,9 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
     set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
-    append_env_key_if_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
     set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
@@ -1292,11 +1292,11 @@ migrate_env_for_update() {
     ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
     ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
     ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
-    append_env_key_if_missing NATS_UI_USER "lancache-ui" "$env_file"
+    set_env_key_if_empty_or_missing NATS_UI_USER "lancache-ui" "$env_file"
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
-    append_env_key_if_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
+    set_env_key_if_empty_or_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
     ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
-    append_env_key_if_missing NATS_DNS_READER_USER "lancache-dns-reader" "$env_file"
+    set_env_key_if_empty_or_missing NATS_DNS_READER_USER "lancache-dns-reader" "$env_file"
     ensure_secret_env_key NATS_DNS_READER_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
