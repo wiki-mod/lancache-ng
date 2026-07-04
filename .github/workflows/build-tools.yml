@@ -1,8 +1,9 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI workflow that builds, smoke-tests, and scans the multi-arch build-tools container
 # image (providing rustc, sccache, distcc) locally, then publishes it to GHCR on a
-# weekly schedule, on relevant pushes to master, and on manual dispatch.
-
+# weekly schedule, on relevant pushes to master, and on manual dispatch. This
+# image is CI infrastructure for acceleration checks, not a product runtime
+# dependency.
 name: Build Tools Image
 
 on:
@@ -127,7 +128,7 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
-      - name: Smoke-test validation tools
+      - name: Smoke-test acceleration-infrastructure tools
         run: |
           set -euo pipefail
 

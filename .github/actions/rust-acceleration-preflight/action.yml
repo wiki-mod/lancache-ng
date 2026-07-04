@@ -1,7 +1,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# GitHub Action for validating Rust build acceleration (sccache, sccache-dist, distcc) configuration and connectivity
-name: Rust acceleration preflight
-description: Validate Rust build acceleration secrets outside BuildKit cacheable Docker build layers.
+# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc) configuration and connectivity
+name: Rust acceleration infrastructure preflight
+description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.
 
 inputs:
   service:
@@ -35,7 +35,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Validate Rust acceleration secrets
+    - name: Validate acceleration-infrastructure secrets
       shell: bash
       env:
         LANCACHE_SERVICE: ${{ inputs.service }}
@@ -48,6 +48,8 @@ runs:
       run: |
         set -euo pipefail
 
+        # This preflight is intentionally inert when no acceleration secrets are present.
+        # Fallback CI paths should continue without LAN-only acceleration.
         mount_args=()
         if [ -n "$REDIS_FILE" ]; then
           [ -s "$REDIS_FILE" ] || { echo "::error::redis-file input points to an empty or missing file."; exit 1; }
@@ -67,6 +69,8 @@ runs:
           exit 0
         fi
 
+        # Pull and run the tools image outside BuildKit so cache layers cannot mask
+        # acceleration-infrastructure failures.
         docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \

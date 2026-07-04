@@ -1,7 +1,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # GitHub Action for cargo invocation with automatic sccache-fallback retry on failure or timeout
 name: Run cargo with sccache fallback
-description: Run one cargo command and retry without sccache if the cache wrapper fails.
+description: Run one cargo command and retry without sccache if the cache wrapper fails, so CI still completes without LAN-only acceleration.
 
 inputs:
   command:
@@ -31,6 +31,7 @@ runs:
         sccache_enabled="${LANCACHE_SCCACHE_ENABLED:-0}"
 
         if [ "$sccache_enabled" != "1" ]; then
+          # Fallback must leave Cargo runnable without any LAN-only acceleration.
           unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
         fi
 

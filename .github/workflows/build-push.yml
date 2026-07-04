@@ -555,8 +555,10 @@ jobs:
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
           grep -F -- "--env HOME=/tmp" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable HOME inside the build-tools container."; exit 1; }
+          # Acceleration-infrastructure policy checks start here.
+          # They validate the sccache/distcc contract, not product correctness.
           if grep -RIn 'RUSTC_WRAPPER:[[:space:]]*""' .github/workflows; then
-            echo "::error::Rust CI jobs must not disable RUSTC_WRAPPER directly; use cargo-with-sccache-fallback for controlled fallback."
+            echo "::error::Acceleration infrastructure checks must not disable RUSTC_WRAPPER directly; use cargo-with-sccache-fallback for controlled fallback."
             exit 1
           fi
           if grep -RIn -- 'timeout --foreground' .github/actions/cargo-with-sccache-fallback/action.yml; then
@@ -576,7 +578,7 @@ jobs:
           grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
           if awk '
-            /^      - name: Prepare Rust build secret files$/ { in_block=1; saw_pr_gate=0; next }
+            /^      - name: Prepare Rust acceleration secret files$/ { in_block=1; saw_pr_gate=0; next }
             in_block && /^      - name: / {
               if (!saw_pr_gate) {
                 print FILENAME ":" FNR ":" "missing pull_request gate in Rust BuildKit secret preparation."
@@ -596,27 +598,27 @@ jobs:
             exit 1
           fi
           grep -F 'uses: ./.github/actions/rust-acceleration-preflight' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Docker Rust builds must run an external acceleration preflight outside BuildKit cache."; exit 1; }
+            || { echo "::error::Rust acceleration infrastructure checks must run an external preflight outside BuildKit cache."; exit 1; }
           if grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+host[[:space:]]*$' .github/workflows/build-push.yml >/dev/null; then
-            echo "::error::Rust acceleration network must not be globally pinned to host; trusted secret-backed builds select host per job."
+            echo "::error::Acceleration infrastructure network must not be globally pinned to host; trusted secret-backed builds select host per job."
             exit 1
           fi
           grep -E '^[[:space:]]+RUST_ACCELERATION_NETWORK:[[:space:]]+bridge[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Rust acceleration network must default to bridge for untrusted and non-accelerated builds."; exit 1; }
+            || { echo "::error::Acceleration infrastructure network must default to bridge for untrusted and non-accelerated builds."; exit 1; }
           grep -F 'rust_network=bridge' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'buildx_network=default' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'rust_network=host' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'buildx_network=host' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'printf '\''RUST_ACCELERATION_NETWORK=%s\n'\'' "$rust_network" >> "$GITHUB_ENV"' .github/workflows/build-push.yml >/dev/null \
             && grep -F 'printf '\''RUST_BUILDX_NETWORK=%s\n'\'' "$buildx_network" >> "$GITHUB_ENV"' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Rust build network must be selected per job from generated acceleration secret files."; exit 1; }
+            || { echo "::error::Acceleration infrastructure network must be selected per job from generated secret files."; exit 1; }
           grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-tools-image:[[:space:]]+\$\{\{[[:space:]]*env\.BUILD_TOOLS_IMAGE[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::External Rust acceleration preflight must receive all generated secret file paths."; exit 1; }
+            || { echo "::error::Acceleration preflight must receive all generated secret file paths."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -637,23 +639,23 @@ jobs:
             && grep -F 'distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
-            || { echo "::error::External Rust acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
+            || { echo "::error::Acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
           grep -F 'docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
-            || { echo "::error::External Rust acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
+            || { echo "::error::Acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
           grep -F 'SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
-            || { echo "::error::External Rust acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
+            || { echo "::error::Acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
-            || { echo "::error::Rust Docker builds must use the same network mode as the acceleration preflight."; exit 1; }
+            || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
-            || { echo "::error::External Rust acceleration preflight must use a cacheable rustc library probe."; exit 1; }
+            || { echo "::error::Acceleration preflight must use a cacheable rustc library probe."; exit 1; }
           if grep -F -- '--crate-type bin' .github/actions/rust-acceleration-preflight/action.yml \
             || grep -E 'sccache rustc .* -o ' .github/actions/rust-acceleration-preflight/action.yml; then
-            echo "::error::External Rust acceleration preflight must not use non-cacheable binary rustc probes."
+            echo "::error::Acceleration preflight must not use non-cacheable binary rustc probes."
             exit 1
           fi
           grep -F 'steps.docker-build-jobs.outputs.jobs' .github/workflows/build-push.yml >/dev/null \
@@ -1459,10 +1461,10 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Rust build secret files
+      - name: Prepare Rust acceleration secret files
         # Trusted Rust image builds may use Redis sccache, sccache-dist, and
-        # distcc. Secrets are written to temporary files for BuildKit and are
-        # never exposed to fork PRs or Dependabot runs.
+        # distcc as CI infrastructure. Secrets are written to temporary files for
+        # BuildKit and are never exposed to fork PRs or Dependabot runs.
         if: >-
           ${{
             (
@@ -1568,7 +1570,7 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Select Rust build network
+      - name: Select Rust acceleration network
         # BuildKit host networking is only enabled when secret-backed
         # acceleration needs access to private runner services. Normal builds
         # stay on the default isolated network.
@@ -1587,7 +1589,7 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
-      - name: Validate Rust acceleration outside BuildKit cache
+      - name: Validate acceleration infrastructure outside BuildKit cache
         if: matrix.rust == true
         uses: ./.github/actions/rust-acceleration-preflight
         with:
@@ -1887,7 +1889,7 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Rust build secret files
+      - name: Prepare Rust acceleration secret files
         if: >-
           ${{
             (
@@ -1997,13 +1999,15 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Select Rust build network
+      - name: Select Rust acceleration network
         if: matrix.rust == true
         env:
           SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
         run: |
           set -euo pipefail
 
+          # Default to bridge so GitHub-hosted or otherwise non-accelerated paths stay valid.
+          # Secret-backed jobs switch to host only when the acceleration inputs exist.
           rust_network=bridge
           buildx_network=default
           if [ -n "$SECRET_FILES" ]; then
@@ -2013,7 +2017,7 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
-      - name: Validate Rust acceleration outside BuildKit cache
+      - name: Validate acceleration infrastructure outside BuildKit cache
         if: matrix.rust == true
         uses: ./.github/actions/rust-acceleration-preflight
         with:
