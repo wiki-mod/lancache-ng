@@ -9,8 +9,6 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
 RESTART_AFTER="${RESTART_AFTER:-3}"
 DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
 DISK_ALARM_PCT="${DISK_ALARM_PCT:-95}"
-CACHE_DIR_STANDARD="${CACHE_DIR_STANDARD:-/cache/standard}"
-CACHE_DIR_SSL="${CACHE_DIR_SSL:-/cache/ssl}"
 CACHE_VALID_DAYS="${CACHE_VALID_DAYS:-365}"
 STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"
 PURGE_STAMP="/var/run/watchdog/purge.stamp"
@@ -29,6 +27,40 @@ F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0
 H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
+
+# Keep the watchdog on one cache path only. If an old install still carries
+# split cache vars, they must agree or the helper refuses to guess.
+resolve_cache_dir() {
+    local cache_dir cache_std cache_ssl
+
+    cache_dir="${CACHE_DIR:-}"
+    cache_std="${CACHE_DIR_STANDARD:-}"
+    cache_ssl="${CACHE_DIR_SSL:-}"
+
+    if [ -n "$cache_dir" ]; then
+        printf '%s\n' "$cache_dir"
+        return 0
+    fi
+
+    if [ -n "$cache_std" ] && [ -n "$cache_ssl" ] && [ "$cache_std" != "$cache_ssl" ]; then
+        log "ERROR: CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
+        exit 1
+    fi
+
+    if [ -n "$cache_std" ]; then
+        printf '%s\n' "$cache_std"
+        return 0
+    fi
+
+    if [ -n "$cache_ssl" ]; then
+        printf '%s\n' "$cache_ssl"
+        return 0
+    fi
+
+    printf '%s\n' "/cache/cache"
+}
+
+CACHE_DIR="$(resolve_cache_dir)"
 
 get_health() {
     local name="$1"
@@ -89,7 +121,7 @@ check_and_maybe_restart() {
 
 write_status() {
     local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local disk_std; disk_std=$(disk_info "$CACHE_DIR_STANDARD")
+    local disk_cache; disk_cache=$(disk_info "$CACHE_DIR")
 
     mkdir -p "$(dirname "$STATUS_FILE")"
 
@@ -104,10 +136,10 @@ write_status() {
   "updated": "$ts",
   "services": {
     "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
-    "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD}${ssl_services}
+  "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD}${ssl_services}
   },
   "disk": {
-    "standard": ${disk_std}
+    "cache": ${disk_cache}
   }
 }
 EOF
@@ -147,20 +179,20 @@ maybe_purge() {
     esac
 
     log "Daily purge: removing cache files older than ${CACHE_VALID_DAYS} days"
-    for dir in "$CACHE_DIR_STANDARD" "$CACHE_DIR_SSL"; do
-        [ -d "$dir" ] || continue
+    if [ -d "$CACHE_DIR" ]; then
         local count=0
         while IFS= read -r -d '' file; do
             if [ -f "$file" ] && rm -- "$file"; then
                 count=$(( count + 1 ))
             fi
-        done < <(find "$dir" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 2>/dev/null)
-        log "Purged $count files from $dir"
-    done
+        done < <(find "$CACHE_DIR" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 2>/dev/null)
+        log "Purged $count files from $CACHE_DIR"
+    fi
     mkdir -p "$(dirname "$PURGE_STAMP")"
     echo "$now" > "$PURGE_STAMP"
 }
 log "Starting. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
+log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 
 while true; do

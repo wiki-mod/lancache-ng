@@ -29,21 +29,23 @@
   </div>
 
   <!-- Cache-Übersicht -->
-  {% if shared_cache %}
   <div class="card">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-slate-200">Gemeinsamer Proxy-Cache</h2>
-      <span class="text-xs text-slate-500">HTTP + HTTPS · ein Cache</span>
+      <div>
+        <h2 class="font-semibold text-slate-200">Gemeinsamer Proxy-Cache</h2>
+        <span class="text-xs text-slate-500">HTTP + HTTPS · ein Cache</span>
+      </div>
+      <span class="text-xs text-slate-500 font-mono">{{ cache_dir }}</span>
     </div>
     <div class="mb-3">
       <div class="flex justify-between text-sm mb-1">
         <span class="text-slate-400">Speicher</span>
-        <span class="text-white font-mono">{{ shared_cache_used_gb }} / {{ shared_cache_max_gb }} GB</span>
+        <span class="text-white font-mono">{{ cache_used_gb }} / {{ cache_max_gb }} GB</span>
       </div>
       <div class="w-full bg-slate-700 rounded-full h-2">
-        <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ shared_cache_pct }}%"></div>
+        <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ cache_pct }}%"></div>
       </div>
-      <p class="text-xs text-slate-500 mt-1">{{ shared_cache_pct }}% belegt</p>
+      <p class="text-xs text-slate-500 mt-1">{{ cache_pct }}% belegt</p>
     </div>
   </div>
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -99,86 +101,6 @@
       {% endif %}
     </div>
   </div>
-  {% else %}
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-    <!-- Standard Cache -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">Standard Cache</h2>
-        <span class="text-xs text-slate-500">HTTP · SNI-Passthrough</span>
-      </div>
-      <div class="mb-3">
-        <div class="flex justify-between text-sm mb-1">
-          <span class="text-slate-400">Speicher</span>
-          <span class="text-white font-mono">{{ standard_used_gb }} / {{ standard_max_gb }} GB</span>
-        </div>
-        <div class="w-full bg-slate-700 rounded-full h-2">
-          <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ standard_pct }}%"></div>
-        </div>
-        <p class="text-xs text-slate-500 mt-1">{{ standard_pct }}% belegt</p>
-      </div>
-      {% if standard_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
-        <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.active }}</p>
-          <p class="text-xs text-slate-400">Verbindungen</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.requests }}</p>
-          <p class="text-xs text-slate-400">Requests</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Wartend</p>
-        </div>
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
-      {% endif %}
-    </div>
-
-    <!-- SSL Cache -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">SSL Cache</h2>
-        <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
-      </div>
-      {% if ssl_enabled %}
-      <div class="mb-3">
-        <div class="flex justify-between text-sm mb-1">
-          <span class="text-slate-400">Speicher</span>
-          <span class="text-white font-mono">{{ ssl_used_gb }} / {{ ssl_max_gb }} GB</span>
-        </div>
-        <div class="w-full bg-slate-700 rounded-full h-2">
-          <div class="bg-purple-500 h-2 rounded-full transition-all" style="width: {{ ssl_pct }}%"></div>
-        </div>
-        <p class="text-xs text-slate-500 mt-1">{{ ssl_pct }}% belegt</p>
-      </div>
-      {% endif %}
-      {% if not ssl_enabled %}
-      <p class="text-sm text-slate-500 mt-3">SSL mode disabled</p>
-      {% elif ssl_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
-        <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
-          <p class="text-xs text-slate-400">Verbindungen</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.requests }}</p>
-          <p class="text-xs text-slate-400">Requests</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Wartend</p>
-        </div>
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
-      {% endif %}
-    </div>
-  </div>
-  {% endif %}
 
   <!-- Cache-Trefferquote -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">

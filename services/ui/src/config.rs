@@ -56,8 +56,7 @@ pub struct Config {
     pub ssl_domains_file: String,
     pub standard_log: String,
     pub ssl_log: String,
-    pub standard_cache_dir: String,
-    pub ssl_cache_dir: String,
+    pub cache_dir: String,
     pub dns_standard_state_dir: String,
     pub dns_ssl_state_dir: String,
     pub proxy_standard_url: String,
@@ -67,8 +66,7 @@ pub struct Config {
     pub dns_ssl_service: String,
     pub proxy_ssl_service: String,
     pub ssl_enabled: bool,
-    pub standard_cache_max_gb: f64,
-    pub ssl_cache_max_gb: f64,
+    pub cache_max_gb: f64,
     pub standard_ip: String,
     pub ssl_ip: String,
     pub dhcp_dns_primary: String,
@@ -114,8 +112,7 @@ impl fmt::Debug for Config {
             .field("ssl_domains_file", &self.ssl_domains_file)
             .field("standard_log", &self.standard_log)
             .field("ssl_log", &self.ssl_log)
-            .field("standard_cache_dir", &self.standard_cache_dir)
-            .field("ssl_cache_dir", &self.ssl_cache_dir)
+            .field("cache_dir", &self.cache_dir)
             .field("dns_standard_state_dir", &self.dns_standard_state_dir)
             .field("dns_ssl_state_dir", &self.dns_ssl_state_dir)
             .field("proxy_standard_url", &self.proxy_standard_url)
@@ -125,8 +122,7 @@ impl fmt::Debug for Config {
             .field("dns_ssl_service", &self.dns_ssl_service)
             .field("proxy_ssl_service", &self.proxy_ssl_service)
             .field("ssl_enabled", &self.ssl_enabled)
-            .field("standard_cache_max_gb", &self.standard_cache_max_gb)
-            .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
+            .field("cache_max_gb", &self.cache_max_gb)
             .field("standard_ip", &self.standard_ip)
             .field("ssl_ip", &self.ssl_ip)
             .field("dhcp_dns_primary", &self.dhcp_dns_primary)
@@ -239,18 +235,12 @@ impl Config {
         let proxy_service = env_or("PROXY_SERVICE", "proxy".to_string());
         let standard_log = env_or("STANDARD_LOG", "/var/log/nginx/access.log".to_string());
         let ssl_log = env_or("SSL_LOG", standard_log.clone());
-        let standard_cache_dir = env_or("STANDARD_CACHE_DIR", "/var/cache/proxy".to_string());
-        let ssl_cache_dir = env_or("SSL_CACHE_DIR", standard_cache_dir.clone());
+        let cache_dir = resolve_cache_dir();
         let proxy_standard_url = env_or("PROXY_STANDARD_URL", format!("http://{proxy_service}"));
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
         let ssl_enabled = env_bool("SSL_ENABLED", true);
-        let cache_max_gb_set = env_present("CACHE_MAX_GB");
-        let shared_cache_max_gb = if cache_max_gb_set {
-            env_f64("CACHE_MAX_GB", 50.0)
-        } else {
-            env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0))
-        };
+        let cache_max_gb = resolve_cache_max_gb();
         let standard_ip = env_str("STANDARD_IP", "192.168.234.10");
         let ssl_ip = env_str("SSL_IP", "192.168.234.11");
         let dhcp_mode = env_dhcp_mode("DHCP_MODE", env_bool("DHCP_ENABLED", false));
@@ -273,8 +263,7 @@ impl Config {
             ssl_domains_file: env_str("SSL_DOMAINS_FILE", "/data/cdn-ssl-domains.txt"),
             standard_log,
             ssl_log,
-            standard_cache_dir,
-            ssl_cache_dir,
+            cache_dir,
             dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
             dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
             proxy_standard_url,
@@ -284,16 +273,7 @@ impl Config {
             dns_ssl_service: env_str("DNS_SSL_SERVICE", "dns-ssl"),
             proxy_ssl_service,
             ssl_enabled,
-            standard_cache_max_gb: if cache_max_gb_set {
-                shared_cache_max_gb
-            } else {
-                env_f64("STANDARD_CACHE_MAX_GB", shared_cache_max_gb)
-            },
-            ssl_cache_max_gb: if cache_max_gb_set {
-                shared_cache_max_gb
-            } else {
-                env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb)
-            },
+            cache_max_gb,
             standard_ip,
             ssl_ip,
             dhcp_dns_primary,
@@ -361,18 +341,57 @@ fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_present(key: &str) -> bool {
-    env::var(key)
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+// CACHE_DIR is the canonical runtime cache path. Legacy split keys remain as
+// compatibility fallbacks only if they still describe the same shared cache.
+fn resolve_cache_dir() -> String {
+    if let Some(cache_dir) = env_opt("CACHE_DIR") {
+        return cache_dir;
+    }
+
+    let standard_cache_dir = env_opt("STANDARD_CACHE_DIR");
+    let ssl_cache_dir = env_opt("SSL_CACHE_DIR");
+
+    match (standard_cache_dir, ssl_cache_dir) {
+        (Some(standard), Some(ssl)) if standard == ssl => standard,
+        (Some(standard), None) => standard,
+        (None, Some(ssl)) => ssl,
+        (Some(_), Some(_)) => panic!(
+            "STANDARD_CACHE_DIR and SSL_CACHE_DIR point to different cache paths; set CACHE_DIR to one shared directory before starting the UI."
+        ),
+        (None, None) => "/var/cache/proxy".to_string(),
+    }
 }
 
-fn env_f64(key: &str, default: f64) -> f64 {
-    env::var(key)
+// Keep CACHE_MAX_GB canonical while tolerating matching legacy values on old
+// installs. Diverging legacy size keys only matter when CACHE_MAX_GB is absent.
+fn resolve_cache_max_gb() -> f64 {
+    if let Some(cache_max_gb) = env::var("CACHE_MAX_GB")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+        .and_then(|value| value.parse::<f64>().ok())
+    {
+        return cache_max_gb;
+    }
+
+    let legacy_cache_max_gb = match (
+        env::var("STANDARD_CACHE_MAX_GB").ok(),
+        env::var("SSL_CACHE_MAX_GB").ok(),
+    ) {
+        (Some(standard), Some(ssl)) => {
+            let standard = standard.parse().unwrap_or(50.0);
+            let ssl = ssl.parse().unwrap_or(standard);
+            if (standard - ssl).abs() > f64::EPSILON {
+                panic!(
+                    "STANDARD_CACHE_MAX_GB and SSL_CACHE_MAX_GB differ without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
+                );
+            }
+            standard
+        }
+        (Some(standard), None) => standard.parse().unwrap_or(50.0),
+        (None, Some(ssl)) => ssl.parse().unwrap_or(50.0),
+        (None, None) => 50.0,
+    };
+
+    legacy_cache_max_gb
 }
 
 fn env_u64(key: &str, default: u64) -> Result<u64, String> {
@@ -507,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn single_proxy_fallbacks_match_current_runtime_layout() {
+    fn cache_dir_fallbacks_match_current_runtime_layout() {
         let _guard = env_test_lock().lock().unwrap();
 
         for key in [
@@ -518,8 +537,12 @@ mod tests {
             "SSL_ENABLED",
             "STANDARD_LOG",
             "SSL_LOG",
+            "CACHE_DIR",
             "STANDARD_CACHE_DIR",
             "SSL_CACHE_DIR",
+            "CACHE_MAX_GB",
+            "STANDARD_CACHE_MAX_GB",
+            "SSL_CACHE_MAX_GB",
         ] {
             env::remove_var(key);
         }
@@ -531,8 +554,39 @@ mod tests {
         assert!(cfg.ssl_enabled);
         assert_eq!(cfg.standard_log, "/var/log/nginx/access.log");
         assert_eq!(cfg.ssl_log, "/var/log/nginx/access.log");
-        assert_eq!(cfg.standard_cache_dir, "/var/cache/proxy");
-        assert_eq!(cfg.ssl_cache_dir, "/var/cache/proxy");
+        assert_eq!(cfg.cache_dir, "/var/cache/proxy");
+        assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    #[test]
+    fn canonical_cache_dir_wins_over_legacy_split_keys() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("CACHE_DIR", "/cache/shared");
+        env::set_var("STANDARD_CACHE_DIR", "/cache/legacy-standard");
+        env::set_var("SSL_CACHE_DIR", "/cache/legacy-ssl");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.cache_dir, "/cache/shared");
+
+        env::remove_var("CACHE_DIR");
+        env::remove_var("STANDARD_CACHE_DIR");
+        env::remove_var("SSL_CACHE_DIR");
+    }
+
+    #[test]
+    fn matching_legacy_cache_dir_values_still_work() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("CACHE_DIR");
+        env::set_var("STANDARD_CACHE_DIR", "/cache/shared");
+        env::set_var("SSL_CACHE_DIR", "/cache/shared");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.cache_dir, "/cache/shared");
+
+        env::remove_var("STANDARD_CACHE_DIR");
+        env::remove_var("SSL_CACHE_DIR");
     }
 
     #[test]
@@ -567,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_limit_env_wins_over_legacy_values() {
+    fn cache_max_gb_wins_over_legacy_values() {
         let _guard = env_test_lock().lock().unwrap();
 
         env::set_var("STANDARD_CACHE_MAX_GB", "77");
@@ -575,8 +629,7 @@ mod tests {
         env::set_var("CACHE_MAX_GB", "42.5");
 
         let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.standard_cache_max_gb, 42.5);
-        assert_eq!(cfg.ssl_cache_max_gb, 42.5);
+        assert_eq!(cfg.cache_max_gb, 42.5);
 
         env::remove_var("CACHE_MAX_GB");
         env::remove_var("STANDARD_CACHE_MAX_GB");
@@ -584,17 +637,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_ssl_cache_limit_can_drive_shared_cache_fallback() {
+    fn matching_legacy_cache_limits_can_drive_shared_fallback() {
         let _guard = env_test_lock().lock().unwrap();
 
         env::remove_var("CACHE_MAX_GB");
-        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::set_var("STANDARD_CACHE_MAX_GB", "88");
         env::set_var("SSL_CACHE_MAX_GB", "88");
 
         let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.standard_cache_max_gb, 88.0);
-        assert_eq!(cfg.ssl_cache_max_gb, 88.0);
+        assert_eq!(cfg.cache_max_gb, 88.0);
 
+        env::remove_var("STANDARD_CACHE_MAX_GB");
         env::remove_var("SSL_CACHE_MAX_GB");
     }
 
@@ -607,8 +660,39 @@ mod tests {
         env::remove_var("SSL_CACHE_MAX_GB");
 
         let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.standard_cache_max_gb, 50.0);
-        assert_eq!(cfg.ssl_cache_max_gb, 50.0);
+        assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    #[test]
+    fn mismatched_legacy_cache_dir_values_fail_closed() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("CACHE_DIR");
+        env::set_var("STANDARD_CACHE_DIR", "/cache/legacy-standard");
+        env::set_var("SSL_CACHE_DIR", "/cache/legacy-ssl");
+
+        let result = std::panic::catch_unwind(Config::from_env);
+
+        env::remove_var("STANDARD_CACHE_DIR");
+        env::remove_var("SSL_CACHE_DIR");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mismatched_legacy_cache_limits_fail_closed() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("CACHE_MAX_GB");
+        env::set_var("STANDARD_CACHE_MAX_GB", "88");
+        env::set_var("SSL_CACHE_MAX_GB", "99");
+
+        let result = std::panic::catch_unwind(Config::from_env);
+
+        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::remove_var("SSL_CACHE_MAX_GB");
+
+        assert!(result.is_err());
     }
 
     #[test]

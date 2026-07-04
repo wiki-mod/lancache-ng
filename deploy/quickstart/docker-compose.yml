@@ -5,9 +5,9 @@
 # Prerequisites:
 #   1. Run setup.sh — configures .env and starts everything automatically
 #      Or manually:
-#   2. Edit .env: adjust IPs and cache paths
-#   3. Create cache directories:
-#        mkdir -p /opt/lancache-ng/cache/standard /opt/lancache-ng/cache/ssl
+#   2. Edit .env: adjust IPs and the shared cache path
+#   3. Create the cache directory:
+#        mkdir -p /opt/lancache-ng/cache
 #   4. (optional) Add second LAN IP:
 #        ip addr add 192.168.234.11/24 dev eth0
 #   5. Start:
@@ -97,7 +97,7 @@ services:
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
-      - ${CACHE_DIR_STANDARD}:/var/cache/nginx/lancache
+      - ${CACHE_DIR:-./cache}:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
       - "${IP_STANDARD}:80:80"
@@ -326,13 +326,13 @@ services:
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
       - CACHE_VALID_DAYS=365
-      - CACHE_DIR_STANDARD=/cache/cache
+      - CACHE_DIR=/cache/cache
       - CONTAINER_PROXY=lancache-proxy
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - SSL_ENABLED=${SSL_ENABLED:-0}
     volumes:
-      - ${CACHE_DIR_STANDARD}:/cache/cache
+      - ${CACHE_DIR:-./cache}:/cache/cache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
@@ -443,7 +443,7 @@ services:
     volumes:
       - ui-data:/data
       - proxy-logs:/var/log/nginx:ro
-      - ${CACHE_DIR_STANDARD}:/var/cache/proxy:ro
+      - ${CACHE_DIR:-./cache}:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats
     ports:
@@ -459,8 +459,7 @@ services:
       - PROXY_SSL_SERVICE=proxy
       - STANDARD_LOG=/var/log/nginx/access.log
       - SSL_LOG=/var/log/nginx/access.log
-      - STANDARD_CACHE_DIR=/var/cache/proxy
-      - SSL_CACHE_DIR=/var/cache/proxy
+      - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
@@ -468,7 +467,7 @@ services:
       - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
       - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
       - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
-      - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-50}}}
+      - CACHE_MAX_GB=${CACHE_MAX_GB:-50}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}

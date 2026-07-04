@@ -173,6 +173,7 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
 
     // Only allow supported cache locations. /opt/lancache-ng is the normal
     // production install path; /var/cache and /data remain container/dev paths.
+    // Legacy split subdirectories stay listed so old installs keep reporting.
     let allowed_prefixes = [
         "/opt/lancache-ng/cache",
         "/opt/lancache-ng/cache/standard",
@@ -180,6 +181,10 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         "/var/cache/standard",
         "/var/cache/ssl",
         "/var/cache/proxy",
+        "/cache/cache",
+        "/cache/standard",
+        "/cache/ssl",
+        "/srv/lancache/cache",
         "/data/lancache",
     ];
     if !allowed_prefixes

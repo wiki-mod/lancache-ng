@@ -29,7 +29,7 @@ The `update` command automatically creates this config backup before pulling rep
 
 ### `--full` backup
 
-Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes cache directories from the active runtime env file plus legacy `/srv/lancache/cache` when present. This can be huge, so it is opt-in.
+Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus any legacy split cache directories and `/srv/lancache/cache` still present on older installs. This can be huge, so it is opt-in.
 
 ## What the automated backup includes
 
@@ -41,7 +41,7 @@ The automated manifest includes these paths when they exist:
 - PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and legacy `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, `/srv/lancache/pdns-filter-state` when present
 - Kea data from the production state root `LANCACHE_STATE_DIR`, optional `KEA_DATA_DIR`, and legacy `/srv/lancache/kea` when present
 - NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
-- in `--full` mode only, cache directories from the production state root `LANCACHE_STATE_DIR`, optional `CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`, and legacy `/srv/lancache/cache`
+- in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus legacy split cache directories (`CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`) and `/srv/lancache/cache` when present
 
 The backup command stops the compose stack before copying mutable databases and restarts it afterward. Staging directories are created with restrictive permissions and cleaned up automatically if a copy or archive operation fails. The command rejects backup destinations that sit inside a path being backed up, which prevents recursive copies when using cache disks as backup storage.
 

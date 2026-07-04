@@ -198,7 +198,7 @@ services:
     env_file:
       - ../../config/dev/watchdog.env
     volumes:
-      - proxy-cache:/cache/standard
+      - proxy-cache:/cache/cache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
@@ -419,8 +419,7 @@ services:
       - PROXY_SSL_SERVICE=proxy
       - STANDARD_LOG=/var/log/nginx/access.log
       - SSL_LOG=/var/log/nginx/access.log
-      - STANDARD_CACHE_DIR=/var/cache/proxy
-      - SSL_CACHE_DIR=/var/cache/proxy
+      - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
       - CACHE_MAX_GB=10
       - STANDARD_IP=${IP_STANDARD}
