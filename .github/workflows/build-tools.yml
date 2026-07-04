@@ -18,6 +18,7 @@ on:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - "tests/bats/**"
+      - "tests/shellspec/**"
       - "setup.sh"
   pull_request:
     branches: [master, v0.2.0]
@@ -25,6 +26,7 @@ on:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - "tests/bats/**"
+      - "tests/shellspec/**"
       - "setup.sh"
 
 permissions:
@@ -205,6 +207,7 @@ jobs:
               rustc
               rustfmt
               sccache
+              shellspec
               shellcheck
             )
 
@@ -220,6 +223,7 @@ jobs:
             sccache --version
             actionlint --version
             bats --version
+            shellspec --version
             shellcheck --version
             distcc --version
             distcc-pump --help >/dev/null
@@ -237,6 +241,17 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bats tests/bats'
+
+      - name: Run ShellSpec setup fixtures
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
 
       - name: Prepare local Trivy cache
         run: |
