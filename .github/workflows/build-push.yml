@@ -457,6 +457,67 @@ jobs:
               || { echo "::error::setup.sh must generate or migrate required runtime key ${key}."; exit 1; }
           done
 
+          setup_update_required_repairs=(
+            CACHE_DIR_SSL
+            CACHE_DIR_STANDARD
+            CACHE_INACTIVE
+            CACHE_MAX_GB
+            CACHE_MAX_SIZE
+            CACHE_MEM_MB
+            CACHE_SLICE_SIZE
+            CACHE_VALID_ANY
+            CACHE_VALID_HIT
+            DDNS_TSIG_KEY
+            KEA_CTRL_TOKEN
+            LANCACHE_IMAGE_CHANNEL
+            LANCACHE_IMAGE_PREFIX
+            LANCACHE_IMAGE_REGISTRY
+            LANCACHE_IMAGE_TAG
+            NATS_DNS_READER_PASSWORD
+            NATS_DNS_READER_USER
+            NATS_DNS_WRITER_PASSWORD
+            NATS_DNS_WRITER_USER
+            NATS_UI_PASSWORD
+            NATS_UI_USER
+            NGINX_UPSTREAM_RESOLVER
+            PDNS_API_KEY
+            PROXY_SECURITY_MODE
+            SECONDARY_REGISTRATION_TOKEN
+          )
+          for key in "${setup_update_required_repairs[@]}"; do
+            if awk -v key="$key" '
+              /^migrate_env_for_update\(\)/ { in_func=1; next }
+              in_func && /^}/ { in_func=0 }
+              in_func && $0 ~ "append_env_key_if_missing[[:space:]]+" key "([[:space:]]|$)" { found=1 }
+              END { exit found ? 0 : 1 }
+            ' setup.sh; then
+              echo "::error::setup.sh update must not preserve empty required ${key} values with append_env_key_if_missing."
+              exit 1
+            fi
+            awk -v key="$key" '
+              /^migrate_env_for_update\(\)/ { in_func=1; next }
+              in_func && /^}/ { in_func=0 }
+              in_func && $0 ~ "(set_env_key_if_empty_or_missing|set_env_key|ensure_secret_env_key|append_required_env_migrated_assignment_if_empty_or_missing)[[:space:]]+" key "([[:space:]]|$)" { found=1 }
+              END { exit found ? 0 : 1 }
+            ' setup.sh \
+              || { echo "::error::setup.sh update must repair empty or missing required ${key} values."; exit 1; }
+          done
+          grep -F 'get_env_var_nonempty()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must provide a helper that finds non-empty duplicate env values before repairing required keys."; exit 1; }
+          grep -F 'existing_value=$(get_env_var_nonempty "$key" "$env_file")' setup.sh >/dev/null \
+            || { echo "::error::Required-key repair must prefer a non-empty duplicate value before writing a fallback."; exit 1; }
+          grep -F 'cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file")' setup.sh >/dev/null \
+            || { echo "::error::CACHE_MAX_SIZE repair must derive from existing CACHE_MAX_GB before falling back to the default."; exit 1; }
+          if ! awk '
+            /^set_env_key\(\) \{/ { in_func=1; seen_next=0; next }
+            in_func && /^}/ { exit seen_next ? 0 : 1 }
+            in_func && /\$1 == key \{/ { in_key=1 }
+            in_func && in_key && /if \(!seen\)/ { seen_next=1 }
+          ' setup.sh; then
+            echo "::error::set_env_key must collapse duplicate assignments instead of rewriting every duplicate key."
+            exit 1
+          fi
+
           if awk '
             /^  release:/ { in_release=1; next }
             in_release && /^  [[:alnum:]_-]+:/ { in_release=0 }
@@ -559,6 +620,22 @@ jobs:
           # They validate the sccache/distcc contract, not product correctness.
           if grep -RIn 'RUSTC_WRAPPER:[[:space:]]*""' .github/workflows; then
             echo "::error::Acceleration infrastructure checks must not disable RUSTC_WRAPPER directly; use cargo-with-sccache-fallback for controlled fallback."
+            exit 1
+          fi
+          grep -F 'rpm_legacy_docker_package_list()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must keep a shared legacy Docker RPM conflict list."; exit 1; }
+          grep -F 'docker-selinux' setup.sh >/dev/null \
+            && grep -F 'docker-engine-selinux' setup.sh >/dev/null \
+            || { echo "::error::Fedora/RHEL Docker RPM conflict guard must include legacy Docker selinux packages."; exit 1; }
+          grep -F 'docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin|docker-compose-plugin)' setup.sh >/dev/null \
+            || { echo "::error::Installing only docker-compose-plugin on RPM hosts must still run the Docker/Podman conflict guard."; exit 1; }
+          if awk '
+            /\[\[ "\$os_id" = fedora \]\]/ { in_fedora=1; next }
+            /^    else$/ { in_fedora=0 }
+            in_fedora && /( podman([[:space:]\\]|$)| runc([[:space:]\\]|$))/ { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' setup.sh; then
+            echo "::error::Fedora Docker conflict guard must not block stock podman or runc."
             exit 1
           fi
           if grep -RIn -- 'timeout --foreground' .github/actions/cargo-with-sccache-fallback/action.yml; then
@@ -801,12 +878,12 @@ jobs:
             exit 1
           fi
 
-          grep -F "append_env_key_if_missing LANCACHE_IMAGE_REGISTRY \"\$(resolve_lancache_image_registry \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
-            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_REGISTRY."; exit 1; }
-          grep -F "append_env_key_if_missing LANCACHE_IMAGE_PREFIX \"\$(resolve_lancache_image_prefix \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
-            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_PREFIX."; exit 1; }
-          grep -F "append_env_key_if_missing LANCACHE_IMAGE_CHANNEL \"\$(resolve_lancache_image_channel \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
-            || { echo "::error::Update migration must preserve the selected LANCACHE_IMAGE_CHANNEL."; exit 1; }
+          grep -F "set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY \"\$(resolve_lancache_image_registry \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must resolve LANCACHE_IMAGE_REGISTRY from existing config instead of hard-coding it."; exit 1; }
+          grep -F "set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX \"\$(resolve_lancache_image_prefix \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must resolve LANCACHE_IMAGE_PREFIX from existing config instead of hard-coding it."; exit 1; }
+          grep -F "set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL \"\$(resolve_lancache_image_channel \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+            || { echo "::error::Update migration must resolve LANCACHE_IMAGE_CHANNEL from existing config instead of hard-coding it."; exit 1; }
           grep -F "set_env_key LANCACHE_IMAGE_TAG \"\$(resolve_lancache_image_tag \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
             || { echo "::error::Update migration must refresh LANCACHE_IMAGE_TAG with resolve_lancache_image_tag."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag.' setup.sh >/dev/null \

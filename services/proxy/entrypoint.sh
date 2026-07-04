@@ -11,7 +11,6 @@ CERT_DIR="/etc/nginx/ssl/certs"
 DOMAINS_FILE="/etc/nginx/cdn-ssl-domains.txt"
 SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
 STREAM_TARGET_FILE="/etc/nginx/stream.d/00-stream-targets.conf"
-PROXY_SECURITY_MODE="${PROXY_SECURITY_MODE:-strict}"
 
 # ────────────────────────────────────────────────────────────────────────────
 # 0. Validate required environment variables
