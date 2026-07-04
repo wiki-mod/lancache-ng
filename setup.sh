@@ -670,6 +670,19 @@ validate_env_value() {
     return 0
 }
 
+validate_env_values_for_initial_write() {
+    local key value pair
+
+    # The first-install .env writer below is a heredoc with unquoted
+    # substitutions. Validate every interpolated value before opening the file
+    # so unsafe characters cannot change Compose .env parsing semantics.
+    for pair in "$@"; do
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        validate_env_value "$key" "$value"
+    done
+}
+
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
@@ -2613,12 +2626,53 @@ NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
-# TODO(#467): Validate heredoc values for safe characters. This block writes many
-# values via variable expansion. Currently covered by validate_env_value() in
-# set_env_key() and append_env_key_if_missing() for incremental updates, but
-# the initial heredoc template here does not yet use per-value validation.
-# A conservative approach for future work: wrap each variable with a helper or
-# add validation to the variables before they are substituted into the heredoc.
+validate_env_values_for_initial_write \
+    "IP_STANDARD=${IP_STANDARD}" \
+    "IP_SSL=${IP_SSL}" \
+    "SSL_ENABLED=${SSL_ENABLED}" \
+    "CACHE_DIR_STANDARD=${CACHE_DIR_STANDARD}" \
+    "CACHE_DIR_SSL=${CACHE_DIR_SSL}" \
+    "CACHE_MAX_SIZE=${cache_gb}g" \
+    "CACHE_MEM_MB=${CACHE_MEM_MB}" \
+    "CACHE_SLICE_SIZE=8m" \
+    "CACHE_VALID_HIT=365d" \
+    "CACHE_VALID_ANY=1m" \
+    "CACHE_INACTIVE=365d" \
+    "NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4" \
+    "PROXY_SECURITY_MODE=lazy" \
+    "PROXY_ALLOWED_CLIENT_CIDRS=" \
+    "CACHE_MAX_GB=${cache_gb}" \
+    "LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}" \
+    "LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}" \
+    "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}" \
+    "LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}" \
+    "DHCP_ENABLED=${DHCP_ENABLED}" \
+    "KEA_DATA_DIR=${KEA_DATA_DIR}" \
+    "DHCP_MODE=${DHCP_MODE}" \
+    "DHCP_SUBNET=${DHCP_SUBNET}" \
+    "DHCP_GATEWAY=${DHCP_GATEWAY}" \
+    "DHCP_RANGE_START=${DHCP_RANGE_START}" \
+    "DHCP_RANGE_END=${DHCP_RANGE_END}" \
+    "DHCP_SUBNET_START=${DHCP_SUBNET_START}" \
+    "DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}" \
+    "DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}" \
+    "UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}" \
+    "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
+    "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
+    "PDNS_API_KEY=${PDNS_API_KEY}" \
+    "NATS_UI_USER=${NATS_UI_USER}" \
+    "NATS_UI_PASSWORD=${NATS_UI_PASSWORD}" \
+    "NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}" \
+    "NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}" \
+    "NATS_DNS_READER_USER=${NATS_DNS_READER_USER}" \
+    "NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}" \
+    "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
+    "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
+    "UI_AUTH_USER=${UI_AUTH_USER}" \
+    "UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}" \
+    "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
+    "UI_BIND_IP=${IP_STANDARD}"
+
 write_env_file "$INSTALL_DIR/.env" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
