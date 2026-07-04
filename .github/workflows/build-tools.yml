@@ -17,11 +17,13 @@ on:
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "tests/bats/**"
   pull_request:
     branches: [master, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "tests/bats/**"
 
 permissions:
   contents: read
@@ -138,6 +140,7 @@ jobs:
             required_tools=(
               actionlint
               bash
+              bats
               cargo
               cargo-audit
               cargo-tarpaulin
@@ -165,12 +168,24 @@ jobs:
             cargo-tarpaulin --version
             sccache --version
             actionlint --version
+            bats --version
             shellcheck --version
             distcc --version
             distcc-pump --help >/dev/null
             docker --version
             docker compose version
           '
+
+      - name: Run Bats setup fixtures
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bats tests/bats'
 
       - name: Prepare local Trivy cache
         run: |

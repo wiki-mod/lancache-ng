@@ -41,6 +41,7 @@ RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       bash \
+      bats \
       bc \
       build-essential \
       ca-certificates \
@@ -146,6 +147,7 @@ RUN set -euo pipefail; \
 RUN set -euo pipefail; \
     required_tools=( \
       bash \
+      bats \
       cargo \
       rustc \
       rustup \
@@ -220,6 +222,7 @@ RUN set -euo pipefail; \
     cargo audit --version; \
     cargo tarpaulin --version; \
     actionlint --version; \
+    bats --version; \
     shellcheck --version; \
     docker --version; \
     docker compose version; \
