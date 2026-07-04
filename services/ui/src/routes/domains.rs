@@ -639,23 +639,11 @@ fn write_domain_file_atomic(path: &str, content: &str) -> anyhow::Result<()> {
     // Attempts atomic write via temp-file + rename pattern. On Linux with individual
     // file bind mounts (e.g., `docker run -v ./cdn-domains.txt:/data/cdn-domains.txt`),
     // the rename fails with EBUSY because the bind mount fixes the file inode and
-    // rename can't replace it in-place. The EBUSY fallback below handles this case,
-    // but falls back to truncate+write which is NOT atomic: if the process is killed
+    // rename can't replace it in-place. The fallback below keeps those supported
+    // deployments working, but it is explicitly non-atomic: if the process is killed
     // after truncate but before write completes, the file is partially corrupted.
     //
-    // MITIGATION (see issue #372):
-    // Mount the parent *directory* instead of individual files:
-    //   BEFORE: docker run -v ./cdn-domains.txt:/data/cdn-domains.txt
-    //   AFTER:  docker run -v ./config/domains:/data
-    // When the directory is the mount point (not the file), rename works atomically
-    // within the mount and EBUSY is not raised. The fallback below can then be left
-    // in place for graceful degradation on unusual bind-mount setups, but won't be
-    // triggered in production once all docker-compose files are updated.
-    //
-    // STATUS: As of 2026-07-02, prod and dev compose files still mount individual files.
-    // Quickstart and secondary deployments use Docker volumes (no file mounts), so they
-    // are not affected. Once the directory-mount migration is complete across all
-    // production deployments, this fallback becomes dead code and can be removed.
+    // Directory mounts stay on the atomic rename path and avoid this fallback.
     let path = Path::new(path);
     let parent = path
         .parent()
@@ -687,20 +675,19 @@ fn write_domain_file_atomic(path: &str, content: &str) -> anyhow::Result<()> {
 }
 
 // Detects EBUSY error from attempting to rename a bind-mounted individual file.
-// This error indicates the file is mounted directly into the container, making
-// atomic rename impossible. See write_domain_file_atomic for context and mitigation.
+// In that case the caller falls back to the in-place write path.
 fn is_bind_mount_replace_error(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(LINUX_ERRNO_EBUSY)
 }
 
 fn write_domain_file_in_place(path: &Path, content: &str) -> anyhow::Result<()> {
-    // FALLBACK for bind-mounted individual files: truncate and write in-place.
-    // This is NOT atomic — if the process crashes after truncate but before all
-    // content is written and synced, the domain list file is left partially corrupted,
-    // and the DNS/proxy services will read an incomplete list on restart.
-    // This fallback should only trigger when bind-mounting individual files
-    // (which has EBUSY on rename). Directory mounts allow atomic rename, avoiding
-    // this path. See write_domain_file_atomic for the fix.
+    // Compatibility fallback for bind-mounted individual files: truncate and write
+    // in-place. This keeps supported file-bind-mount deployments working, but it is
+    // NOT atomic. If the process crashes after truncate but before all content is
+    // written and synced, the domain list file is left partially corrupted, and the
+    // DNS/proxy services will read an incomplete list on restart.
+    //
+    // Directory mounts stay on the atomic rename path above.
     let mut file = fs::OpenOptions::new()
         .write(true)
         .truncate(true)
