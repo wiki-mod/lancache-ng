@@ -1,10 +1,11 @@
 <!-- Optional: keep and edit this notice if AI assistance was used; delete it when it is not applicable. Do not leave incorrect personal statements in place. -->
 > **Transparency notice:** This contribution was developed with AI assistance. I reviewed and tested the result, but the implementation may be partly or largely AI-generated.
 
-<!-- Add the relevant issue link. Use `Refs #...` for tracking/parent/umbrella issues. Use `Closes #...` only if merging this PR should close that issue. If no issue exists, explain why. -->
-
 ## Summary
 <!-- One or two sentences: what does this PR do? -->
+
+## Linked Issues
+<!-- Use `Refs #...` for tracking/parent/umbrella issues. Use `Closes #...` only if merging this PR should close that issue. If no issue exists, explain why. -->
 
 ## What This Actually Changes
 <!-- Before/after framing: what was true before this PR, what's different after, and why that gap mattered.
@@ -26,6 +27,9 @@ closes, or of NOT merging this PR -- not just the technical mechanism. -->
 ## Scope Boundaries
 <!-- What this PR deliberately does NOT touch, even if related. Keeps review focused and prevents
 scope creep from being silently absorbed into an unrelated change. -->
+
+## Risk / Rollback / Follow-up
+<!-- State the remaining risk, how to roll back if needed, and any follow-up work that should stay visible in the PR body. -->
 
 ## Local Scope Evidence
 <!-- List the files this PR actually touches (e.g. from `git diff --stat`). If a related file was

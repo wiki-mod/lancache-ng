@@ -46,6 +46,11 @@ look. At minimum, each pull request should explain:
 - which files were actually touched (scope evidence)
 - which checks were run, with the exact commands
 - any remaining risk or follow-up work
+
+The template now exposes visible `Linked issues` and `Risk / Rollback /
+Follow-up` sections. Fill those in directly instead of relying on hidden
+comments so the rendered PR body always surfaces the tracking and risk
+context reviewers need.
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
 - whether a GitHub-hosted fallback still works without LAN-only cache assumptions
 
@@ -66,6 +71,10 @@ Track related work explicitly in the PR body:
 - If no issue exists, explain why in the PR body instead of leaving the relationship unclear.
 - Open PRs should include links for relevant review context (for example tracking and umbrella issue).
 
+Use the visible `Linked issues` section in the template for those links so the
+rendered PR body keeps the relationship obvious even when nobody edits the body
+after opening the PR.
+
 ### Changelog expectations
 
 There is no checked-in changelog file.
@@ -76,6 +85,9 @@ behavior, operational impact, validation performed, and any explicit follow-up
 issue. Silent changes are not acceptable for release, setup, CI, or runtime
 behavior. Keep this section current by editing it directly as the PR changes,
 not by appending new comments each time something is fixed or added.
+
+Use the template's visible `Risk / Rollback / Follow-up` section to capture
+the remaining operator risk and any rollback or follow-up notes.
 
 ### Quality and release process expectations
 
