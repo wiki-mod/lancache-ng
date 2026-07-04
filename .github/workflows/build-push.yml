@@ -171,6 +171,9 @@ jobs:
         run: bash scripts/check-file-headers.sh
 
   shellcheck:
+    # ShellCheck and ActionLint run inside the same build-tools image selected
+    # by validate-compose. That keeps linting independent from whatever happens
+    # to be installed on the runner host.
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
     env:
@@ -189,6 +192,9 @@ jobs:
             bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
   validate-compose:
+    # This job is the lightweight project-wide gate. It validates compose/setup
+    # contracts and exports one smoke-tested build-tools image reference for all
+    # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
@@ -215,6 +221,9 @@ jobs:
               ;;
           esac
 
+          # validation_build_tools_image may be a branch-local fallback for this
+          # job only. The output exported to downstream jobs stays the published
+          # digest-qualified image resolved above.
           validation_build_tools_image="$(bash scripts/select-build-tools-image.sh)"
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
@@ -617,10 +626,10 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
-          grep -F 'smoked_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'docker image inspect "$image" --format' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'smoked_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
-            || { echo "::error::Build-tools selector must export the exact image reference that passed smoke validation."; exit 1; }
+          grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'docker buildx imagetools inspect "$image"' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'published_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
+            || { echo "::error::Build-tools selector must export the smoke-validated published image by multi-arch manifest digest."; exit 1; }
           if awk '
             index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)\"") { in_resolve = 1 }
             in_resolve && index($0, "printf '\''build_tools_image=%s\\n'\'' \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
@@ -639,6 +648,9 @@ jobs:
             || { echo "::error::The build-tools workflow must run on the heavy runner tier."; exit 1; }
           grep -F 'pull: true' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must pull fresh mutable bases before scan and publish builds."; exit 1; }
+          grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
+            && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'retry-build.outputs.digest' | grep -F 'steps.build.outputs.digest' >/dev/null \
+            || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
           grep -F 'Note arm64 scan coverage deferral' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must make its arm64 scan deferral explicit."; exit 1; }
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
@@ -1284,6 +1296,9 @@ jobs:
     # Full image vulnerability scans are intentionally limited to trusted refs.
     # They build every service image and routinely dominate PR runtime on
     # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
+    # The build job depends on this gate before it can push normal service
+    # images. Build-tools receives an additional exact pushed-digest scan in the
+    # build job because the multi-arch published image is produced there.
     if: github.event_name != 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -1569,6 +1584,10 @@ jobs:
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
   build:
+    # This job is the only place that publishes service sha-* images. It waits
+    # for lightweight validation, policy checks, and trusted-ref vulnerability
+    # scans before publishing. For build-tools, it also scans the exact pushed
+    # digest before attestation/promotion can proceed.
     needs:
       - shellcheck
       - validate-compose
@@ -2023,6 +2042,45 @@ jobs:
             rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
             mv "$BUILDX_CACHE_DEST" "$cache_dir"
           ) 9>"$lock_file"
+
+      - name: Prepare pushed build-tools Trivy cache
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            matrix.service == 'build-tools' &&
+            (
+              steps.build.outcome == 'success' ||
+              steps.retry-build.outcome == 'success'
+            )
+          }}
+        run: |
+          set -euo pipefail
+          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+
+      - name: Scan pushed build-tools digest with Trivy
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            matrix.service == 'build-tools' &&
+            (
+              steps.build.outcome == 'success' ||
+              steps.retry-build.outcome == 'success'
+            )
+          }}
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          timeout: 10m
+          exit-code: "1"
 
       - name: Log in to GHCR for provenance attestation
         if: >-

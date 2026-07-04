@@ -103,6 +103,8 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # Pull requests cannot push to GHCR, so they build a local amd64 image and
+      # run the same smoke/Trivy checks before the workflow can pass.
       - name: Build local scan image
         id: local-build
         timeout-minutes: 60
@@ -186,6 +188,8 @@ jobs:
 
           echo "::notice::The build-tools workflow validates the amd64 scan image before publishing multi-architecture tags. Arm64 scan coverage is deferred for v0.1.0-alpha."
 
+      # Trusted refs publish the multi-arch index. The next step scans that
+      # exact pushed digest before attestation completes.
       - name: Build and push multi-architecture build-tools image
         id: build
         if: github.event_name != 'pull_request'
@@ -200,6 +204,29 @@ jobs:
           platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
+
+      - name: Prepare pushed build-tools Trivy cache
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+
+      - name: Scan pushed build-tools digest with Trivy
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          timeout: 10m
+          exit-code: "1"
 
       - name: Attest build-tools image provenance
         if: github.event_name != 'pull_request'

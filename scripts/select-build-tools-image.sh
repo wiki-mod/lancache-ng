@@ -70,14 +70,16 @@ smoke_test_image() {
   '
 }
 
-smoked_image_reference() {
+published_image_reference() {
   local image="$1" digest=""
 
-  digest="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
-  if [[ "$digest" = *@sha256:* ]]; then
-    printf '%s\n' "$digest"
+  digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
+  digest="${digest%\"}"
+  digest="${digest#\"}"
+  if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    printf '%s@%s\n' "${image%:*}" "$digest"
   else
-    printf '%s\n' "$image"
+    fail "could not resolve multi-platform manifest digest for $image"
   fi
 }
 
@@ -91,7 +93,7 @@ fi
 
 if [[ "$require_published" = "true" ]]; then
   if docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
-    smoked_image_reference "$published_image"
+    published_image_reference "$published_image"
     exit 0
   fi
   cat "$pull_log" >&2
@@ -102,13 +104,13 @@ if [[ "$event_name" != "pull_request" ]]; then
   printf '::notice::Building a branch-local build-tools validation image for a trusted ref.\n' >&2
   docker build --pull -t "$fallback_image" "$build_tools_context" >&2
   smoke_test_image "$fallback_image"
-  smoked_image_reference "$fallback_image"
+  printf '%s\n' "$fallback_image"
   exit 0
 fi
 
 if docker pull "$published_image" >"$pull_log" 2>&1; then
   if smoke_test_image "$published_image"; then
-    smoked_image_reference "$published_image"
+    published_image_reference "$published_image"
     exit 0
   fi
   if [[ "$trusted_fallback_allowed" != "true" ]]; then
@@ -131,4 +133,4 @@ fi
 printf '::notice::Building a branch-local build-tools validation image.\n' >&2
 docker build --pull -t "$fallback_image" "$build_tools_context" >&2
 smoke_test_image "$fallback_image"
-smoked_image_reference "$fallback_image"
+printf '%s\n' "$fallback_image"
