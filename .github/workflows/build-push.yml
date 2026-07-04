@@ -298,6 +298,43 @@ jobs:
             echo "::error::User-facing production install paths must not instruct users to build images locally."
             exit 1
           fi
+
+          if grep -RIn -- '/srv/lancache' README.md CLAUDE.md deploy/prod deploy/quickstart services/ui/src; then
+            echo "::error::Runtime defaults and user-facing install paths must use /opt/lancache-ng, not legacy /srv/lancache."
+            exit 1
+          fi
+
+          for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+            grep -F "set_env_key_if_empty_or_missing ${key}" setup.sh >/dev/null \
+              || { echo "::error::setup.sh update must write ${key} so legacy /srv/lancache state can be preserved before prod defaults move."; exit 1; }
+            grep -F "${key}" deploy/prod/.env >/dev/null \
+              || { echo "::error::deploy/prod/.env must document ${key} for manual production upgrades."; exit 1; }
+            grep -F "${key}" docs/backup-restore.md >/dev/null \
+              || { echo "::error::backup docs must mention ${key}."; exit 1; }
+          done
+
+          grep -F 'LANCACHE_STATE_DIR=/opt/lancache-ng' deploy/prod/.env >/dev/null \
+            || { echo "::error::deploy/prod/.env must expose one production state root for manual upgrade paths."; exit 1; }
+          grep -F 'set_env_key_if_empty_or_missing LANCACHE_STATE_DIR' setup.sh >/dev/null \
+            || { echo "::error::setup.sh update must write LANCACHE_STATE_DIR before per-service state keys."; exit 1; }
+          grep -F 'production_state_root_default()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must keep a state-root default helper for setup installs and manual deploy/prod updates."; exit 1; }
+          grep -F 'basename "$(dirname "$install_dir")")" = "deploy"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh deploy/prod updates must default runtime state to /opt/lancache-ng, not the checkout."; exit 1; }
+          grep -F 'sudo ./setup.sh update "$(pwd)/deploy/prod"' README.md >/dev/null \
+            || { echo "::error::README manual production updates must pass deploy/prod explicitly to setup.sh update."; exit 1; }
+          grep -F '${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard' deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::prod compose must derive PowerDNS state from LANCACHE_STATE_DIR when no per-service override is set."; exit 1; }
+          grep -F '${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf' deploy/prod/docker-compose.yml >/dev/null \
+            || { echo "::error::prod compose must derive NATS config state from LANCACHE_STATE_DIR when no per-service override is set."; exit 1; }
+          grep -F 'LANCACHE_STATE_DIR' docs/backup-restore.md >/dev/null \
+            || { echo "::error::backup docs must describe LANCACHE_STATE_DIR coverage."; exit 1; }
+          grep -F 'legacy_dir_or_default /srv/lancache/cache' setup.sh >/dev/null \
+            || { echo "::error::setup.sh update must preserve an existing legacy /srv/lancache/cache before changing cache defaults."; exit 1; }
+          grep -F 'pdns_filter_state_dir=$(get_env_var PDNS_FILTER_STATE_DIR "$env_file")' setup.sh >/dev/null \
+            || { echo "::error::backup_manifest must read PDNS_FILTER_STATE_DIR."; exit 1; }
+          grep -F 'nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")' setup.sh >/dev/null \
+            || { echo "::error::backup_manifest must read NATS_CONF_DIR."; exit 1; }
           VALIDATE_PREBUILT
 
       - name: Validate compose files

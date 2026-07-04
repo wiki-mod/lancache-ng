@@ -815,6 +815,29 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
     fi
 }
 
+legacy_dir_or_default() {
+    local legacy_dir="$1" default_dir="$2"
+
+    if [[ -d "$legacy_dir" ]]; then
+        printf '%s\n' "$legacy_dir"
+    else
+        printf '%s\n' "$default_dir"
+    fi
+}
+
+production_state_root_default() {
+    local install_dir="$1"
+
+    # A manual production checkout runs setup.sh update against deploy/prod,
+    # but runtime state must still live in the approved production root instead
+    # of inside the Git checkout.
+    if [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]; then
+        printf '%s\n' "/opt/lancache-ng"
+    else
+        printf '%s\n' "$install_dir"
+    fi
+}
+
 # Full .env rewrites keep the original owner/mode because the file contains
 # runtime tokens and may already be locked down to 0600.
 write_env_file() {
@@ -1224,6 +1247,7 @@ migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_dir_source cache_max_gb cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
+    local kea_data_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir state_root_default
     env_file="$install_dir/.env"
 
     [[ -f "$env_file" ]] \
@@ -1240,6 +1264,11 @@ migrate_env_for_update() {
     [[ -n "$ip_ssl" ]] && ssl_enabled=1
     set_env_key_if_empty_or_missing SSL_ENABLED "$ssl_enabled" "$env_file"
 
+    state_root_default=$(production_state_root_default "$install_dir")
+    state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
+    state_dir="${state_dir:-$(legacy_dir_or_default /srv/lancache "$state_root_default")}"
+    set_env_key_if_empty_or_missing LANCACHE_STATE_DIR "$state_dir" "$env_file"
+
     # Cache settings. Older installs may only have CACHE_DIR, so keep that path
     # and map both proxy modes to the same cache directory by default.
     cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
@@ -1248,9 +1277,24 @@ migrate_env_for_update() {
         cache_dir=$(get_env_var CACHE_DIR "$env_file")
         cache_dir_source=CACHE_DIR
     fi
-    cache_dir="${cache_dir:-$install_dir/cache/standard}"
+    cache_dir="${cache_dir:-$(legacy_dir_or_default /srv/lancache/cache "$state_dir/cache")}"
     append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
     append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
+
+    # Older repository-based prod installs stored state below one legacy root.
+    # Preserve that root first, then derive per-service defaults from it so both
+    # automatic setup updates and documented manual prod upgrades use one state
+    # contract instead of several unrelated path edits.
+    pdns_standard_dir=$(legacy_dir_or_default /srv/lancache/pdns-standard "$state_dir/pdns-standard")
+    pdns_ssl_dir=$(legacy_dir_or_default /srv/lancache/pdns-ssl "$state_dir/pdns-ssl")
+    pdns_filter_state_dir=$(legacy_dir_or_default /srv/lancache/pdns-filter-state "$state_dir/pdns-filter-state")
+    nats_data_dir=$(legacy_dir_or_default /srv/lancache/nats "$state_dir/nats")
+    nats_conf_dir=$(legacy_dir_or_default /srv/lancache/nats-conf "$state_dir/nats-conf")
+    set_env_key_if_empty_or_missing PDNS_STANDARD_DIR "$pdns_standard_dir" "$env_file"
+    set_env_key_if_empty_or_missing PDNS_SSL_DIR "$pdns_ssl_dir" "$env_file"
+    set_env_key_if_empty_or_missing PDNS_FILTER_STATE_DIR "$pdns_filter_state_dir" "$env_file"
+    set_env_key_if_empty_or_missing NATS_DATA_DIR "$nats_data_dir" "$env_file"
+    set_env_key_if_empty_or_missing NATS_CONF_DIR "$nats_conf_dir" "$env_file"
 
     cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file")
     cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file")
@@ -1282,7 +1326,8 @@ migrate_env_for_update() {
     # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
     # read one complete runtime configuration.
     append_env_key_if_missing DHCP_ENABLED "0" "$env_file"
-    append_env_key_if_missing KEA_DATA_DIR "$install_dir/kea" "$env_file"
+    kea_data_dir=$(legacy_dir_or_default /srv/lancache/kea "$state_dir/kea")
+    set_env_key_if_empty_or_missing KEA_DATA_DIR "$kea_data_dir" "$env_file"
     append_env_key_if_missing DHCP_SUBNET "" "$env_file"
     append_env_key_if_missing DHCP_GATEWAY "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
@@ -1406,12 +1451,32 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file="$install_dir/.env"
-    local cache_std cache_ssl kea_dir
+    local cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
+    state_dir="${state_dir:-$(production_state_root_default "$install_dir")}"
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
     kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+    nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")
+    nats_data_dir=$(get_env_var NATS_DATA_DIR "$env_file")
+    pdns_filter_state_dir=$(get_env_var PDNS_FILTER_STATE_DIR "$env_file")
+    pdns_ssl_dir=$(get_env_var PDNS_SSL_DIR "$env_file")
+    pdns_standard_dir=$(get_env_var PDNS_STANDARD_DIR "$env_file")
+    cache_std="${cache_std:-$state_dir/cache}"
+    cache_ssl="${cache_ssl:-$cache_std}"
+    kea_dir="${kea_dir:-$state_dir/kea}"
+    nats_conf_dir="${nats_conf_dir:-$state_dir/nats-conf}"
+    nats_data_dir="${nats_data_dir:-$state_dir/nats}"
+    pdns_filter_state_dir="${pdns_filter_state_dir:-$state_dir/pdns-filter-state}"
+    pdns_ssl_dir="${pdns_ssl_dir:-$state_dir/pdns-ssl}"
+    pdns_standard_dir="${pdns_standard_dir:-$state_dir/pdns-standard}"
 
     printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
+    [[ -n "${pdns_standard_dir:-}" && -d "$pdns_standard_dir" ]] && printf '%s\n' "$pdns_standard_dir"
+    [[ -n "${pdns_ssl_dir:-}" && -d "$pdns_ssl_dir" ]] && printf '%s\n' "$pdns_ssl_dir"
+    [[ -n "${pdns_filter_state_dir:-}" && -d "$pdns_filter_state_dir" ]] && printf '%s\n' "$pdns_filter_state_dir"
+    [[ -n "${nats_data_dir:-}" && -d "$nats_data_dir" ]] && printf '%s\n' "$nats_data_dir"
+    [[ -n "${nats_conf_dir:-}" && -d "$nats_conf_dir" ]] && printf '%s\n' "$nats_conf_dir"
     [[ -d /srv/lancache/pdns-standard ]] && printf '%s\n' /srv/lancache/pdns-standard
     [[ -d /srv/lancache/pdns-ssl ]] && printf '%s\n' /srv/lancache/pdns-ssl
     [[ -d /srv/lancache/pdns-filter-state ]] && printf '%s\n' /srv/lancache/pdns-filter-state

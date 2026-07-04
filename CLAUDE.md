@@ -103,7 +103,7 @@ by configuring which DNS server IP they point to:
 | | dev | prod |
 |---|---|---|
 | Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `/srv/lancache/cache` on host |
+| Cache volume | Docker named volume | `/opt/lancache-ng/cache` on host |
 | CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
 | DNS query logging | On | Off |
 | Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
@@ -133,7 +133,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
    Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
    Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
    Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directory: `mkdir -p /srv/lancache/cache`
+   Create cache directory: `mkdir -p /opt/lancache-ng/cache`
 
 ## Adding More CDN Domains
 

@@ -24,7 +24,7 @@ The `update` command automatically creates this config backup before pulling rep
 
 ### `--full` backup
 
-Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes cache directories from `.env` plus `/srv/lancache/cache` when present. This can be huge, so it is opt-in.
+Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes cache directories from `.env`. Older installs that still have legacy `/srv/lancache` directories are included when present, but new installs should not create `/srv/lancache`. This can be huge, so it is opt-in.
 
 ## What the automated backup includes
 
@@ -33,10 +33,10 @@ The automated manifest includes these paths when they exist:
 - install configuration: `.env`, `docker-compose.yml`, and `certs/`
 - quickstart Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
-- PowerDNS state under `/srv/lancache/pdns-standard` and `/srv/lancache/pdns-ssl`
-- Kea data from `KEA_DATA_DIR` and `/srv/lancache/kea`
-- NATS state and generated config under `/srv/lancache/nats` and `/srv/lancache/nats-conf`
-- in `--full` mode only, cache directories from `CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`, and `/srv/lancache/cache`
+- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and, for legacy installs only, `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, and `/srv/lancache/pdns-filter-state` when present
+- Kea data from the production state root `LANCACHE_STATE_DIR`, `KEA_DATA_DIR`, and, for legacy installs only, `/srv/lancache/kea` when present
+- NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, and, for legacy installs only, `/srv/lancache/nats` and `/srv/lancache/nats-conf` when present
+- in `--full` mode only, cache directories from the production state root `LANCACHE_STATE_DIR`, `CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`, and legacy `/srv/lancache/cache` when present
 
 The backup command stops the compose stack before copying mutable databases and restarts it afterward. Staging directories are created with restrictive permissions and cleaned up automatically if a copy or archive operation fails. The command rejects backup destinations that sit inside a path being backed up, which prevents recursive copies when using cache disks as backup storage.
 

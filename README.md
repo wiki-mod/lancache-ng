@@ -592,8 +592,13 @@ IP_SSL=192.168.1.11
 
 SSL_ENABLED=1
 
-CACHE_DIR_STANDARD=/srv/lancache/cache
-CACHE_DIR_SSL=/srv/lancache/cache
+LANCACHE_STATE_DIR=/opt/lancache-ng
+
+# Optional per-service overrides. Leave unset unless you intentionally split
+# state across multiple disks; compose derives normal state paths from
+# LANCACHE_STATE_DIR.
+# CACHE_DIR_STANDARD=/opt/lancache-ng/cache
+# CACHE_DIR_SSL=/opt/lancache-ng/cache
 
 CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512
@@ -653,8 +658,13 @@ SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 Create directories:
 
 ```bash
-mkdir -p /srv/lancache/cache
-mkdir -p /srv/lancache/kea
+mkdir -p /opt/lancache-ng/cache
+mkdir -p /opt/lancache-ng/kea
+mkdir -p /opt/lancache-ng/pdns-standard
+mkdir -p /opt/lancache-ng/pdns-ssl
+mkdir -p /opt/lancache-ng/pdns-filter-state
+mkdir -p /opt/lancache-ng/nats
+mkdir -p /opt/lancache-ng/nats-conf
 ```
 
 Start the stack:
@@ -663,6 +673,17 @@ Start the stack:
 docker compose -f deploy/prod/docker-compose.yml pull
 docker compose -f deploy/prod/docker-compose.yml up -d
 ```
+
+For later upgrades from this manual checkout, pull the repository and update the
+production stack directory explicitly instead of using a raw compose pull/up:
+
+```bash
+git pull --ff-only
+sudo ./setup.sh update "$(pwd)/deploy/prod"
+```
+
+The update command creates the rollback backup and applies state-path migrations
+before restarting the stack.
 
 Check status:
 

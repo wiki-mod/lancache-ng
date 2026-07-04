@@ -165,17 +165,18 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         return 0.0;
     }
 
-    // Normalize the path to prevent traversal attacks (e.g., /srv/lancache/standard/../evil)
+    // Normalize the path to prevent traversal attacks (e.g., /opt/lancache-ng/cache/../evil)
     // Reject any path containing ".." components
     if path.contains("..") {
         return 0.0;
     }
 
-    // Only allow specific cache directories
-    // Expanded to include both /srv/lancache and /var/cache prefixes (dev and prod defaults)
+    // Only allow supported cache locations. /opt/lancache-ng is the normal
+    // production install path; /var/cache and /data remain container/dev paths.
     let allowed_prefixes = [
-        "/srv/lancache/standard",
-        "/srv/lancache/ssl",
+        "/opt/lancache-ng/cache",
+        "/opt/lancache-ng/cache/standard",
+        "/opt/lancache-ng/cache/ssl",
         "/var/cache/standard",
         "/var/cache/ssl",
         "/var/cache/proxy",

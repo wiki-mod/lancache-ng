@@ -3,6 +3,13 @@
 
 # Cache data - never commit
 data/
+/cache/
+/kea/
+/nats/
+/nats-conf/
+/pdns-standard/
+/pdns-ssl/
+/pdns-filter-state/
 
 # Generated certificates (keep only the CA template, not issued certs)
 certs/*.crt
