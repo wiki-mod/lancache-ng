@@ -553,6 +553,17 @@ get_env_assignment_value_raw() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
 
+get_env_assignment_value_raw_nonempty() {
+    local key="$1" env_file="$2" raw value
+    while IFS= read -r raw; do
+        value=$(_compose_parse_env_value "$raw")
+        if [[ -n "$value" ]]; then
+            printf '%s' "$raw"
+            return 0
+        fi
+    done < <(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print}' "$env_file" 2>/dev/null)
+}
+
 # .env helpers stay in setup.sh because this script owns install, update, and
 # migration behavior for curl | bash users.
 env_key_exists() {
@@ -715,12 +726,14 @@ append_env_key_if_missing() {
 }
 
 set_env_key_if_empty_or_missing() {
-    local key="$1" value="$2" env_file="$3" existing_value
+    local key="$1" value="$2" env_file="$3" existing_assignment
     validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
-        existing_value=$(get_env_var_nonempty "$key" "$env_file")
-        if [[ -n "$existing_value" ]]; then
-            set_env_key "$key" "$existing_value" "$env_file"
+        # Keep an operator's existing non-empty assignment verbatim so Compose
+        # interpolation and other already-valid raw values survive update.
+        existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file")
+        if [[ -n "$existing_assignment" ]]; then
+            set_env_assignment "$key" "$existing_assignment" "$env_file"
         else
             set_env_key "$key" "$value" "$env_file"
         fi
@@ -748,7 +761,7 @@ append_env_assignment_if_missing() {
 
 append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local source_assignment source_value
+    local source_assignment
 
     # Preserve intentionally empty optional targets. UI_BIND_IP=, for example,
     # deliberately keeps Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback alive.
@@ -756,9 +769,8 @@ append_env_migrated_assignment_if_missing() {
         return 0
     fi
 
-    source_value=$(get_env_var "$source_key" "$env_file")
-    source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
-    if [[ -n "$source_value" && -n "$source_assignment" ]]; then
+    source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file")
+    if [[ -n "$source_assignment" ]]; then
         # Rewrite empty migrated targets in place so updates do not append
         # duplicate KEY= lines.
         set_env_assignment "$target_key" "$source_assignment" "$env_file"
@@ -769,18 +781,21 @@ append_env_migrated_assignment_if_missing() {
 
 append_required_env_migrated_assignment_if_empty_or_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local source_assignment source_value
+    local target_assignment source_assignment
 
     # Required migrated paths cannot stay empty: Compose would turn KEY= into an
     # invalid bind mount. This helper repairs only those required keys and keeps
     # the optional migration helper above from changing deliberate empty values.
-    if env_key_has_value "$target_key" "$env_file"; then
+    # Preserve a later non-empty duplicate before falling back to source or
+    # default state so updates converge on the operator's actual cache dir.
+    target_assignment=$(get_env_assignment_value_raw_nonempty "$target_key" "$env_file")
+    if [[ -n "$target_assignment" ]]; then
+        set_env_assignment "$target_key" "$target_assignment" "$env_file"
         return 0
     fi
 
-    source_value=$(get_env_var "$source_key" "$env_file")
-    source_assignment=$(get_env_assignment_value_raw "$source_key" "$env_file")
-    if [[ -n "$source_value" && -n "$source_assignment" ]]; then
+    source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file")
+    if [[ -n "$source_assignment" ]]; then
         set_env_assignment "$target_key" "$source_assignment" "$env_file"
     elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
         set_env_key "$target_key" "$fallback_value" "$env_file"
@@ -1207,7 +1222,7 @@ migrate_env_for_update() {
     ip_ssl=$(get_env_var IP_SSL "$env_file")
     ssl_enabled=0
     [[ -n "$ip_ssl" ]] && ssl_enabled=1
-    append_env_key_if_missing SSL_ENABLED "$ssl_enabled" "$env_file"
+    set_env_key_if_empty_or_missing SSL_ENABLED "$ssl_enabled" "$env_file"
 
     # Cache settings. Older installs may only have CACHE_DIR, so keep that path
     # and map both proxy modes to the same cache directory by default.
@@ -2598,7 +2613,7 @@ NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 
-# TODO(#374): Validate heredoc values for safe characters. This block writes many
+# TODO(#467): Validate heredoc values for safe characters. This block writes many
 # values via variable expansion. Currently covered by validate_env_value() in
 # set_env_key() and append_env_key_if_missing() for incremental updates, but
 # the initial heredoc template here does not yet use per-value validation.

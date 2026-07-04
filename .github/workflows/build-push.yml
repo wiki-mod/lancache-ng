@@ -515,6 +515,7 @@ jobs:
             NGINX_UPSTREAM_RESOLVER
             PDNS_API_KEY
             PROXY_SECURITY_MODE
+            SSL_ENABLED
             SECONDARY_REGISTRATION_TOKEN
           )
           for key in "${setup_update_required_repairs[@]}"; do
@@ -537,8 +538,12 @@ jobs:
           done
           grep -F 'get_env_var_nonempty()' setup.sh >/dev/null \
             || { echo "::error::setup.sh must provide a helper that finds non-empty duplicate env values before repairing required keys."; exit 1; }
-          grep -F 'existing_value=$(get_env_var_nonempty "$key" "$env_file")' setup.sh >/dev/null \
-            || { echo "::error::Required-key repair must prefer a non-empty duplicate value before writing a fallback."; exit 1; }
+          grep -F 'get_env_assignment_value_raw_nonempty()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must provide a helper that preserves the raw assignment for a non-empty duplicate env value."; exit 1; }
+          grep -F 'existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file")' setup.sh >/dev/null \
+            || { echo "::error::Required-key repair must preserve the raw non-empty assignment before writing a fallback."; exit 1; }
+          grep -F 'source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file")' setup.sh >/dev/null \
+            || { echo "::error::Migrated assignments must preserve raw non-empty source values before writing a fallback."; exit 1; }
           grep -F 'cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file")' setup.sh >/dev/null \
             || { echo "::error::CACHE_MAX_SIZE repair must derive from existing CACHE_MAX_GB before falling back to the default."; exit 1; }
           if ! awk '
