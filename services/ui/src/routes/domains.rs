@@ -258,11 +258,26 @@ pub async fn toggle_aaaa_filter(
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
     let enable = form.enabled.as_deref() == Some("1");
+    let mut failed_paths = Vec::new();
+
     for marker_path in aaaa_filter_marker_paths(&state) {
         if let Err(e) = set_aaaa_filter_marker(&marker_path, enable) {
-            tracing::error!(path = %marker_path.display(), error = %e, "AAAA filter toggle failed");
+            tracing::error!(
+                path = %marker_path.display(),
+                enabled = enable,
+                error = %e,
+                "AAAA filter toggle failed"
+            );
+            failed_paths.push(marker_path);
         }
     }
+
+    if !failed_paths.is_empty() {
+        // The UI must not report success if any DNS instance cannot observe the
+        // requested marker state.
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     Ok(Redirect::to("/domains"))
 }
 
@@ -857,6 +872,13 @@ mod tests {
         assert!(!aaaa_filter_enabled_at(&marker));
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn aaaa_filter_marker_write_fails_when_state_dir_is_missing() {
+        let marker = temp_dir("aaaa-filter-missing").join("missing/aaaa-filter-enabled");
+
+        assert!(set_aaaa_filter_marker(&marker, true).is_err());
     }
 
     #[test]
