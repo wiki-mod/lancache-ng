@@ -8,6 +8,10 @@ want to test pull requests, build images locally or reduce hosted CI usage.
 Local runner settings are an optimization layer. Keep them optional and
 documented so the project can move jobs back to GitHub-hosted runners without
 rewriting Dockerfiles or build scripts.
+This guide covers Dev/CI acceleration only. Production installs, setup/update
+flows, and runtime service containers must continue to work from prebuilt
+images without sccache, sccache-dist, distcc, distcc-pump, or local Buildx
+cache state.
 
 ## When a local runner helps
 
@@ -111,6 +115,9 @@ Rust services can benefit from `sccache`.
 
 If you enable `sccache`, use a cache backend that is reachable from the build
 environment. Redis is a common choice for self-hosted runners.
+For jobs that must also run on GitHub-hosted fallback, document whether Redis
+backing is optional, preferred, or a hard gate and keep the job green when the
+cache backend is unavailable.
 
 Important rules:
 
@@ -137,6 +144,8 @@ repository files.
 Some Rust crates still compile C or C++ helper code through build scripts.
 For those cases, `distcc` with `pump` can offload part of the work to remote
 compiler hosts.
+As with `sccache`, this is a build-speed optimization only; setup and runtime
+image pulls must not depend on it.
 
 Use this as an opt-in setting:
 

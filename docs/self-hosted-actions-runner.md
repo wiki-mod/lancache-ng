@@ -38,6 +38,20 @@ The build-tools image does not replace the baseline runner requirements below.
 The GitHub workflows still need a working self-hosted runner, Docker daemon,
 Buildx support, outbound network access, and CodeQL action setup.
 
+## Acceleration contract
+
+Build acceleration is a CI optimization, not a runtime requirement. Jobs that
+use Redis-backed `sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or a local
+Buildx cache must document whether that accelerator is optional, preferred, or
+a hard gate. GitHub-hosted fallback validation must not inherit LAN-only
+assumptions about Redis URLs, distcc schedulers, cache paths, or runner labels.
+
+As a rule of thumb:
+
+- optional: the job stays green without the accelerator
+- preferred: use the accelerator when available, but keep a documented fallback
+- gate: the job must have the accelerator or fail closed before doing work
+
 ## Debian runner packages
 
 On a Debian runner, install the baseline tools used by the workflows:
