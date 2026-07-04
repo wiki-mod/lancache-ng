@@ -405,16 +405,20 @@ jobs:
             exit 1
           fi
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'acl safe_container_action' "$compose_file" \
+            grep -Fq 'acl safe_service_restart' "$compose_file" \
+              && grep -Fq 'acl safe_probe_action' "$compose_file" \
               && grep -Fq 'acl lancache_container' "$compose_file" \
               && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
+              && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$compose_file" \
+              && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$compose_file" \
+              && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$compose_file" \
               && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
               && grep -Fq 'http-request deny' "$compose_file" \
               && ! grep -Fq '/containers/create' "$compose_file" \
               && ! grep -Fq '/containers/json' "$compose_file" \
               && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions."
+                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
                 exit 1
               }
           done
