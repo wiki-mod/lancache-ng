@@ -745,11 +745,11 @@ async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, any
     let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
         .context("resolve DHCP probe container")?;
 
-    stop_container_if_running(docker, &id).await?;
+    stop_container_if_running(docker, id).await?;
     let started_since = unix_timestamp_seconds();
 
     docker
-        .start_container(&id, Some(StartContainerOptionsBuilder::default().build()))
+        .start_container(id, Some(StartContainerOptionsBuilder::default().build()))
         .await
         .context("start DHCP probe container")?;
 
