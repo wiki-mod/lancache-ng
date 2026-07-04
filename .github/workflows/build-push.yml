@@ -163,6 +163,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   file-headers:
+    # Cheap repository hygiene gate. It runs before expensive Rust/image work so
+    # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
@@ -200,6 +202,10 @@ jobs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx for manifest inspection
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
       - name: Resolve compose validation image
         id: select-compose-validation-image
         env:
@@ -826,6 +832,8 @@ jobs:
           esac
 
   dns_rust_quality:
+    # DNS Rust quality is scoped by detect-changes for PR speed, but workflow
+    # changes still force it because the CI contract itself may have changed.
     name: rust-quality (dns/nats-subscriber)
     needs: detect-changes
     if: >-
@@ -882,6 +890,8 @@ jobs:
           command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
   ui_rust_quality:
+    # UI Rust quality mirrors the DNS job but stays independent so both crates
+    # can run in parallel on suitable runners.
     name: rust-quality (ui)
     needs: detect-changes
     if: >-
@@ -938,6 +948,8 @@ jobs:
           command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   dns_test:
+    # DNS unit tests are separate from quality checks so failures identify
+    # whether the regression is lint/format level or behavioral.
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
     if: >-
@@ -986,6 +998,8 @@ jobs:
           command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
   ui_test:
+    # UI tests run only when the UI or workflow contract changes. This keeps
+    # docs/setup-only PRs from paying for unrelated Rust test work.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
     if: >-
@@ -1034,6 +1048,8 @@ jobs:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   watchdog_test:
+    # Watchdog has its own small shell runtime and therefore its own scoped
+    # syntax/executable gate instead of being folded into larger Rust jobs.
     name: test (watchdog)
     needs: [validate-compose, detect-changes]
     if: >-
@@ -1055,6 +1071,8 @@ jobs:
           test -x services/watchdog/watchdog.sh
 
   dns_cargo_audit:
+    # Dependency audits remain crate-specific. They are skipped only when path
+    # filtering proves the crate and workflow contract did not change.
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
     if: >-
@@ -1097,6 +1115,8 @@ jobs:
               fi'
 
   ui_cargo_audit:
+    # UI dependency audit mirrors the DNS audit and stays parallel to avoid
+    # serializing independent Rust checks.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
     if: >-
@@ -1139,6 +1159,9 @@ jobs:
               fi'
 
   ci_scope_policy:
+    # Central policy reconciliation for PR path filtering. Individual jobs may
+    # skip for speed, but this job verifies that every required check really ran
+    # for the files touched by the PR.
     name: CI scope policy
     needs:
       - detect-changes
@@ -1176,6 +1199,11 @@ jobs:
           UI_CARGO_AUDIT_RESULT: ${{ needs.ui_cargo_audit.result }}
         run: |
           set -euo pipefail
+
+          grep -n "Set up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
+            echo "::error::validate-compose must set up Buildx before resolving digest-qualified build-tools images."
+            exit 1
+          }
 
           require_boolean() {
             local name="$1" value="$2"
@@ -1389,6 +1417,9 @@ jobs:
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Rust build secret files
+        # Trusted Rust image builds may use Redis sccache, sccache-dist, and
+        # distcc. Secrets are written to temporary files for BuildKit and are
+        # never exposed to fork PRs or Dependabot runs.
         if: >-
           ${{
             (
@@ -1495,6 +1526,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Select Rust build network
+        # BuildKit host networking is only enabled when secret-backed
+        # acceleration needs access to private runner services. Normal builds
+        # stay on the default isolated network.
         if: matrix.rust == true
         env:
           SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
@@ -1949,6 +1983,9 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
+        # First build attempt uses the configured acceleration path. It is
+        # allowed to fail so the retry path can prove the Dockerfile fallback
+        # instead of leaving a transient acceleration outage as the final state.
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
@@ -1978,6 +2015,9 @@ jobs:
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
       - name: Retry Build and push
+        # Retry once with the same declared image inputs. Dockerfile-level
+        # fallback disables broken acceleration while preserving the normal
+        # build and publish contract.
         id: retry-build
         if: >-
           ${{
@@ -2058,6 +2098,8 @@ jobs:
           mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
 
       - name: Scan pushed build-tools digest with Trivy
+        # Build-tools influences every downstream validation job, so the exact
+        # pushed digest is scanned before provenance and channel promotion.
         if: >-
           ${{
             github.event_name != 'pull_request' &&
@@ -2111,6 +2153,8 @@ jobs:
           push-to-registry: true
 
   promote:
+    # Promotion is intentionally separate from image build. It moves coherent
+    # channel tags only after all sha-* source images for the same commit exist.
     name: promote stack image channels
     needs: build
     if: github.event_name != 'pull_request'
@@ -2274,6 +2318,8 @@ jobs:
           done
 
   release:
+    # Release source archives must match the same commit that produced the
+    # images. This keeps source, image tags, and attestations traceable together.
     name: publish release source
     needs: promote
     if: startsWith(github.ref, 'refs/tags/v')

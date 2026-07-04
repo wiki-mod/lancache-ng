@@ -99,9 +99,16 @@ jobs:
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
           tags: |
-            type=ref,event=branch
             type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Compute immutable pushed source tag
+        id: source-tag
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          printf 'image=%s:sha-%s\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Pull requests cannot push to GHCR, so they build a local amd64 image and
       # run the same smoke/Trivy checks before the workflow can pass.
@@ -188,8 +195,9 @@ jobs:
 
           echo "::notice::The build-tools workflow validates the amd64 scan image before publishing multi-architecture tags. Arm64 scan coverage is deferred for v0.1.0-alpha."
 
-      # Trusted refs publish the multi-arch index. The next step scans that
-      # exact pushed digest before attestation completes.
+      # Trusted refs publish only an immutable sha-* source tag first. Mutable
+      # branch/latest tags are promoted after the exact pushed digest has passed
+      # Trivy and provenance attestation.
       - name: Build and push multi-architecture build-tools image
         id: build
         if: github.event_name != 'pull_request'
@@ -199,7 +207,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
           provenance: false
@@ -235,6 +243,27 @@ jobs:
           subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      - name: Promote build-tools mutable tags
+        if: github.event_name != 'pull_request'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUSHED_DIGEST: ${{ steps.build.outputs.digest }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          source_image="${BUILD_TOOLS_IMAGE}@${PUSHED_DIGEST}"
+          branch_tag="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$branch_tag" ]; then
+            echo "::error::Could not derive a safe mutable build-tools branch tag from '$REF_NAME'."
+            exit 1
+          fi
+
+          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_image"
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_image"
+          fi
 
       - name: Rotate local Buildx cache
         if: >-
