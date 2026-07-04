@@ -265,7 +265,7 @@ install_docker_apt() {
     fi
 
     if [[ "$compose_package" = docker-compose-plugin ]]; then
-        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin "$compose_package"
+        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io "$compose_package"
     else
         apt-get install -y --no-install-recommends docker.io "$compose_package"
     fi
@@ -310,7 +310,7 @@ install_docker_rpm() {
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
     fi
 
     repo_url=$(docker_rpm_repo_url)
@@ -374,7 +374,7 @@ install_docker() {
         fi
         install_docker_apt || die "Failed to install Docker."
     elif command -v dnf >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -383,7 +383,7 @@ install_docker() {
         fi
         install_docker_rpm dnf || die "Failed to install Docker."
     elif command -v yum >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
