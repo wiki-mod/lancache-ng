@@ -195,6 +195,35 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
+      - name: Run governance guardrails
+        if: github.event_name == 'pull_request'
+        env:
+          GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GOVERNANCE_PR_TITLE: ${{ github.event.pull_request.title }}
+          GOVERNANCE_PR_BODY: ${{ github.event.pull_request.body }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          changed_files="$(mktemp "$PWD/.governance-changed-files.XXXXXX")"
+          trap 'rm -f "$changed_files"' EXIT
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}"
+          git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}"
+          git cat-file -e "${GITHUB_SHA}^{commit}"
+          git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e GITHUB_REPOSITORY \
+            -e GOVERNANCE_PR_TITLE \
+            -e GOVERNANCE_PR_BODY \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
     # contracts and exports one smoke-tested build-tools image reference for all
@@ -405,16 +434,20 @@ jobs:
             exit 1
           fi
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'acl safe_container_action' "$compose_file" \
+            grep -Fq 'acl safe_service_restart' "$compose_file" \
+              && grep -Fq 'acl safe_probe_action' "$compose_file" \
               && grep -Fq 'acl lancache_container' "$compose_file" \
               && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
+              && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$compose_file" \
+              && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$compose_file" \
+              && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$compose_file" \
               && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
               && grep -Fq 'http-request deny' "$compose_file" \
               && ! grep -Fq '/containers/create' "$compose_file" \
               && ! grep -Fq '/containers/json' "$compose_file" \
               && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions."
+                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
                 exit 1
               }
           done

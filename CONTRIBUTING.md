@@ -46,6 +46,11 @@ look. At minimum, each pull request should explain:
 - which files were actually touched (scope evidence)
 - which checks were run, with the exact commands
 - any remaining risk or follow-up work
+
+The template now exposes visible `Linked issues` and `Risk / Rollback /
+Follow-up` sections. Fill those in directly instead of relying on hidden
+comments so the rendered PR body always surfaces the tracking and risk
+context reviewers need.
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
 - whether a GitHub-hosted fallback still works without LAN-only cache assumptions
 
@@ -63,8 +68,14 @@ Track related work explicitly in the PR body:
 
 - Use `Refs #123` for parent issues, umbrella issues, and follow-up references.
 - Use `Closes #123` only when this PR should also close that issue.
+- If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
+- When a PR is merged, completion claims must be checked against the merged code on `github/master`, not just the PR head or narrative.
 - If no issue exists, explain why in the PR body instead of leaving the relationship unclear.
 - Open PRs should include links for relevant review context (for example tracking and umbrella issue).
+
+Use the visible `Linked issues` section in the template for those links so the
+rendered PR body keeps the relationship obvious even when nobody edits the body
+after opening the PR.
 
 ### Changelog expectations
 
@@ -76,6 +87,9 @@ behavior, operational impact, validation performed, and any explicit follow-up
 issue. Silent changes are not acceptable for release, setup, CI, or runtime
 behavior. Keep this section current by editing it directly as the PR changes,
 not by appending new comments each time something is fixed or added.
+
+Use the template's visible `Risk / Rollback / Follow-up` section to capture
+the remaining operator risk and any rollback or follow-up notes.
 
 ### Quality and release process expectations
 

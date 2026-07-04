@@ -18,6 +18,8 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Every pull request body must include a changelog-style summary: what changed, user-visible impact, how it was validated, known risk, and any follow-up work. A PR without this cannot be called integration-ready regardless of CI status.
 - Use closing keywords such as `Fixes #123` or `Closes #123` only when merging the PR should close the issue.
 - Use non-closing references such as `Refs #123` for parent trackers, design discussions, drafts, or partial follow-up work.
+- Scaffold or partial-fix PRs must say they are scaffold or partial in the title/body, must name the remaining open tracker with `Refs #123`, and must not use `Fixes #123` / `Closes #123` for the unresolved remainder.
+- After a PR lands, compare the merge commit or current `github/master` against the original issue before claiming completion; PR-head-only claims are not sufficient.
 - Do not leave known issue/PR relationships only in chat history; capture them in GitHub so review, merge, and cleanup decisions stay traceable.
 
 ## Agent Workflow
