@@ -70,6 +70,19 @@ smoke_test_image() {
   '
 }
 
+published_image_reference() {
+  local image="$1" digest=""
+
+  digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
+  digest="${digest%\"}"
+  digest="${digest#\"}"
+  if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    printf '%s@%s\n' "${image%:*}" "$digest"
+  else
+    fail "could not resolve multi-platform manifest digest for $image"
+  fi
+}
+
 trusted_fallback_allowed=false
 if [[ "$event_name" = "pull_request" ]]; then
   [[ -n "$head_repository" && "$head_repository" = "$base_repository" ]] \
@@ -80,7 +93,7 @@ fi
 
 if [[ "$require_published" = "true" ]]; then
   if docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
-    printf '%s\n' "$published_image"
+    published_image_reference "$published_image"
     exit 0
   fi
   cat "$pull_log" >&2
@@ -97,7 +110,7 @@ fi
 
 if docker pull "$published_image" >"$pull_log" 2>&1; then
   if smoke_test_image "$published_image"; then
-    printf '%s\n' "$published_image"
+    published_image_reference "$published_image"
     exit 0
   fi
   if [[ "$trusted_fallback_allowed" != "true" ]]; then

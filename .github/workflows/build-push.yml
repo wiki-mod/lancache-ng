@@ -1,7 +1,8 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# CI pipeline that detects changed paths on PRs, builds and tests each Rust/Docker
-# service (dns, ui, watchdog, dhcp, dhcp-proxy, proxy), and pushes multi-arch images
-# to GHCR on master pushes and version tags.
+# CI pipeline that detects changed paths on PRs, builds, tests, and scans each
+# Rust/Docker service (dns, ui, watchdog, dhcp, dhcp-proxy, proxy), and publishes
+# multi-arch images to GHCR on master pushes and version tags.
+
 name: Build & Push
 
 on:
@@ -162,6 +163,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   file-headers:
+    # Cheap repository hygiene gate. It runs before expensive Rust/image work so
+    # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
@@ -170,21 +173,15 @@ jobs:
         run: bash scripts/check-file-headers.sh
 
   shellcheck:
+    # ShellCheck and ActionLint run inside the same build-tools image selected
+    # by validate-compose. That keeps linting independent from whatever happens
+    # to be installed on the runner host.
+    needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Select build-tools image
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
-            printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
-          else
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-          fi
 
       - name: Run ShellCheck and ActionLint
         run: |
@@ -197,28 +194,46 @@ jobs:
             bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
   validate-compose:
+    # This job is the lightweight project-wide gate. It validates compose/setup
+    # contracts and exports one smoke-tested build-tools image reference for all
+    # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Select compose validation image
+
+      - name: Set up Docker Buildx for manifest inspection
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Resolve compose validation image
         id: select-compose-validation-image
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          # Resolve the required published image FIRST. If it's unavailable or fails
+          # smoke checks, this exits before the permissive selector below ever builds
+          # the (large) local fallback image, so there's nothing left to clean up.
           downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$downstream_build_tools_image" >> "$GITHUB_ENV"
-            printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
-          else
-            build_tools_image="$(bash scripts/select-build-tools-image.sh)"
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-            printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
-          fi
+
+          case "$downstream_build_tools_image" in
+            *@sha256:*)
+              ;;
+            *)
+              echo "::error::Expected a digest-qualified build-tools image from the published build-tools selector, got '$downstream_build_tools_image'."
+              exit 1
+              ;;
+          esac
+
+          # validation_build_tools_image may be a branch-local fallback for this
+          # job only. The output exported to downstream jobs stays the published
+          # digest-qualified image resolved above.
+          validation_build_tools_image="$(bash scripts/select-build-tools-image.sh)"
+
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
+          printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
       - name: Validate stack image contract
         run: |
@@ -617,9 +632,33 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
+          grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'docker buildx imagetools inspect "$image"' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'published_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
+            || { echo "::error::Build-tools selector must export the smoke-validated published image by multi-arch manifest digest."; exit 1; }
+          if awk '
+            index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)\"") { in_resolve = 1 }
+            in_resolve && index($0, "printf '\''build_tools_image=%s\\n'\'' \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
+            in_resolve && index($0, "docker pull \"$downstream_build_tools_image\"") { found = 1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::validate-compose must not re-pull mutable build-tools tags after selector smoke validation."
+            exit 1
+          fi
           grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
             && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }
+          grep -F 'needs: validate-compose' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
+          grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must run on the heavy runner tier."; exit 1; }
+          grep -F 'pull: true' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must pull fresh mutable bases before scan and publish builds."; exit 1; }
+          grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
+            && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'retry-build.outputs.digest' | grep -F 'steps.build.outputs.digest' >/dev/null \
+            || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
+          grep -F 'Note arm64 scan coverage deferral' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must make its arm64 scan deferral explicit."; exit 1; }
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
               && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \
@@ -793,6 +832,8 @@ jobs:
           esac
 
   dns_rust_quality:
+    # DNS Rust quality is scoped by detect-changes for PR speed, but workflow
+    # changes still force it because the CI contract itself may have changed.
     name: rust-quality (dns/nats-subscriber)
     needs: detect-changes
     if: >-
@@ -849,6 +890,8 @@ jobs:
           command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
   ui_rust_quality:
+    # UI Rust quality mirrors the DNS job but stays independent so both crates
+    # can run in parallel on suitable runners.
     name: rust-quality (ui)
     needs: detect-changes
     if: >-
@@ -905,6 +948,8 @@ jobs:
           command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   dns_test:
+    # DNS unit tests are separate from quality checks so failures identify
+    # whether the regression is lint/format level or behavioral.
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
     if: >-
@@ -953,6 +998,8 @@ jobs:
           command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
   ui_test:
+    # UI tests run only when the UI or workflow contract changes. This keeps
+    # docs/setup-only PRs from paying for unrelated Rust test work.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
     if: >-
@@ -1001,6 +1048,8 @@ jobs:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   watchdog_test:
+    # Watchdog has its own small shell runtime and therefore its own scoped
+    # syntax/executable gate instead of being folded into larger Rust jobs.
     name: test (watchdog)
     needs: [validate-compose, detect-changes]
     if: >-
@@ -1022,6 +1071,8 @@ jobs:
           test -x services/watchdog/watchdog.sh
 
   dns_cargo_audit:
+    # Dependency audits remain crate-specific. They are skipped only when path
+    # filtering proves the crate and workflow contract did not change.
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
     if: >-
@@ -1064,6 +1115,8 @@ jobs:
               fi'
 
   ui_cargo_audit:
+    # UI dependency audit mirrors the DNS audit and stays parallel to avoid
+    # serializing independent Rust checks.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
     if: >-
@@ -1106,6 +1159,9 @@ jobs:
               fi'
 
   ci_scope_policy:
+    # Central policy reconciliation for PR path filtering. Individual jobs may
+    # skip for speed, but this job verifies that every required check really ran
+    # for the files touched by the PR.
     name: CI scope policy
     needs:
       - detect-changes
@@ -1143,6 +1199,11 @@ jobs:
           UI_CARGO_AUDIT_RESULT: ${{ needs.ui_cargo_audit.result }}
         run: |
           set -euo pipefail
+
+          grep -n "Set up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
+            echo "::error::validate-compose must set up Buildx before resolving digest-qualified build-tools images."
+            exit 1
+          }
 
           require_boolean() {
             local name="$1" value="$2"
@@ -1263,6 +1324,9 @@ jobs:
     # Full image vulnerability scans are intentionally limited to trusted refs.
     # They build every service image and routinely dominate PR runtime on
     # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
+    # The build job depends on this gate before it can push normal service
+    # images. Build-tools receives an additional exact pushed-digest scan in the
+    # build job because the multi-arch published image is produced there.
     if: github.event_name != 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -1312,44 +1376,14 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Detect build-tools scan input changes
+      - name: Enable build-tools publish scan
         id: build-tools-scan-changes
         if: matrix.service == 'build-tools'
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          should_scan=false
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              should_scan=true
-              ;;
-          esac
-
-          if [ "$should_scan" = "false" ]; then
-            if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-              should_scan=true
-              changed_files="initial-or-unknown-history"
-            else
-              git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_scan=true
-              if [ "$should_scan" = "false" ]; then
-                changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml .github/workflows/build-tools.yml)"
-              else
-                changed_files="previous-commit-unavailable"
-              fi
-            fi
-
-            if [ "${changed_files:-}" != "" ]; then
-              should_scan=true
-            fi
-          fi
-
-          if [ "$should_scan" = "true" ]; then
-            echo "::notice::build-tools scan inputs changed or a release tag is being built; image scan remains enabled."
-          else
-            echo "::notice::build-tools scan inputs did not change; skipping routine build-tools scan image rebuild."
-          fi
+          should_scan=true
+          echo "::notice::build-tools scan remains enabled on trusted refs so publish coverage includes the sha-* source image. Arm64 scan coverage is deferred separately."
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
@@ -1383,6 +1417,9 @@ jobs:
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Rust build secret files
+        # Trusted Rust image builds may use Redis sccache, sccache-dist, and
+        # distcc. Secrets are written to temporary files for BuildKit and are
+        # never exposed to fork PRs or Dependabot runs.
         if: >-
           ${{
             (
@@ -1489,6 +1526,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Select Rust build network
+        # BuildKit host networking is only enabled when secret-backed
+        # acceleration needs access to private runner services. Normal builds
+        # stay on the default isolated network.
         if: matrix.rust == true
         env:
           SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
@@ -1578,6 +1618,10 @@ jobs:
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
   build:
+    # This job is the only place that publishes service sha-* images. It waits
+    # for lightweight validation, policy checks, and trusted-ref vulnerability
+    # scans before publishing. For build-tools, it also scans the exact pushed
+    # digest before attestation/promotion can proceed.
     needs:
       - shellcheck
       - validate-compose
@@ -1639,7 +1683,6 @@ jobs:
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
@@ -1666,33 +1709,9 @@ jobs:
               should_build=true
             fi
           elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
-            # Keep build-tools aligned with the container-scan gate: do not
-            # publish a fresh build-tools image on routine master pushes when
-            # the corresponding Trivy scan was intentionally skipped.
-            should_build=false
-            case "$GITHUB_REF" in
-              refs/tags/v*)
-                should_build=true
-                ;;
-            esac
-
-            if [ "$should_build" = "false" ]; then
-              if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-                should_build=true
-                changed_files="initial-or-unknown-history"
-              else
-                git fetch --no-tags --depth=1 origin "$BEFORE_SHA" || should_build=true
-                if [ "$should_build" = "false" ]; then
-                  changed_files="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- tools/build-tools .github/workflows/build-push.yml .github/workflows/build-tools.yml)"
-                else
-                  changed_files="previous-commit-unavailable"
-                fi
-              fi
-
-              if [ "${changed_files:-}" != "" ]; then
-                should_build=true
-              fi
-            fi
+            # Build-tools publishes the sha-* source image on every trusted ref
+            # so the promotion job always has a source image to move.
+            should_build=true
           fi
 
           case "$should_build" in
@@ -1964,6 +1983,9 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
+        # First build attempt uses the configured acceleration path. It is
+        # allowed to fail so the retry path can prove the Dockerfile fallback
+        # instead of leaving a transient acceleration outage as the final state.
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
@@ -1993,6 +2015,9 @@ jobs:
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
       - name: Retry Build and push
+        # Retry once with the same declared image inputs. Dockerfile-level
+        # fallback disables broken acceleration while preserving the normal
+        # build and publish contract.
         id: retry-build
         if: >-
           ${{
@@ -2058,6 +2083,47 @@ jobs:
             mv "$BUILDX_CACHE_DEST" "$cache_dir"
           ) 9>"$lock_file"
 
+      - name: Prepare pushed build-tools Trivy cache
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            matrix.service == 'build-tools' &&
+            (
+              steps.build.outcome == 'success' ||
+              steps.retry-build.outcome == 'success'
+            )
+          }}
+        run: |
+          set -euo pipefail
+          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+
+      - name: Scan pushed build-tools digest with Trivy
+        # Build-tools influences every downstream validation job, so the exact
+        # pushed digest is scanned before provenance and channel promotion.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            matrix.service == 'build-tools' &&
+            (
+              steps.build.outcome == 'success' ||
+              steps.retry-build.outcome == 'success'
+            )
+          }}
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          timeout: 10m
+          exit-code: "1"
+
       - name: Log in to GHCR for provenance attestation
         if: >-
           ${{
@@ -2087,6 +2153,8 @@ jobs:
           push-to-registry: true
 
   promote:
+    # Promotion is intentionally separate from image build. It moves coherent
+    # channel tags only after all sha-* source images for the same commit exist.
     name: promote stack image channels
     needs: build
     if: github.event_name != 'pull_request'
@@ -2250,6 +2318,8 @@ jobs:
           done
 
   release:
+    # Release source archives must match the same commit that produced the
+    # images. This keeps source, image tags, and attestations traceable together.
     name: publish release source
     needs: promote
     if: startsWith(github.ref, 'refs/tags/v')
