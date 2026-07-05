@@ -3,6 +3,13 @@
 
 # Cache data - never commit
 data/
+/cache/
+/kea/
+/nats/
+/nats-conf/
+/pdns-standard/
+/pdns-ssl/
+/pdns-filter-state/
 
 # Generated certificates (keep only the CA template, not issued certs)
 certs/*.crt
@@ -20,6 +27,7 @@ services/dhcp/keys/
 /.env
 /.env.dev
 /.env.prod
+deploy/prod/.env.local
 
 # config/*.env files are committed (no secrets, just operational config)
 

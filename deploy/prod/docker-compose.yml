@@ -114,8 +114,11 @@ services:
       - NATS_RECONCILER=1
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
-      - /srv/lancache/pdns-standard:/var/lib/powerdns
-      - /srv/lancache/pdns-filter-state:/var/lib/powerdns-state
+      # Normal production keeps these overrides unset so one LANCACHE_STATE_DIR
+      # move retargets DNS and NATS together. setup.sh writes explicit keys only
+      # when it has to preserve a real legacy/custom path during update.
+      - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
@@ -151,8 +154,8 @@ services:
       - NATS_CONSUMER=dns-ssl
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
-      - /srv/lancache/pdns-ssl:/var/lib/powerdns
-      - /srv/lancache/pdns-filter-state:/var/lib/powerdns-state
+      - ${PDNS_SSL_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-ssl}:/var/lib/powerdns
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
@@ -231,7 +234,9 @@ services:
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
-      - /srv/lancache/kea:/var/lib/kea    # runtime config + leases; create with: mkdir -p /srv/lancache/kea
+      # Kea follows the same state-root contract as PowerDNS/NATS; leave
+      # KEA_DATA_DIR unset unless this service truly lives off the shared root.
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -260,7 +265,7 @@ services:
   # ── DHCP Proxy (dnsmasq) ──────────────────────────────────────────────────
   # Proxy mode: sits next to an existing DHCP server and serves proxy-DHCP/PXE clients.
   # Mutually exclusive with Kea mode (both want port 67/udp).
-  # Activate with: docker compose --profile dhcp-proxy up -d
+  # Activate with: docker compose --env-file .env.local --profile dhcp-proxy up -d
   dhcp-proxy:
     container_name: lancache-dhcp-proxy
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
@@ -377,8 +382,10 @@ services:
         trap - EXIT
         exec nats-server -c /etc/nats/nats.conf
     volumes:
-      - /srv/lancache/nats:/data
-      - /srv/lancache/nats-conf:/etc/nats
+      # nats-conf is generated runtime state, so the root-derived default keeps
+      # it outside the checkout while still allowing an explicit override.
+      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/data
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
     environment:
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
@@ -403,8 +410,8 @@ services:
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
       - proxy-cache:/var/cache/proxy:ro
-      - /srv/lancache/pdns-filter-state:/var/lib/powerdns-state
-      - /srv/lancache/nats-conf:/etc/nats   # shared with NATS: UI writes nats.conf here
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats   # shared with NATS: UI writes nats.conf here
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -496,7 +503,9 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /srv/lancache/cache
+      # CACHE_DIR_STANDARD stays available as an advanced override, but the
+      # normal production path is derived from the shared state root.
+      device: ${CACHE_DIR_STANDARD:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
   watchdog-status:
   netdataconfig:

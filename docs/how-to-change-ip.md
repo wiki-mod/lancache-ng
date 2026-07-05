@@ -78,7 +78,7 @@ sudo systemctl restart networking
 ## Step 2 — Update `.env`
 
 ```bash
-nano deploy/prod/.env
+nano deploy/prod/.env.local
 # or for quickstart:
 nano deploy/quickstart/.env
 ```
@@ -116,13 +116,13 @@ PROXY_IP=192.168.2.11
 
 ```bash
 cd deploy/prod
-docker compose up -d
+docker compose --env-file .env.local up -d
 ```
 
 Wait a few seconds, then check everything is healthy:
 
 ```bash
-docker compose ps
+docker compose --env-file .env.local ps
 ```
 
 You should see `healthy` next to the proxy and DNS containers (`proxy`, `dns-standard`, and `dns-ssl` when SSL mode is enabled).
@@ -174,7 +174,8 @@ If both return the correct IPs, the change was successful. 🎉
 ip -4 addr show
 
 # Are the containers running?
-docker compose ps
+cd deploy/prod
+docker compose --env-file .env.local ps
 
 # Check firewall — port 53 must be open on the new IP
 # iptables:   iptables -C INPUT -p udp --dport 53 -j ACCEPT
@@ -184,7 +185,8 @@ docker compose ps
 
 **Containers fail to start:**
 ```bash
-docker compose logs -f
+cd deploy/prod
+docker compose --env-file .env.local logs -f
 ```
 
 **Clients can't reach the cache after the change:**
