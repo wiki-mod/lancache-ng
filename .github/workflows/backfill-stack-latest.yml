@@ -1,0 +1,171 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Manual recovery workflow for the stable latest stack channel. It is limited
+# to audited operator-triggered backfills so normal master builds still cannot
+# move latest.
+
+name: Backfill Stack Latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_channel:
+        description: Existing stack channel to read, usually edge.
+        required: true
+        default: edge
+      expected_source_tag:
+        description: Expected immutable sha-* tag from stack.env.
+        required: true
+      confirmation:
+        description: Type promote-latest to move latest.
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: backfill-stack-latest
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backfill-latest:
+    name: backfill latest from existing stack pointer
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Backfill latest channel
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_CHANNEL: ${{ inputs.source_channel }}
+          EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REQUIRED_PLATFORMS: linux/amd64
+        run: |
+          set -euo pipefail
+
+          [[ "$CONFIRMATION" = "promote-latest" ]] \
+            || { echo "::error::confirmation must be promote-latest."; exit 1; }
+          [[ "$SOURCE_CHANNEL" =~ ^[A-Za-z0-9_.-]+$ ]] \
+            || { echo "::error::source_channel contains unsupported characters."; exit 1; }
+          [[ "$EXPECTED_SOURCE_TAG" =~ ^sha-[0-9a-f]{7,}$ ]] \
+            || { echo "::error::expected_source_tag must be an immutable sha-* tag."; exit 1; }
+
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          source_stack="ghcr.io/${REPOSITORY}/stack:${SOURCE_CHANNEL}"
+          container_id=""
+          stack_env=""
+          resolved_source_tag=""
+          declared_commit=""
+          declare -A previous_refs=()
+          promoted_targets=()
+
+          digest_for_image() {
+            local image=$1 digest
+
+            # shellcheck disable=SC2016 # Go template is evaluated by Docker.
+            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]]
+            printf '%s\n' "$digest"
+          }
+
+          rollback_promotions() {
+            local status=$? target_image previous_digest
+
+            if [[ -n "$container_id" ]]; then
+              docker rm "$container_id" >/dev/null 2>&1 || true
+            fi
+            if [[ "$status" = "0" || "${#promoted_targets[@]}" = "0" ]]; then
+              exit "$status"
+            fi
+
+            echo "::error::Latest backfill failed after one or more tags moved; attempting best-effort rollback."
+            for target_image in "${promoted_targets[@]}"; do
+              previous_digest="${previous_refs[$target_image]:-}"
+              if [[ -n "$previous_digest" ]]; then
+                docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                  || echo "::error::Could not restore previous digest for $target_image."
+              else
+                echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
+              fi
+            done
+            exit "$status"
+          }
+          trap rollback_promotions EXIT
+
+          docker buildx imagetools inspect "$source_stack" >/dev/null
+          container_id="$(docker create "$source_stack")"
+          stack_env="$(docker cp "${container_id}:/stack.env" - | tar -xO)"
+          docker rm "$container_id" >/dev/null
+          container_id=""
+
+          # shellcheck disable=SC2016 # AWK fields must stay literal.
+          resolved_source_tag="$(awk -F= '$1 == "LANCACHE_IMAGE_TAG" {print $2; exit}' <<< "$stack_env")"
+          # shellcheck disable=SC2016 # AWK fields must stay literal.
+          declared_commit="$(awk -F= '$1 == "LANCACHE_IMAGE_COMMIT" {print $2; exit}' <<< "$stack_env")"
+          [[ "$resolved_source_tag" = "$EXPECTED_SOURCE_TAG" ]] \
+            || { echo "::error::${source_stack} resolves to ${resolved_source_tag}, expected ${EXPECTED_SOURCE_TAG}."; exit 1; }
+          [[ "$resolved_source_tag" =~ ^sha-[0-9a-f]{7,}$ ]] \
+            || { echo "::error::Resolved source tag is not immutable: ${resolved_source_tag}."; exit 1; }
+          [[ "$declared_commit" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::stack.env is missing a full source commit."; exit 1; }
+
+          source_stack_immutable="ghcr.io/${REPOSITORY}/stack:${resolved_source_tag}"
+          docker buildx imagetools inspect "$source_stack_immutable" >/dev/null
+          bash scripts/require-image-platforms.sh "$source_stack_immutable" "$REQUIRED_PLATFORMS"
+
+          for service in "${services[@]}"; do
+            source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
+            docker buildx imagetools inspect "$source_image" >/dev/null
+            bash scripts/require-image-platforms.sh "$source_image" "$REQUIRED_PLATFORMS"
+          done
+
+          for service in "${services[@]}"; do
+            source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
+            target_image="ghcr.io/${REPOSITORY}/${service}:latest"
+            previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+            docker buildx imagetools create --prefer-index=false -t "$target_image" "$source_image"
+            promoted_targets+=("$target_image")
+          done
+
+          target_stack="ghcr.io/${REPOSITORY}/stack:latest"
+          previous_refs["$target_stack"]="$(digest_for_image "$target_stack" || true)"
+          docker buildx imagetools create --prefer-index=false -t "$target_stack" "$source_stack_immutable"
+          promoted_targets+=("$target_stack")
+
+          for service in "${services[@]}"; do
+            source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
+            target_image="ghcr.io/${REPOSITORY}/${service}:latest"
+            [[ "$(digest_for_image "$source_image")" = "$(digest_for_image "$target_image")" ]] \
+              || { echo "::error::latest digest mismatch for ${service}."; exit 1; }
+          done
+          [[ "$(digest_for_image "$source_stack_immutable")" = "$(digest_for_image "$target_stack")" ]] \
+            || { echo "::error::latest digest mismatch for stack pointer."; exit 1; }
+
+          {
+            printf '%s\n\n' "### Backfilled latest channel"
+            printf -- '- Source channel: %s\n' "$SOURCE_CHANNEL"
+            printf -- '- Source tag: %s\n' "$resolved_source_tag"
+            printf -- '- Source commit: %s\n' "$declared_commit"
+            printf -- '- Target channel: latest\n'
+          } >> "$GITHUB_STEP_SUMMARY"
