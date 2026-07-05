@@ -72,6 +72,7 @@ pub struct Config {
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
     pub allow_insecure_ui: bool,
+    pub ui_session_ttl_seconds: u64,
     pub security_headers_enabled: bool,
     pub hsts_mode: HstsMode,
     pub pdns_auth_url: String,
@@ -129,6 +130,7 @@ impl fmt::Debug for Config {
                 &self.auth_password.as_ref().map(|_| "***REDACTED***"),
             )
             .field("allow_insecure_ui", &self.allow_insecure_ui)
+            .field("ui_session_ttl_seconds", &self.ui_session_ttl_seconds)
             .field("pdns_auth_url", &self.pdns_auth_url)
             .field("pdns_rec_url", &self.pdns_rec_url)
             .field("pdns_api_key", &"***REDACTED***")
@@ -226,6 +228,7 @@ impl Config {
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
             allow_insecure_ui: env_bool("ALLOW_INSECURE_UI", false),
+            ui_session_ttl_seconds: env_u64("UI_SESSION_TTL_SECONDS", 86_400),
             security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
             hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
@@ -286,6 +289,13 @@ fn env_f64(key: &str, default: f64) -> f64 {
     env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(default)
 }
 

@@ -5,7 +5,7 @@
 //! and the full route table: dashboard, DHCP subnet/reservation management,
 //! DNS/SSL/LAN domain records, stats, logs, the first-run setup wizard, a
 //! Netdata metrics proxy, and secondary-node management. Also implements this
-//! service's own CSRF protection, HTTP Basic auth, and security-header
+//! service's own per-session CSRF protection, HTTP Basic auth, and security-header
 //! middleware rather than pulling in an external auth/CSRF crate.
 //!
 //! See `routes/` for the individual page/API handlers this file wires
@@ -17,12 +17,13 @@ mod docker_client;
 mod nats_config;
 mod nginx_client;
 mod routes;
+mod session;
 
 use anyhow::Result;
 use axum::{
     body::{to_bytes, Body},
     extract::Request,
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -31,7 +32,12 @@ use base64::Engine as _;
 use bollard::Docker;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
 use tera::Tera;
 
@@ -45,20 +51,46 @@ pub struct AppState {
     pub dhcp_probe_lock: tokio::sync::Mutex<()>,
     pub nats: async_nats::Client,
     pub db: Mutex<Connection>,
-    pub csrf_token: String,
+    pub ui_session_secret: [u8; 32],
+    pub ui_session_ttl: Duration,
 }
 
-const CSRF_COOKIE_NAME: &str = "lancache_csrf";
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
+const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 
-fn generate_csrf_token() -> String {
-    let bytes: [u8; 32] = rand::random();
-    hex::encode(bytes)
+fn load_or_create_session_secret() -> Result<[u8; 32]> {
+    const SESSION_SECRET_FILE: &str = "/data/lancache-ui-session.secret";
+
+    match fs::read_to_string(SESSION_SECRET_FILE) {
+        Ok(contents) => {
+            let secret = hex::decode(contents.trim())?;
+            if secret.len() != 32 {
+                anyhow::bail!(
+                    "Session secret at {} must contain exactly 32 bytes encoded as hex",
+                    SESSION_SECRET_FILE
+                );
+            }
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&secret);
+            Ok(bytes)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let secret: [u8; 32] = rand::random();
+            let encoded = hex::encode(secret);
+            let mut open_options = OpenOptions::new();
+            open_options.create_new(true).write(true);
+            #[cfg(unix)]
+            open_options.mode(0o600);
+            let mut file = open_options.open(SESSION_SECRET_FILE)?;
+            file.write_all(encoded.as_bytes())?;
+            file.sync_all()?;
+            Ok(secret)
+        }
+        Err(err) => Err(err.into()),
+    }
 }
-
-// TODO(#366): Migrate from process-wide CSRF token to per-session tokens with rotation on login
 
 fn is_mutating_method(method: &Method) -> bool {
     matches!(
@@ -67,83 +99,8 @@ fn is_mutating_method(method: &Method) -> bool {
     )
 }
 
-fn csrf_cookie_value(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .map(str::trim)
-        .find_map(|cookie| cookie.strip_prefix("lancache_csrf="))
-}
-
 fn csrf_header_value(headers: &HeaderMap) -> Option<&str> {
     headers.get(CSRF_HEADER_NAME)?.to_str().ok()
-}
-
-fn set_csrf_cookie(response: &mut axum::response::Response, token: &str) {
-    let cookie = format!(
-        "{}={}; Path=/; SameSite=Strict; HttpOnly",
-        CSRF_COOKIE_NAME, token
-    );
-
-    match cookie.parse() {
-        Ok(cookie) => {
-            response.headers_mut().insert(header::SET_COOKIE, cookie);
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "failed to build csrf cookie header");
-        }
-    }
-}
-
-async fn csrf_protect(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    req: Request<Body>,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let method = req.method().clone();
-    let path = req.uri().path().to_owned();
-    let exempt_secondary_registration = method == Method::POST && path == "/api/secondary/register";
-
-    if !is_mutating_method(&method) || exempt_secondary_registration {
-        let mut response = next.run(req).await;
-        set_csrf_cookie(&mut response, &state.csrf_token);
-        return response;
-    }
-
-    let cookie_token = csrf_cookie_value(req.headers()).map(str::to_owned);
-    let header_token = csrf_header_value(req.headers()).map(str::to_owned);
-
-    let (parts, body) = req.into_parts();
-    let body_bytes = match to_bytes(body, MAX_CSRF_BODY_BYTES).await {
-        Ok(body_bytes) => body_bytes,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to read request body for csrf validation");
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-    };
-
-    let form_token = if header_token.is_none() {
-        form_urlencoded::parse(&body_bytes)
-            .find_map(|(key, value)| (key == CSRF_FORM_FIELD).then(|| value.into_owned()))
-    } else {
-        None
-    };
-
-    let submitted_token = header_token.or(form_token);
-    let valid = cookie_token.as_deref() == Some(state.csrf_token.as_str())
-        && submitted_token.as_deref() == Some(state.csrf_token.as_str());
-
-    if !valid {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-
-    let mut response = next
-        .run(Request::from_parts(parts, Body::from(body_bytes)))
-        .await;
-    set_csrf_cookie(&mut response, &state.csrf_token);
-    response
 }
 
 const TEMPLATE_NAMES: &[&str] = &[
@@ -240,24 +197,8 @@ async fn chart_js() -> impl IntoResponse {
     )
 }
 
-async fn basic_auth(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let user = state
-        .config
-        .auth_user
-        .as_deref()
-        .expect("UI_AUTH_USER validated at startup");
-    let pass = state
-        .config
-        .auth_password
-        .as_deref()
-        .expect("UI_AUTH_PASSWORD validated at startup");
-
-    let ok = req
-        .headers()
+fn basic_auth_is_valid(headers: &HeaderMap, user: &str, pass: &str) -> bool {
+    headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Basic "))
@@ -275,26 +216,138 @@ async fn basic_auth(
                 Sha256::digest(provided_pass.as_bytes()).ct_eq(&Sha256::digest(pass.as_bytes()));
             Some(bool::from(user_match & pass_match))
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if ok {
-        next.run(req).await
-    } else {
-        match axum::http::Response::builder()
-            .status(axum::http::StatusCode::UNAUTHORIZED)
-            .header("WWW-Authenticate", r#"Basic realm="LanCache Admin""#)
-            .body(axum::body::Body::from("Unauthorized"))
-        {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to build basic auth challenge response");
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal Server Error",
-                )
-                    .into_response()
-            }
+fn unauthorized_basic_auth_response() -> axum::response::Response {
+    match axum::http::Response::builder()
+        .status(axum::http::StatusCode::UNAUTHORIZED)
+        .header("WWW-Authenticate", r#"Basic realm="LanCache Admin""#)
+        .body(axum::body::Body::from("Unauthorized"))
+    {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to build basic auth challenge response");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+            )
+                .into_response()
         }
+    }
+}
+
+// Basic auth must be re-checked on every request when required, independent
+// of any session cookie — see the security comment on the call site in
+// `basic_auth` for why the cookie is never allowed to substitute for it.
+fn requires_basic_auth_rejection(
+    auth_required: bool,
+    headers: &HeaderMap,
+    state: &AppState,
+) -> bool {
+    match (&state.config.auth_user, &state.config.auth_password) {
+        (Some(user), Some(pass)) if auth_required => !basic_auth_is_valid(headers, user, pass),
+        _ => false,
+    }
+}
+
+async fn basic_auth(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let auth_required = state.config.auth_user.is_some() && state.config.auth_password.is_some();
+    let secure_cookie = forwarded_proto_is_https(req.headers());
+    let now = SystemTime::now();
+
+    // The session cookie only carries CSRF state, never authentication. A
+    // stolen/replayed cookie must not substitute for Basic auth, and rotating
+    // the Basic password must immediately revoke access — so this check runs
+    // on every request when auth is required, regardless of cookie validity.
+    if requires_basic_auth_rejection(auth_required, req.headers(), &state) {
+        return unauthorized_basic_auth_response();
+    }
+
+    let mut needs_cookie = false;
+    let session = match session::session_cookie_value(req.headers()).and_then(|cookie_value| {
+        session::validate_session_cookie(cookie_value, &state.ui_session_secret, now)
+    }) {
+        Some(session) => session,
+        None => {
+            needs_cookie = true;
+            session::issue_session(&state.ui_session_secret, state.ui_session_ttl)
+        }
+    };
+
+    session::set_internal_csrf_header(req.headers_mut(), &session.csrf_token);
+
+    let method = req.method().clone();
+    if is_mutating_method(&method) {
+        let (parts, body) = req.into_parts();
+        let body_bytes = match to_bytes(body, MAX_CSRF_BODY_BYTES).await {
+            Ok(body_bytes) => body_bytes,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to read request body for csrf validation");
+                let mut response = StatusCode::BAD_REQUEST.into_response();
+                if needs_cookie {
+                    session::set_session_cookie(
+                        &mut response,
+                        &session,
+                        state.ui_session_ttl,
+                        secure_cookie,
+                    );
+                }
+                return response;
+            }
+        };
+
+        let submitted_token = csrf_header_value(&parts.headers)
+            .map(str::to_owned)
+            .or_else(|| {
+                form_urlencoded::parse(&body_bytes).find_map(|(key, value)| {
+                    (key == CSRF_FORM_FIELD).then(|| value.into_owned())
+                })
+            });
+
+        let valid = submitted_token
+            .as_deref()
+            .is_some_and(|token| session::token_matches(&session.csrf_token, token));
+        if !valid {
+            let mut response = StatusCode::FORBIDDEN.into_response();
+            if needs_cookie {
+                session::set_session_cookie(
+                    &mut response,
+                    &session,
+                    state.ui_session_ttl,
+                    secure_cookie,
+                );
+            }
+            return response;
+        }
+
+        let mut response = next
+            .run(Request::from_parts(parts, Body::from(body_bytes)))
+            .await;
+        if needs_cookie {
+            session::set_session_cookie(
+                &mut response,
+                &session,
+                state.ui_session_ttl,
+                secure_cookie,
+            );
+        }
+        response
+    } else {
+        let mut response = next.run(req).await;
+        if needs_cookie {
+            session::set_session_cookie(
+                &mut response,
+                &session,
+                state.ui_session_ttl,
+                secure_cookie,
+            );
+        }
+        response
     }
 }
 
@@ -364,6 +417,18 @@ fn resolve_admin_ui_auth_mode(
     }
 }
 
+fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
+    if seconds == 0 {
+        return Err("UI_SESSION_TTL_SECONDS must be greater than zero".to_string());
+    }
+    if seconds > MAX_UI_SESSION_TTL_SECONDS {
+        return Err(format!(
+            "UI_SESSION_TTL_SECONDS ({seconds}) exceeds the maximum of {MAX_UI_SESSION_TTL_SECONDS} seconds (1 year)"
+        ));
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -398,21 +463,16 @@ async fn main() -> Result<()> {
         .as_deref()
         .filter(|value| !value.is_empty());
 
-    let auth_enabled =
-        match resolve_admin_ui_auth_mode(auth_user, auth_password, cfg.allow_insecure_ui) {
-            Ok(enabled) => {
-                if !enabled {
-                    tracing::warn!(
-                        "ALLOW_INSECURE_UI=true — starting Admin-UI without authentication"
-                    );
-                }
-                enabled
-            }
-            Err(message) => {
-                tracing::error!("{message}");
-                std::process::exit(1);
-            }
-        };
+    match resolve_admin_ui_auth_mode(auth_user, auth_password, cfg.allow_insecure_ui) {
+        Ok(false) => {
+            tracing::warn!("ALLOW_INSECURE_UI=true — starting Admin-UI without authentication");
+        }
+        Ok(true) => {}
+        Err(message) => {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    }
 
     let templates = load_templates(&cfg.template_dir);
     let docker = docker_client::connect_from_env()?;
@@ -421,6 +481,13 @@ async fn main() -> Result<()> {
         .build()?;
 
     let nats = connect_nats_with_retry(&cfg).await;
+    let ui_session_secret = load_or_create_session_secret()?;
+
+    if let Err(message) = validate_ui_session_ttl_seconds(cfg.ui_session_ttl_seconds) {
+        tracing::error!("{}", message);
+        std::process::exit(1);
+    }
+    let ui_session_ttl = Duration::from_secs(cfg.ui_session_ttl_seconds);
 
     let db = {
         let conn = Connection::open("/data/lancache-ui.db").expect("Cannot open UI database");
@@ -447,7 +514,8 @@ async fn main() -> Result<()> {
         dhcp_probe_lock: tokio::sync::Mutex::new(()),
         nats,
         db,
-        csrf_token: generate_csrf_token(),
+        ui_session_secret,
+        ui_session_ttl,
     });
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up
@@ -462,7 +530,8 @@ async fn main() -> Result<()> {
         post(routes::secondaries::register_secondary),
     );
 
-    // Routes that are protected by Basic Auth when auth is enabled.
+    // Routes that are protected by Basic Auth when auth is enabled. The
+    // middleware also issues per-session CSRF state for every request.
     let protected_routes = Router::new()
         .route("/", get(routes::dashboard::dashboard))
         .route("/dhcp", get(routes::dhcp::dhcp_page))
@@ -507,17 +576,8 @@ async fn main() -> Result<()> {
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            csrf_protect,
-        ));
-
-    let protected_routes = if auth_enabled {
-        protected_routes.layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
             basic_auth,
-        ))
-    } else {
-        protected_routes
-    };
+        ));
 
     let app = Router::new()
         .merge(public_routes)
@@ -562,6 +622,43 @@ mod tests {
     }
 
     #[test]
+    fn basic_auth_rejects_wrong_credentials_and_accepts_correct_ones() {
+        fn auth_header(user: &str, pass: &str) -> HeaderValue {
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            HeaderValue::from_str(&format!("Basic {encoded}")).unwrap()
+        }
+
+        let mut headers = HeaderMap::new();
+        assert!(!basic_auth_is_valid(&headers, "admin", "secret"));
+
+        headers.insert(axum::http::header::AUTHORIZATION, auth_header("admin", "wrong"));
+        assert!(!basic_auth_is_valid(&headers, "admin", "secret"));
+
+        headers.insert(axum::http::header::AUTHORIZATION, auth_header("admin", "secret"));
+        assert!(basic_auth_is_valid(&headers, "admin", "secret"));
+    }
+
+    #[test]
+    fn a_valid_session_cookie_never_substitutes_for_required_basic_auth() {
+        // A session cookie only ever carries CSRF state, never authentication:
+        // accepting one in place of Basic auth would let a copied cookie
+        // bypass auth, and survive a password rotation, until the session TTL
+        // expired.
+        let secret = [0x55; 32];
+        let now = SystemTime::now();
+        let session = session::issue_session_at(now, &secret, Duration::from_secs(300));
+        assert!(session::validate_session_cookie(&session.cookie_value, &secret, now).is_some());
+
+        let headers_without_basic_auth = HeaderMap::new();
+        assert!(!basic_auth_is_valid(
+            &headers_without_basic_auth,
+            "admin",
+            "secret"
+        ));
+    }
+
+    #[test]
     fn admin_ui_auth_requires_explicit_opt_in_for_insecure_mode() {
         assert_eq!(
             resolve_admin_ui_auth_mode(Some("admin"), Some("secret"), false),
@@ -571,5 +668,30 @@ mod tests {
         assert!(resolve_admin_ui_auth_mode(None, None, false).is_err());
         assert!(resolve_admin_ui_auth_mode(Some("admin"), None, true).is_err());
         assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
+    }
+
+    #[test]
+    fn ui_session_ttl_rejects_zero_and_overflow_prone_values() {
+        assert!(validate_ui_session_ttl_seconds(0).is_err());
+        assert!(validate_ui_session_ttl_seconds(86_400).is_ok());
+        assert!(validate_ui_session_ttl_seconds(MAX_UI_SESSION_TTL_SECONDS).is_ok());
+        assert!(validate_ui_session_ttl_seconds(MAX_UI_SESSION_TTL_SECONDS + 1).is_err());
+        assert!(validate_ui_session_ttl_seconds(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn session_cookie_helper_matches_the_session_header() {
+        let empty_headers = HeaderMap::new();
+        assert!(session::csrf_header_value(&empty_headers).is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HeaderName::from_static(
+                session::INTERNAL_CSRF_HEADER_NAME,
+            ),
+            HeaderValue::from_static("session-token-a"),
+        );
+
+        assert_eq!(session::csrf_header_value(&headers), Some("session-token-a"));
     }
 }

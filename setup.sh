@@ -1522,6 +1522,7 @@ migrate_env_for_update() {
     # password; otherwise the UI is explicitly marked insecure.
     append_env_key_if_missing UI_AUTH_USER "" "$env_file"
     append_env_key_if_missing UI_AUTH_PASSWORD "" "$env_file"
+    append_env_key_if_missing UI_SESSION_TTL_SECONDS "86400" "$env_file"
     ui_user=$(get_env_var UI_AUTH_USER "$env_file")
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file")
     if [[ -n "$ui_user" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
@@ -2827,6 +2828,8 @@ NATS_DNS_READER_USER=$(get_env_var NATS_DNS_READER_USER "$env_file")
 NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
+UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
+UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-86400}"
 
 validate_env_values_for_initial_write \
     "IP_STANDARD=${IP_STANDARD}" \
@@ -2869,6 +2872,7 @@ validate_env_values_for_initial_write \
     "NATS_DNS_READER_USER=${NATS_DNS_READER_USER}" \
     "NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
+    "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
     "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
     "UI_AUTH_USER=${UI_AUTH_USER}" \
     "UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}" \
@@ -2962,6 +2966,7 @@ COMPOSE_PROFILES=${COMPOSE_PROFILES}
 # Empty auth values are only allowed when ALLOW_INSECURE_UI=true is set explicitly.
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
+UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}
 ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
 # Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
