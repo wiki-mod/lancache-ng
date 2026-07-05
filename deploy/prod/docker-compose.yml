@@ -183,10 +183,12 @@ services:
   # toggles with a deny-by-default allowlist for named lancache-ng containers.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
-    entrypoint: ["/bin/sh", "-ec"]
-    command: *docker-socket-proxy-command
+    entrypoint: ["/usr/local/bin/lancache-docker-socket-proxy.sh"]
+    command: []
+    stdin_open: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../../scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
     restart: always
@@ -271,6 +273,8 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dhcp-proxy.env
+    volumes:
+      - ui-data:/data:ro
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -406,6 +410,7 @@ services:
   ui:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
+      - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
@@ -512,3 +517,4 @@ volumes:
   netdataconfig:
   netdatalib:
   netdatacache:
+  ui-data:

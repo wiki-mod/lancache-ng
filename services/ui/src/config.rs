@@ -2,12 +2,15 @@
 //!
 //! Runtime configuration for the Admin UI service: loads and validates
 //! settings from the process environment (auth, DHCP mode, HSTS mode,
-//! session TTL, and related toggles) into a typed `Config`.
+//! session TTL, and related toggles) plus the UI's persisted `/data`
+//! overrides into a typed `Config`.
 
 use std::env;
 use std::fmt;
+use std::fs;
 
 const DEFAULT_UI_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
+const DEFAULT_UI_SETTINGS_FILE: &str = "/data/lancache-ui-settings.env";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HstsMode {
@@ -68,8 +71,14 @@ pub struct Config {
     pub ssl_cache_max_gb: f64,
     pub standard_ip: String,
     pub ssl_ip: String,
+    pub dhcp_dns_primary: String,
+    pub dhcp_dns_secondary: String,
+    pub dhcp_ntp_servers: String,
+    pub dhcp_proxy_subnet_start: String,
+    pub dhcp_upstream_dhcp_ip: String,
     pub dhcp_mode: DhcpMode,
     pub dhcp_api_url: String,
+    pub ui_settings_file: String,
     pub dhcp_api_token: String,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
@@ -120,8 +129,14 @@ impl fmt::Debug for Config {
             .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
             .field("standard_ip", &self.standard_ip)
             .field("ssl_ip", &self.ssl_ip)
+            .field("dhcp_dns_primary", &self.dhcp_dns_primary)
+            .field("dhcp_dns_secondary", &self.dhcp_dns_secondary)
+            .field("dhcp_ntp_servers", &self.dhcp_ntp_servers)
+            .field("dhcp_proxy_subnet_start", &self.dhcp_proxy_subnet_start)
+            .field("dhcp_upstream_dhcp_ip", &self.dhcp_upstream_dhcp_ip)
             .field("dhcp_mode", &self.dhcp_mode.as_str())
             .field("dhcp_api_url", &self.dhcp_api_url)
+            .field("ui_settings_file", &self.ui_settings_file)
             .field("dhcp_api_token", &"***REDACTED***")
             .field(
                 "auth_user",
@@ -166,6 +181,60 @@ impl fmt::Display for Config {
 }
 
 impl Config {
+    pub fn effective_dhcp_mode(&self) -> DhcpMode {
+        read_dhcp_mode_override(&self.ui_settings_file).unwrap_or(self.dhcp_mode)
+    }
+
+    pub fn effective_dhcp_dns_primary(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_DNS_PRIMARY")
+            .unwrap_or_else(|| self.dhcp_dns_primary.clone())
+    }
+
+    pub fn effective_dhcp_dns_secondary(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_DNS_SECONDARY")
+            .unwrap_or_else(|| self.dhcp_dns_secondary.clone())
+    }
+
+    pub fn effective_dhcp_ntp_servers(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_NTP_SERVERS")
+            .unwrap_or_else(|| self.dhcp_ntp_servers.clone())
+    }
+
+    pub fn effective_dhcp_proxy_subnet_start(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_SUBNET_START")
+            .unwrap_or_else(|| self.dhcp_proxy_subnet_start.clone())
+    }
+
+    pub fn effective_dhcp_upstream_dhcp_ip(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "UPSTREAM_DHCP_IP")
+            .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
+    }
+
+    pub fn ui_override_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("DHCP_MODE={}", self.effective_dhcp_mode().as_str())];
+        let proxy_subnet_start = self.effective_dhcp_proxy_subnet_start();
+        if !proxy_subnet_start.trim().is_empty() {
+            lines.push(format!("DHCP_SUBNET_START={}", proxy_subnet_start.trim()));
+        }
+        let dhcp_dns_primary = self.effective_dhcp_dns_primary();
+        if !dhcp_dns_primary.trim().is_empty() {
+            lines.push(format!("DHCP_DNS_PRIMARY={}", dhcp_dns_primary.trim()));
+        }
+        let dhcp_dns_secondary = self.effective_dhcp_dns_secondary();
+        if !dhcp_dns_secondary.trim().is_empty() {
+            lines.push(format!("DHCP_DNS_SECONDARY={}", dhcp_dns_secondary.trim()));
+        }
+        let upstream_dhcp_ip = self.effective_dhcp_upstream_dhcp_ip();
+        if !upstream_dhcp_ip.trim().is_empty() {
+            lines.push(format!("UPSTREAM_DHCP_IP={}", upstream_dhcp_ip.trim()));
+        }
+        let dhcp_ntp_servers = self.effective_dhcp_ntp_servers();
+        if !dhcp_ntp_servers.trim().is_empty() {
+            lines.push(format!("DHCP_NTP_SERVERS={}", dhcp_ntp_servers.trim()));
+        }
+        lines
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let proxy_service = env_or("PROXY_SERVICE", "proxy".to_string());
         let standard_log = env_or("STANDARD_LOG", "/var/log/nginx/access.log".to_string());
@@ -182,12 +251,15 @@ impl Config {
         } else {
             env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0))
         };
+        let standard_ip = env_str("STANDARD_IP", "192.168.234.10");
+        let ssl_ip = env_str("SSL_IP", "192.168.234.11");
         let dhcp_mode = env_dhcp_mode("DHCP_MODE", env_bool("DHCP_ENABLED", false));
-        let dhcp_api_url = if dhcp_mode.is_kea() {
-            env_str("DHCP_API_URL", "http://localhost:8000")
-        } else {
-            String::new()
-        };
+        let dhcp_api_url = env_str("DHCP_API_URL", "http://localhost:8000");
+        let dhcp_dns_primary = env::var("DHCP_DNS_PRIMARY").unwrap_or_else(|_| standard_ip.clone());
+        let dhcp_dns_secondary = env::var("DHCP_DNS_SECONDARY").unwrap_or_else(|_| ssl_ip.clone());
+        let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "debian.pool.ntp.org,time.nist.gov");
+        let dhcp_proxy_subnet_start = env_str("DHCP_SUBNET_START", "");
+        let dhcp_upstream_dhcp_ip = env_str("UPSTREAM_DHCP_IP", "");
 
         let lancache_image_tag = env_str("LANCACHE_IMAGE_TAG", "latest");
         let lancache_image_channel = env::var("LANCACHE_IMAGE_CHANNEL")
@@ -222,10 +294,16 @@ impl Config {
             } else {
                 env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb)
             },
-            standard_ip: env_str("STANDARD_IP", "192.168.234.10"),
-            ssl_ip: env_str("SSL_IP", "192.168.234.11"),
+            standard_ip,
+            ssl_ip,
+            dhcp_dns_primary,
+            dhcp_dns_secondary,
+            dhcp_ntp_servers,
+            dhcp_proxy_subnet_start,
+            dhcp_upstream_dhcp_ip,
             dhcp_mode,
             dhcp_api_url,
+            ui_settings_file: env_str("UI_SETTINGS_FILE", DEFAULT_UI_SETTINGS_FILE),
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
@@ -320,18 +398,38 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-fn env_dhcp_mode(key: &str, legacy_enabled: bool) -> DhcpMode {
-    let raw = env::var(key)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    match raw.as_str() {
+fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
         "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
         "disabled" => DhcpMode::Disabled,
         "" if legacy_enabled => DhcpMode::Kea,
         _ => DhcpMode::Disabled,
     }
+}
+
+fn env_dhcp_mode(key: &str, legacy_enabled: bool) -> DhcpMode {
+    let raw = env::var(key).unwrap_or_default();
+    parse_dhcp_mode(&raw, legacy_enabled)
+}
+
+fn read_dhcp_mode_override(path: &str) -> Option<DhcpMode> {
+    read_ui_override(path, "DHCP_MODE").map(|value| parse_dhcp_mode(&value, false))
+}
+
+fn read_ui_override(path: &str, key: &str) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let prefix = format!("{key}=");
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix(&prefix) {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
 }
 
 fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
@@ -628,22 +726,32 @@ mod tests {
     }
 
     #[test]
-    fn dhcp_api_url_is_disabled_for_non_kea_modes() {
+    fn dhcp_api_url_is_loaded_from_env_and_mode_can_be_overridden() {
         let _guard = env_test_lock().lock().unwrap();
+        let settings_path =
+            std::env::temp_dir().join(format!("lancache-ui-settings-{}.env", std::process::id()));
 
+        env::set_var("UI_SETTINGS_FILE", &settings_path);
         env::set_var("DHCP_MODE", "dnsmasq-proxy");
         env::set_var("DHCP_API_URL", "http://dhcp:8000");
-        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "");
+        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
         env::set_var("DHCP_MODE", "disabled");
         env::set_var("DHCP_API_URL", "http://dhcp:8000");
-        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "");
+        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
         env::set_var("DHCP_MODE", "kea");
         env::set_var("DHCP_API_URL", "http://dhcp:8000");
         assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
+        fs::write(&settings_path, "DHCP_MODE=dnsmasq-proxy\n").unwrap();
+        let cfg = Config::from_env().unwrap();
+        assert!(matches!(cfg.effective_dhcp_mode(), DhcpMode::DnsmasqProxy));
+        assert_eq!(cfg.dhcp_api_url, "http://dhcp:8000");
+
         env::remove_var("DHCP_MODE");
         env::remove_var("DHCP_API_URL");
+        env::remove_var("UI_SETTINGS_FILE");
+        let _ = fs::remove_file(settings_path);
     }
 }

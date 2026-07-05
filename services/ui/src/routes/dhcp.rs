@@ -26,8 +26,11 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::fs;
 use std::future::Future;
 use std::net::Ipv4Addr;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -122,6 +125,9 @@ pub struct Subnet {
     pub pool_start: String,
     pub pool_end: String,
     pub gateway: String,
+    pub dns_primary: String,
+    pub dns_secondary: String,
+    pub ntp_servers: String,
     pub lease_time: u32,
     pub domain: String,
 }
@@ -152,6 +158,9 @@ pub struct AddSubnetForm {
     pub pool_start: String,
     pub pool_end: String,
     pub gateway: String,
+    pub dns_primary: String,
+    pub dns_secondary: String,
+    pub ntp_servers: String,
     pub lease_time: String,
     pub domain: String,
 }
@@ -164,6 +173,9 @@ pub struct UpdateSubnetForm {
     pub pool_start: String,
     pub pool_end: String,
     pub gateway: String,
+    pub dns_primary: String,
+    pub dns_secondary: String,
+    pub ntp_servers: String,
     pub lease_time: String,
     pub domain: String,
 }
@@ -190,18 +202,47 @@ pub struct RemoveReservationForm {
     pub mac: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateDhcpModeForm {
+    pub csrf_token: String,
+    pub dhcp_mode: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateDhcpProxyForm {
+    pub csrf_token: String,
+    pub dhcp_subnet_start: String,
+    pub dhcp_dns_primary: String,
+    pub dhcp_dns_secondary: String,
+    pub upstream_dhcp_ip: String,
+}
+
 // ─── Handlers ───
 
 pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let mut ctx = Context::new();
-    let dhcp_has_kea = state.config.dhcp_mode.is_kea();
+    let dhcp_mode = state.config.effective_dhcp_mode();
+    let dhcp_has_kea = dhcp_mode.is_kea();
+    let dhcp_dns_primary = state.config.effective_dhcp_dns_primary();
+    let dhcp_dns_secondary = state.config.effective_dhcp_dns_secondary();
+    let dhcp_ntp_servers = state.config.effective_dhcp_ntp_servers();
+    let dhcp_proxy_subnet_start = state.config.effective_dhcp_proxy_subnet_start();
+    let dhcp_upstream_dhcp_ip = state.config.effective_dhcp_upstream_dhcp_ip();
     ctx.insert("active_page", "dhcp");
-    ctx.insert("dhcp_mode", &state.config.dhcp_mode.as_str());
+    ctx.insert("dhcp_mode", &dhcp_mode.as_str());
     ctx.insert("dhcp_has_kea", &dhcp_has_kea);
     ctx.insert("dhcp_api_url", &state.config.dhcp_api_url);
+    ctx.insert("dhcp_dns_primary", &dhcp_dns_primary);
+    ctx.insert("dhcp_dns_secondary", &dhcp_dns_secondary);
+    ctx.insert("dhcp_ntp_servers", &dhcp_ntp_servers);
+    ctx.insert("dhcp_proxy_subnet_start", &dhcp_proxy_subnet_start);
+    ctx.insert("dhcp_upstream_dhcp_ip", &dhcp_upstream_dhcp_ip);
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
-    if dhcp_has_kea && !state.config.dhcp_api_url.is_empty() {
+    if kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
         let subnets = fetch_subnets(&state).await.unwrap_or_default();
         let (leases, reservations) =
             tokio::join!(fetch_leases(&state), fetch_all_reservations(&state));
@@ -219,7 +260,10 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
 }
 
 fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
-    if kea_api_available(state.config.dhcp_mode, &state.config.dhcp_api_url) {
+    if kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
         Ok(())
     } else {
         Err(DhcpError::conflict(
@@ -230,6 +274,146 @@ fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
 
 fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
     mode.is_kea() && !api_url.is_empty()
+}
+
+fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" => Some(crate::config::DhcpMode::Disabled),
+        "kea" => Some(crate::config::DhcpMode::Kea),
+        "dnsmasq-proxy" => Some(crate::config::DhcpMode::DnsmasqProxy),
+        _ => None,
+    }
+}
+
+fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<(), DhcpError> {
+    let mut map = BTreeMap::new();
+    for (key, value) in values {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            map.insert((*key).to_string(), trimmed.to_string());
+        }
+    }
+
+    let mut content = String::new();
+    for key in [
+        "DHCP_MODE",
+        "DHCP_SUBNET_START",
+        "DHCP_DNS_PRIMARY",
+        "DHCP_DNS_SECONDARY",
+        "UPSTREAM_DHCP_IP",
+        "DHCP_NTP_SERVERS",
+    ] {
+        if let Some(value) = map.get(key) {
+            content.push_str(key);
+            content.push('=');
+            content.push_str(value);
+            content.push('\n');
+        }
+    }
+
+    let target = Path::new(&state.config.ui_settings_file);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            DhcpError::config_error(format!(
+                "Failed to prepare settings directory {}: {}",
+                parent.display(),
+                err
+            ))
+        })?;
+    }
+    let tmp_path = target.with_extension("tmp");
+    fs::write(&tmp_path, content).map_err(|err| {
+        DhcpError::config_error(format!(
+            "Failed to persist DHCP mode to {}: {}",
+            tmp_path.display(),
+            err
+        ))
+    })?;
+    fs::rename(&tmp_path, target).map_err(|err| {
+        DhcpError::config_error(format!(
+            "Failed to finalize DHCP mode settings at {}: {}",
+            target.display(),
+            err
+        ))
+    })
+}
+
+pub async fn update_dhcp_mode(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateDhcpModeForm>,
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    let mode = parse_dhcp_mode_input(&form.dhcp_mode)
+        .ok_or_else(|| DhcpError::conflict("Invalid DHCP mode requested."))?;
+
+    persist_ui_settings(
+        &state,
+        &[
+            ("DHCP_MODE", mode.as_str().to_string()),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+        ],
+    )?;
+    Ok(Redirect::to("/dhcp"))
+}
+
+pub async fn update_dhcp_proxy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateDhcpProxyForm>,
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    if form.dhcp_subnet_start.trim().is_empty() || parse_ipv4(&form.dhcp_subnet_start).is_none() {
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+    }
+    if parse_ipv4(&form.dhcp_dns_primary).is_none() {
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+    }
+    if !form.dhcp_dns_secondary.trim().is_empty() && parse_ipv4(&form.dhcp_dns_secondary).is_none()
+    {
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+    }
+    if parse_ipv4(&form.upstream_dhcp_ip).is_none() {
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+    }
+
+    persist_ui_settings(
+        &state,
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            ("DHCP_SUBNET_START", form.dhcp_subnet_start),
+            ("DHCP_DNS_PRIMARY", form.dhcp_dns_primary),
+            ("DHCP_DNS_SECONDARY", form.dhcp_dns_secondary),
+            ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+        ],
+    )?;
+    Ok(Redirect::to("/dhcp"))
 }
 
 pub async fn add_subnet(
@@ -244,6 +428,9 @@ pub async fn add_subnet(
         &form.pool_start,
         &form.pool_end,
         &form.gateway,
+        &form.dns_primary,
+        &form.dns_secondary,
+        &form.ntp_servers,
         &form.lease_time,
     )
     .map_err(DhcpError::from)?;
@@ -269,9 +456,12 @@ pub async fn add_subnet(
             pool_start: form.pool_start,
             pool_end: form.pool_end,
             gateway: form.gateway,
+            dns_primary: form.dns_primary,
+            dns_secondary: form.dns_secondary,
+            ntp_servers: form.ntp_servers,
             domain: form.domain,
             lease_time,
-            preserved_options: Vec::new(),
+            editable_options: Vec::new(),
             reservations: None,
             reservation_identifiers: default_reservation_identifiers(),
         })?);
@@ -295,6 +485,9 @@ pub async fn update_subnet(
         &form.pool_start,
         &form.pool_end,
         &form.gateway,
+        &form.dns_primary,
+        &form.dns_secondary,
+        &form.ntp_servers,
         &form.lease_time,
     )
     .map_err(DhcpError::from)?;
@@ -312,7 +505,6 @@ pub async fn update_subnet(
             .iter_mut()
             .find(|s| s["id"].as_u64() == Some(subnet_id as u64))
             .ok_or("subnet not found")?;
-        let preserved_options = preserved_subnet_options(entry);
         let reservations = compatible_reservations_for_subnet(entry, &form.subnet)?;
         let reservation_identifiers = reservation_identifiers_for_subnet(entry, &reservations);
         apply_subnet_value(
@@ -323,9 +515,12 @@ pub async fn update_subnet(
                 pool_start: form.pool_start,
                 pool_end: form.pool_end,
                 gateway: form.gateway,
+                dns_primary: form.dns_primary,
+                dns_secondary: form.dns_secondary,
+                ntp_servers: form.ntp_servers,
                 domain: form.domain,
                 lease_time,
-                preserved_options,
+                editable_options: preserved_subnet_options(entry),
                 reservations: Some(reservations),
                 reservation_identifiers,
             },
@@ -387,7 +582,9 @@ pub async fn add_reservation(
             json!({
                 "hw-address": mac,
                 "ip-address": form.ip,
-                "hostname": form.hostname
+                "hostname": form.hostname,
+                "option-data": [],
+                "client-classes": []
             }),
         )?;
         Ok(())
@@ -739,7 +936,7 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
 
     // Parse "Server Identifier: 198.51.100.1" from nmap output
     for line in output.lines() {
-        let line = line.trim();
+        let line = normalize_nmap_line(line);
         if let Some(rest) = line.strip_prefix("Server Identifier:") {
             let ip = rest.trim().to_string();
             if !ip.is_empty() {
@@ -748,6 +945,11 @@ async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
         }
     }
     DhcpCheckStatus::NotFound
+}
+
+fn normalize_nmap_line(line: &str) -> &str {
+    line.trim_start_matches(|ch: char| ch == '|' || ch == '_' || ch.is_whitespace())
+        .trim_end()
 }
 
 const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
@@ -900,18 +1102,33 @@ fn validate_dhcp_form(
     pool_start: &str,
     pool_end: &str,
     gateway: &str,
+    dns_primary: &str,
+    dns_secondary: &str,
+    ntp_servers: &str,
     lease_time: &str,
 ) -> Result<u32, StatusCode> {
     let (subnet_addr, prefix_len) = parse_cidr(subnet).ok_or(StatusCode::BAD_REQUEST)?;
     let pool_start_addr = parse_ipv4(pool_start).ok_or(StatusCode::BAD_REQUEST)?;
     let pool_end_addr = parse_ipv4(pool_end).ok_or(StatusCode::BAD_REQUEST)?;
     let gateway_addr = parse_ipv4(gateway).ok_or(StatusCode::BAD_REQUEST)?;
+    let dns_primary_addr = parse_ipv4(dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
+    let dns_secondary_addr = if dns_secondary.trim().is_empty() {
+        dns_primary_addr
+    } else {
+        parse_ipv4(dns_secondary).ok_or(StatusCode::BAD_REQUEST)?
+    };
 
     if !ipv4_in_cidr(subnet_addr, prefix_len, pool_start_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, pool_end_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, gateway_addr)
+        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_primary_addr)
+        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_secondary_addr)
         || ipv4_to_u32(pool_start_addr) > ipv4_to_u32(pool_end_addr)
     {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if !ntp_servers.trim().is_empty() && parse_ntp_server_list(ntp_servers).is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -984,9 +1201,12 @@ struct SubnetValue {
     pool_start: String,
     pool_end: String,
     gateway: String,
+    dns_primary: String,
+    dns_secondary: String,
+    ntp_servers: String,
     domain: String,
     lease_time: u32,
-    preserved_options: Vec<Value>,
+    editable_options: Vec<Value>,
     reservations: Option<Vec<Value>>,
     reservation_identifiers: Vec<Value>,
 }
@@ -1016,8 +1236,11 @@ fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'sta
     entry.insert(
         "option-data".to_string(),
         Value::Array(build_subnet_options(
-            input.preserved_options,
+            input.editable_options,
             input.gateway,
+            input.dns_primary,
+            input.dns_secondary,
+            input.ntp_servers,
             input.domain,
         )),
     );
@@ -1043,16 +1266,26 @@ fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'sta
 }
 
 fn build_subnet_options(
-    mut preserved_options: Vec<Value>,
+    mut editable_options: Vec<Value>,
     gateway: String,
+    dns_primary: String,
+    dns_secondary: String,
+    ntp_servers: String,
     domain: String,
 ) -> Vec<Value> {
-    preserved_options.retain(|option| !is_ui_managed_subnet_option(option));
+    editable_options.retain(|option| !is_ui_managed_subnet_option(option));
 
-    preserved_options.push(json!({"name": "routers", "data": gateway}));
-    preserved_options.push(json!({"name": "domain-name", "data": domain}));
-    preserved_options.push(json!({"name": "domain-search", "data": domain}));
-    preserved_options
+    editable_options.push(json!({"name": "routers", "data": gateway}));
+    editable_options.push(json!({
+        "name": "domain-name-servers",
+        "data": format_dns_server_option(&dns_primary, &dns_secondary)
+    }));
+    editable_options.push(json!({"name": "domain-name", "data": domain}));
+    editable_options.push(json!({"name": "domain-search", "data": domain}));
+    if let Some(data) = format_ntp_server_option(&ntp_servers) {
+        editable_options.push(json!({"name": "ntp-servers", "data": data}));
+    }
+    editable_options
 }
 
 fn preserved_subnet_options(subnet: &Value) -> Vec<Value> {
@@ -1077,12 +1310,17 @@ fn is_ui_managed_subnet_option(option: &Value) -> bool {
     let managed_by_name = option
         .get("name")
         .and_then(|value| value.as_str())
-        .map(|name| matches!(name, "routers" | "domain-name" | "domain-search"))
+        .map(|name| {
+            matches!(
+                name,
+                "routers" | "domain-name" | "domain-search" | "domain-name-servers" | "ntp-servers"
+            )
+        })
         .unwrap_or(false);
     let managed_by_code = option
         .get("code")
         .and_then(|value| value.as_u64())
-        .map(|code| matches!(code, 3 | 15 | 119))
+        .map(|code| matches!(code, 3 | 6 | 15 | 42 | 119))
         .unwrap_or(false);
 
     managed_by_name || managed_by_code
@@ -1094,6 +1332,35 @@ fn is_dhcp4_option_space(option: &Value) -> bool {
         .and_then(|value| value.as_str())
         .map(|space| space == "dhcp4")
         .unwrap_or(true)
+}
+
+fn split_option_list(raw: &str) -> Vec<String> {
+    raw.split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn format_dns_server_option(primary: &str, secondary: &str) -> String {
+    if secondary.trim().is_empty() || secondary.trim() == primary.trim() {
+        primary.trim().to_string()
+    } else {
+        format!("{}, {}", primary.trim(), secondary.trim())
+    }
+}
+
+fn format_ntp_server_option(ntp_servers: &str) -> Option<String> {
+    let servers = parse_ntp_server_list(ntp_servers);
+    if servers.is_empty() {
+        None
+    } else {
+        Some(servers.join(", "))
+    }
+}
+
+fn parse_ntp_server_list(raw: &str) -> Vec<String> {
+    split_option_list(raw)
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -1121,6 +1388,8 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
             .unwrap_or("")
             .to_string()
     };
+    let dns_servers = split_option_list(&opt("domain-name-servers", 6));
+    let ntp_servers = opt("ntp-servers", 42);
 
     Subnet {
         id: subnet.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
@@ -1138,6 +1407,9 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
             .map(|s| s.trim().to_string())
             .unwrap_or_default(),
         gateway: opt("routers", 3),
+        dns_primary: dns_servers.first().cloned().unwrap_or_default(),
+        dns_secondary: dns_servers.get(1).cloned().unwrap_or_default(),
+        ntp_servers,
         lease_time: subnet
             .get("valid-lifetime")
             .and_then(|v| v.as_u64())
@@ -1401,6 +1673,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "86400",
         );
 
@@ -1414,6 +1689,9 @@ mod tests {
             "198.51.101.100",
             "198.51.101.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "86400",
         );
 
@@ -1427,6 +1705,9 @@ mod tests {
             "198.51.100.200",
             "198.51.100.100",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "86400",
         );
 
@@ -1440,6 +1721,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "not-a-number",
         );
 
@@ -1453,6 +1737,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.101.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "86400",
         );
 
@@ -1466,6 +1753,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "86400",
         );
 
@@ -1479,6 +1769,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "0",
         );
 
@@ -1492,6 +1785,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "59",
         );
 
@@ -1505,6 +1801,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "60",
         );
 
@@ -1518,6 +1817,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "604800",
         );
 
@@ -1531,6 +1833,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "604801",
         );
 
@@ -1544,6 +1849,9 @@ mod tests {
             "198.51.100.100",
             "198.51.100.200",
             "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
             "999999999",
         );
 
@@ -1933,9 +2241,12 @@ mod tests {
             pool_start: "10.0.0.10".to_string(),
             pool_end: "10.0.0.200".to_string(),
             gateway: "10.0.0.1".to_string(),
+            dns_primary: "10.0.0.2".to_string(),
+            dns_secondary: "10.0.0.3".to_string(),
+            ntp_servers: "10.0.0.4".to_string(),
             domain: "lan.example".to_string(),
             lease_time: MAX_LEASE_TIME,
-            preserved_options: Vec::new(),
+            editable_options: Vec::new(),
             reservations: None,
             reservation_identifiers: default_reservation_identifiers(),
         })
@@ -1958,9 +2269,12 @@ mod tests {
             pool_start: "10.0.0.10".to_string(),
             pool_end: "10.0.0.200".to_string(),
             gateway: "10.0.0.1".to_string(),
+            dns_primary: "10.0.0.2".to_string(),
+            dns_secondary: "10.0.0.3".to_string(),
+            ntp_servers: "10.0.0.4".to_string(),
             domain: "lan.example".to_string(),
             lease_time: 3600,
-            preserved_options: Vec::new(),
+            editable_options: Vec::new(),
             reservations: Some(reservations.clone()),
             reservation_identifiers: default_reservation_identifiers(),
         })
@@ -2010,9 +2324,12 @@ mod tests {
                 pool_start: "10.0.1.10".to_string(),
                 pool_end: "10.0.1.200".to_string(),
                 gateway: "10.0.1.1".to_string(),
+                dns_primary: "10.0.1.2".to_string(),
+                dns_secondary: "10.0.1.3".to_string(),
+                ntp_servers: "10.0.1.4".to_string(),
                 domain: "new.lan".to_string(),
                 lease_time: 7200,
-                preserved_options,
+                editable_options: preserved_options,
                 reservations: None,
                 reservation_identifiers: default_reservation_identifiers(),
             },
@@ -2042,10 +2359,10 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.0.2, 10.0.0.3"));
+                && option["data"] == "10.0.1.2, 10.0.1.3"));
         assert!(options
             .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.0.4"));
+            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4"));
         assert!(options
             .iter()
             .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1"));
@@ -2065,7 +2382,9 @@ mod tests {
             "pools": [{"pool": "10.0.0.10 - 10.0.0.200"}],
             "option-data": [
                 {"code": 3, "data": "10.0.0.1"},
-                {"code": 15, "data": "lan.example"}
+                {"code": 6, "data": "10.0.0.2, 10.0.0.3"},
+                {"code": 15, "data": "lan.example"},
+                {"code": 42, "data": "10.0.0.4"}
             ],
             "valid-lifetime": 3600
         });
@@ -2073,6 +2392,9 @@ mod tests {
         let parsed = parse_subnet_entry(&subnet);
 
         assert_eq!(parsed.gateway, "10.0.0.1");
+        assert_eq!(parsed.dns_primary, "10.0.0.2");
+        assert_eq!(parsed.dns_secondary, "10.0.0.3");
+        assert_eq!(parsed.ntp_servers, "10.0.0.4");
         assert_eq!(parsed.domain, "lan.example");
     }
 
@@ -2105,20 +2427,61 @@ mod tests {
             pool_start: "10.0.2.10".to_string(),
             pool_end: "10.0.2.200".to_string(),
             gateway: "10.0.2.1".to_string(),
+            dns_primary: "10.0.2.2".to_string(),
+            dns_secondary: "10.0.2.3".to_string(),
+            ntp_servers: String::new(),
             domain: "new.lan".to_string(),
             lease_time: 3600,
-            preserved_options: Vec::new(),
+            editable_options: Vec::new(),
             reservations: None,
             reservation_identifiers: default_reservation_identifiers(),
         })
         .expect("subnet value");
 
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert_eq!(options.len(), 3);
+        assert_eq!(options.len(), 4);
         assert!(options
             .iter()
             .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "domain-name-servers"
+                && option["data"] == "10.0.2.2, 10.0.2.3"));
         assert!(!options.iter().any(|option| option["name"] == "ntp-servers"));
+    }
+
+    #[test]
+    fn build_subnet_value_preserves_editable_extra_option_data() {
+        let subnet = build_subnet_value(SubnetValue {
+            id: 5,
+            subnet: "10.0.3.0/24".to_string(),
+            pool_start: "10.0.3.10".to_string(),
+            pool_end: "10.0.3.200".to_string(),
+            gateway: "10.0.3.1".to_string(),
+            dns_primary: "10.0.3.2".to_string(),
+            dns_secondary: "10.0.3.3".to_string(),
+            ntp_servers: "10.0.3.4".to_string(),
+            domain: "new.lan".to_string(),
+            lease_time: 7200,
+            editable_options: vec![
+                json!({"name": "boot-file-name", "data": "pxelinux.0"}),
+                json!({"name": "vendor-foo", "data": "keep-me"}),
+            ],
+            reservations: None,
+            reservation_identifiers: default_reservation_identifiers(),
+        })
+        .expect("subnet value");
+
+        let options = subnet["option-data"].as_array().expect("option-data array");
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me"));
+        assert!(options
+            .iter()
+            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4"));
     }
 
     #[test]
