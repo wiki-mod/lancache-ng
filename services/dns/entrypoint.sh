@@ -97,14 +97,38 @@ configure_ddns_tsig() {
     echo "[lancache-dns] Configured TSIG-authenticated DDNS updates for LAN zones."
 }
 
+render_template_atomic() {
+    local variables="$1" template="$2" target="$3"
+    local target_dir target_name tmp
+
+    target_dir=$(dirname "$target")
+    target_name=$(basename "$target")
+    tmp=$(mktemp "${target_dir}/.${target_name}.tmp.XXXXXX") \
+        || {
+            echo "[lancache-dns] FATAL: failed to create a temporary file for $target_name"
+            exit 1
+        }
+
+    if ! envsubst "$variables" < "$template" > "$tmp"; then
+        rm -f "$tmp"
+        echo "[lancache-dns] FATAL: failed to render $target_name"
+        exit 1
+    fi
+
+    if ! mv "$tmp" "$target"; then
+        rm -f "$tmp"
+        echo "[lancache-dns] FATAL: failed to replace $target_name"
+        exit 1
+    fi
+}
+
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
 
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
 echo "[lancache-dns] Generating recursor.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable name.
-envsubst '${PDNS_API_KEY}' < /etc/pdns/recursor.conf.template > /tmp/recursor.conf && \
-    mv /tmp/recursor.conf /etc/pdns/recursor.conf
+render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template /etc/pdns/recursor.conf
 
 if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
@@ -114,8 +138,7 @@ fi
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable names.
-envsubst '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' < /etc/pdns/auth/pdns.conf.template > /tmp/pdns.conf && \
-    mv /tmp/pdns.conf /etc/pdns/auth/pdns.conf
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' /etc/pdns/auth/pdns.conf.template /etc/pdns/auth/pdns.conf
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
