@@ -578,10 +578,12 @@ git clone https://github.com/wiki-mod/lancache-ng.git
 cd lancache-ng
 ```
 
-Edit the production environment file:
+Copy the checked-in production template to an untracked runtime env file and
+edit that file:
 
 ```bash
-nano deploy/prod/.env
+cp deploy/prod/.env deploy/prod/.env.local
+nano deploy/prod/.env.local
 ```
 
 Set at least:
@@ -645,11 +647,10 @@ Current prebuilt first-party images are published for `linux/amd64`. Multi-archi
 
 Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
-This v0.1.x production contract intentionally keeps the optional per-service
-state override keys for compatibility with existing installs. Any broader
-cleanup of those legacy knobs should happen no earlier than a future v0.2.0
-migration path and must come with explicit `setup.sh` migration support rather
-than another silent path flip.
+Keep `deploy/prod/.env` as the checked-in template. Manual production changes
+belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
+`setup.sh update`, `setup.sh backup`, `setup.sh restore`, and `setup.sh update-ip`
+when present.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
@@ -676,13 +677,14 @@ mkdir -p /opt/lancache-ng/nats-conf
 Start the stack:
 
 ```bash
-docker compose -f deploy/prod/docker-compose.yml pull
-docker compose -f deploy/prod/docker-compose.yml up -d
+docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml pull
+docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml up -d
 ```
 
-For later upgrades from this manual checkout, create a rollback backup before
-pulling new repository files, then update the production stack directory
-explicitly instead of using a raw compose pull/up:
+For later upgrades from this manual checkout, keep local changes in
+`deploy/prod/.env.local`, create a rollback backup before pulling new repository
+files, then update the production stack directory explicitly instead of using a
+raw compose pull/up:
 
 ```bash
 sudo ./setup.sh backup --config "$(pwd)/deploy/prod"
@@ -690,15 +692,15 @@ git pull --ff-only
 sudo ./setup.sh update "$(pwd)/deploy/prod"
 ```
 
-The explicit pre-pull backup preserves the currently working compose, `.env`,
-certificates and runtime config before tracked files change. The update command
-creates another rollback backup after the pull, applies state-path migrations
-and validates compose before restarting the stack.
+The explicit pre-pull backup preserves the currently working compose,
+`.env.local`, certificates and runtime config before tracked files change. The
+update command creates another rollback backup after the pull, applies
+state-path migrations and validates compose before restarting the stack.
 
 Check status:
 
 ```bash
-docker compose -f deploy/prod/docker-compose.yml ps
+docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml ps
 ```
 
 ## Proxmox LXC notes

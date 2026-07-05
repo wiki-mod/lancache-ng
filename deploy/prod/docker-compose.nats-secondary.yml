@@ -9,7 +9,7 @@
 # when remote secondaries need to connect directly to NATS:
 #
 #   ENABLE_SECONDARY=1 NATS_BIND_IP=<trusted-lan-ip> \
-#     docker compose -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d
+#     docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d
 #
 # Compatibility options:
 # - Existing deployments that use ENABLE_SECONDARY can include this override

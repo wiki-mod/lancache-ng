@@ -308,7 +308,7 @@ jobs:
           # - manual prod keeps one normal root knob (LANCACHE_STATE_DIR)
           # - optional per-service keys are preserved only for real legacy/custom paths
           # - setup.sh must not treat a bare /srv/lancache directory as active state
-          for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+          for key in CACHE_DIR_STANDARD CACHE_DIR_SSL PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
               || { echo "::error::setup.sh update must preserve ${key} only when legacy/custom state would otherwise move away from the one-root contract."; exit 1; }
             grep -F "${key}" deploy/prod/.env >/dev/null \
@@ -343,6 +343,15 @@ jobs:
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
           grep -F 'sudo ./setup.sh update "$(pwd)/deploy/prod"' README.md >/dev/null \
             || { echo "::error::README manual production updates must pass deploy/prod explicitly to setup.sh update."; exit 1; }
+          grep -F 'deploy/prod/.env.local' .gitignore >/dev/null \
+            || { echo "::error::Manual deploy/prod runtime env must be ignored as deploy/prod/.env.local."; exit 1; }
+          grep -F 'runtime_env_file_for_install_dir()' setup.sh >/dev/null \
+            && grep -F 'is_deploy_prod_install_dir "$install_dir"' setup.sh >/dev/null \
+            && grep -F '$install_dir/.env.local' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must prefer deploy/prod/.env.local as the active manual prod runtime env when present."; exit 1; }
+          grep -F 'cp deploy/prod/.env deploy/prod/.env.local' README.md >/dev/null \
+            && grep -F 'docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml' README.md >/dev/null \
+            || { echo "::error::README manual production flow must keep deploy/prod/.env as a clean template and run compose with deploy/prod/.env.local."; exit 1; }
           if awk '
             /sudo \.\/setup\.sh backup --config "\$\(pwd\)\/deploy\/prod"/ { backup_seen=1 }
             /git pull --ff-only/ && !backup_seen { print FILENAME ":" FNR ":" $0; found=1 }
@@ -556,8 +565,6 @@ jobs:
           done
 
           setup_update_required_repairs=(
-            CACHE_DIR_SSL
-            CACHE_DIR_STANDARD
             CACHE_INACTIVE
             CACHE_MAX_GB
             CACHE_MAX_SIZE

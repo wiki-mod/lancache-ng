@@ -866,15 +866,26 @@ set_optional_env_path_override_if_needed() {
 
     existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file")
     if [[ -n "$existing_assignment" ]]; then
-        set_env_assignment "$key" "$existing_assignment" "$env_file"
+        if [[ "$existing_assignment" = "$derived_path" ]]; then
+            remove_env_key "$key" "$env_file"
+        else
+            set_env_assignment "$key" "$existing_assignment" "$env_file"
+        fi
         return 0
     fi
 
     # Keep the one-root contract effective: if the derived state-root path is
-    # already correct, leave optional per-service keys absent (or intentionally
-    # empty) so a later LANCACHE_STATE_DIR change still retargets the service.
+    # already correct, leave optional per-service keys absent so a later
+    # LANCACHE_STATE_DIR change still retargets the service.
     [[ "$desired_path" = "$derived_path" ]] && return 0
     set_env_key "$key" "$desired_path" "$env_file"
+}
+
+remove_env_key() {
+    local key="$1" env_file="$2"
+
+    env_key_exists "$key" "$env_file" || return 0
+    awk -F= -v key="$key" '$1 != key' "$env_file" | write_env_file "$env_file"
 }
 
 production_state_root_default() {
@@ -893,6 +904,16 @@ production_state_root_default() {
 is_deploy_prod_install_dir() {
     local install_dir="$1"
     [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]
+}
+
+runtime_env_file_for_install_dir() {
+    local install_dir="$1"
+
+    if is_deploy_prod_install_dir "$install_dir" && [[ -f "$install_dir/.env.local" ]]; then
+        printf '%s\n' "$install_dir/.env.local"
+    else
+        printf '%s\n' "$install_dir/.env"
+    fi
 }
 
 deploy_prod_repo_root() {
@@ -1322,17 +1343,17 @@ resolve_lancache_image_tag() {
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
-    local allow_insecure_ui cache_dir cache_dir_source cache_max_gb cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default
-    env_file="$install_dir/.env"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     [[ -f "$env_file" ]] \
         || die "Missing $env_file. Cannot update safely because local runtime configuration is not available."
 
-    print_step "Checking local .env"
+    print_step "Checking runtime .env"
 
     require_env_value_for_update IP_STANDARD "$env_file"
 
@@ -1351,14 +1372,12 @@ migrate_env_for_update() {
     # Cache settings. Older installs may only have CACHE_DIR, so keep that path
     # and map both proxy modes to the same cache directory by default.
     cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
-    cache_dir_source=CACHE_DIR_STANDARD
     if [[ -z "$cache_dir" ]]; then
         cache_dir=$(get_env_var CACHE_DIR "$env_file")
-        cache_dir_source=CACHE_DIR
     fi
     cache_dir="${cache_dir:-$(legacy_dir_or_default "$(legacy_state_path cache)" "$state_dir/cache")}"
-    append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_STANDARD "$cache_dir_source" "$cache_dir" "$env_file"
-    append_required_env_migrated_assignment_if_empty_or_missing CACHE_DIR_SSL "$cache_dir_source" "$cache_dir" "$env_file"
+    set_optional_env_path_override_if_needed CACHE_DIR_STANDARD "$cache_dir" "$state_dir/cache" "$env_file"
+    set_optional_env_path_override_if_needed CACHE_DIR_SSL "$cache_dir" "$state_dir/cache" "$env_file"
 
     # Older repository-based prod installs stored state below one legacy root.
     # Preserve that root first, then derive per-service defaults from it so both
@@ -1535,8 +1554,10 @@ install_missing_tools() {
 
 backup_manifest() {
     local install_dir="$1" mode="$2"
-    local env_file="$install_dir/.env"
+    local env_file cache_env_file
     local cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    cache_env_file="$install_dir/.env"
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
     state_dir="${state_dir:-$(legacy_state_root_or_default "$(production_state_root_default "$install_dir")")}"
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
@@ -1556,7 +1577,9 @@ backup_manifest() {
     pdns_ssl_dir="${pdns_ssl_dir:-$state_dir/pdns-ssl}"
     pdns_standard_dir="${pdns_standard_dir:-$state_dir/pdns-standard}"
 
-    printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
+    printf '%s\n' "$cache_env_file"
+    [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
+    printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/certs"
     deploy_prod_repo_input_paths "$install_dir"
     [[ -n "${pdns_standard_dir:-}" && -d "$pdns_standard_dir" ]] && printf '%s\n' "$pdns_standard_dir"
     [[ -n "${pdns_ssl_dir:-}" && -d "$pdns_ssl_dir" ]] && printf '%s\n' "$pdns_ssl_dir"
@@ -1596,33 +1619,40 @@ compose_stack_available() {
 
 compose_stack_stop() {
     local install_dir="$1"
+    local env_file
     compose_stack_available "$install_dir" || return 0
     print_step "Stopping stack for consistent backup/restore"
-    (cd "$install_dir" && docker compose stop) || print_warn "docker compose stop failed — continuing"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    (cd "$install_dir" && docker compose --env-file "$env_file" stop) || print_warn "docker compose stop failed — continuing"
 }
 
 compose_stack_start() {
     local install_dir="$1"
+    local env_file
     compose_stack_available "$install_dir" || return 0
     print_step "Starting stack"
-    (cd "$install_dir" && docker compose up -d) || print_warn "docker compose up failed — start the stack manually"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    (cd "$install_dir" && docker compose --env-file "$env_file" up -d) || print_warn "docker compose up failed — start the stack manually"
 }
 
 validate_compose_config() {
     local install_dir="$1"
+    local env_file
     print_step "Validating Docker Compose configuration"
-    (cd "$install_dir" && docker compose --env-file "$install_dir/.env" -f "$install_dir/docker-compose.yml" config --quiet) \
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    (cd "$install_dir" && docker compose --env-file "$env_file" -f "$install_dir/docker-compose.yml" config --quiet) \
         || die "Docker Compose configuration is not valid. The stack was not pulled or restarted."
     print_ok "Docker Compose configuration is valid"
 }
 
 compose_volume_names() {
-    local install_dir="$1" container
+    local install_dir="$1" container env_file
     compose_stack_available "$install_dir" || return 0
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
     while IFS= read -r container; do
         [[ -n "$container" ]] || continue
         docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "$container"
-    done < <(cd "$install_dir" && docker compose ps --all -q 2>/dev/null) | sort -u
+    done < <(cd "$install_dir" && docker compose --env-file "$env_file" ps --all -q 2>/dev/null) | sort -u
 }
 
 backup_compose_volumes() {
@@ -1657,10 +1687,11 @@ restore_compose_volumes() {
 }
 
 record_image_revisions() {
-    local install_dir="$1" output="$2"
+    local install_dir="$1" output="$2" env_file
     compose_stack_available "$install_dir" || return 0
-    (cd "$install_dir" && docker compose images --format json > "$output") 2>/dev/null \
-        || (cd "$install_dir" && docker compose images > "$output") 2>/dev/null \
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    (cd "$install_dir" && docker compose --env-file "$env_file" images --format json > "$output") 2>/dev/null \
+        || (cd "$install_dir" && docker compose --env-file "$env_file" images > "$output") 2>/dev/null \
         || print_warn "Could not record current image revisions"
 }
 
@@ -1678,7 +1709,7 @@ cmd_backup() {
     done
     install_dir=$(realpath -m "$install_dir")
     backup_root=$(realpath -m "$backup_root")
-    [[ -f "$install_dir/docker-compose.yml" && -f "$install_dir/.env" ]] \
+    [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     install_missing_tools tar rsync
 
@@ -1781,8 +1812,11 @@ cmd_restore() {
     if [[ -d "$root/$rel_install" ]]; then
         mkdir -p "$install_dir"
         rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/"
-        if [[ "$archived_install" != "$install_dir" && -f "$install_dir/.env" ]]; then
-            sed -i "s#${archived_install}#${install_dir}#g" "$install_dir/.env"
+        if [[ "$archived_install" != "$install_dir" ]]; then
+            for path in "$install_dir/.env" "$install_dir/.env.local"; do
+                [[ -f "$path" ]] || continue
+                sed -i "s#${archived_install}#${install_dir}#g" "$path"
+            done
         fi
     fi
     while IFS= read -r path; do
@@ -1919,11 +1953,13 @@ EOF
 # convergence. Reordering can leave a half-migrated stack running.
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
+    local env_file
     install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     UPDATE_CONVERGENCE_PAUSED=0
     UPDATE_CONVERGENCE_COMPLETED=0
@@ -1952,13 +1988,13 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling selected images"
-    docker compose pull \
+    docker compose --env-file "$env_file" pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
     validate_compose_config "$install_dir"
 
     print_step "Restarting containers"
-    docker compose up -d --remove-orphans
+    docker compose --env-file "$env_file" up -d --remove-orphans
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
@@ -1970,11 +2006,12 @@ cmd_update() {
 # operators use it when the stack is already in an unknown state.
 cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
+    local env_file
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     cd "$install_dir"
 
-    local env_file="$install_dir/.env"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
     local ip_standard ip_ssl cache_std cache_ssl
     ip_standard=$(get_env_var IP_STANDARD "$env_file")
     ip_ssl=$(get_env_var IP_SSL "$env_file")
@@ -1982,7 +2019,7 @@ cmd_debug() {
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
 
     print_step "Container status"
-    docker compose ps
+    docker compose --env-file "$env_file" ps
 
     print_step "Logs (last 30 lines per service)"
     local ssl_enabled; ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
@@ -1992,7 +2029,7 @@ cmd_debug() {
     local svc
     for svc in "${svc_list[@]}"; do
         printf "\n${BOLD}--- %s ---${RESET}\n" "$svc"
-        docker compose logs --tail=30 "$svc" 2>/dev/null || true
+        docker compose --env-file "$env_file" logs --tail=30 "$svc" 2>/dev/null || true
     done
 
     print_step "Cache usage"
@@ -2042,10 +2079,12 @@ cmd_update_ip() {
 
     print_step "Reading current configuration"
 
-    local deploy_env="$SCRIPT_DIR/deploy/prod/.env"
+    local prod_dir="$SCRIPT_DIR/deploy/prod"
+    local deploy_env
     local dns_standard_env="$SCRIPT_DIR/config/prod/dns-standard.env"
     local dns_ssl_env="$SCRIPT_DIR/config/prod/dns-ssl.env"
 
+    deploy_env=$(runtime_env_file_for_install_dir "$prod_dir")
     [[ -f "$deploy_env" ]] || die "Configuration not found: $deploy_env"
     [[ -f "$dns_standard_env" ]] || die "Configuration not found: $dns_standard_env"
     [[ -f "$dns_ssl_env" ]] || die "Configuration not found: $dns_ssl_env"
@@ -2105,8 +2144,7 @@ cmd_update_ip() {
 
     print_step "Restarting containers"
 
-    cd "$SCRIPT_DIR"
-    docker compose -f "$SCRIPT_DIR/deploy/prod/docker-compose.yml" up -d \
+    (cd "$prod_dir" && docker compose --env-file "$deploy_env" -f "$prod_dir/docker-compose.yml" up -d) \
         && print_ok "Stack restarted"
 
     printf "\n"
@@ -2372,7 +2410,7 @@ LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
     print_step "Starting secondary DNS container"
-    (cd "$secondary_dir" && docker compose up -d) \
+    (cd "$secondary_dir" && docker compose --env-file "$(runtime_env_file_for_install_dir "$secondary_dir")" up -d) \
         || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
@@ -3055,7 +3093,7 @@ ask "Start now? [Y/n]" "Y"
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
-docker compose pull \
+docker compose --env-file "$INSTALL_DIR/.env" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
 print_step "Starting stack"
@@ -3067,7 +3105,7 @@ if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
     systemctl start lancache.service
     systemctl start lancache-converge.timer
 else
-    docker compose up -d
+    docker compose --env-file "$INSTALL_DIR/.env" up -d
 fi
 print_ok "Stack started"
 

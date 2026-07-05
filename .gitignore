@@ -27,6 +27,7 @@ services/dhcp/keys/
 /.env
 /.env.dev
 /.env.prod
+deploy/prod/.env.local
 
 # config/*.env files are committed (no secrets, just operational config)
 

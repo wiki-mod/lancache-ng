@@ -2,7 +2,10 @@
 
 LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling optional Watchtower helper updates.
 
-Legacy `/srv/lancache` paths in this document are compatibility and migration context only. They describe older repository-based installs that accidentally used `/srv/lancache`; they are not the intended active default for new or cleaned-up v0.1 production installs.
+For manual production checkouts, keep `deploy/prod/.env` as the checked-in
+template and put real runtime settings in `deploy/prod/.env.local`. `setup.sh`
+prefers that untracked file automatically for backup, update, restore, and
+`update-ip` when it exists.
 
 ## Setup script commands
 
@@ -26,23 +29,19 @@ The `update` command automatically creates this config backup before pulling rep
 
 ### `--full` backup
 
-Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes cache directories from `.env`. Older installs that still have legacy `/srv/lancache` directories are included when present, but new installs should not create `/srv/lancache`. This can be huge, so it is opt-in.
+Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes cache directories from the active runtime env file plus legacy `/srv/lancache/cache` when present. This can be huge, so it is opt-in.
 
 ## What the automated backup includes
 
 The automated manifest includes these paths when they exist:
 
-- install configuration: `.env`, `docker-compose.yml`, and `certs/`; manual
-  `deploy/prod` backups also include the repository-root runtime inputs reached
-  via `../../` (`certs/`, `config/prod/`, `services/dns/cdn-domains.txt`, and
-  `services/proxy/cdn-ssl-domains.txt`) because production compose mounts or
-  reads those tracked files outside `deploy/prod/`
+- install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`, and `certs/`; manual `deploy/prod` backups also include the repository-root runtime inputs reached via `../../` (`certs/`, `config/prod/`, `services/dns/cdn-domains.txt`, and `services/proxy/cdn-ssl-domains.txt`) because production compose mounts or reads those tracked files outside `deploy/prod/`
 - quickstart Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
-- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and, for legacy installs only, `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, and `/srv/lancache/pdns-filter-state` when present
-- Kea data from the production state root `LANCACHE_STATE_DIR`, `KEA_DATA_DIR`, and, for legacy installs only, `/srv/lancache/kea` when present
-- NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, and, for legacy installs only, `/srv/lancache/nats` and `/srv/lancache/nats-conf` when present
-- in `--full` mode only, cache directories from the production state root `LANCACHE_STATE_DIR`, `CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`, and legacy `/srv/lancache/cache` when present
+- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and legacy `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, `/srv/lancache/pdns-filter-state` when present
+- Kea data from the production state root `LANCACHE_STATE_DIR`, optional `KEA_DATA_DIR`, and legacy `/srv/lancache/kea` when present
+- NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
+- in `--full` mode only, cache directories from the production state root `LANCACHE_STATE_DIR`, optional `CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`, and legacy `/srv/lancache/cache`
 
 The backup command stops the compose stack before copying mutable databases and restarts it afterward. Staging directories are created with restrictive permissions and cleaned up automatically if a copy or archive operation fails. The command rejects backup destinations that sit inside a path being backed up, which prevents recursive copies when using cache disks as backup storage.
 
@@ -73,7 +72,7 @@ If Watchtower changed an optional helper image, remove `watchtower` from `COMPOS
 
 Test restores periodically on a spare host or VM:
 
-1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored `.env` are rewritten for migrations. Backups created from `deploy/prod` also remap the archived repository-root runtime inputs to the new checkout root instead of restoring them to stale absolute paths. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped.
+1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored active runtime env file are rewritten for migrations. Backups created from `deploy/prod` also remap the archived repository-root runtime inputs to the new checkout root instead of restoring them to stale absolute paths. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped.
 2. Start the stack.
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.

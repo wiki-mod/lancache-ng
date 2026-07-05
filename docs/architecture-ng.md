@@ -101,7 +101,7 @@ Example:
 
 ```sh
 ENABLE_SECONDARY=1 NATS_BIND_IP=192.168.1.5 \
-  docker compose -f deploy/prod/docker-compose.yml \
+  docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml \
   -f deploy/prod/docker-compose.nats-secondary.yml up -d
 ```
 

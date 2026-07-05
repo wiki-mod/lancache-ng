@@ -265,7 +265,7 @@ services:
   # ── DHCP Proxy (dnsmasq) ──────────────────────────────────────────────────
   # Proxy mode: sits next to an existing DHCP server and serves proxy-DHCP/PXE clients.
   # Mutually exclusive with Kea mode (both want port 67/udp).
-  # Activate with: docker compose --profile dhcp-proxy up -d
+  # Activate with: docker compose --env-file .env.local --profile dhcp-proxy up -d
   dhcp-proxy:
     container_name: lancache-dhcp-proxy
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
