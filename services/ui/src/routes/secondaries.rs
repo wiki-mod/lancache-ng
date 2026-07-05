@@ -52,6 +52,7 @@ pub struct Secondary {
 
 pub async fn secondaries_page(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Html<String>, StatusCode> {
     let db = state
         .db
@@ -81,7 +82,7 @@ pub async fn secondaries_page(
     ctx.insert("secondaries", &secondaries);
     ctx.insert("primary_url", &primary_url);
     ctx.insert("registration_token", reg_token);
-    crate::routes::insert_csrf_token(&mut ctx, &state);
+    crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     Ok(crate::routes::render(
         &state.templates,
@@ -163,7 +164,7 @@ pub async fn remove_secondary(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    crate::routes::verify_csrf_header(&state, &headers)?;
+    crate::routes::verify_csrf_header(&headers)?;
     let rows_affected = {
         let db = state
             .db
@@ -192,7 +193,7 @@ pub async fn rotate_token(
     headers: HeaderMap,
     axum::extract::Json(form): axum::extract::Json<RotateForm>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    crate::routes::verify_csrf_header(&state, &headers)?;
+    crate::routes::verify_csrf_header(&headers)?;
     // Validate token — reject if token is unconfigured (empty).
     if state.config.secondary_registration_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);

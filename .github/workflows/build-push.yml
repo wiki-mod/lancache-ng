@@ -706,6 +706,12 @@ jobs:
             echo "::error::set_env_key must collapse duplicate assignments instead of rewriting every duplicate key."
             exit 1
           fi
+          grep -F 'validate_ui_session_ttl_seconds()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must validate UI_SESSION_TTL_SECONDS before writing or reusing it."; exit 1; }
+          grep -F 'validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh update must validate preserved UI_SESSION_TTL_SECONDS before mutating or restarting the stack."; exit 1; }
+          grep -F 'validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh install must validate UI_SESSION_TTL_SECONDS before writing the runtime .env."; exit 1; }
 
           if awk '
             /^  release:/ { in_release=1; next }
