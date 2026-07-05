@@ -164,7 +164,7 @@ impl fmt::Display for Config {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let proxy_service = env_or("PROXY_SERVICE", "proxy".to_string());
         let standard_log = env_or("STANDARD_LOG", "/var/log/nginx/access.log".to_string());
         let ssl_log = env_or("SSL_LOG", standard_log.clone());
@@ -193,7 +193,7 @@ impl Config {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| derive_lancache_image_channel(&lancache_image_tag));
 
-        Self {
+        Ok(Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
             cdn_domains_file: env_str("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
             ssl_domains_file: env_str("SSL_DOMAINS_FILE", "/data/cdn-ssl-domains.txt"),
@@ -228,7 +228,7 @@ impl Config {
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
             allow_insecure_ui: env_bool("ALLOW_INSECURE_UI", false),
-            ui_session_ttl_seconds: env_u64("UI_SESSION_TTL_SECONDS", 86_400),
+            ui_session_ttl_seconds: env_u64("UI_SESSION_TTL_SECONDS", 86_400)?,
             security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
             hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
@@ -249,7 +249,7 @@ impl Config {
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
-        }
+        })
     }
 }
 
@@ -292,11 +292,16 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(default)
+fn env_u64(key: &str, default: u64) -> Result<u64, String> {
+    match env::var(key) {
+        Ok(value) => value.trim().parse::<u64>().map_err(|_| {
+            format!("{key} must be an unsigned integer number of seconds, got {value:?}")
+        }),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(format!("{key} must be a valid UTF-8 integer value"))
+        }
+    }
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -416,7 +421,7 @@ mod tests {
             env::remove_var(key);
         }
 
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.proxy_standard_url, "http://proxy");
         assert_eq!(cfg.proxy_ssl_url, "http://proxy");
         assert_eq!(cfg.proxy_ssl_service, "proxy");
@@ -436,7 +441,7 @@ mod tests {
         env::remove_var("PROXY_SSL_URL");
         env::remove_var("PROXY_SSL_SERVICE");
 
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.proxy_standard_url, "http://legacy-proxy");
         assert_eq!(cfg.proxy_ssl_url, "http://legacy-proxy");
         assert_eq!(cfg.proxy_ssl_service, "legacy-proxy");
@@ -449,13 +454,13 @@ mod tests {
         let _guard = env_test_lock().lock().unwrap();
 
         env::set_var("SSL_ENABLED", "0");
-        assert!(!Config::from_env().ssl_enabled);
+        assert!(!Config::from_env().unwrap().ssl_enabled);
 
         env::set_var("SSL_ENABLED", "false");
-        assert!(!Config::from_env().ssl_enabled);
+        assert!(!Config::from_env().unwrap().ssl_enabled);
 
         env::remove_var("SSL_ENABLED");
-        assert!(Config::from_env().ssl_enabled);
+        assert!(Config::from_env().unwrap().ssl_enabled);
     }
 
     #[test]
@@ -466,7 +471,7 @@ mod tests {
         env::set_var("SSL_CACHE_MAX_GB", "88");
         env::set_var("CACHE_MAX_GB", "42.5");
 
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.standard_cache_max_gb, 42.5);
         assert_eq!(cfg.ssl_cache_max_gb, 42.5);
 
@@ -483,7 +488,7 @@ mod tests {
         env::remove_var("STANDARD_CACHE_MAX_GB");
         env::set_var("SSL_CACHE_MAX_GB", "88");
 
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.standard_cache_max_gb, 88.0);
         assert_eq!(cfg.ssl_cache_max_gb, 88.0);
 
@@ -498,9 +503,33 @@ mod tests {
         env::remove_var("STANDARD_CACHE_MAX_GB");
         env::remove_var("SSL_CACHE_MAX_GB");
 
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.standard_cache_max_gb, 50.0);
         assert_eq!(cfg.ssl_cache_max_gb, 50.0);
+    }
+
+    #[test]
+    fn ui_session_ttl_defaults_when_unset_and_rejects_invalid_values() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("UI_SESSION_TTL_SECONDS");
+        assert_eq!(Config::from_env().unwrap().ui_session_ttl_seconds, 86_400);
+
+        env::set_var("UI_SESSION_TTL_SECONDS", "3600s");
+        let err = Config::from_env().unwrap_err();
+        assert_eq!(
+            err,
+            "UI_SESSION_TTL_SECONDS must be an unsigned integer number of seconds, got \"3600s\""
+        );
+
+        env::set_var("UI_SESSION_TTL_SECONDS", "abc");
+        let err = Config::from_env().unwrap_err();
+        assert_eq!(
+            err,
+            "UI_SESSION_TTL_SECONDS must be an unsigned integer number of seconds, got \"abc\""
+        );
+
+        env::remove_var("UI_SESSION_TTL_SECONDS");
     }
 
     #[test]
@@ -511,14 +540,14 @@ mod tests {
         env::remove_var("LANCACHE_IMAGE_PREFIX");
         env::remove_var("LANCACHE_IMAGE_CHANNEL");
         env::remove_var("LANCACHE_IMAGE_TAG");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_registry, "ghcr.io");
         assert_eq!(cfg.lancache_image_prefix, "wiki-mod/lancache-ng");
         assert_eq!(cfg.lancache_image_channel, "latest");
         assert_eq!(cfg.lancache_image_tag, "latest");
 
         env::set_var("LANCACHE_IMAGE_TAG", "sha-deadbeef");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_channel, "pinned");
         assert_eq!(cfg.lancache_image_tag, "sha-deadbeef");
 
@@ -526,7 +555,7 @@ mod tests {
         env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
         env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
         env::set_var("LANCACHE_IMAGE_TAG", "v1.2.3");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_registry, "registry.example.test:5000");
         assert_eq!(cfg.lancache_image_prefix, "mirror/lancache-ng");
         assert_eq!(cfg.lancache_image_channel, "edge");
@@ -545,18 +574,27 @@ mod tests {
         env::set_var("DHCP_MODE", "dnsmasq-proxy");
         env::remove_var("DHCP_ENABLED");
         assert!(matches!(
-            Config::from_env().dhcp_mode,
+            Config::from_env().unwrap().dhcp_mode,
             DhcpMode::DnsmasqProxy
         ));
 
         env::set_var("DHCP_MODE", "kea");
-        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Kea));
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::Kea
+        ));
 
         env::set_var("DHCP_MODE", "disabled");
-        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Disabled));
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::Disabled
+        ));
 
         env::set_var("DHCP_MODE", "invalid");
-        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Disabled));
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::Disabled
+        ));
 
         env::remove_var("DHCP_MODE");
     }
@@ -567,10 +605,16 @@ mod tests {
 
         env::set_var("DHCP_ENABLED", "1");
         env::remove_var("DHCP_MODE");
-        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Kea));
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::Kea
+        ));
 
         env::set_var("DHCP_ENABLED", "0");
-        assert!(matches!(Config::from_env().dhcp_mode, DhcpMode::Disabled));
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::Disabled
+        ));
 
         env::remove_var("DHCP_ENABLED");
     }
@@ -581,15 +625,15 @@ mod tests {
 
         env::set_var("DHCP_MODE", "dnsmasq-proxy");
         env::set_var("DHCP_API_URL", "http://dhcp:8000");
-        assert_eq!(Config::from_env().dhcp_api_url, "");
+        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "");
 
         env::set_var("DHCP_MODE", "disabled");
         env::set_var("DHCP_API_URL", "http://dhcp:8000");
-        assert_eq!(Config::from_env().dhcp_api_url, "");
+        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "");
 
         env::set_var("DHCP_MODE", "kea");
         env::set_var("DHCP_API_URL", "http://dhcp:8000");
-        assert_eq!(Config::from_env().dhcp_api_url, "http://dhcp:8000");
+        assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
         env::remove_var("DHCP_MODE");
         env::remove_var("DHCP_API_URL");

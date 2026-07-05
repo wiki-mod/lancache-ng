@@ -107,7 +107,9 @@ pub fn set_session_cookie(
 
     match HeaderValue::from_str(&cookie) {
         Ok(header_value) => {
-            response.headers_mut().insert(header::SET_COOKIE, header_value);
+            response
+                .headers_mut()
+                .insert(header::SET_COOKIE, header_value);
         }
         Err(err) => {
             tracing::error!(error = %err, "failed to build session cookie header");
@@ -203,14 +205,12 @@ mod tests {
         tampered_cookie.push('x');
         assert!(validate_session_cookie(&tampered_cookie, &secret, now).is_none());
 
-        assert!(
-            validate_session_cookie(
-                &session.cookie_value,
-                &secret,
-                now + Duration::from_secs(301)
-            )
-            .is_none()
-        );
+        assert!(validate_session_cookie(
+            &session.cookie_value,
+            &secret,
+            now + Duration::from_secs(301)
+        )
+        .is_none());
     }
 
     #[test]

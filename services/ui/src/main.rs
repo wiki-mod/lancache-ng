@@ -304,9 +304,8 @@ async fn basic_auth(
         let submitted_token = csrf_header_value(&parts.headers)
             .map(str::to_owned)
             .or_else(|| {
-                form_urlencoded::parse(&body_bytes).find_map(|(key, value)| {
-                    (key == CSRF_FORM_FIELD).then(|| value.into_owned())
-                })
+                form_urlencoded::parse(&body_bytes)
+                    .find_map(|(key, value)| (key == CSRF_FORM_FIELD).then(|| value.into_owned()))
             });
 
         let valid = submitted_token
@@ -429,6 +428,12 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
+    validate_ui_session_ttl_seconds(cfg.ui_session_ttl_seconds)?;
+    nats_config::validate_runtime_nats_credentials(cfg)?;
+    Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -438,7 +443,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cfg = config::Config::from_env();
+    let cfg = match config::Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(message) => {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    };
 
     // SECONDARY_REGISTRATION_TOKEN must be non-empty; an empty token allows
     // unauthenticated registration (empty string matches empty string).
@@ -450,12 +461,15 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Validate before the retry loop so bad env overrides fail closed instead
-    // of leaving the UI waiting for a NATS container with an invalid config.
-    if let Err(message) = nats_config::validate_runtime_nats_credentials(&cfg) {
-        tracing::error!("{message}");
-        std::process::exit(1);
-    }
+    // Validate before the retry loop and secret creation so bad env overrides
+    // fail closed without waiting on NATS or creating durable session state.
+    let ui_session_ttl = match preflight_startup_config(&cfg) {
+        Ok(ui_session_ttl) => ui_session_ttl,
+        Err(message) => {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    };
 
     let auth_user = cfg.auth_user.as_deref().filter(|value| !value.is_empty());
     let auth_password = cfg
@@ -482,12 +496,6 @@ async fn main() -> Result<()> {
 
     let nats = connect_nats_with_retry(&cfg).await;
     let ui_session_secret = load_or_create_session_secret()?;
-
-    if let Err(message) = validate_ui_session_ttl_seconds(cfg.ui_session_ttl_seconds) {
-        tracing::error!("{}", message);
-        std::process::exit(1);
-    }
-    let ui_session_ttl = Duration::from_secs(cfg.ui_session_ttl_seconds);
 
     let db = {
         let conn = Connection::open("/data/lancache-ui.db").expect("Cannot open UI database");
@@ -632,10 +640,16 @@ mod tests {
         let mut headers = HeaderMap::new();
         assert!(!basic_auth_is_valid(&headers, "admin", "secret"));
 
-        headers.insert(axum::http::header::AUTHORIZATION, auth_header("admin", "wrong"));
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            auth_header("admin", "wrong"),
+        );
         assert!(!basic_auth_is_valid(&headers, "admin", "secret"));
 
-        headers.insert(axum::http::header::AUTHORIZATION, auth_header("admin", "secret"));
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            auth_header("admin", "secret"),
+        );
         assert!(basic_auth_is_valid(&headers, "admin", "secret"));
     }
 
@@ -680,18 +694,32 @@ mod tests {
     }
 
     #[test]
+    fn startup_preflight_rejects_invalid_ttl_before_other_static_checks() {
+        let mut cfg = config::Config::from_env().unwrap();
+        cfg.ui_session_ttl_seconds = 0;
+        cfg.nats_ui_user = "invalid user".to_string();
+        cfg.nats_ui_password = "still-invalid".to_string();
+
+        assert_eq!(
+            preflight_startup_config(&cfg),
+            Err("UI_SESSION_TTL_SECONDS must be greater than zero".to_string())
+        );
+    }
+
+    #[test]
     fn session_cookie_helper_matches_the_session_header() {
         let empty_headers = HeaderMap::new();
         assert!(session::csrf_header_value(&empty_headers).is_none());
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            axum::http::header::HeaderName::from_static(
-                session::INTERNAL_CSRF_HEADER_NAME,
-            ),
+            axum::http::header::HeaderName::from_static(session::INTERNAL_CSRF_HEADER_NAME),
             HeaderValue::from_static("session-token-a"),
         );
 
-        assert_eq!(session::csrf_header_value(&headers), Some("session-token-a"));
+        assert_eq!(
+            session::csrf_header_value(&headers),
+            Some("session-token-a")
+        );
     }
 }

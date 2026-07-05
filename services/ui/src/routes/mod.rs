@@ -16,8 +16,8 @@ pub mod stats;
 
 use axum::http::HeaderMap;
 use axum::response::Html;
-use tera::{Context, Tera};
 use subtle::ConstantTimeEq;
+use tera::{Context, Tera};
 use tracing::error;
 
 pub fn render(templates: &Tera, name: &str, ctx: &Context, dev_mode: bool) -> Html<String> {
@@ -48,12 +48,9 @@ pub fn insert_csrf_token(ctx: &mut Context, headers: &HeaderMap) {
     ctx.insert("csrf_token", token);
 }
 
-pub fn verify_csrf_token(
-    headers: &HeaderMap,
-    token: &str,
-) -> Result<(), axum::http::StatusCode> {
-    let session_token = crate::session::csrf_header_value(headers)
-        .ok_or(axum::http::StatusCode::FORBIDDEN)?;
+pub fn verify_csrf_token(headers: &HeaderMap, token: &str) -> Result<(), axum::http::StatusCode> {
+    let session_token =
+        crate::session::csrf_header_value(headers).ok_or(axum::http::StatusCode::FORBIDDEN)?;
 
     if bool::from(session_token.as_bytes().ct_eq(token.as_bytes())) {
         Ok(())
@@ -63,8 +60,8 @@ pub fn verify_csrf_token(
 }
 
 pub fn verify_csrf_header(headers: &axum::http::HeaderMap) -> Result<(), axum::http::StatusCode> {
-    let session_token = crate::session::csrf_header_value(headers)
-        .ok_or(axum::http::StatusCode::FORBIDDEN)?;
+    let session_token =
+        crate::session::csrf_header_value(headers).ok_or(axum::http::StatusCode::FORBIDDEN)?;
     let token = headers
         .get("x-csrf-token")
         .and_then(|value| value.to_str().ok());
@@ -134,12 +131,13 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            axum::http::header::HeaderName::from_static(
-                crate::session::INTERNAL_CSRF_HEADER_NAME,
-            ),
+            axum::http::header::HeaderName::from_static(crate::session::INTERNAL_CSRF_HEADER_NAME),
             axum::http::HeaderValue::from_static("session-token-a"),
         );
-        headers.insert("x-csrf-token", axum::http::HeaderValue::from_static("session-token-a"));
+        headers.insert(
+            "x-csrf-token",
+            axum::http::HeaderValue::from_static("session-token-a"),
+        );
 
         let mut ctx = Context::new();
         insert_csrf_token(&mut ctx, &headers);
@@ -151,7 +149,10 @@ mod tests {
         assert!(verify_csrf_token(&headers, "session-token-a").is_ok());
         assert!(verify_csrf_header(&headers).is_ok());
 
-        headers.insert("x-csrf-token", axum::http::HeaderValue::from_static("session-token-b"));
+        headers.insert(
+            "x-csrf-token",
+            axum::http::HeaderValue::from_static("session-token-b"),
+        );
         assert!(verify_csrf_token(&headers, "session-token-b").is_err());
         assert!(verify_csrf_header(&headers).is_err());
     }
