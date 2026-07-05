@@ -10,6 +10,9 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path as FsPath;
+use std::process;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tera::Context;
@@ -265,13 +268,50 @@ pub async fn update_nats_conf(
         state.config.nats_dns_reader_password
     );
 
-    std::fs::write(&state.config.nats_conf_path, nats_conf)
-        .map_err(|e| format!("Failed to write nats.conf: {}", e).into())
+    write_nats_conf_atomically(&state.config.nats_conf_path, &nats_conf)
+}
+
+fn write_nats_conf_atomically(
+    path: &str,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let target = FsPath::new(path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("nats.conf path has no parent directory: {path}"))?;
+    let file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("nats.conf");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("System clock is before UNIX_EPOCH: {e}"))?
+        .as_nanos();
+    let tmp_path = parent.join(format!(".{file_name}.tmp-{}-{stamp}", process::id()));
+
+    fs::write(&tmp_path, content)
+        .map_err(|e| format!("Failed to write temporary nats.conf: {e}"))?;
+
+    if let Err(err) = fs::rename(&tmp_path, target) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to atomically replace nats.conf: {err}").into());
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lancache-ng-{name}-{}-{stamp}", process::id()))
+    }
 
     #[test]
     fn register_response_serializes_image_tag_for_secondary_setup() {
@@ -294,5 +334,24 @@ mod tests {
         assert_eq!(value["image_prefix"], "mirror/lancache-ng");
         assert_eq!(value["image_channel"], "edge");
         assert_eq!(value["image_tag"], "v1.2.3");
+    }
+
+    #[test]
+    fn nats_conf_write_replaces_file_atomically() {
+        let dir = temp_dir("nats-conf-atomic");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nats.conf");
+        fs::write(&path, "old").unwrap();
+
+        write_nats_conf_atomically(path.to_str().unwrap(), "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -498,6 +498,10 @@ jobs:
           }
 
           validate_nats_config_ownership
+          grep -Fq 'fn write_nats_conf_atomically(' services/ui/src/routes/secondaries.rs \
+            || { echo "::error::Admin UI must keep an atomic nats.conf write helper for the v0.1.0 shared-token path."; exit 1; }
+          grep -Fq 'fs::rename(&tmp_path, target)' services/ui/src/routes/secondaries.rs \
+            || { echo "::error::Admin UI nats.conf writes must use temp-file plus rename, not direct overwrite."; exit 1; }
 
           if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
