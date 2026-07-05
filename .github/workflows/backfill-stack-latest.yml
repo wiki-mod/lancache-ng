@@ -92,12 +92,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          # Product stack latest backfill intentionally excludes build-tools:
+          # that tooling image has its own build/publish workflow and mutable
+          # channel, so mixing it here would make a stable product backfill race
+          # with normal toolchain refreshes.
+          services=(proxy dns watchdog dhcp dhcp-proxy ui)
           source_stack="ghcr.io/${REPOSITORY}/stack:${SOURCE_RELEASE_TAG}"
           container_id=""
           stack_env=""
           resolved_source_tag=""
           declared_commit=""
+          source_release_commit=""
           declare -A previous_refs=()
           promoted_targets=()
 
@@ -158,38 +163,52 @@ jobs:
           [[ "$declared_commit" = "$EXPECTED_SOURCE_COMMIT" ]] \
             || { echo "::error::${source_stack} declares commit ${declared_commit}, expected ${EXPECTED_SOURCE_COMMIT}."; exit 1; }
 
+          git fetch --force --depth=1 origin "refs/tags/${SOURCE_RELEASE_TAG}:refs/tags/${SOURCE_RELEASE_TAG}"
+          source_release_commit="$(git rev-list -n 1 "$SOURCE_RELEASE_TAG")"
+          [[ "$source_release_commit" = "$declared_commit" ]] \
+            || { echo "::error::${SOURCE_RELEASE_TAG} points at ${source_release_commit}, but stack.env declares ${declared_commit}."; exit 1; }
+          git checkout --detach "$SOURCE_RELEASE_TAG"
+
           source_stack_immutable="ghcr.io/${REPOSITORY}/stack:${resolved_source_tag}"
-          docker buildx imagetools inspect "$source_stack_immutable" >/dev/null
-          bash scripts/require-image-platforms.sh "$source_stack_immutable" "$REQUIRED_PLATFORMS"
+          source_stack_digest="$(digest_for_image "$source_stack")"
+          source_stack_immutable_digest="$(digest_for_image "$source_stack_immutable")"
+          [[ "$source_stack_digest" = "$source_stack_immutable_digest" ]] \
+            || { echo "::error::${source_stack} digest does not match ${source_stack_immutable}; refusing to promote drifted release sources."; exit 1; }
+          bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
 
           for service in "${services[@]}"; do
+            source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
             source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
-            docker buildx imagetools inspect "$source_image" >/dev/null
-            bash scripts/require-image-platforms.sh "$source_image" "$REQUIRED_PLATFORMS"
+            source_release_digest="$(digest_for_image "$source_release_image")"
+            source_sha_digest="$(digest_for_image "$source_image")"
+            [[ "$source_release_digest" = "$source_sha_digest" ]] \
+              || { echo "::error::${source_release_image} digest does not match ${source_image}; refusing to promote drifted release sources."; exit 1; }
+            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
           done
 
           bash scripts/check-stable-external-images.sh
 
           for service in "${services[@]}"; do
-            source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
+            source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
+            source_release_digest="$(digest_for_image "$source_release_image")"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
             previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-            docker buildx imagetools create --prefer-index=false -t "$target_image" "$source_image"
+            docker buildx imagetools create --prefer-index=false -t "$target_image" "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}"
             promoted_targets+=("$target_image")
           done
 
           target_stack="ghcr.io/${REPOSITORY}/stack:latest"
           previous_refs["$target_stack"]="$(digest_for_image "$target_stack" || true)"
-          docker buildx imagetools create --prefer-index=false -t "$target_stack" "$source_stack_immutable"
+          docker buildx imagetools create --prefer-index=false -t "$target_stack" "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}"
           promoted_targets+=("$target_stack")
 
           for service in "${services[@]}"; do
-            source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
+            source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
-            [[ "$(digest_for_image "$source_image")" = "$(digest_for_image "$target_image")" ]] \
+            [[ "$(digest_for_image "$source_release_image")" = "$(digest_for_image "$target_image")" ]] \
               || { echo "::error::latest digest mismatch for ${service}."; exit 1; }
           done
-          [[ "$(digest_for_image "$source_stack_immutable")" = "$(digest_for_image "$target_stack")" ]] \
+          [[ "$(digest_for_image "$source_stack")" = "$(digest_for_image "$target_stack")" ]] \
             || { echo "::error::latest digest mismatch for stack pointer."; exit 1; }
 
           {
