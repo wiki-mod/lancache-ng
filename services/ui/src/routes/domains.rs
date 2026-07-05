@@ -5,6 +5,7 @@
 
 use crate::{docker_client, AppState};
 use axum::extract::{Form, State};
+use axum::http::HeaderMap;
 use axum::response::{Html, Redirect};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -53,7 +54,7 @@ pub struct Record {
     pub disabled: bool,
 }
 
-pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
+pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let dns_domains = read_domain_file(&state.config.cdn_domains_file);
     let ssl_domains = read_domain_file(&state.config.ssl_domains_file);
 
@@ -66,7 +67,7 @@ pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("active_page", "domains");
-    crate::routes::insert_csrf_token(&mut ctx, &state);
+    crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     crate::routes::render(
         &state.templates,
@@ -78,9 +79,10 @@ pub async fn domains_page(State(state): State<Arc<AppState>>) -> Html<String> {
 
 pub async fn add_dns(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let Some(domain) = parse_domain_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid dns domain");
         return Err(axum::http::StatusCode::BAD_REQUEST);
@@ -100,9 +102,10 @@ pub async fn add_dns(
 
 pub async fn remove_dns(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let Some(domain) = normalize_domain_delete_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid dns domain delete");
         return Err(axum::http::StatusCode::BAD_REQUEST);
@@ -122,9 +125,10 @@ pub async fn remove_dns(
 
 pub async fn add_ssl(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let Some(domain) = parse_domain_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain");
         return Err(axum::http::StatusCode::BAD_REQUEST);
@@ -144,9 +148,10 @@ pub async fn add_ssl(
 
 pub async fn remove_ssl(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AddForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let Some(domain) = normalize_domain_delete_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain delete");
         return Err(axum::http::StatusCode::BAD_REQUEST);
@@ -166,9 +171,10 @@ pub async fn remove_ssl(
 
 pub async fn add_lan_record(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<LanRecordForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let name = normalize_lan_name(&form.name);
     let ttl = form.ttl.unwrap_or(300);
 
@@ -208,9 +214,10 @@ pub async fn add_lan_record(
 
 pub async fn remove_lan_record(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<LanRecordForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let name = normalize_lan_name(&form.name);
 
     let Some(record_type) = normalize_delete_record_type(&form.record_type) else {
@@ -254,9 +261,10 @@ pub async fn remove_lan_record(
 
 pub async fn toggle_aaaa_filter(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AaaaFilterForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&state, &form.csrf_token)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let enable = form.enabled.as_deref() == Some("1");
     let mut failed_paths = Vec::new();
 

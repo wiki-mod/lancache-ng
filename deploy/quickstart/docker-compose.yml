@@ -466,6 +466,7 @@ services:
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
+      - UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS:-86400}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
       - DNS_SSL_STATE_DIR=/var/lib/powerdns-state

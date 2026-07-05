@@ -498,6 +498,10 @@ jobs:
           }
 
           validate_nats_config_ownership
+          grep -Fq 'fn write_nats_conf_atomically(' services/ui/src/routes/secondaries.rs \
+            || { echo "::error::Admin UI must keep an atomic nats.conf write helper for the v0.1.0 shared-token path."; exit 1; }
+          grep -Fq 'fs::rename(&tmp_path, target)' services/ui/src/routes/secondaries.rs \
+            || { echo "::error::Admin UI nats.conf writes must use temp-file plus rename, not direct overwrite."; exit 1; }
 
           grep -Fq 'render_template_atomic' services/dns/entrypoint.sh \
             || { echo "::error::DNS entrypoint must render generated configs through the atomic helper."; exit 1; }
@@ -558,6 +562,85 @@ jobs:
           if [[ "$missing_required" = "1" ]]; then
             exit 1
           fi
+
+          validate_dhcp_proxy_env_file_contract() {
+            local compose_file="$1"
+            local expected_env_file="$2"
+
+            awk -v compose_file="$compose_file" -v expected_env_file="$expected_env_file" '
+              function trim(value) {
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+$/, "", value)
+                return value
+              }
+              function content_indent(value, prefix) {
+                match(value, /^[[:space:]]*/)
+                prefix = substr(value, 1, RLENGTH)
+                return length(prefix)
+              }
+              function strip_inline_comment(value) {
+                sub(/[[:space:]]+#.*/, "", value)
+                return value
+              }
+              /^  dhcp-proxy:/ {
+                in_service=1
+                saw_service=1
+                in_env_file_block=0
+                next
+              }
+              in_service && /^  [[:alnum:]_-]+:/ {
+                in_service=0
+                in_env_file_block=0
+              }
+              in_service {
+                line=strip_inline_comment($0)
+                stripped=trim(line)
+
+                if (in_env_file_block && stripped != "" && content_indent(line) <= env_file_indent) {
+                  in_env_file_block=0
+                }
+                if (in_env_file_block && stripped ~ /^-/ && index(stripped, expected_env_file) > 0) {
+                  saw_env_file=1
+                }
+
+                if (line ~ /^[[:space:]]*env_file:[[:space:]]*$/) {
+                  in_env_file_block=1
+                  env_file_indent=content_indent(line)
+                } else if (line ~ /^[[:space:]]*env_file:[[:space:]]*/ && index(line, expected_env_file) > 0) {
+                  saw_env_file=1
+                }
+
+                if (line ~ /^[[:space:]]*environment:[[:space:]]*/) {
+                  saw_environment=1
+                }
+                if (stripped ~ /^-[[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/ || stripped ~ /[{,][[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP):[[:space:]]*"\$\{/) {
+                  saw_interpolated_dhcp_key=1
+                }
+              }
+              END {
+                if (!saw_service) {
+                  printf "::error file=%s::dhcp-proxy service is missing.\n", compose_file
+                  exit 1
+                }
+                if (!saw_env_file) {
+                  printf "::error file=%s::dhcp-proxy must keep using env_file %s so setup-managed dnsmasq-proxy values are not lost.\n", compose_file, expected_env_file
+                  exit 1
+                }
+                if (saw_environment || saw_interpolated_dhcp_key) {
+                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for dev/prod.\n", compose_file
+                  exit 1
+                }
+              }
+            ' "$compose_file"
+          }
+
+          # Dev/prod dhcp-proxy values are written by setup into env files.
+          # Compose interpolation does not read env_file values, so explicit
+          # environment entries here would silently erase the configured proxy
+          # DHCP settings. Quickstart is intentionally separate because setup
+          # writes its single .env file directly.
+          validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
+          validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
           if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
             echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
@@ -645,6 +728,12 @@ jobs:
             echo "::error::set_env_key must collapse duplicate assignments instead of rewriting every duplicate key."
             exit 1
           fi
+          grep -F 'validate_ui_session_ttl_seconds()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must validate UI_SESSION_TTL_SECONDS before writing or reusing it."; exit 1; }
+          grep -F 'validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh update must validate preserved UI_SESSION_TTL_SECONDS before mutating or restarting the stack."; exit 1; }
+          grep -F 'validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh install must validate UI_SESSION_TTL_SECONDS before writing the runtime .env."; exit 1; }
 
           if awk '
             /^  release:/ { in_release=1; next }
