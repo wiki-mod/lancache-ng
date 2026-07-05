@@ -546,22 +546,52 @@ jobs:
             local expected_env_file="$2"
 
             awk -v compose_file="$compose_file" -v expected_env_file="$expected_env_file" '
+              function trim(value) {
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+$/, "", value)
+                return value
+              }
+              function content_indent(value, prefix) {
+                match(value, /^[[:space:]]*/)
+                prefix = substr(value, 1, RLENGTH)
+                return length(prefix)
+              }
+              function strip_inline_comment(value) {
+                sub(/[[:space:]]+#.*/, "", value)
+                return value
+              }
               /^  dhcp-proxy:/ {
                 in_service=1
                 saw_service=1
+                in_env_file_block=0
                 next
               }
               in_service && /^  [[:alnum:]_-]+:/ {
                 in_service=0
+                in_env_file_block=0
               }
               in_service {
-                if (index($0, expected_env_file) > 0) {
+                line=strip_inline_comment($0)
+                stripped=trim(line)
+
+                if (in_env_file_block && stripped != "" && content_indent(line) <= env_file_indent) {
+                  in_env_file_block=0
+                }
+                if (in_env_file_block && stripped ~ /^-/ && index(stripped, expected_env_file) > 0) {
                   saw_env_file=1
                 }
-                if ($0 ~ /^[[:space:]]*environment:[[:space:]]*$/) {
-                  saw_environment_block=1
+
+                if (line ~ /^[[:space:]]*env_file:[[:space:]]*$/) {
+                  in_env_file_block=1
+                  env_file_indent=content_indent(line)
+                } else if (line ~ /^[[:space:]]*env_file:[[:space:]]*/ && index(line, expected_env_file) > 0) {
+                  saw_env_file=1
                 }
-                if ($0 ~ /(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/) {
+
+                if (line ~ /^[[:space:]]*environment:[[:space:]]*/) {
+                  saw_environment=1
+                }
+                if (stripped ~ /^-[[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/ || stripped ~ /[{,][[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP):[[:space:]]*"\$\{/) {
                   saw_interpolated_dhcp_key=1
                 }
               }
@@ -574,7 +604,7 @@ jobs:
                   printf "::error file=%s::dhcp-proxy must keep using env_file %s so setup-managed dnsmasq-proxy values are not lost.\n", compose_file, expected_env_file
                   exit 1
                 }
-                if (saw_environment_block || saw_interpolated_dhcp_key) {
+                if (saw_environment || saw_interpolated_dhcp_key) {
                   printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for dev/prod.\n", compose_file
                   exit 1
                 }
@@ -582,7 +612,7 @@ jobs:
             ' "$compose_file"
           }
 
-          # #418: dev/prod dhcp-proxy values are written by setup into env files.
+          # Dev/prod dhcp-proxy values are written by setup into env files.
           # Compose interpolation does not read env_file values, so explicit
           # environment entries here would silently erase the configured proxy
           # DHCP settings. Quickstart is intentionally separate because setup
