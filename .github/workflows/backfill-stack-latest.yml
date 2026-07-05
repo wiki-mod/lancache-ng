@@ -9,10 +9,10 @@ name: Backfill Stack Latest
 on:
   workflow_dispatch:
     inputs:
-      source_channel:
-        description: Existing stack channel to read, usually edge.
+      source_release_tag:
+        description: Stable stack release tag to read, for example v0.1.0.
         required: true
-        default: edge
+        default: v0.1.0
       expected_source_tag:
         description: Expected immutable sha-* tag from stack.env.
         required: true
@@ -25,7 +25,9 @@ permissions:
   packages: write
 
 concurrency:
-  group: backfill-stack-latest
+  # `latest` writes must serialize with the normal release promotion job in
+  # build-push.yml so rollback state cannot interleave across workflows.
+  group: "Build & Push-publish"
   cancel-in-progress: false
 
 defaults:
@@ -37,6 +39,30 @@ jobs:
     name: backfill latest from existing stack pointer
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
+      - name: Require default branch dispatch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+          SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
+          EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          [[ "$CONFIRMATION" = "promote-latest" ]] \
+            || { echo "::error::confirmation must be promote-latest."; exit 1; }
+          [[ "$DEFAULT_BRANCH" = "master" ]] \
+            || { echo "::error::Repository default branch must be master for this package-writing workflow."; exit 1; }
+          [[ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ]] \
+            || { echo "::error::Backfill must be dispatched from refs/heads/${DEFAULT_BRANCH}, got ${GITHUB_REF}."; exit 1; }
+          [[ "$GITHUB_REF_PROTECTED" = "true" ]] \
+            || { echo "::error::Backfill must run on the protected master branch before any checkout or registry login."; exit 1; }
+          [[ "$SOURCE_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::source_release_tag must be a stable release tag such as v0.1.0."; exit 1; }
+          [[ "$EXPECTED_SOURCE_TAG" =~ ^(sha-[0-9a-f]{7,}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+            || { echo "::error::expected_source_tag must be a stable release tag or immutable sha-* tag."; exit 1; }
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -53,22 +79,14 @@ jobs:
       - name: Backfill latest channel
         env:
           REPOSITORY: ${{ github.repository }}
-          SOURCE_CHANNEL: ${{ inputs.source_channel }}
+          SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
           EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
-          CONFIRMATION: ${{ inputs.confirmation }}
           REQUIRED_PLATFORMS: linux/amd64
         run: |
           set -euo pipefail
 
-          [[ "$CONFIRMATION" = "promote-latest" ]] \
-            || { echo "::error::confirmation must be promote-latest."; exit 1; }
-          [[ "$SOURCE_CHANNEL" =~ ^[A-Za-z0-9_.-]+$ ]] \
-            || { echo "::error::source_channel contains unsupported characters."; exit 1; }
-          [[ "$EXPECTED_SOURCE_TAG" =~ ^sha-[0-9a-f]{7,}$ ]] \
-            || { echo "::error::expected_source_tag must be an immutable sha-* tag."; exit 1; }
-
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
-          source_stack="ghcr.io/${REPOSITORY}/stack:${SOURCE_CHANNEL}"
+          source_stack="ghcr.io/${REPOSITORY}/stack:${SOURCE_RELEASE_TAG}"
           container_id=""
           stack_env=""
           resolved_source_tag=""
@@ -114,6 +132,7 @@ jobs:
           trap rollback_promotions EXIT
 
           docker buildx imagetools inspect "$source_stack" >/dev/null
+          docker pull "$source_stack" >/dev/null
           container_id="$(docker create "$source_stack")"
           stack_env="$(docker cp "${container_id}:/stack.env" - | tar -xO)"
           docker rm "$container_id" >/dev/null
@@ -140,6 +159,8 @@ jobs:
             bash scripts/require-image-platforms.sh "$source_image" "$REQUIRED_PLATFORMS"
           done
 
+          bash scripts/check-stable-external-images.sh
+
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
@@ -164,8 +185,8 @@ jobs:
 
           {
             printf '%s\n\n' "### Backfilled latest channel"
-            printf -- '- Source channel: %s\n' "$SOURCE_CHANNEL"
-            printf -- '- Source tag: %s\n' "$resolved_source_tag"
+            printf -- '- Source release tag: %s\n' "$SOURCE_RELEASE_TAG"
+            printf -- '- Resolved source tag: %s\n' "$resolved_source_tag"
             printf -- '- Source commit: %s\n' "$declared_commit"
             printf -- '- Target channel: latest\n'
           } >> "$GITHUB_STEP_SUMMARY"
