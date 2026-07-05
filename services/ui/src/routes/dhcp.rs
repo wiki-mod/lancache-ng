@@ -11,6 +11,7 @@
 use crate::{docker_client, AppState};
 use anyhow::Context as AnyhowContext;
 use axum::extract::{Form, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
@@ -191,15 +192,14 @@ pub struct RemoveReservationForm {
 
 // ─── Handlers ───
 
-pub async fn dhcp_page(State(state): State<Arc<AppState>>) -> Html<String> {
+pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let mut ctx = Context::new();
     let dhcp_has_kea = state.config.dhcp_mode.is_kea();
     ctx.insert("active_page", "dhcp");
     ctx.insert("dhcp_mode", &state.config.dhcp_mode.as_str());
     ctx.insert("dhcp_has_kea", &dhcp_has_kea);
-    ctx.insert("csrf_token", &state.csrf_token);
     ctx.insert("dhcp_api_url", &state.config.dhcp_api_url);
-    crate::routes::insert_csrf_token(&mut ctx, &state);
+    crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     if dhcp_has_kea && !state.config.dhcp_api_url.is_empty() {
         let subnets = fetch_subnets(&state).await.unwrap_or_default();
@@ -234,10 +234,11 @@ fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
 
 pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
@@ -284,10 +285,11 @@ pub async fn add_subnet(
 
 pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
     let lease_time = validate_dhcp_form(
         &form.subnet,
         &form.pool_start,
@@ -338,10 +340,11 @@ pub async fn update_subnet(
 
 pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -362,10 +365,11 @@ pub async fn remove_subnet(
 
 pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
@@ -395,10 +399,11 @@ pub async fn add_reservation(
 
 pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
-    crate::routes::verify_csrf_token(&state, &form.csrf_token).map_err(DhcpError::from)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
