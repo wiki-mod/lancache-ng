@@ -1101,9 +1101,10 @@ resolve_lancache_image_channel() {
         [[ -n "$release_tag" ]] && channel="pinned"
     fi
 
-    # Untagged checkouts follow the tested pre-stable channel; tagged
-    # releases stay pinned to their release tag.
-    channel="${channel:-edge}"
+    # Normal installs default to the stable channel. Untagged development or
+    # pre-stable testing must opt into edge explicitly so production users do
+    # not drift onto a moving integration channel by accident.
+    channel="${channel:-latest}"
     validate_lancache_image_channel "$channel"
     printf '%s\n' "$channel"
 }
@@ -2708,13 +2709,11 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 # For Admin UI (GB as number for progress bar)
 CACHE_MAX_GB=${cache_gb}
 
-# First-party service image selector. "edge" is the default for current
-# master checkouts; "latest" is the stable release channel used by tagged
-# release archives.
+# First-party service image selector. "latest" is the stable default.
+# Use "edge" only when you explicitly want the tested pre-stable channel.
 # setup.sh resolves mutable channels to an immutable sha-* service tag before
 # pulling images so one install cannot consume a mixed stack during promotion.
-# Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag and
-# keep the pinned release channel/tag pair intact.
+# Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.
 LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}
 LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}
 LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}
