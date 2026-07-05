@@ -541,6 +541,55 @@ jobs:
             exit 1
           fi
 
+          validate_dhcp_proxy_env_file_contract() {
+            local compose_file="$1"
+            local expected_env_file="$2"
+
+            awk -v compose_file="$compose_file" -v expected_env_file="$expected_env_file" '
+              /^  dhcp-proxy:/ {
+                in_service=1
+                saw_service=1
+                next
+              }
+              in_service && /^  [[:alnum:]_-]+:/ {
+                in_service=0
+              }
+              in_service {
+                if (index($0, expected_env_file) > 0) {
+                  saw_env_file=1
+                }
+                if ($0 ~ /^[[:space:]]*environment:[[:space:]]*$/) {
+                  saw_environment_block=1
+                }
+                if ($0 ~ /(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/) {
+                  saw_interpolated_dhcp_key=1
+                }
+              }
+              END {
+                if (!saw_service) {
+                  printf "::error file=%s::dhcp-proxy service is missing.\n", compose_file
+                  exit 1
+                }
+                if (!saw_env_file) {
+                  printf "::error file=%s::dhcp-proxy must keep using env_file %s so setup-managed dnsmasq-proxy values are not lost.\n", compose_file, expected_env_file
+                  exit 1
+                }
+                if (saw_environment_block || saw_interpolated_dhcp_key) {
+                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for dev/prod.\n", compose_file
+                  exit 1
+                }
+              }
+            ' "$compose_file"
+          }
+
+          # #418: dev/prod dhcp-proxy values are written by setup into env files.
+          # Compose interpolation does not read env_file values, so explicit
+          # environment entries here would silently erase the configured proxy
+          # DHCP settings. Quickstart is intentionally separate because setup
+          # writes its single .env file directly.
+          validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
+          validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
+
           if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
             echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
             exit 1
