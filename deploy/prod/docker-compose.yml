@@ -114,6 +114,9 @@ services:
       - NATS_RECONCILER=1
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
+      # Normal production keeps these overrides unset so one LANCACHE_STATE_DIR
+      # move retargets DNS and NATS together. setup.sh writes explicit keys only
+      # when it has to preserve a real legacy/custom path during update.
       - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
     ports:
@@ -231,6 +234,8 @@ services:
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
+      # Kea follows the same state-root contract as PowerDNS/NATS; leave
+      # KEA_DATA_DIR unset unless this service truly lives off the shared root.
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
     network_mode: host
     cap_add:
@@ -377,6 +382,8 @@ services:
         trap - EXIT
         exec nats-server -c /etc/nats/nats.conf
     volumes:
+      # nats-conf is generated runtime state, so the root-derived default keeps
+      # it outside the checkout while still allowing an explicit override.
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/data
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
     environment:
@@ -496,6 +503,8 @@ volumes:
     driver_opts:
       type: none
       o: bind
+      # CACHE_DIR_STANDARD stays available as an advanced override, but the
+      # normal production path is derived from the shared state root.
       device: ${CACHE_DIR_STANDARD:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
   watchdog-status:

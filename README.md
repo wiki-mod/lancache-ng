@@ -645,6 +645,12 @@ Current prebuilt first-party images are published for `linux/amd64`. Multi-archi
 
 Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
+This v0.1.x production contract intentionally keeps the optional per-service
+state override keys for compatibility with existing installs. Any broader
+cleanup of those legacy knobs should happen no earlier than a future v0.2.0
+migration path and must come with explicit `setup.sh` migration support rather
+than another silent path flip.
+
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
 ```env

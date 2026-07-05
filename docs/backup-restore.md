@@ -2,6 +2,8 @@
 
 LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling optional Watchtower helper updates.
 
+Legacy `/srv/lancache` paths in this document are compatibility and migration context only. They describe older repository-based installs that accidentally used `/srv/lancache`; they are not the intended active default for new or cleaned-up v0.1 production installs.
+
 ## Setup script commands
 
 The setup script includes three backup-related flows:
@@ -31,8 +33,10 @@ Use this when moving to new hardware or when losing cached objects would be expe
 The automated manifest includes these paths when they exist:
 
 - install configuration: `.env`, `docker-compose.yml`, and `certs/`; manual
-  `deploy/prod` backups also include the repository-root `certs/` directory
-  because production compose mounts that CA directory via `../../certs`
+  `deploy/prod` backups also include the repository-root runtime inputs reached
+  via `../../` (`certs/`, `config/prod/`, `services/dns/cdn-domains.txt`, and
+  `services/proxy/cdn-ssl-domains.txt`) because production compose mounts or
+  reads those tracked files outside `deploy/prod/`
 - quickstart Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and, for legacy installs only, `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, and `/srv/lancache/pdns-filter-state` when present
@@ -69,7 +73,7 @@ If Watchtower changed an optional helper image, remove `watchtower` from `COMPOS
 
 Test restores periodically on a spare host or VM:
 
-1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored `.env` are rewritten for migrations. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped.
+1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored `.env` are rewritten for migrations. Backups created from `deploy/prod` also remap the archived repository-root runtime inputs to the new checkout root instead of restoring them to stale absolute paths. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped.
 2. Start the stack.
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.
