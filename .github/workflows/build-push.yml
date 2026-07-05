@@ -503,6 +503,24 @@ jobs:
           grep -Fq 'fs::rename(&tmp_path, target)' services/ui/src/routes/secondaries.rs \
             || { echo "::error::Admin UI nats.conf writes must use temp-file plus rename, not direct overwrite."; exit 1; }
 
+          grep -Fq 'render_template_atomic' services/dns/entrypoint.sh \
+            || { echo "::error::DNS entrypoint must render generated configs through the atomic helper."; exit 1; }
+          grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' services/dns/entrypoint.sh \
+            || { echo "::error::DNS entrypoint generated configs must stage temp files in the target directory."; exit 1; }
+          if grep -Fq '> /tmp/recursor.conf' services/dns/entrypoint.sh \
+            || grep -Fq '> /tmp/pdns.conf' services/dns/entrypoint.sh; then
+            echo "::error::DNS entrypoint must not render PDNS configs through /tmp before replacing target configs."
+            exit 1
+          fi
+          if grep -Fq "sed -i 's/^  loglevel: 3$/  loglevel: 6/' /etc/pdns/recursor.conf" services/dns/entrypoint.sh; then
+            echo "::error::DNS query logging must be applied to the staged recursor.conf before replacement."
+            exit 1
+          fi
+          grep -Fq 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml"' setup.sh \
+            || { echo "::error::Secondary setup must atomically write generated docker-compose.yml."; exit 1; }
+          grep -Fq 'write_env_file "${secondary_dir}/.env"' setup.sh \
+            || { echo "::error::Secondary setup must use the safe env writer for generated .env files."; exit 1; }
+
           if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
             exit 1
