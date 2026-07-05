@@ -35,8 +35,10 @@ jobs:
   # PR-only change classification: skips per-crate/per-service heavy work only
   # when a PR clearly cannot affect it. Service-image decisions are based on
   # each Dockerfile's COPY graph, while docs/governance/setup/deploy/release
-  # classes stay visible for policy checks. Any workflow or composite-action
-  # change is treated as touching everything, since the CI logic itself changed.
+  # classes stay visible for policy checks. Build-affecting workflow or
+  # composite-action changes are treated as touching runtime services, since the
+  # CI logic itself changed. Dedicated release helper workflows remain release
+  # contract changes, and build-tools rebuilds stay tied to build-tools inputs.
   # Master/tag pushes are never scoped: they always run the full pipeline.
   detect-changes:
     name: detect changed paths
@@ -142,7 +144,9 @@ jobs:
             output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
             output_bool "proxy" touches_prefix "services/proxy/"
             output_bool "build_tools" touches_prefix "tools/build-tools/"
-            if touches_prefix ".github/workflows/" || touches_prefix ".github/actions/"; then
+            if touches_exact ".github/workflows/build-push.yml" \
+              || touches_exact ".github/workflows/build-tools.yml" \
+              || touches_prefix ".github/actions/"; then
               echo "workflow=true"
             else
               echo "workflow=false"
@@ -160,7 +164,11 @@ jobs:
               echo "setup_runtime=false"
             fi
             output_bool "deploy" touches_prefix "deploy/"
-            output_bool "release_contract" touches_prefix "release/"
+            if touches_prefix "release/" || touches_exact ".github/workflows/backfill-stack-latest.yml"; then
+              echo "release_contract=true"
+            else
+              echo "release_contract=false"
+            fi
             output_bool "scripts" touches_prefix "scripts/"
           } >> "$GITHUB_OUTPUT"
 
@@ -2050,7 +2058,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
