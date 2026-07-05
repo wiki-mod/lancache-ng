@@ -20,6 +20,8 @@ export LANG=C LC_ALL=C
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
+DEFAULT_UI_SESSION_TTL_SECONDS=86400
+MAX_UI_SESSION_TTL_SECONDS=31536000
 
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
@@ -89,6 +91,23 @@ is_valid_dhcp_mode() {
         disabled|kea|dnsmasq-proxy) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+validate_ui_session_ttl_seconds() {
+    local value="$1" source="${2:-UI_SESSION_TTL_SECONDS}" numeric max
+
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        die "UI_SESSION_TTL_SECONDS in ${source} must be an unsigned integer number of seconds."
+    fi
+    numeric="${value#"${value%%[!0]*}"}"
+    numeric="${numeric:-0}"
+    if [[ "$numeric" = "0" ]]; then
+        die "UI_SESSION_TTL_SECONDS in ${source} must be greater than zero."
+    fi
+    max="$MAX_UI_SESSION_TTL_SECONDS"
+    if (( ${#numeric} > ${#max} )) || { (( ${#numeric} == ${#max} )) && (( 10#$numeric > 10#$max )); }; then
+        die "UI_SESSION_TTL_SECONDS in ${source} must be at most ${MAX_UI_SESSION_TTL_SECONDS} seconds (1 year)."
+    fi
 }
 
 # Centralize runtime profile calculation so install and update cannot drift:
@@ -1347,7 +1366,7 @@ migrate_env_for_update() {
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
-    local state_dir state_root_default
+    local state_dir state_root_default ui_session_ttl
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     [[ -f "$env_file" ]] \
@@ -1356,6 +1375,10 @@ migrate_env_for_update() {
     print_step "Checking runtime .env"
 
     require_env_value_for_update IP_STANDARD "$env_file"
+    ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
+    ui_session_ttl="${ui_session_ttl:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
+    validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
+    set_env_key_if_empty_or_missing UI_SESSION_TTL_SECONDS "$ui_session_ttl" "$env_file"
 
     # Listener addresses. IP_SSL may stay empty; that means SSL mode is off.
     append_env_key_if_missing IP_SSL "" "$env_file"
@@ -2829,7 +2852,8 @@ NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
 NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
-UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-86400}"
+UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
+validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
 
 validate_env_values_for_initial_write \
     "IP_STANDARD=${IP_STANDARD}" \
