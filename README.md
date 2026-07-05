@@ -315,8 +315,8 @@ See `docs/backup-restore.md` for backup scope, restore testing, secret handling,
 resolves mutable channels to the immutable `LANCACHE_IMAGE_TAG` used by Docker
 Compose.
 
-- `latest` is the default stable release channel.
-- `edge` is the tested pre-stable channel promoted from `master`.
+- `edge` is the default channel for current `master` checkouts.
+- `latest` is the stable release channel published by tagged releases.
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
@@ -324,10 +324,11 @@ Compose.
 
 Recommended for production:
 
-- Use `latest` for normal stable deployments.
-- Use a tagged release value (for example `v1.2.3`) for pinned deployments.
-- Use `edge`, branch tags, or `sha-*` tags only for temporary test environments
-  where intentional drift is acceptable.
+- Use `latest` or a tagged release value (for example `v1.2.3`) for stable
+  deployments from a release archive.
+- Use `edge`, branch tags, or `sha-*` tags only for current `master`
+  checkouts and temporary test environments where intentional drift is
+  acceptable.
 
 The release workflow publishes service images with branch, tag, and SHA tags and keeps release source notes in GitHub releases.
 
@@ -604,13 +605,13 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 CACHE_MAX_GB=50
 
 # First-party service image selector.
-# latest is the latest stable release channel.
-# Use edge only when you explicitly want the tested pre-stable channel.
+# edge is the default channel for current master checkouts.
+# latest is the stable release channel used by tagged releases.
 # setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
 # Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
-LANCACHE_IMAGE_CHANNEL=latest
+LANCACHE_IMAGE_CHANNEL=edge
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
@@ -623,7 +624,14 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
-`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the latest stable release. Use `edge` only when you explicitly want the tested pre-stable channel. `setup.sh` resolves mutable channels through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers match the source tree.
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `edge` is the
+default for current `master` checkouts, while `latest` is the stable release
+channel published by tagged releases. `setup.sh` resolves mutable channels
+through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG`
+that Docker Compose pulls. If you install from a tagged release archive or a
+checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned`
+and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers
+match the source tree.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
 The resulting install/update path still stays pull-only and does not depend on
