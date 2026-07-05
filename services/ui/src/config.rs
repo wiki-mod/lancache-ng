@@ -7,6 +7,8 @@
 use std::env;
 use std::fmt;
 
+const DEFAULT_UI_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HstsMode {
     Auto,
@@ -228,7 +230,10 @@ impl Config {
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
             allow_insecure_ui: env_bool("ALLOW_INSECURE_UI", false),
-            ui_session_ttl_seconds: env_u64("UI_SESSION_TTL_SECONDS", 86_400)?,
+            ui_session_ttl_seconds: env_u64(
+                "UI_SESSION_TTL_SECONDS",
+                DEFAULT_UI_SESSION_TTL_SECONDS,
+            )?,
             security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
             hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
@@ -513,7 +518,10 @@ mod tests {
         let _guard = env_test_lock().lock().unwrap();
 
         env::remove_var("UI_SESSION_TTL_SECONDS");
-        assert_eq!(Config::from_env().unwrap().ui_session_ttl_seconds, 86_400);
+        assert_eq!(
+            Config::from_env().unwrap().ui_session_ttl_seconds,
+            DEFAULT_UI_SESSION_TTL_SECONDS
+        );
 
         env::set_var("UI_SESSION_TTL_SECONDS", "3600s");
         let err = Config::from_env().unwrap_err();
