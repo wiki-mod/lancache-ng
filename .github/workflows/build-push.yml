@@ -975,6 +975,12 @@ jobs:
             || { echo "::error::setup.sh secondary must write LANCACHE_IMAGE_CHANNEL."; exit 1; }
           grep -F 'derive_release_archive_image_tag()' setup.sh >/dev/null \
             || { echo "::error::setup.sh must preserve release archive image tags before defaulting to latest."; exit 1; }
+          grep -F 'channel="${channel:-latest}"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must keep latest as the normal stable default; edge must be explicit."; exit 1; }
+          grep -F 'LANCACHE_IMAGE_CHANNEL=latest' README.md >/dev/null \
+            || { echo "::error::README must document latest as the normal install default."; exit 1; }
+          grep -F 'edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`' docs/release-versioning.md >/dev/null \
+            || { echo "::error::Release docs must keep edge opt-in, not default."; exit 1; }
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh

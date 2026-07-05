@@ -1101,6 +1101,9 @@ resolve_lancache_image_channel() {
         [[ -n "$release_tag" ]] && channel="pinned"
     fi
 
+    # Normal installs default to the stable channel. Untagged development or
+    # pre-stable testing must opt into edge explicitly so production users do
+    # not drift onto a moving integration channel by accident.
     channel="${channel:-latest}"
     validate_lancache_image_channel "$channel"
     printf '%s\n' "$channel"
@@ -2706,7 +2709,7 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 # For Admin UI (GB as number for progress bar)
 CACHE_MAX_GB=${cache_gb}
 
-# First-party service image selector. "latest" is the latest stable release.
+# First-party service image selector. "latest" is the stable default.
 # Use "edge" only when you explicitly want the tested pre-stable channel.
 # setup.sh resolves mutable channels to an immutable sha-* service tag before
 # pulling images so one install cannot consume a mixed stack during promotion.
