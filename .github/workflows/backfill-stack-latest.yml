@@ -16,6 +16,9 @@ on:
       expected_source_tag:
         description: Expected immutable sha-* tag from stack.env.
         required: true
+      expected_source_commit:
+        description: Expected full 40-character source commit from stack.env.
+        required: true
       confirmation:
         description: Type promote-latest to move latest.
         required: true
@@ -46,6 +49,7 @@ jobs:
           GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
           SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
           EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
@@ -62,6 +66,8 @@ jobs:
             || { echo "::error::source_release_tag must be a stable release tag such as v0.1.0."; exit 1; }
           [[ "$EXPECTED_SOURCE_TAG" =~ ^(sha-[0-9a-f]{7,}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
             || { echo "::error::expected_source_tag must be a stable release tag or immutable sha-* tag."; exit 1; }
+          [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::expected_source_commit must be a full 40-character commit SHA."; exit 1; }
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -81,6 +87,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
           EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
           REQUIRED_PLATFORMS: linux/amd64
         run: |
           set -euo pipefail
@@ -148,6 +155,8 @@ jobs:
             || { echo "::error::Resolved source tag is not immutable: ${resolved_source_tag}."; exit 1; }
           [[ "$declared_commit" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "::error::stack.env is missing a full source commit."; exit 1; }
+          [[ "$declared_commit" = "$EXPECTED_SOURCE_COMMIT" ]] \
+            || { echo "::error::${source_stack} declares commit ${declared_commit}, expected ${EXPECTED_SOURCE_COMMIT}."; exit 1; }
 
           source_stack_immutable="ghcr.io/${REPOSITORY}/stack:${resolved_source_tag}"
           docker buildx imagetools inspect "$source_stack_immutable" >/dev/null
