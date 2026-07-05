@@ -1,29 +1,58 @@
 {# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 
-   Domain management page: manage CDN domains and LAN records. #}
+   DNS management page: manage CDN domains, SSL scope, LAN records, and the
+   IPv4-only setting via content tabs, with the secondary registration view
+   exposed from the shared DNS section. #}
 {% extends "base.html" %}
-{% block title %} – Domains{% endblock %}
+{% block title %} – DNS{% endblock %}
 
 {% block content %}
 <div class="max-w-5xl mx-auto space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">Domain-Verwaltung</h1>
+    <h1 class="text-xl font-bold text-white">DNS-Verwaltung</h1>
     <p class="text-sm text-slate-400 mt-1">
       CDN-Domains und LAN-Records können ohne Container-Neustart live geändert werden.
     </p>
   </div>
 
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+  <div class="flex items-center gap-2 border-b border-slate-700">
+    <a href="/domains"
+       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "domains" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
+      DNS
+    </a>
+    <a href="/secondaries"
+       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
+      Secondary
+    </a>
+  </div>
 
-    <!-- DNS-Domains -->
-    <div class="card flex flex-col gap-4">
+  <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
+    <button type="button" data-dns-tab="http"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      HTTP
+    </button>
+    <button type="button" data-dns-tab="https"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      HTTPS
+    </button>
+    <button type="button" data-dns-tab="lan"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      LAN
+    </button>
+    <button type="button" data-dns-tab="settings"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      Settings
+    </button>
+  </div>
+
+  <div class="space-y-6">
+    <section data-dns-panel="http" class="card flex flex-col gap-4">
       <div>
-        <h2 class="font-semibold text-slate-200">DNS-Liste</h2>
+        <h2 class="font-semibold text-slate-200">HTTP / DNS-Liste</h2>
         <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen</p>
       </div>
 
-      <!-- Add form -->
       <form action="/domains/dns/add" method="post" class="flex gap-2">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="text" name="domain" placeholder="z.B. steamcontent.com"
@@ -35,8 +64,7 @@
         </button>
       </form>
 
-      <!-- Domain list -->
-      <div class="space-y-1 max-h-96 overflow-y-auto">
+      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if dns_domains %}
         {% for domain in dns_domains %}
         <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
@@ -58,16 +86,14 @@
       </div>
 
       <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
-    </div>
+    </section>
 
-    <!-- SSL-Domains -->
-    <div class="card flex flex-col gap-4">
+    <section data-dns-panel="https" class="card flex flex-col gap-4 hidden">
       <div>
-        <h2 class="font-semibold text-slate-200">SSL-Zertifikat-Liste</h2>
+        <h2 class="font-semibold text-slate-200">HTTPS / SSL-Zertifikat-Liste</h2>
         <p class="text-xs text-slate-500 mt-0.5">cdn-ssl-domains.txt · Root-Domains für Wildcard-Certs</p>
       </div>
 
-      <!-- Add form -->
       <form action="/domains/ssl/add" method="post" class="flex gap-2">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="text" name="domain" placeholder="z.B. steampowered.com"
@@ -79,8 +105,7 @@
         </button>
       </form>
 
-      <!-- Domain list -->
-      <div class="space-y-1 max-h-96 overflow-y-auto">
+      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if ssl_domains %}
         {% for domain in ssl_domains %}
         <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
@@ -102,125 +127,119 @@
       </div>
 
       <p class="text-xs text-slate-500">{{ ssl_domains | length }} Einträge · Wildcard-Cert pro Root-Domain</p>
-    </div>
+    </section>
 
-  </div>
-
-  <!-- LAN-Einträge -->
-  <div class="card flex flex-col gap-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
-      <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
-    </div>
-
-    <!-- Add form -->
-    <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div class="flex gap-2">
-        <input type="text" name="name" placeholder="z.B. myserver.lan."
-               required
-               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-        <select name="record_type" required
-                class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
-          <option value="">Typ wählen</option>
-          <option value="A">A</option>
-          <option value="AAAA">AAAA</option>
-          <option value="CNAME">CNAME</option>
-          <option value="MX">MX</option>
-          <option value="TXT">TXT</option>
-        </select>
+    <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
+      <div>
+        <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
+        <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
       </div>
-      <div class="flex gap-2">
-        <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
-               required min="1"
-               class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-        <input type="text" name="content" placeholder="z.B. 192.168.1.10 oder mail.example.com"
-               required
-               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-        <button type="submit"
-                class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-          Hinzufügen
-        </button>
-      </div>
-    </form>
 
-    <!-- Record list -->
-    <div class="space-y-1 max-h-96 overflow-y-auto">
-      {% if lan_records %}
-      {% for record in lan_records %}
-      <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
-        <div class="flex-1 min-w-0">
-          <div class="flex gap-2 items-center">
-            <span class="font-mono text-sm text-slate-300">{{ record.name }}</span>
-            <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">{{ record.type }}</span>
-            <span class="text-xs text-slate-500">TTL: {{ record.ttl }}</span>
-          </div>
-          <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+      <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex gap-2">
+          <input type="text" name="name" placeholder="z.B. myserver.lan."
+                 required
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+          <select name="record_type" required
+                  class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
+            <option value="">Typ wählen</option>
+            <option value="A">A</option>
+            <option value="AAAA">AAAA</option>
+            <option value="CNAME">CNAME</option>
+            <option value="MX">MX</option>
+            <option value="TXT">TXT</option>
+          </select>
         </div>
-        <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="name" value="{{ record.name }}">
-          <input type="hidden" name="record_type" value="{{ record.type }}">
-          <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
+        <div class="flex gap-2">
+          <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
+                 required min="1"
+                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+          <input type="text" name="content" placeholder="z.B. 192.168.1.10 oder mail.example.com"
+                 required
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
           <button type="submit"
-                  data-record-name="{{ record.name }}"
-                  data-record-type="{{ record.type }}"
-                  onclick="return confirmRemoveRecord(this)"
-                  class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
-            Entfernen
+                  class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+            Hinzufügen
           </button>
-        </form>
+        </div>
+      </form>
+
+      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
+        {% if lan_records %}
+        {% for record in lan_records %}
+        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+          <div class="flex-1 min-w-0">
+            <div class="flex gap-2 items-center">
+              <span class="font-mono text-sm text-slate-300">{{ record.name }}</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">{{ record.type }}</span>
+              <span class="text-xs text-slate-500">TTL: {{ record.ttl }}</span>
+            </div>
+            <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+          </div>
+          <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="name" value="{{ record.name }}">
+            <input type="hidden" name="record_type" value="{{ record.type }}">
+            <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
+            <button type="submit"
+                    data-record-name="{{ record.name }}"
+                    data-record-type="{{ record.type }}"
+                    onclick="return confirmRemoveRecord(this)"
+                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+              Entfernen
+            </button>
+          </form>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>
+        {% endif %}
       </div>
-      {% endfor %}
-      {% else %}
-      <p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>
-      {% endif %}
-    </div>
 
-    <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
-  </div>
+      <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+    </section>
 
-  <!-- Info-Box -->
-  <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 text-sm text-blue-300">
-    <p class="font-semibold mb-1">Hinweis zum SSL-Modus</p>
-    <p>Die DNS-Liste steuert welche Domains auf den Cache-DNS zeigen.
-       Die SSL-Liste bestimmt für welche Domains ein Wildcard-Zertifikat ausgestellt wird.
-       Neue SSL-Domains brauchen einen Eintrag in <em>beiden</em> Listen.</p>
-  </div>
+    <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
+      <div>
+        <h2 class="font-semibold text-slate-200">Settings / IPv4-only Modus</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          Unterdrückt IPv6-Antworten für alle Domains — Clients nutzen dann IPv4 und landen im Cache.
+          Wird per Lua im PowerDNS Recursor umgesetzt, kein DNS-Neustart nötig.
+        </p>
+      </div>
 
-  <!-- AAAA-Filter -->
-  <div class="card flex flex-col gap-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">IPv4-only Modus (AAAA-Filter)</h2>
-      <p class="text-xs text-slate-500 mt-0.5">
-        Unterdrückt IPv6-Antworten für alle Domains — Clients nutzen dann IPv4 und landen im Cache.
-        Wird per Lua im PowerDNS Recursor umgesetzt, kein DNS-Neustart nötig.
+      <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
+                 {% if aaaa_filter_enabled %}checked{% endif %}
+                 class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer">
+          <label for="aaaa-enabled" class="text-sm text-slate-300 cursor-pointer">
+            IPv4-only aktivieren
+          </label>
+        </div>
+        <button type="submit"
+                class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+          Speichern
+        </button>
+      </form>
+
+      <p class="text-xs text-slate-500">
+        {% if aaaa_filter_enabled %}
+        Status: <span class="text-green-400 font-semibold">Aktiviert</span>
+        {% else %}
+        Status: <span class="text-slate-400">Deaktiviert</span>
+        {% endif %}
       </p>
-    </div>
+    </section>
+  </div>
 
-    <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div class="flex items-center gap-2">
-        <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
-               {% if aaaa_filter_enabled %}checked{% endif %}
-               class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer">
-        <label for="aaaa-enabled" class="text-sm text-slate-300 cursor-pointer">
-          IPv4-only aktivieren
-        </label>
-      </div>
-      <button type="submit"
-              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-        Speichern
-      </button>
-    </form>
-
-    <p class="text-xs text-slate-500">
-      {% if aaaa_filter_enabled %}
-      Status: <span class="text-green-400 font-semibold">Aktiviert</span>
-      {% else %}
-      Status: <span class="text-slate-400">Deaktiviert</span>
-      {% endif %}
-    </p>
+  <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 text-sm text-blue-300">
+    <p class="font-semibold mb-1">Hinweis zum DNS-Modus</p>
+    <p>Die HTTP-Liste steuert welche Domains auf den Cache-DNS zeigen.
+       Die HTTPS-Liste bestimmt für welche Domains ein Wildcard-Zertifikat ausgestellt wird.
+       Neue HTTPS-Domains brauchen einen Eintrag in <em>beiden</em> Listen.</p>
   </div>
 
 </div>
@@ -229,8 +248,29 @@
 
 {% block scripts %}
 <script>
+  function setActiveDnsTab(tabName) {
+    document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
+      panel.classList.toggle('hidden', panel.dataset.dnsPanel !== tabName);
+    });
+
+    document.querySelectorAll('.dns-tab-btn').forEach((button) => {
+      const isActive = button.dataset.dnsTab === tabName;
+      button.classList.toggle('border-blue-500', isActive);
+      button.classList.toggle('text-blue-300', isActive);
+      button.classList.toggle('text-slate-400', !isActive);
+      button.classList.toggle('hover:text-slate-200', !isActive);
+      button.classList.toggle('text-slate-200', isActive);
+    });
+  }
+
   function confirmRemoveRecord(btn) {
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
   }
+
+  document.querySelectorAll('.dns-tab-btn').forEach((button) => {
+    button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
+  });
+
+  setActiveDnsTab('http');
 </script>
 {% endblock %}

@@ -1,24 +1,35 @@
 {# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 
-   Secondary DNS registration and management page. #}
+   Secondary DNS registration and management page in the shared DNS section. #}
 {% extends "base.html" %}
-{% block title %} – Secondaries{% endblock %}
+{% block title %} – Secondary{% endblock %}
 
 {% block content %}
 <div class="max-w-5xl mx-auto space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">Secondary DNS</h1>
+    <h1 class="text-xl font-bold text-white">Secondary</h1>
     <p class="text-sm text-slate-400 mt-1">
       Externe DNS-Instanzen die automatisch synchronisiert werden
     </p>
+  </div>
+
+  <div class="flex items-center gap-2 border-b border-slate-700">
+    <a href="/domains"
+       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "domains" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
+      DNS
+    </a>
+    <a href="/secondaries"
+       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
+      Secondary
+    </a>
   </div>
 
   <!-- Registration Instructions Card -->
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen</p>
+      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>.</p>
     </div>
 
     <div class="relative group">
@@ -35,6 +46,16 @@
 
     <p class="text-xs text-slate-500">
       Der Befehl registriert den Secondary, generiert die benötigten Werte und startet den Container automatisch.
+    </p>
+
+    <p class="text-xs text-amber-300/90 leading-relaxed">
+      Hinweis für lokale Tests auf demselben Host: Wenn bereits ein Dienst Port 53 belegt, musst du eine freie
+      Bind-IP per <code class="text-slate-200">--listen-ip</code> angeben. Der Installer zeigt dir den Konflikt
+      dann direkt an, statt erst beim Docker-Start zu scheitern.
+    </p>
+
+    <p class="text-xs text-slate-500">
+      Zeitangaben werden als lokale Datum-/Uhrzeitangaben dargestellt, nicht als Unix-Zeitstempel.
     </p>
   </div>
 
@@ -62,12 +83,14 @@
           <tr class="hover:bg-slate-700/50 transition-colors">
             <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
             <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
-            <td class="px-3 py-2 text-slate-400 text-xs">{{ secondary.registered_at }}</td>
+            <td class="px-3 py-2 text-slate-400 text-xs">
+              <time class="js-epoch" data-epoch="{{ secondary.registered_at }}"></time>
+            </td>
             <td class="px-3 py-2 text-slate-400 text-xs">
               {% if secondary.last_seen %}
-                {{ secondary.last_seen }}
+                <time class="js-epoch" data-epoch="{{ secondary.last_seen }}"></time>
               {% else %}
-                <span class="text-slate-500">Nie</span>
+                <span class="text-slate-500">Noch nicht erfasst</span>
               {% endif %}
             </td>
             <td class="px-3 py-2 text-right space-x-2">
@@ -95,6 +118,28 @@
 
 {% block scripts %}
 <script>
+  function formatEpochSeconds(epochSeconds) {
+    const date = new Date(Number(epochSeconds) * 1000);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    return new Intl.DateTimeFormat('de-DE', {
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+      hour12: false,
+    }).format(date);
+  }
+
+  function formatEpochCells() {
+    document.querySelectorAll('.js-epoch').forEach((element) => {
+      const formatted = formatEpochSeconds(element.dataset.epoch);
+      if (formatted) {
+        element.textContent = formatted;
+      }
+    });
+  }
+
   function copyCmd() {
     const text = document.getElementById('install-cmd').innerText;
     navigator.clipboard.writeText(text).then(() => {
@@ -151,5 +196,7 @@
       alert(`Fehler: ${error.message}`);
     }
   }
+
+  formatEpochCells();
 </script>
 {% endblock %}

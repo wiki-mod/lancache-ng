@@ -71,7 +71,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
     ctx.insert("shared_cache", &shared_cache);
     ctx.insert("ssl_enabled", &cfg.ssl_enabled);
-    let dhcp_mode = cfg.dhcp_mode;
+    let dhcp_mode = cfg.effective_dhcp_mode();
     let has_kea = matches!(dhcp_mode, DhcpMode::Kea);
     ctx.insert("dhcp_mode", &dhcp_mode.as_str());
     ctx.insert("dhcp_mode_has_kea", &has_kea);
