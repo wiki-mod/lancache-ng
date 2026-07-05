@@ -99,6 +99,7 @@ configure_ddns_tsig() {
 
 render_template_atomic() {
     local variables="$1" template="$2" target="$3"
+    local enable_query_logging="${4:-0}"
     local target_dir target_name tmp
 
     target_dir=$(dirname "$target")
@@ -114,6 +115,9 @@ render_template_atomic() {
         echo "[lancache-dns] FATAL: failed to render $target_name"
         exit 1
     fi
+    if [ "$enable_query_logging" = "1" ]; then
+        sed -i 's/^  loglevel: 3$/  loglevel: 6/' "$tmp"
+    fi
 
     if ! mv "$tmp" "$target"; then
         rm -f "$tmp"
@@ -128,12 +132,10 @@ echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
 echo "[lancache-dns] Generating recursor.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable name.
-render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template /etc/pdns/recursor.conf
-
 if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
-    sed -i 's/^  loglevel: 3$/  loglevel: 6/' /etc/pdns/recursor.conf
 fi
+render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template /etc/pdns/recursor.conf "$LOG_QUERIES"
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
