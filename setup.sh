@@ -1451,7 +1451,7 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file="$install_dir/.env"
-    local cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    local cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir repo_root state_dir
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
     state_dir="${state_dir:-$(production_state_root_default "$install_dir")}"
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
@@ -1472,6 +1472,10 @@ backup_manifest() {
     pdns_standard_dir="${pdns_standard_dir:-$state_dir/pdns-standard}"
 
     printf '%s\n' "$install_dir/.env" "$install_dir/docker-compose.yml" "$install_dir/certs"
+    if [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]; then
+        repo_root=$(realpath -m "$install_dir/../..")
+        [[ -d "$repo_root/certs" ]] && printf '%s\n' "$repo_root/certs"
+    fi
     [[ -n "${pdns_standard_dir:-}" && -d "$pdns_standard_dir" ]] && printf '%s\n' "$pdns_standard_dir"
     [[ -n "${pdns_ssl_dir:-}" && -d "$pdns_ssl_dir" ]] && printf '%s\n' "$pdns_ssl_dir"
     [[ -n "${pdns_filter_state_dir:-}" && -d "$pdns_filter_state_dir" ]] && printf '%s\n' "$pdns_filter_state_dir"
@@ -1824,6 +1828,7 @@ EOF
 # convergence. Reordering can leave a half-migrated stack running.
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
+    install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported

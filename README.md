@@ -674,16 +674,20 @@ docker compose -f deploy/prod/docker-compose.yml pull
 docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
-For later upgrades from this manual checkout, pull the repository and update the
-production stack directory explicitly instead of using a raw compose pull/up:
+For later upgrades from this manual checkout, create a rollback backup before
+pulling new repository files, then update the production stack directory
+explicitly instead of using a raw compose pull/up:
 
 ```bash
+sudo ./setup.sh backup --config "$(pwd)/deploy/prod"
 git pull --ff-only
 sudo ./setup.sh update "$(pwd)/deploy/prod"
 ```
 
-The update command creates the rollback backup and applies state-path migrations
-before restarting the stack.
+The explicit pre-pull backup preserves the currently working compose, `.env`,
+certificates and runtime config before tracked files change. The update command
+creates another rollback backup after the pull, applies state-path migrations
+and validates compose before restarting the stack.
 
 Check status:
 

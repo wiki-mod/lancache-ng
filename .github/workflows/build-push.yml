@@ -321,8 +321,20 @@ jobs:
             || { echo "::error::setup.sh must keep a state-root default helper for setup installs and manual deploy/prod updates."; exit 1; }
           grep -F 'basename "$(dirname "$install_dir")")" = "deploy"' setup.sh >/dev/null \
             || { echo "::error::setup.sh deploy/prod updates must default runtime state to /opt/lancache-ng, not the checkout."; exit 1; }
+          grep -F 'install_dir=$(realpath -m "$install_dir")' setup.sh >/dev/null \
+            || { echo "::error::setup.sh update must normalize install_dir before cd so deploy/prod backups are path-stable."; exit 1; }
+          grep -F '[[ -d "$repo_root/certs" ]] && printf '\''%s\n'\'' "$repo_root/certs"' setup.sh >/dev/null \
+            || { echo "::error::deploy/prod backups must include repository-root certs mounted by production compose."; exit 1; }
           grep -F 'sudo ./setup.sh update "$(pwd)/deploy/prod"' README.md >/dev/null \
             || { echo "::error::README manual production updates must pass deploy/prod explicitly to setup.sh update."; exit 1; }
+          if awk '
+            /sudo \.\/setup\.sh backup --config "\$\(pwd\)\/deploy\/prod"/ { backup_seen=1 }
+            /git pull --ff-only/ && !backup_seen { print FILENAME ":" FNR ":" $0; found=1 }
+            END { exit found ? 0 : 1 }
+          ' README.md; then
+            echo "::error::README manual production updates must create a config backup before git pull changes tracked files."
+            exit 1
+          fi
           grep -F '${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard' deploy/prod/docker-compose.yml >/dev/null \
             || { echo "::error::prod compose must derive PowerDNS state from LANCACHE_STATE_DIR when no per-service override is set."; exit 1; }
           grep -F '${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf' deploy/prod/docker-compose.yml >/dev/null \

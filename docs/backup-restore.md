@@ -30,7 +30,9 @@ Use this when moving to new hardware or when losing cached objects would be expe
 
 The automated manifest includes these paths when they exist:
 
-- install configuration: `.env`, `docker-compose.yml`, and `certs/`
+- install configuration: `.env`, `docker-compose.yml`, and `certs/`; manual
+  `deploy/prod` backups also include the repository-root `certs/` directory
+  because production compose mounts that CA directory via `../../certs`
 - quickstart Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and, for legacy installs only, `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, and `/srv/lancache/pdns-filter-state` when present
