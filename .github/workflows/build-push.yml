@@ -1934,10 +1934,15 @@ jobs:
             secret_args+=(--secret "id=distcc_potential_hosts,src=$DISTCC_HOSTS_FILE")
           fi
 
+          scan_build_network="${RUST_BUILDX_NETWORK:-default}"
+          if [ "$scan_build_network" = "bridge" ]; then
+            scan_build_network=default
+          fi
+
           DOCKER_BUILDKIT=1 docker build \
             --pull \
             --platform ${{ matrix.platform }} \
-            --network "$RUST_ACCELERATION_NETWORK" \
+            --network "$scan_build_network" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
