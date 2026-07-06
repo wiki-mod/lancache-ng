@@ -69,6 +69,10 @@ is_positive_integer() {
     [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
 }
 
+is_absolute_path() {
+    [[ -n "${1:-}" && "$1" == /* ]]
+}
+
 is_dnsmasq_subnet_start() {
     local ip="$1"
 
@@ -993,8 +997,14 @@ set_optional_env_path_override_if_needed() {
     if [[ -n "$existing_assignment" ]]; then
         if [[ "$existing_assignment" = "$derived_path" ]]; then
             remove_env_key "$key" "$env_file"
-        else
+        elif [[ "$existing_assignment" == *'$'* ]]; then
+            # Preserve intentionally templated values like ${LAN_CACHE_ROOT}/cache.
             set_env_assignment "$key" "$existing_assignment" "$env_file"
+        elif is_absolute_path "$existing_assignment"; then
+            set_env_assignment "$key" "$existing_assignment" "$env_file"
+        else
+            # Repair obviously broken literal values such as "50" or "n".
+            set_env_key "$key" "$desired_path" "$env_file"
         fi
         return 0
     fi
@@ -1052,6 +1062,39 @@ install_quickstart_compose_assets() {
     else
         chmod 0755 "$socket_proxy_target"
     fi
+}
+
+git_default_branch_name() {
+    local repo_dir="$1" default_branch=""
+
+    default_branch=$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    default_branch="${default_branch#origin/}"
+    if [[ -z "$default_branch" ]]; then
+        default_branch=$(git -C "$repo_dir" remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF; exit}' || true)
+    fi
+
+    printf '%s\n' "${default_branch:-master}"
+}
+
+git_repo_is_clean() {
+    local repo_dir="$1"
+
+    [[ -z "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]]
+}
+
+sync_repo_to_default_branch() {
+    local repo_dir="$1" default_branch
+
+    default_branch=$(git_default_branch_name "$repo_dir")
+    git_repo_is_clean "$repo_dir" \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+
+    git -C "$repo_dir" fetch --prune origin \
+        || die "Failed to refresh repository metadata for $repo_dir."
+    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$default_branch" \
+        || die "Remote branch origin/$default_branch is unavailable for $repo_dir."
+    git -C "$repo_dir" checkout -B "$default_branch" "origin/$default_branch" \
+        || die "Failed to reset $repo_dir to origin/$default_branch."
 }
 
 deploy_prod_repo_root() {
@@ -2130,23 +2173,23 @@ cmd_update() {
     UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
 
+    if [[ -d "$install_dir/.git" ]]; then
+        print_step "Updating repo"
+        sync_repo_to_default_branch "$install_dir"
+    fi
+
+    # Quickstart installs keep a copied compose bundle under the install tree.
+    # Refresh those assets before any backup-driven restart so even copied
+    # installs use the current container wiring during the whole update.
+    install_quickstart_compose_assets "$install_dir"
+    print_ok "quickstart compose assets updated"
+
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
         trap - EXIT
         resume_lancache_convergence_after_update true
         UPDATE_CONVERGENCE_COMPLETED=1
         die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
-    fi
-
-    if [[ -d "$install_dir/.git" ]]; then
-        print_step "Updating repo"
-        git -C "$install_dir" pull --ff-only \
-            || print_warn "git pull failed — continuing with local version"
-        # Quickstart installs keep a copied compose bundle under the install
-        # tree, so a repo update must refresh those assets as well or the tree
-        # would silently keep the previous compose wiring.
-        install_quickstart_compose_assets "$install_dir"
-        print_ok "quickstart compose assets updated"
     fi
 
     migrate_env_for_update "$install_dir"
@@ -2698,7 +2741,8 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
         install_git
     fi
     if [[ -d "/opt/lancache-ng/.git" ]]; then
-        git -C /opt/lancache-ng pull --ff-only
+        print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+        sync_repo_to_default_branch /opt/lancache-ng
     else
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
             || die "Clone failed."
@@ -2785,12 +2829,20 @@ print_ok "quickstart compose assets copied to $INSTALL_DIR"
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
 
-ask "Cache directory" "$INSTALL_DIR/cache/standard"
-CACHE_DIR_STANDARD="$REPLY"
+while true; do
+    ask "Cache directory (absolute path)" "$INSTALL_DIR/cache/standard"
+    CACHE_DIR_STANDARD="$REPLY"
+    is_absolute_path "$CACHE_DIR_STANDARD" && break
+    print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache/standard)."
+done
 
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    ask "Cache directory SSL mode" "$INSTALL_DIR/cache/ssl"
-    CACHE_DIR_SSL="$REPLY"
+    while true; do
+        ask "Cache directory SSL mode (absolute path)" "$INSTALL_DIR/cache/ssl"
+        CACHE_DIR_SSL="$REPLY"
+        is_absolute_path "$CACHE_DIR_SSL" && break
+        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache/ssl)."
+    done
 else
     CACHE_DIR_SSL="$CACHE_DIR_STANDARD"
 fi
@@ -2857,8 +2909,12 @@ UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
 
-    ask "Kea data directory (config + leases)" "$INSTALL_DIR/kea"
-    KEA_DATA_DIR="$REPLY"
+    while true; do
+        ask "Kea data directory (config + leases, absolute path)" "$INSTALL_DIR/kea"
+        KEA_DATA_DIR="$REPLY"
+        is_absolute_path "$KEA_DATA_DIR" && break
+        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/kea)."
+    done
 
     while true; do
         ask "DHCP subnet (CIDR)" "10.0.0.0/24"
