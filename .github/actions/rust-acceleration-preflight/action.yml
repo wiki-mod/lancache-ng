@@ -270,9 +270,13 @@ runs:
                 distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"
                 PATH="$wrapper_dir:$PATH"
                 export PATH
-                pump_started=1
-                pump_log="$preflight_dir/distcc-pump.log"
-                run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
+                if [ -n "$distcc_pump_filtered_hosts" ]; then
+                  pump_started=1
+                  pump_log="$preflight_dir/distcc-pump.log"
+                  run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
+                else
+                  echo "[INFO] distcc-pump did not publish usable hosts; continuing with plain distcc fallback."
+                fi
                 distcc-pump --shutdown >/dev/null 2>&1 || true
                 unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
               fi
