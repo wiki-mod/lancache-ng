@@ -112,6 +112,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         return 0; \
       fi; \
       disable_distcc; \
+      unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
       echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
       if cargo build -j "$cargo_jobs" --release --locked; then \
         echo "[INFO] normal local C compiler fallback completed." >&2; \
