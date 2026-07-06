@@ -1054,6 +1054,39 @@ install_quickstart_compose_assets() {
     fi
 }
 
+git_default_branch_name() {
+    local repo_dir="$1" default_branch=""
+
+    default_branch=$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    default_branch="${default_branch#origin/}"
+    if [[ -z "$default_branch" ]]; then
+        default_branch=$(git -C "$repo_dir" remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF; exit}' || true)
+    fi
+
+    printf '%s\n' "${default_branch:-master}"
+}
+
+git_repo_is_clean() {
+    local repo_dir="$1"
+
+    [[ -z "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]]
+}
+
+sync_repo_to_default_branch() {
+    local repo_dir="$1" default_branch
+
+    default_branch=$(git_default_branch_name "$repo_dir")
+    git_repo_is_clean "$repo_dir" \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+
+    git -C "$repo_dir" fetch --prune origin \
+        || die "Failed to refresh repository metadata for $repo_dir."
+    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$default_branch" \
+        || die "Remote branch origin/$default_branch is unavailable for $repo_dir."
+    git -C "$repo_dir" checkout -B "$default_branch" "origin/$default_branch" \
+        || die "Failed to reset $repo_dir to origin/$default_branch."
+}
+
 deploy_prod_repo_root() {
     local install_dir="$1"
     realpath -m "$install_dir/../.."
@@ -2140,8 +2173,7 @@ cmd_update() {
 
     if [[ -d "$install_dir/.git" ]]; then
         print_step "Updating repo"
-        git -C "$install_dir" pull --ff-only \
-            || print_warn "git pull failed — continuing with local version"
+        sync_repo_to_default_branch "$install_dir"
         # Quickstart installs keep a copied compose bundle under the install
         # tree, so a repo update must refresh those assets as well or the tree
         # would silently keep the previous compose wiring.
@@ -2698,7 +2730,8 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
         install_git
     fi
     if [[ -d "/opt/lancache-ng/.git" ]]; then
-        git -C /opt/lancache-ng pull --ff-only
+        print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+        sync_repo_to_default_branch /opt/lancache-ng
     else
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
             || die "Clone failed."
