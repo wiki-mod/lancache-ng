@@ -254,8 +254,8 @@ runs:
                 esac
               done
               if [ -z "$distcc_hosts" ]; then
-                echo "[ERROR] DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts." >&2
-                exit 1
+                echo "[INFO] DISTCC_POTENTIAL_HOSTS did not resolve to usable remote hosts; falling back to 127.0.0.1."
+                distcc_hosts="127.0.0.1"
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
@@ -273,7 +273,13 @@ runs:
                 if [ -n "$distcc_pump_filtered_hosts" ]; then
                   pump_started=1
                   pump_log="$preflight_dir/distcc-pump.log"
-                  run_logged "$pump_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o"
+                  if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1; then
+                    scan_log "$pump_log"
+                  else
+                    cat "$pump_log" >&2
+                    echo "[INFO] distcc-pump probe did not complete; continuing with plain distcc fallback."
+                    unset pump_started
+                  fi
                 else
                   echo "[INFO] distcc-pump did not publish usable hosts; continuing with plain distcc fallback."
                 fi
