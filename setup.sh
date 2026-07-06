@@ -20,6 +20,7 @@ export LANG=C LC_ALL=C
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
+DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -1030,6 +1031,19 @@ runtime_env_file_for_install_dir() {
     fi
 }
 
+install_quickstart_compose_assets() {
+    local install_dir="$1" socket_proxy_target
+
+    socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
+    mkdir -p "$install_dir/scripts"
+    install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
+    if [[ "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" != "$(realpath -m "$socket_proxy_target")" ]]; then
+        install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
+    else
+        chmod 0755 "$socket_proxy_target"
+    fi
+}
+
 deploy_prod_repo_root() {
     local install_dir="$1"
     realpath -m "$install_dir/../.."
@@ -1714,7 +1728,7 @@ backup_manifest() {
 
     printf '%s\n' "$cache_env_file"
     [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
-    printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/certs"
+    printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/certs" "$install_dir/scripts"
     deploy_prod_repo_input_paths "$install_dir"
     [[ -n "${pdns_standard_dir:-}" && -d "$pdns_standard_dir" ]] && printf '%s\n' "$pdns_standard_dir"
     [[ -n "${pdns_ssl_dir:-}" && -d "$pdns_ssl_dir" ]] && printf '%s\n' "$pdns_ssl_dir"
@@ -2114,9 +2128,8 @@ cmd_update() {
         print_step "Updating repo"
         git -C "$install_dir" pull --ff-only \
             || print_warn "git pull failed — continuing with local version"
-        cp "$install_dir/deploy/quickstart/docker-compose.yml" \
-           "$install_dir/docker-compose.yml"
-        print_ok "docker-compose.yml updated"
+        install_quickstart_compose_assets "$install_dir"
+        print_ok "quickstart compose assets updated"
     fi
 
     migrate_env_for_update "$install_dir"
@@ -2749,8 +2762,8 @@ if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
 fi
 
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
-cp "$QUICKSTART_COMPOSE" "$INSTALL_DIR/docker-compose.yml"
-print_ok "docker-compose.yml copied to $INSTALL_DIR/docker-compose.yml"
+install_quickstart_compose_assets "$INSTALL_DIR"
+print_ok "quickstart compose assets copied to $INSTALL_DIR"
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
