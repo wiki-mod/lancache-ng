@@ -287,7 +287,9 @@ runs:
                 unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
               fi
 
-              distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
+              if [ -n "$distcc_pump_filtered_hosts" ]; then
+                distcc_hosts_without_pump="$distcc_pump_filtered_hosts"
+              fi
               export DISTCC_HOSTS="$distcc_hosts_without_pump"
               distcc_log="$preflight_dir/distcc.log"
               run_logged "$distcc_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
