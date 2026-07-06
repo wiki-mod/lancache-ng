@@ -64,6 +64,101 @@ is_valid_ipv4() {
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+detect_secondary_listen_ip() {
+    local ip
+
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' \
+        || true)
+    if [[ -n "$ip" ]] && is_valid_ipv4 "$ip"; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+
+    ip=$(ip -4 addr show \
+        | awk '/inet / && $2 !~ /^127\./ && $2 !~ /^172\./ { sub(/\/.*/, "", $2); print $2; exit }' \
+        || true)
+    if [[ -n "$ip" ]] && is_valid_ipv4 "$ip"; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+
+    return 1
+}
+
+secondary_listen_ip_conflicts() {
+    local listen_ip="$1"
+
+    ss -H -ltnup '( sport = :53 )' 2>/dev/null | awk -v ip="$listen_ip" '
+        {
+            local = $5
+            sub(/:[0-9]+$/, "", local)
+            if (ip == "0.0.0.0") {
+                print
+            } else if (local == ip || local == "0.0.0.0" || local == "*") {
+                print
+            }
+        }
+    '
+}
+
+secondary_suggest_alternate_listen_ip() {
+    local current="$1" candidate
+
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        [[ "$candidate" = "$current" ]] && continue
+        [[ -z "$(secondary_listen_ip_conflicts "$candidate")" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(
+        ip -4 addr show \
+            | awk '/inet / && $2 !~ /^127\./ && $2 !~ /^172\./ { sub(/\/.*/, "", $2); print $2 }'
+    )
+
+    for candidate in 127.0.0.1 127.0.0.2 127.0.0.3 127.0.0.4 127.0.0.5 127.0.0.6 127.0.0.7 127.0.0.8 127.0.0.9 127.0.0.10; do
+        [[ "$candidate" = "$current" ]] && continue
+        [[ -z "$(secondary_listen_ip_conflicts "$candidate")" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+
+    return 1
+}
+
+secondary_choose_listen_ip() {
+    local listen_ip="$1" conflicts suggestion
+
+    while true; do
+        conflicts="$(secondary_listen_ip_conflicts "$listen_ip")"
+        if [[ -z "$conflicts" ]]; then
+            printf '%s\n' "$listen_ip"
+            return 0
+        fi
+
+        print_warn "Port 53 is already in use for bind IP ${listen_ip}."
+        {
+            printf '%s\n' "$conflicts" | sed 's/^/    /'
+            if command -v fuser >/dev/null 2>&1; then
+                fuser -v 53/tcp 53/udp 2>&1 | sed 's/^/    /' || true
+            fi
+            if command -v lsof >/dev/null 2>&1; then
+                lsof -nP -iTCP:53 -iUDP:53 -sTCP:LISTEN 2>/dev/null | sed 's/^/    /' || true
+            fi
+        } >&2
+
+        if ! [[ -t 0 && -t 1 ]]; then
+            return 1
+        fi
+
+        suggestion="$(secondary_suggest_alternate_listen_ip "$listen_ip" || true)"
+        ask "Use another Secondary bind IP" "${suggestion:-$listen_ip}"
+        listen_ip="$REPLY"
+        is_valid_ipv4 "$listen_ip" \
+            || { print_error "Invalid IPv4 address: $listen_ip"; continue; }
+    done
+}
+
 is_valid_cidr() {
     local cidr="$1" ip mask octets
 
@@ -2202,7 +2297,7 @@ cmd_update_ip() {
 # credentials returned by the primary UI/API, writes a small DNS-only compose
 # directory, and must not modify the primary host configuration.
 cmd_secondary() {
-    local primary="" token="" name="" proxy_ip="" listen_ip="0.0.0.0" rotate=0
+    local primary="" token="" name="" proxy_ip="" listen_ip="" rotate=0
     local response_file http_status response secondary_dir
     local nats_url nats_user nats_password consumer_name pdns_api_key
     local response_image_registry response_image_prefix response_image_channel response_image_tag
@@ -2220,7 +2315,7 @@ Required arguments:
   --proxy-ip <ip>    Primary proxy IP address clients should use for cached traffic
 
 Optional arguments:
-  --listen-ip <ip>   Bind IP for the secondary DNS container (default: 0.0.0.0)
+  --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
   --rotate           Reuse an existing secondary directory and refresh credentials
 EOF
     }
@@ -2284,10 +2379,16 @@ EOF
         || die "--name must contain only alphanumeric characters and dashes"
     is_valid_ipv4 "$proxy_ip" \
         || die "--proxy-ip must be a valid IPv4 address"
-    if [[ "$listen_ip" != "0.0.0.0" ]]; then
+    if [[ -n "$listen_ip" ]]; then
         is_valid_ipv4 "$listen_ip" \
-            || die "--listen-ip must be a valid IPv4 address or 0.0.0.0"
+            || die "--listen-ip must be a valid IPv4 address"
+    else
+        listen_ip=$(detect_secondary_listen_ip) \
+            || die "Could not auto-detect a secondary bind IP. Re-run with --listen-ip <ip>."
     fi
+    listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
+        || die "No free secondary bind IP available on port 53. Re-run with --listen-ip <ip> after freeing the port."
+    print_ok "Secondary DNS bind IP: ${listen_ip}"
     assert_prebuilt_image_platform_supported
 
     print_step "Registering secondary"
@@ -2421,8 +2522,8 @@ services:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
     ports:
-      - "\${LISTEN_IP:-0.0.0.0}:53:53/udp"
-      - "\${LISTEN_IP:-0.0.0.0}:53:53/tcp"
+      - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
+      - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
     restart: always
     logging:
       driver: json-file
@@ -2434,6 +2535,8 @@ volumes:
   pdns-data:
   pdns-filter-state:
 EOF
+
+    secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 
     write_env_file "${secondary_dir}/.env" <<EOF
 PROXY_IP=${proxy_ip}
@@ -2450,7 +2553,7 @@ LANCACHE_IMAGE_TAG=${lancache_image_tag}
 EOF
 
     print_step "Starting secondary DNS container"
-    (cd "$secondary_dir" && docker compose --env-file "$(runtime_env_file_for_install_dir "$secondary_dir")" up -d) \
+    (cd "$secondary_dir" && docker compose --env-file "$secondary_env_file" up -d) \
         || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."

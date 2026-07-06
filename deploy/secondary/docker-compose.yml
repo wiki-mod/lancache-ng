@@ -21,8 +21,8 @@ services:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
     ports:
-      - "${LISTEN_IP:-0.0.0.0}:53:53/udp"
-      - "${LISTEN_IP:-0.0.0.0}:53:53/tcp"
+      - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
+      - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
     healthcheck:
       test: ["CMD", "rec_control", "ping"]
       interval: 30s

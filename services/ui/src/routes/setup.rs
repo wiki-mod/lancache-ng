@@ -11,7 +11,7 @@ pub async fn setup_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut ctx = Context::new();
     ctx.insert("standard_ip", &state.config.standard_ip);
     ctx.insert("ssl_ip", &state.config.ssl_ip);
-    ctx.insert("dhcp_mode", &state.config.dhcp_mode.as_str());
+    ctx.insert("dhcp_mode", &state.config.effective_dhcp_mode().as_str());
     ctx.insert("active_page", "setup");
     crate::routes::render(&state.templates, "setup.html", &ctx, state.config.dev_mode)
 }

@@ -4,19 +4,107 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="space-y-6">
+<div class="max-w-5xl mx-auto space-y-6">
 
-  <div class="bg-slate-800 border border-slate-700 rounded-lg p-4">
-    <div class="flex items-center justify-between">
-      <h2 class="text-sm font-medium text-white">DHCP mode</h2>
-      <span class="text-xs text-slate-400">{{ dhcp_mode }}</span>
+  <div>
+    <h1 class="text-xl font-bold text-white">DHCP-Verwaltung</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      DHCP-Modus, Kea-Subnetze, Reservierungen und Leases werden hier gemeinsam verwaltet.
+    </p>
+  </div>
+
+  <div class="flex items-center gap-2 border-b border-slate-700">
+    <a href="/dhcp"
+       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "dhcp" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
+      DHCP
+    </a>
+    <a href="/secondaries"
+       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
+      Secondary
+    </a>
+  </div>
+
+  <div class="card space-y-4">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 class="font-semibold text-slate-200">DHCP mode</h2>
+        <p class="text-xs text-slate-500 mt-0.5">Der Modus wird live aus der UI-Konfiguration gelesen und persistent in `/data` gespeichert.</p>
+      </div>
+      <span class="text-xs px-2 py-1 rounded bg-slate-700 text-slate-200">{{ dhcp_mode }}</span>
     </div>
-    {% if not dhcp_has_kea %}
-      {% if dhcp_mode == "dnsmasq-proxy" %}
-      <p class="text-sm text-amber-300 mt-2">dnsmasq proxy mode is active. Kea subnet, reservation, and lease management is disabled for this mode.</p>
-      {% else %}
-      <p class="text-sm text-slate-400 mt-2">DHCP management is disabled. Existing router DHCP remains responsible for clients.</p>
-      {% endif %}
+
+    <form method="post" action="/dhcp/mode" class="grid gap-3 md:grid-cols-2 items-end">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
+        <select name="dhcp_mode"
+                class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="disabled" {% if dhcp_mode == "disabled" %}selected{% endif %}>disabled</option>
+          <option value="kea" {% if dhcp_mode == "kea" %}selected{% endif %}>kea</option>
+          <option value="dnsmasq-proxy" {% if dhcp_mode == "dnsmasq-proxy" %}selected{% endif %}>dnsmasq-proxy</option>
+        </select>
+      </div>
+      <button type="submit"
+              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        Speichern
+      </button>
+    </form>
+
+    {% if dhcp_mode == "dnsmasq-proxy" %}
+      <div class="text-sm text-amber-300 space-y-2">
+        <p>dnsmasq proxy mode is active. This page shows the live proxy values and lets you edit them directly as simple fields.</p>
+        <ul class="list-disc pl-5 space-y-1 text-amber-200">
+          <li>Proxy-DHCP / PXE helper only</li>
+          <li>Expected proxy options: <code>DHCP_SUBNET_START</code>, <code>DHCP_DNS_PRIMARY</code>, <code>DHCP_DNS_SECONDARY</code>, <code>UPSTREAM_DHCP_IP</code></li>
+          <li>DNS values are plain IP fields; no JSON, no client-class syntax, no advanced parser tricks</li>
+        </ul>
+        <div class="grid gap-2 md:grid-cols-2 rounded border border-amber-500/30 bg-slate-900/50 p-3 text-xs">
+          <div><span class="text-slate-400">Subnet start:</span> <span class="text-white">{{ dhcp_proxy_subnet_start }}</span></div>
+          <div><span class="text-slate-400">Upstream DHCP:</span> <span class="text-white">{{ dhcp_upstream_dhcp_ip }}</span></div>
+          <div><span class="text-slate-400">DNS 1:</span> <span class="text-white">{{ dhcp_dns_primary }}</span></div>
+          <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
+        </div>
+        <form method="post" action="/dhcp/proxy" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="grid gap-3 md:grid-cols-2">
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Proxy subnet start</label>
+              <input type="text" name="dhcp_subnet_start" value="{{ dhcp_proxy_subnet_start }}" placeholder="10.0.0.0" required
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server</label>
+              <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
+              <input type="text" name="dhcp_dns_primary" value="{{ dhcp_dns_primary }}" placeholder="10.0.0.10" required
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
+              <input type="text" name="dhcp_dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="10.0.0.11"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+          </div>
+          <button type="submit"
+                  class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+            Proxy-Werte speichern
+          </button>
+        </form>
+      </div>
+    {% elif dhcp_mode == "kea" %}
+      <div class="text-sm text-green-400 space-y-2">
+        <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
+        <ul class="list-disc pl-5 space-y-1 text-green-300">
+          <li>Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options</li>
+          <li>Current Kea subnet editor preserves unmanaged <code>option-data</code> entries on save, but exposes only simple fields here</li>
+          <li>Static reservations and live leases are available below</li>
+        </ul>
+      </div>
+    {% else %}
+      <p class="text-sm text-slate-400">DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.</p>
     {% endif %}
   </div>
 
@@ -26,7 +114,9 @@
     <div class="flex items-center justify-between">
       <div>
         <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
-        <p id="check-status" class="text-sm text-slate-400">Prüfe auf fremde DHCP-Server...</p>
+        <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
+        <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
+        <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
       </div>
       <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
         Erneut prüfen
@@ -60,6 +150,16 @@
               class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
           </div>
           <div>
+            <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
+            <input type="text" name="dns_primary" value="{{ dhcp_dns_primary }}" placeholder="192.168.2.10" required
+              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
+            <input type="text" name="dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="192.168.2.11"
+              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
+          </div>
+          <div>
             <label class="block text-xs text-slate-400 mb-1">IP-Pool Start</label>
             <input type="text" name="pool_start" placeholder="192.168.2.100" required
               class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
@@ -78,6 +178,12 @@
             <label class="block text-xs text-slate-400 mb-1">Domain</label>
             <input type="text" name="domain" value="lan"
               class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
+          </div>
+          <div class="col-span-2">
+            <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
+            <input type="text" name="ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="192.0.2.123, 192.0.2.124"
+              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
+            <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Liste. Leerlassen, wenn du keinen NTP-Wert verteilen willst.</p>
           </div>
         </div>
         <div class="flex gap-2">
@@ -101,7 +207,10 @@
       <div class="flex items-center justify-between px-4 py-3 bg-slate-700">
         <div>
           <span class="text-white font-medium text-sm">{{ subnet.subnet }}</span>
-          <span class="ml-2 text-xs text-slate-400">ID {{ subnet.id }} · Pool {{ subnet.pool_start }}–{{ subnet.pool_end }} · GW {{ subnet.gateway }}</span>
+          <span class="ml-2 text-xs text-slate-400">ID {{ subnet.id }} · Pool {{ subnet.pool_start }}–{{ subnet.pool_end }} · GW {{ subnet.gateway }} · DNS {{ subnet.dns_primary }}{% if subnet.dns_secondary != "" %}, {{ subnet.dns_secondary }}{% endif %}</span>
+          {% if subnet.ntp_servers != "" %}
+          <div class="text-xs text-slate-500 mt-1">NTP {{ subnet.ntp_servers }}</div>
+          {% endif %}
         </div>
         <div class="flex gap-2">
           <button onclick="toggleEditSubnet({{ subnet.id }})" class="text-xs px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded">
@@ -135,6 +244,16 @@
                 class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
             </div>
             <div>
+              <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
+              <input type="text" name="dns_primary" value="{{ subnet.dns_primary }}" required
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
+              <input type="text" name="dns_secondary" value="{{ subnet.dns_secondary }}"
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
               <label class="block text-xs text-slate-400 mb-1">Pool Start</label>
               <input type="text" name="pool_start" value="{{ subnet.pool_start }}" required
                 class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
@@ -153,6 +272,12 @@
               <label class="block text-xs text-slate-400 mb-1">Domain</label>
               <input type="text" name="domain" value="{{ subnet.domain }}"
                 class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div class="col-span-2">
+              <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
+              <input type="text" name="ntp_servers" value="{{ subnet.ntp_servers }}"
+                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Adressen, z. B. <code>192.0.2.123, 192.0.2.124</code></p>
             </div>
           </div>
           <div class="flex gap-2">
@@ -201,6 +326,7 @@
             class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
         </div>
       </div>
+      <p class="text-xs text-slate-500">Die Reservierung nutzt einfache Felder; zusätzliche Kea-JSON-Metadaten sind in der UI bewusst ausgeblendet.</p>
       <button type="submit" class="w-full px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
         + Hinzufügen
       </button>
@@ -243,7 +369,7 @@
             <th class="text-left py-2 text-slate-300">MAC-Adresse</th>
             <th class="text-left py-2 text-slate-300">Hostname</th>
             <th class="text-left py-2 text-slate-300">Subnet</th>
-            <th class="text-left py-2 text-slate-300">Ablauf (Unix)</th>
+            <th class="text-left py-2 text-slate-300">Ablauf</th>
           </tr>
         </thead>
         <tbody>
@@ -253,7 +379,9 @@
             <td class="py-2 text-slate-300">{{ lease.mac }}</td>
             <td class="py-2 text-slate-300">{{ lease.hostname }}</td>
             <td class="py-2 text-slate-400">{{ lease.subnet_id }}</td>
-            <td class="py-2 text-slate-400">{{ lease.expires }}</td>
+            <td class="py-2 text-slate-400">
+              <span class="dhcp-expiry" data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
+            </td>
           </tr>
           {% endfor %}
           {% if leases | length == 0 %}
@@ -283,26 +411,72 @@ function toggleEditSubnet(id) {
 
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
+  const conflictEl = document.getElementById('check-conflict-status');
+  const clientEl = document.getElementById('check-client-status');
   statusEl.textContent = 'Prüfe...';
+  conflictEl.textContent = 'Konfliktprobe läuft...';
+  clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
     const res = await fetch('/api/dhcp/check');
     const data = await res.json();
-    if (data.status === 'found') {
-      statusEl.className = 'text-sm text-yellow-400';
-      statusEl.textContent = `⚠ DHCP-Server gefunden: ${data.output ?? ''}`;
-    } else if (data.status === 'not_found') {
+    if (data.status === 'verified') {
       statusEl.className = 'text-sm text-green-400';
-      statusEl.textContent = '✓ Kein fremder DHCP-Server gefunden';
+      statusEl.textContent = '✓ Konfliktprobe und DHCP-Client-Dry-Run erfolgreich';
+    } else if (data.status === 'conflict_found') {
+      statusEl.className = 'text-sm text-yellow-400';
+      statusEl.textContent = '⚠ Fremder DHCP-Server gefunden';
+    } else if (data.status === 'client_failed') {
+      statusEl.className = 'text-sm text-amber-400';
+      statusEl.textContent = '⚠ DHCP-Client-Dry-Run fehlgeschlagen';
     } else {
       statusEl.className = 'text-sm text-amber-400';
-      statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${data.reason ?? 'unbekannt'}`;
+      const reason = data.conflict?.reason ?? data.client?.reason ?? 'unbekannt';
+      statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${reason}`;
+    }
+    if (data.conflict?.status === 'found') {
+      conflictEl.className = 'text-sm text-yellow-400';
+      conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
+    } else if (data.conflict?.status === 'not_found') {
+      conflictEl.className = 'text-sm text-green-400';
+      conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';
+    } else {
+      conflictEl.className = 'text-sm text-amber-400';
+      conflictEl.textContent = `Konfliktprobe: nicht verfügbar (${data.conflict?.reason ?? 'unbekannt'})`;
+    }
+    if (data.client?.status === 'passed') {
+      clientEl.className = 'text-sm text-green-400';
+      clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
+    } else if (data.client?.status === 'failed') {
+      clientEl.className = 'text-sm text-amber-400';
+      clientEl.textContent = `DHCP-Client-Dry-Run: fehlgeschlagen (${data.client.output ?? 'ohne Detail'})`;
+    } else {
+      clientEl.className = 'text-sm text-amber-400';
+      clientEl.textContent = `DHCP-Client-Dry-Run: nicht verfügbar (${data.client?.reason ?? 'unbekannt'})`;
     }
   } catch (e) {
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
   }
 }
 
+function formatDhcpExpiries() {
+  const formatter = new Intl.DateTimeFormat('de-DE', {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+  });
+
+  document.querySelectorAll('.dhcp-expiry').forEach((el) => {
+    const epoch = Number(el.dataset.epoch);
+    if (!Number.isFinite(epoch) || epoch <= 0) {
+      return;
+    }
+
+    el.textContent = formatter.format(new Date(epoch * 1000));
+    el.title = `Unix: ${el.dataset.epoch}`;
+  });
+}
+
 document.addEventListener('DOMContentLoaded', checkDhcpConflict);
+document.addEventListener('DOMContentLoaded', formatDhcpExpiries);
 </script>
 {% endif %}
 {% endblock %}

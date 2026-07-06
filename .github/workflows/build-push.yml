@@ -394,6 +394,7 @@ jobs:
           DDNS_TSIG_KEY: ci-ddns-tsig-key
           IP_SSL: 127.0.0.2
           IP_STANDARD: 127.0.0.1
+          LISTEN_IP: 127.0.0.3
           ALLOW_INSECURE_UI: "true"
           KEA_CTRL_TOKEN: ci-kea-token
           NATS_CONSUMER: ci-secondary
@@ -432,6 +433,7 @@ jobs:
             --env DDNS_TSIG_KEY \
             --env IP_SSL \
             --env IP_STANDARD \
+            --env LISTEN_IP \
             --env ALLOW_INSECURE_UI \
             --env KEA_CTRL_TOKEN \
             --env NATS_CONSUMER \
@@ -539,12 +541,14 @@ jobs:
           fi
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
             grep -Fq 'acl safe_service_restart' "$compose_file" \
+              && grep -Fq 'acl safe_dhcp_action' "$compose_file" \
               && grep -Fq 'acl safe_probe_action' "$compose_file" \
               && grep -Fq 'acl lancache_container' "$compose_file" \
               && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
               && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$compose_file" \
+              && grep -Fq 'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)' "$compose_file" \
               && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$compose_file" \
-              && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$compose_file" \
+              && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$compose_file" \
               && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
               && grep -Fq 'http-request deny' "$compose_file" \
               && ! grep -Fq '/containers/create' "$compose_file" \

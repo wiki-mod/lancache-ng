@@ -6,6 +6,11 @@
 
 set -e
 
+if [ -f /data/lancache-ui-settings.env ]; then
+    # shellcheck disable=SC1091
+    . /data/lancache-ui-settings.env
+fi
+
 : "${DHCP_SUBNET_START:?DHCP_SUBNET_START is required for dnsmasq proxy mode.}"
 : "${DHCP_DNS_PRIMARY:?DHCP_DNS_PRIMARY is required for dnsmasq proxy mode.}"
 : "${DHCP_DNS_SECONDARY:=$DHCP_DNS_PRIMARY}"
