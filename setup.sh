@@ -2173,6 +2173,17 @@ cmd_update() {
     UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
 
+    if [[ -d "$install_dir/.git" ]]; then
+        print_step "Updating repo"
+        sync_repo_to_default_branch "$install_dir"
+    fi
+
+    # Quickstart installs keep a copied compose bundle under the install tree.
+    # Refresh those assets before any backup-driven restart so even copied
+    # installs use the current container wiring during the whole update.
+    install_quickstart_compose_assets "$install_dir"
+    print_ok "quickstart compose assets updated"
+
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
         trap - EXIT
@@ -2180,17 +2191,6 @@ cmd_update() {
         UPDATE_CONVERGENCE_COMPLETED=1
         die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
     fi
-
-    if [[ -d "$install_dir/.git" ]]; then
-        print_step "Updating repo"
-        sync_repo_to_default_branch "$install_dir"
-    fi
-
-    # Quickstart installs keep a copied compose bundle under the install tree.
-    # Refresh those assets on every update, even when the install directory is
-    # not itself a git checkout, or the stack can keep stale compose wiring.
-    install_quickstart_compose_assets "$install_dir"
-    print_ok "quickstart compose assets updated"
 
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
