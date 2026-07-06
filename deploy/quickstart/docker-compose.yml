@@ -427,6 +427,8 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     entrypoint: ["/usr/local/bin/dhcp-probe.sh"]
     network_mode: host
+    volumes:
+      - ./scripts/dhcp-probe.sh:/usr/local/bin/dhcp-probe.sh:ro
     restart: "no"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
