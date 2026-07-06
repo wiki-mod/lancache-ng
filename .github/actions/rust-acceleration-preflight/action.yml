@@ -232,9 +232,11 @@ runs:
                   break
                 fi
               done
+              original_path="$PATH"
+              distcc_enabled=1
               if [ -z "$wrapper_dir" ]; then
-                echo "[ERROR] distcc wrapper directory not found." >&2
-                exit 1
+                echo "[INFO] distcc wrapper directory not found; skipping distcc preflight and using plain cc."
+                distcc_enabled=0
               fi
 
               printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/distcc-probe.c"
@@ -259,49 +261,70 @@ runs:
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
-              export PATH="$wrapper_dir:$PATH"
-              export DISTCC_FALLBACK=0
+              if [ "$distcc_enabled" = "1" ]; then
+                export PATH="$wrapper_dir:$PATH"
+                export DISTCC_FALLBACK=0
 
-              if [ -n "$distcc_pump_hosts" ]; then
-                export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"
-                unset DISTCC_HOSTS
-                pump_env="$(distcc-pump --startup)"
-                eval "$pump_env"
-                distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"
-                PATH="$wrapper_dir:$PATH"
-                export PATH
-                if [ -n "$distcc_pump_filtered_hosts" ]; then
-                  pump_started=1
-                  pump_log="$preflight_dir/distcc-pump.log"
-                  if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1; then
-                    scan_log "$pump_log"
+                if [ -n "$distcc_pump_hosts" ]; then
+                  export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"
+                  unset DISTCC_HOSTS
+                  pump_env="$(distcc-pump --startup)"
+                  eval "$pump_env"
+                  distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"
+                  PATH="$wrapper_dir:$PATH"
+                  export PATH
+                  if [ -n "$distcc_pump_filtered_hosts" ]; then
+                    pump_started=1
+                    pump_log="$preflight_dir/distcc-pump.log"
+                    if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1; then
+                      scan_log "$pump_log"
+                    else
+                      cat "$pump_log" >&2
+                      echo "[INFO] distcc-pump probe did not complete; continuing with plain distcc fallback."
+                      unset pump_started
+                    fi
                   else
-                    cat "$pump_log" >&2
-                    echo "[INFO] distcc-pump probe did not complete; continuing with plain distcc fallback."
-                    unset pump_started
+                    echo "[INFO] distcc-pump did not publish usable hosts; continuing with plain distcc fallback."
                   fi
-                else
-                  echo "[INFO] distcc-pump did not publish usable hosts; continuing with plain distcc fallback."
+                  distcc-pump --shutdown >/dev/null 2>&1 || true
+                  unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
-                distcc-pump --shutdown >/dev/null 2>&1 || true
-                unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
+
+                distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
+                final_distcc_hosts="$distcc_hosts_without_pump"
+                if [ -n "$distcc_pump_filtered_hosts" ]; then
+                  final_distcc_hosts="$distcc_pump_filtered_hosts"
+                fi
+                if [ -z "$final_distcc_hosts" ]; then
+                  final_distcc_hosts="$distcc_hosts"
+                fi
+                if [ -z "$final_distcc_hosts" ]; then
+                  echo "[INFO] distcc host list unavailable after pump handling; skipping distcc preflight and using plain cc."
+                  distcc_enabled=0
+                fi
               fi
 
-              distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
-              final_distcc_hosts="$distcc_hosts_without_pump"
-              if [ -n "$distcc_pump_filtered_hosts" ]; then
-                final_distcc_hosts="$distcc_pump_filtered_hosts"
+              if [ "$distcc_enabled" = "1" ]; then
+                export DISTCC_HOSTS="$final_distcc_hosts"
+                distcc_log="$preflight_dir/distcc.log"
+                if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1; then
+                  scan_log "$distcc_log"
+                  echo "[INFO] distcc preflight completed."
+                else
+                  cat "$distcc_log" >&2
+                  echo "[INFO] distcc preflight failed; using plain cc fallback."
+                  export PATH="$original_path"
+                  unset DISTCC_HOSTS DISTCC_FALLBACK
+                  plain_log="$preflight_dir/plain-cc.log"
+                  run_logged "$plain_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
+                  echo "[INFO] plain cc fallback completed."
+                fi
+              else
+                export PATH="$original_path"
+                unset DISTCC_HOSTS DISTCC_FALLBACK
+                plain_log="$preflight_dir/plain-cc.log"
+                run_logged "$plain_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
+                echo "[INFO] plain cc fallback completed."
               fi
-              if [ -z "$final_distcc_hosts" ]; then
-                final_distcc_hosts="$distcc_hosts"
-              fi
-              if [ -z "$final_distcc_hosts" ]; then
-                echo "[INFO] distcc host list still empty after pump handling; forcing localhost fallback."
-                final_distcc_hosts="127.0.0.1"
-              fi
-              export DISTCC_HOSTS="$final_distcc_hosts"
-              distcc_log="$preflight_dir/distcc.log"
-              run_logged "$distcc_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
-              echo "[INFO] distcc preflight completed."
             fi
         PREFLIGHT
