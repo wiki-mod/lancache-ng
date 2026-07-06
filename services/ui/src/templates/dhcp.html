@@ -114,7 +114,9 @@
     <div class="flex items-center justify-between">
       <div>
         <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
-        <p id="check-status" class="text-sm text-slate-400">Prüfe auf fremde DHCP-Server...</p>
+        <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
+        <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
+        <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
       </div>
       <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
         Erneut prüfen
@@ -179,9 +181,9 @@
           </div>
           <div class="col-span-2">
             <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
-            <input type="text" name="ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="debian.pool.ntp.org, time.nist.gov"
+            <input type="text" name="ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="192.0.2.123, 192.0.2.124"
               class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-            <p class="text-xs text-slate-500 mt-1">Kommagetrennte Liste. Leerlassen, wenn du keinen NTP-Wert verteilen willst.</p>
+            <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Liste. Leerlassen, wenn du keinen NTP-Wert verteilen willst.</p>
           </div>
         </div>
         <div class="flex gap-2">
@@ -275,7 +277,7 @@
               <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
               <input type="text" name="ntp_servers" value="{{ subnet.ntp_servers }}"
                 class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Kommagetrennt, z. B. <code>debian.pool.ntp.org, time.nist.gov</code></p>
+              <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Adressen, z. B. <code>192.0.2.123, 192.0.2.124</code></p>
             </div>
           </div>
           <div class="flex gap-2">
@@ -409,19 +411,47 @@ function toggleEditSubnet(id) {
 
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
+  const conflictEl = document.getElementById('check-conflict-status');
+  const clientEl = document.getElementById('check-client-status');
   statusEl.textContent = 'Prüfe...';
+  conflictEl.textContent = 'Konfliktprobe läuft...';
+  clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
     const res = await fetch('/api/dhcp/check');
     const data = await res.json();
-    if (data.status === 'found') {
-      statusEl.className = 'text-sm text-yellow-400';
-      statusEl.textContent = `⚠ DHCP-Server gefunden: ${data.output ?? ''}`;
-    } else if (data.status === 'not_found') {
+    if (data.status === 'verified') {
       statusEl.className = 'text-sm text-green-400';
-      statusEl.textContent = '✓ Kein fremder DHCP-Server gefunden';
+      statusEl.textContent = '✓ Konfliktprobe und DHCP-Client-Dry-Run erfolgreich';
+    } else if (data.status === 'conflict_found') {
+      statusEl.className = 'text-sm text-yellow-400';
+      statusEl.textContent = '⚠ Fremder DHCP-Server gefunden';
+    } else if (data.status === 'client_failed') {
+      statusEl.className = 'text-sm text-amber-400';
+      statusEl.textContent = '⚠ DHCP-Client-Dry-Run fehlgeschlagen';
     } else {
       statusEl.className = 'text-sm text-amber-400';
-      statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${data.reason ?? 'unbekannt'}`;
+      const reason = data.conflict?.reason ?? data.client?.reason ?? 'unbekannt';
+      statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${reason}`;
+    }
+    if (data.conflict?.status === 'found') {
+      conflictEl.className = 'text-sm text-yellow-400';
+      conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
+    } else if (data.conflict?.status === 'not_found') {
+      conflictEl.className = 'text-sm text-green-400';
+      conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';
+    } else {
+      conflictEl.className = 'text-sm text-amber-400';
+      conflictEl.textContent = `Konfliktprobe: nicht verfügbar (${data.conflict?.reason ?? 'unbekannt'})`;
+    }
+    if (data.client?.status === 'passed') {
+      clientEl.className = 'text-sm text-green-400';
+      clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
+    } else if (data.client?.status === 'failed') {
+      clientEl.className = 'text-sm text-amber-400';
+      clientEl.textContent = `DHCP-Client-Dry-Run: fehlgeschlagen (${data.client.output ?? 'ohne Detail'})`;
+    } else {
+      clientEl.className = 'text-sm text-amber-400';
+      clientEl.textContent = `DHCP-Client-Dry-Run: nicht verfügbar (${data.client?.reason ?? 'unbekannt'})`;
     }
   } catch (e) {
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;

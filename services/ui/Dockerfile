@@ -352,6 +352,7 @@ RUN set -eu; \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     coreutils \
+    isc-dhcp-client \
     locales \
     nmap \
     util-linux \
@@ -364,12 +365,13 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY dhcp-probe.sh /usr/local/bin/dhcp-probe.sh
 
 RUN groupadd --system --gid 10001 lancache \
     && useradd --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh
+    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/dhcp-probe.sh
 
 
 EXPOSE 8080

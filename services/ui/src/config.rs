@@ -257,7 +257,7 @@ impl Config {
         let dhcp_api_url = env_str("DHCP_API_URL", "http://localhost:8000");
         let dhcp_dns_primary = env::var("DHCP_DNS_PRIMARY").unwrap_or_else(|_| standard_ip.clone());
         let dhcp_dns_secondary = env::var("DHCP_DNS_SECONDARY").unwrap_or_else(|_| ssl_ip.clone());
-        let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "debian.pool.ntp.org,time.nist.gov");
+        let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "");
         let dhcp_proxy_subnet_start = env_str("DHCP_SUBNET_START", "");
         let dhcp_upstream_dhcp_ip = env_str("UPSTREAM_DHCP_IP", "");
 

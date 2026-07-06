@@ -1,8 +1,8 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
-//! conflict checks, and applies guarded DHCP config mutations through the Kea
-//! control-agent with rollback handling for failed persistence.
+//! dual DHCP probe checks, and applies guarded DHCP config mutations through
+//! the Kea control-agent with rollback handling for failed persistence.
 //!
 //! Docker exec is intentionally not used here. The UI talks to a narrowed
 //! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
@@ -111,11 +111,38 @@ fn html_escape(s: &str) -> String {
 
 // ─── Data Structures ───
 
-#[derive(Debug)]
-enum DhcpCheckStatus {
-    Found(String),
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum DhcpConflictCheckStatus {
+    Found { output: String },
     NotFound,
-    Unavailable(String),
+    Unavailable { reason: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum DhcpClientCheckStatus {
+    Passed { output: String },
+    Failed { output: String },
+    Unavailable { reason: String },
+}
+
+#[derive(Debug)]
+struct DhcpCheckReport {
+    conflict: DhcpConflictCheckStatus,
+    client: DhcpClientCheckStatus,
+}
+
+impl DhcpCheckReport {
+    fn overall_status(&self) -> &'static str {
+        match (&self.conflict, &self.client) {
+            (DhcpConflictCheckStatus::Found { .. }, _) => "conflict_found",
+            (DhcpConflictCheckStatus::Unavailable { .. }, _) => "unavailable",
+            (_, DhcpClientCheckStatus::Unavailable { .. }) => "unavailable",
+            (_, DhcpClientCheckStatus::Failed { .. }) => "client_failed",
+            (_, DhcpClientCheckStatus::Passed { .. }) => "verified",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -285,6 +312,42 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
     }
 }
 
+async fn reconcile_dhcp_mode(
+    state: &AppState,
+    mode: crate::config::DhcpMode,
+) -> Result<(), DhcpError> {
+    // Only predeclared Compose services are controlled here. Missing profile
+    // containers stay a visible operator error instead of silently diverging
+    // from the UI's persisted DHCP mode.
+    match mode {
+        crate::config::DhcpMode::Disabled => {
+            docker_client::stop_service_if_present(&state.docker, "dhcp")
+                .await
+                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
+                .await
+                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+        }
+        crate::config::DhcpMode::Kea => {
+            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
+                .await
+                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+            docker_client::start_service(&state.docker, "dhcp")
+                .await
+                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+        }
+        crate::config::DhcpMode::DnsmasqProxy => {
+            docker_client::stop_service_if_present(&state.docker, "dhcp")
+                .await
+                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+            docker_client::start_service(&state.docker, "dhcp-proxy")
+                .await
+                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<(), DhcpError> {
     let mut map = BTreeMap::new();
     for (key, value) in values {
@@ -373,6 +436,7 @@ pub async fn update_dhcp_mode(
             ),
         ],
     )?;
+    reconcile_dhcp_mode(&state, mode).await?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -423,16 +487,16 @@ pub async fn add_subnet(
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
-    let lease_time = validate_dhcp_form(
-        &form.subnet,
-        &form.pool_start,
-        &form.pool_end,
-        &form.gateway,
-        &form.dns_primary,
-        &form.dns_secondary,
-        &form.ntp_servers,
-        &form.lease_time,
-    )
+    let lease_time = validate_dhcp_form(DhcpFormValidation {
+        subnet: &form.subnet,
+        pool_start: &form.pool_start,
+        pool_end: &form.pool_end,
+        gateway: &form.gateway,
+        dns_primary: &form.dns_primary,
+        dns_secondary: &form.dns_secondary,
+        ntp_servers: &form.ntp_servers,
+        lease_time: &form.lease_time,
+    })
     .map_err(DhcpError::from)?;
 
     kea_config_modify(&state, move |config| {
@@ -480,16 +544,16 @@ pub async fn update_subnet(
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
-    let lease_time = validate_dhcp_form(
-        &form.subnet,
-        &form.pool_start,
-        &form.pool_end,
-        &form.gateway,
-        &form.dns_primary,
-        &form.dns_secondary,
-        &form.ntp_servers,
-        &form.lease_time,
-    )
+    let lease_time = validate_dhcp_form(DhcpFormValidation {
+        subnet: &form.subnet,
+        pool_start: &form.pool_start,
+        pool_end: &form.pool_end,
+        gateway: &form.gateway,
+        dns_primary: &form.dns_primary,
+        dns_secondary: &form.dns_secondary,
+        ntp_servers: &form.ntp_servers,
+        lease_time: &form.lease_time,
+    })
     .map_err(DhcpError::from)?;
     let subnet_id = form.id;
 
@@ -618,20 +682,12 @@ pub async fn remove_reservation(
 }
 
 pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let status = check_other_dhcp(&state).await;
-    match status {
-        DhcpCheckStatus::Found(ip) => Json(json!({
-            "status": "found",
-            "output": ip
-        })),
-        DhcpCheckStatus::NotFound => Json(json!({
-            "status": "not_found"
-        })),
-        DhcpCheckStatus::Unavailable(reason) => Json(json!({
-            "status": "unavailable",
-            "reason": reason
-        })),
-    }
+    let report = check_dhcp_probe(&state).await;
+    Json(json!({
+        "status": report.overall_status(),
+        "conflict": report.conflict,
+        "client": report.client,
+    }))
 }
 
 // ─── Kea API Core ───
@@ -921,30 +977,27 @@ async fn fetch_all_reservations(
     ))
 }
 
-async fn check_other_dhcp(state: &AppState) -> DhcpCheckStatus {
+async fn check_dhcp_probe(state: &AppState) -> DhcpCheckReport {
     // Serializes probe requests against the single predeclared dhcp-probe
     // container — concurrent /api/dhcp/check calls would otherwise race to
     // restart/attach/inspect the same container.
     let _guard = state.dhcp_probe_lock.lock().await;
 
-    let output = match run_dhcp_conflict_probe(&state.docker).await {
+    let output = match run_dhcp_probe(&state.docker).await {
         Ok(out) => out,
         Err(e) => {
-            return DhcpCheckStatus::Unavailable(format!("Failed to execute DHCP check: {}", e));
+            return DhcpCheckReport {
+                conflict: DhcpConflictCheckStatus::Unavailable {
+                    reason: format!("Failed to execute DHCP check: {}", e),
+                },
+                client: DhcpClientCheckStatus::Unavailable {
+                    reason: "probe container did not complete".to_string(),
+                },
+            };
         }
     };
 
-    // Parse "Server Identifier: 198.51.100.1" from nmap output
-    for line in output.lines() {
-        let line = normalize_nmap_line(line);
-        if let Some(rest) = line.strip_prefix("Server Identifier:") {
-            let ip = rest.trim().to_string();
-            if !ip.is_empty() {
-                return DhcpCheckStatus::Found(ip);
-            }
-        }
-    }
-    DhcpCheckStatus::NotFound
+    parse_dhcp_probe_report(&output)
 }
 
 fn normalize_nmap_line(line: &str) -> &str {
@@ -954,8 +1007,10 @@ fn normalize_nmap_line(line: &str) -> &str {
 
 const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
 const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
+const DHCP_CONFLICT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CONFLICT_RESULT__";
+const DHCP_CLIENT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CLIENT_RESULT__";
 
-async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
+async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
     let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
         .context("resolve DHCP probe container")?;
 
@@ -995,6 +1050,91 @@ async fn run_dhcp_conflict_probe(docker: &bollard::Docker) -> Result<String, any
     }
 
     Ok(output)
+}
+
+fn parse_dhcp_probe_report(output: &str) -> DhcpCheckReport {
+    DhcpCheckReport {
+        conflict: parse_conflict_probe_result(output),
+        client: parse_client_probe_result(output),
+    }
+}
+
+fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
+    if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CONFLICT_RESULT_MARKER) {
+        return match status {
+            "found" if !detail.is_empty() => DhcpConflictCheckStatus::Found {
+                output: detail.to_string(),
+            },
+            "not_found" => DhcpConflictCheckStatus::NotFound,
+            "unavailable" => DhcpConflictCheckStatus::Unavailable {
+                reason: if detail.is_empty() {
+                    "nmap did not return a summary".to_string()
+                } else {
+                    detail.to_string()
+                },
+            },
+            _ => DhcpConflictCheckStatus::Unavailable {
+                reason: format!("unexpected conflict summary: {} {}", status, detail),
+            },
+        };
+    }
+
+    for line in output.lines() {
+        let line = normalize_nmap_line(line);
+        if let Some(rest) = line.strip_prefix("Server Identifier:") {
+            let ip = rest.trim().to_string();
+            if !ip.is_empty() {
+                return DhcpConflictCheckStatus::Found { output: ip };
+            }
+        }
+    }
+
+    DhcpConflictCheckStatus::NotFound
+}
+
+fn parse_client_probe_result(output: &str) -> DhcpClientCheckStatus {
+    if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CLIENT_RESULT_MARKER) {
+        return match status {
+            "passed" => DhcpClientCheckStatus::Passed {
+                output: if detail.is_empty() {
+                    "dhclient dry-run succeeded".to_string()
+                } else {
+                    detail.to_string()
+                },
+            },
+            "failed" => DhcpClientCheckStatus::Failed {
+                output: if detail.is_empty() {
+                    "dhclient dry-run failed".to_string()
+                } else {
+                    detail.to_string()
+                },
+            },
+            "unavailable" => DhcpClientCheckStatus::Unavailable {
+                reason: if detail.is_empty() {
+                    "dhclient dry-run unavailable".to_string()
+                } else {
+                    detail.to_string()
+                },
+            },
+            _ => DhcpClientCheckStatus::Unavailable {
+                reason: format!("unexpected client summary: {} {}", status, detail),
+            },
+        };
+    }
+
+    DhcpClientCheckStatus::Unavailable {
+        reason: "dhclient summary missing".to_string(),
+    }
+}
+
+fn parse_probe_result_line<'a>(output: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
+    output.lines().rev().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix(marker)?;
+        let rest = rest.trim_start();
+        let (status, detail) = rest.split_once(' ').unwrap_or((rest, ""));
+        Some((status.trim(), detail.trim()))
+    })
 }
 
 async fn collect_container_logs_since(
@@ -1097,25 +1237,27 @@ fn is_valid_mac(mac: &str) -> bool {
     cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn validate_dhcp_form(
-    subnet: &str,
-    pool_start: &str,
-    pool_end: &str,
-    gateway: &str,
-    dns_primary: &str,
-    dns_secondary: &str,
-    ntp_servers: &str,
-    lease_time: &str,
-) -> Result<u32, StatusCode> {
-    let (subnet_addr, prefix_len) = parse_cidr(subnet).ok_or(StatusCode::BAD_REQUEST)?;
-    let pool_start_addr = parse_ipv4(pool_start).ok_or(StatusCode::BAD_REQUEST)?;
-    let pool_end_addr = parse_ipv4(pool_end).ok_or(StatusCode::BAD_REQUEST)?;
-    let gateway_addr = parse_ipv4(gateway).ok_or(StatusCode::BAD_REQUEST)?;
-    let dns_primary_addr = parse_ipv4(dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
-    let dns_secondary_addr = if dns_secondary.trim().is_empty() {
+struct DhcpFormValidation<'a> {
+    subnet: &'a str,
+    pool_start: &'a str,
+    pool_end: &'a str,
+    gateway: &'a str,
+    dns_primary: &'a str,
+    dns_secondary: &'a str,
+    ntp_servers: &'a str,
+    lease_time: &'a str,
+}
+
+fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> {
+    let (subnet_addr, prefix_len) = parse_cidr(input.subnet).ok_or(StatusCode::BAD_REQUEST)?;
+    let pool_start_addr = parse_ipv4(input.pool_start).ok_or(StatusCode::BAD_REQUEST)?;
+    let pool_end_addr = parse_ipv4(input.pool_end).ok_or(StatusCode::BAD_REQUEST)?;
+    let gateway_addr = parse_ipv4(input.gateway).ok_or(StatusCode::BAD_REQUEST)?;
+    let dns_primary_addr = parse_ipv4(input.dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
+    let dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
         dns_primary_addr
     } else {
-        parse_ipv4(dns_secondary).ok_or(StatusCode::BAD_REQUEST)?
+        parse_ipv4(input.dns_secondary).ok_or(StatusCode::BAD_REQUEST)?
     };
 
     if !ipv4_in_cidr(subnet_addr, prefix_len, pool_start_addr)
@@ -1128,11 +1270,12 @@ fn validate_dhcp_form(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    if !ntp_servers.trim().is_empty() && parse_ntp_server_list(ntp_servers).is_empty() {
+    if !input.ntp_servers.trim().is_empty() && parse_ntp_server_list(input.ntp_servers).is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let lease_time = lease_time
+    let lease_time = input
+        .lease_time
         .parse::<u32>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if !(MIN_LEASE_TIME..=MAX_LEASE_TIME).contains(&lease_time) {
@@ -1361,6 +1504,9 @@ fn format_ntp_server_option(ntp_servers: &str) -> Option<String> {
 
 fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
+        .into_iter()
+        .filter(|server| parse_ipv4(server).is_some())
+        .collect()
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -1603,6 +1749,30 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
+    macro_rules! validate_test_dhcp_form {
+        (
+            $subnet:expr,
+            $pool_start:expr,
+            $pool_end:expr,
+            $gateway:expr,
+            $dns_primary:expr,
+            $dns_secondary:expr,
+            $ntp_servers:expr,
+            $lease_time:expr $(,)?
+        ) => {
+            validate_dhcp_form(DhcpFormValidation {
+                subnet: $subnet,
+                pool_start: $pool_start,
+                pool_end: $pool_end,
+                gateway: $gateway,
+                dns_primary: $dns_primary,
+                dns_secondary: $dns_secondary,
+                ntp_servers: $ntp_servers,
+                lease_time: $lease_time,
+            })
+        };
+    }
+
     #[derive(Debug)]
     enum MockStep {
         Response(Value),
@@ -1650,6 +1820,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_dual_dhcp_probe_report_with_conflict_and_client_success() {
+        let report = parse_dhcp_probe_report(
+            "__LANCACHE_DHCP_PROBE_START__ 1\n\
+             __LANCACHE_DHCP_CONFLICT_RESULT__ found 192.168.1.1\n\
+             __LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
+        );
+
+        assert_eq!(report.overall_status(), "conflict_found");
+        match report.conflict {
+            DhcpConflictCheckStatus::Found { output } => assert_eq!(output, "192.168.1.1"),
+            other => panic!("unexpected conflict result: {:?}", other),
+        }
+        match report.client {
+            DhcpClientCheckStatus::Passed { output } => {
+                assert_eq!(output, "dhclient succeeded on eth0")
+            }
+            other => panic!("unexpected client result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_dual_dhcp_probe_report_marks_missing_client_summary_unavailable() {
+        let report = parse_dhcp_probe_report("__LANCACHE_DHCP_PROBE_START__ 1\n");
+
+        assert_eq!(report.overall_status(), "unavailable");
+        assert!(matches!(report.conflict, DhcpConflictCheckStatus::NotFound));
+        assert!(matches!(
+            report.client,
+            DhcpClientCheckStatus::Unavailable { .. }
+        ));
+    }
+
+    #[test]
     fn kea_mutation_guard_requires_kea_mode_and_api_url() {
         assert!(kea_api_available(
             crate::config::DhcpMode::Kea,
@@ -1668,7 +1871,7 @@ mod tests {
 
     #[test]
     fn accepts_valid_dhcp_form() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1684,7 +1887,7 @@ mod tests {
 
     #[test]
     fn rejects_pool_outside_subnet() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.101.100",
             "198.51.101.200",
@@ -1700,7 +1903,7 @@ mod tests {
 
     #[test]
     fn rejects_reversed_pool_range() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.200",
             "198.51.100.100",
@@ -1716,7 +1919,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_lease_time() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1732,7 +1935,7 @@ mod tests {
 
     #[test]
     fn rejects_gateway_outside_subnet() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1748,7 +1951,7 @@ mod tests {
 
     #[test]
     fn rejects_non_network_cidr() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.5/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1764,7 +1967,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_lease_time() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1780,7 +1983,7 @@ mod tests {
 
     #[test]
     fn rejects_lease_time_below_minimum() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1796,7 +1999,7 @@ mod tests {
 
     #[test]
     fn accepts_lease_time_at_minimum() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1812,7 +2015,7 @@ mod tests {
 
     #[test]
     fn accepts_lease_time_at_maximum() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1828,7 +2031,7 @@ mod tests {
 
     #[test]
     fn rejects_lease_time_above_maximum() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",
@@ -1844,7 +2047,7 @@ mod tests {
 
     #[test]
     fn rejects_huge_lease_time() {
-        let lease_time = validate_dhcp_form(
+        let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",
             "198.51.100.100",
             "198.51.100.200",

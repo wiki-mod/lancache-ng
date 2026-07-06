@@ -7,7 +7,8 @@
 //! compose services.
 
 use anyhow::{Context, Result};
-use bollard::query_parameters::RestartContainerOptionsBuilder;
+use bollard::errors::Error as BollardError;
+use bollard::query_parameters::{RestartContainerOptionsBuilder, StopContainerOptionsBuilder};
 use bollard::Docker;
 
 pub fn connect_from_env() -> Result<Docker> {
@@ -42,11 +43,39 @@ pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> 
     Ok(())
 }
 
+pub async fn start_service(docker: &Docker, service_name: &str) -> Result<()> {
+    let id = container_name_for_service(service_name)?;
+    docker
+        .start_container(id, None)
+        .await
+        .with_context(|| format!("Failed to start '{}'", service_name))?;
+    tracing::info!("Started service '{}'", service_name);
+    Ok(())
+}
+
+pub async fn stop_service_if_present(docker: &Docker, service_name: &str) -> Result<()> {
+    let id = container_name_for_service(service_name)?;
+    let options = StopContainerOptionsBuilder::default().t(10).build();
+    match docker.stop_container(id, Some(options)).await {
+        Ok(()) => {
+            tracing::info!("Stopped service '{}'", service_name);
+            Ok(())
+        }
+        Err(BollardError::DockerResponseServerError {
+            status_code: 304 | 404,
+            ..
+        }) => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("Failed to stop '{}'", service_name)),
+    }
+}
+
 pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
     match service_name {
         "proxy" | "lancache-proxy" => Ok("lancache-proxy"),
         "dns-standard" | "lancache-dns-standard" => Ok("lancache-dns-standard"),
         "dns-ssl" | "lancache-dns-ssl" => Ok("lancache-dns-ssl"),
+        "dhcp" | "lancache-dhcp" => Ok("lancache-dhcp"),
+        "dhcp-proxy" | "lancache-dhcp-proxy" => Ok("lancache-dhcp-proxy"),
         "dhcp-probe" | "lancache-dhcp-probe" => Ok("lancache-dhcp-probe"),
         "nats" | "lancache-nats" => Ok("lancache-nats"),
         _ => anyhow::bail!(
