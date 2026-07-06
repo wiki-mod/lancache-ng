@@ -74,6 +74,7 @@ All GitHub content — issues, pull requests, commit messages, code comments, an
 - Setup, update, and migration logic must converge old or incomplete installations toward the current expected state.
 - Missing required configuration values should be generated when safe or rejected with a clear fail-closed error when they require user input.
 - Existing non-empty local values must be preserved by default.
+- DHCP NTP settings are a project-wide policy decision, not a per-PR cleanup target. Preserve the currently established DHCP NTP defaults and semantics exactly as they are defined in the repo unless a maintainer explicitly opens a separate issue/PR to change that policy. Do not silently remove, narrow, or "simplify" NTP values, and do not replace them with a different representation just because a validation path would be easier to satisfy.
 - Known placeholders such as `CHANGE_ME_*` are not valid runtime values and must be replaced or rejected before dependent services start.
 - Validation must happen before container restart, image pull, or runtime mutation when a failed validation would leave the installation in a worse state.
 - Re-running `setup.sh update` after a successful update should report no destructive changes and should not rewrite stable local files unnecessarily.

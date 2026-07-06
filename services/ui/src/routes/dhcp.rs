@@ -410,6 +410,7 @@ pub async fn update_dhcp_mode(
     let mode = parse_dhcp_mode_input(&form.dhcp_mode)
         .ok_or_else(|| DhcpError::conflict("Invalid DHCP mode requested."))?;
 
+    reconcile_dhcp_mode(&state, mode).await?;
     persist_ui_settings(
         &state,
         &[
@@ -436,7 +437,6 @@ pub async fn update_dhcp_mode(
             ),
         ],
     )?;
-    reconcile_dhcp_mode(&state, mode).await?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -1254,7 +1254,7 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     let pool_end_addr = parse_ipv4(input.pool_end).ok_or(StatusCode::BAD_REQUEST)?;
     let gateway_addr = parse_ipv4(input.gateway).ok_or(StatusCode::BAD_REQUEST)?;
     let dns_primary_addr = parse_ipv4(input.dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
-    let dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
+    let _dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
         dns_primary_addr
     } else {
         parse_ipv4(input.dns_secondary).ok_or(StatusCode::BAD_REQUEST)?
@@ -1263,8 +1263,6 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     if !ipv4_in_cidr(subnet_addr, prefix_len, pool_start_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, pool_end_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, gateway_addr)
-        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_primary_addr)
-        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_secondary_addr)
         || ipv4_to_u32(pool_start_addr) > ipv4_to_u32(pool_end_addr)
     {
         return Err(StatusCode::BAD_REQUEST);
@@ -1504,9 +1502,6 @@ fn format_ntp_server_option(ntp_servers: &str) -> Option<String> {
 
 fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
-        .into_iter()
-        .filter(|server| parse_ipv4(server).is_some())
-        .collect()
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -1878,6 +1873,22 @@ mod tests {
             "198.51.100.1",
             "198.51.100.2",
             "198.51.100.3",
+            "198.51.100.4",
+            "86400",
+        );
+
+        assert_eq!(lease_time.unwrap(), 86400);
+    }
+
+    #[test]
+    fn accepts_routed_dns_servers_outside_subnet() {
+        let lease_time = validate_test_dhcp_form!(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "10.0.0.10",
+            "203.0.113.53",
             "198.51.100.4",
             "86400",
         );
