@@ -252,7 +252,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let dhcp_has_kea = dhcp_mode.is_kea();
     let dhcp_dns_primary = state.config.effective_dhcp_dns_primary();
     let dhcp_dns_secondary = state.config.effective_dhcp_dns_secondary();
-    let dhcp_ntp_servers = effective_ipv4_ntp_servers(&state);
+    let dhcp_ntp_servers = state.config.effective_dhcp_ntp_servers();
     let dhcp_proxy_subnet_start = state.config.effective_dhcp_proxy_subnet_start();
     let dhcp_upstream_dhcp_ip = state.config.effective_dhcp_upstream_dhcp_ip();
     ctx.insert("active_page", "dhcp");
@@ -310,10 +310,6 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
         "dnsmasq-proxy" => Some(crate::config::DhcpMode::DnsmasqProxy),
         _ => None,
     }
-}
-
-fn effective_ipv4_ntp_servers(state: &AppState) -> String {
-    format_ntp_server_option(&state.config.effective_dhcp_ntp_servers()).unwrap_or_default()
 }
 
 async fn reconcile_dhcp_mode(
@@ -435,7 +431,10 @@ pub async fn update_dhcp_mode(
                 "UPSTREAM_DHCP_IP",
                 state.config.effective_dhcp_upstream_dhcp_ip(),
             ),
-            ("DHCP_NTP_SERVERS", effective_ipv4_ntp_servers(&state)),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -472,7 +471,10 @@ pub async fn update_dhcp_proxy(
             ("DHCP_DNS_PRIMARY", form.dhcp_dns_primary),
             ("DHCP_DNS_SECONDARY", form.dhcp_dns_secondary),
             ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
-            ("DHCP_NTP_SERVERS", effective_ipv4_ntp_servers(&state)),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -1251,20 +1253,24 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     let pool_start_addr = parse_ipv4(input.pool_start).ok_or(StatusCode::BAD_REQUEST)?;
     let pool_end_addr = parse_ipv4(input.pool_end).ok_or(StatusCode::BAD_REQUEST)?;
     let gateway_addr = parse_ipv4(input.gateway).ok_or(StatusCode::BAD_REQUEST)?;
-    parse_ipv4(input.dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
-    if !input.dns_secondary.trim().is_empty() {
-        parse_ipv4(input.dns_secondary).ok_or(StatusCode::BAD_REQUEST)?;
-    }
+    let dns_primary_addr = parse_ipv4(input.dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
+    let dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
+        dns_primary_addr
+    } else {
+        parse_ipv4(input.dns_secondary).ok_or(StatusCode::BAD_REQUEST)?
+    };
 
     if !ipv4_in_cidr(subnet_addr, prefix_len, pool_start_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, pool_end_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, gateway_addr)
+        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_primary_addr)
+        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_secondary_addr)
         || ipv4_to_u32(pool_start_addr) > ipv4_to_u32(pool_end_addr)
     {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    if !input.ntp_servers.trim().is_empty() && !ntp_server_list_is_ipv4(input.ntp_servers) {
+    if !input.ntp_servers.trim().is_empty() && parse_ntp_server_list(input.ntp_servers).is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -1498,14 +1504,6 @@ fn format_ntp_server_option(ntp_servers: &str) -> Option<String> {
 
 fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
-        .into_iter()
-        .filter(|server| parse_ipv4(server).is_some())
-        .collect()
-}
-
-fn ntp_server_list_is_ipv4(raw: &str) -> bool {
-    let servers = split_option_list(raw);
-    !servers.is_empty() && servers.iter().all(|server| parse_ipv4(server).is_some())
 }
 
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
@@ -1943,38 +1941,6 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "not-a-number",
-        );
-
-        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
-    }
-
-    #[test]
-    fn rejects_ntp_hostnames() {
-        let lease_time = validate_test_dhcp_form!(
-            "198.51.100.0/24",
-            "198.51.100.100",
-            "198.51.100.200",
-            "198.51.100.1",
-            "198.51.100.2",
-            "198.51.100.3",
-            "debian.pool.ntp.org,time.nist.gov",
-            "86400",
-        );
-
-        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
-    }
-
-    #[test]
-    fn rejects_mixed_invalid_ntp_servers() {
-        let lease_time = validate_test_dhcp_form!(
-            "198.51.100.0/24",
-            "198.51.100.100",
-            "198.51.100.200",
-            "198.51.100.1",
-            "198.51.100.2",
-            "198.51.100.3",
-            "198.51.100.4, time.nist.gov",
-            "86400",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
