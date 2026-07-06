@@ -65,6 +65,16 @@ is_valid_ipv4() {
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+is_positive_integer() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
+}
+
+is_dnsmasq_subnet_start() {
+    local ip="$1"
+
+    is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
+}
+
 detect_secondary_listen_ip() {
     local ip
 
@@ -1487,7 +1497,7 @@ resolve_lancache_image_tag() {
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
@@ -1556,7 +1566,11 @@ migrate_env_for_update() {
     fi
 
     set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
-    set_env_key_if_empty_or_missing CACHE_MEM_MB "512" "$env_file"
+    cache_mem_mb=$(get_env_var CACHE_MEM_MB "$env_file")
+    if ! is_positive_integer "$cache_mem_mb"; then
+        cache_mem_mb="512"
+    fi
+    set_env_key CACHE_MEM_MB "$cache_mem_mb" "$env_file"
     set_env_key_if_empty_or_missing CACHE_SLICE_SIZE "8m" "$env_file"
     set_env_key_if_empty_or_missing CACHE_VALID_HIT "365d" "$env_file"
     set_env_key_if_empty_or_missing CACHE_VALID_ANY "1m" "$env_file"
@@ -1622,8 +1636,8 @@ migrate_env_for_update() {
 
     case "$dhcp_mode" in
         dnsmasq-proxy)
-            is_valid_ipv4 "$dhcp_subnet_start" \
-                || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_SUBNET_START in $env_file. Set the proxy-DHCP subnet start for your LAN, then rerun setup.sh update."
+            is_dnsmasq_subnet_start "$dhcp_subnet_start" \
+                || die "DHCP_MODE=dnsmasq-proxy requires a proxy-DHCP subnet start ending in .0 in $env_file. Set the subnet base for your LAN, then rerun setup.sh update."
             is_valid_ipv4 "$dhcp_dns_primary" \
                 || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_DNS_PRIMARY in $env_file. Set the DNS option that proxy-DHCP/PXE clients should receive, then rerun setup.sh update."
             if [[ -z "$dhcp_dns_secondary" ]]; then
@@ -2756,7 +2770,7 @@ fi
 print_step "Installation directory"
 
 ask "Directory" "/opt/lancache-ng"
-INSTALL_DIR="$REPLY"
+INSTALL_DIR="$(realpath -m "$REPLY")"
 
 if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
     print_warn "Existing directory found: $INSTALL_DIR"
@@ -2788,8 +2802,12 @@ while true; do
     print_error "Please enter a positive integer (e.g. 50)."
 done
 
-ask "Cache RAM buffer in MB (keys_zone)" "512"
-CACHE_MEM_MB="$REPLY"
+while true; do
+    ask "Cache RAM buffer in MB (keys_zone)" "512"
+    CACHE_MEM_MB="$REPLY"
+    is_positive_integer "$CACHE_MEM_MB" && break
+    print_error "Please enter a positive integer (e.g. 512)."
+done
 
 # ── 5. Watchtower ─────────────────────────────────────────────────────────────
 print_step "Automatic helper updates (Watchtower)"
@@ -2885,8 +2903,8 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     ask "DHCP subnet start for dnsmasq-proxy" "10.0.0.0"
     while true; do
         DHCP_SUBNET_START="$REPLY"
-        is_valid_ipv4 "$DHCP_SUBNET_START" && break
-        print_error "Invalid IPv4 address: $DHCP_SUBNET_START"
+        is_dnsmasq_subnet_start "$DHCP_SUBNET_START" && break
+        print_error "DHCP subnet start must be a network address ending in .0, e.g. 10.0.0.0"
         ask "DHCP subnet start for dnsmasq-proxy" "10.0.0.0"
     done
 

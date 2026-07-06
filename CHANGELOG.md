@@ -4,8 +4,8 @@
 
 - Fixed follow-up DHCP and quickstart installer findings from #476: quickstart
   installs now include the socket-proxy entrypoint, DHCP mode is persisted only
-  after Docker reconciliation succeeds, and routed DNS option values may live
-  outside the served subnet.
+  after Docker reconciliation succeeds, Kea NTP defaults stay IPv4-safe, and
+  routed DNS option values may live outside the served subnet.
 - Switched the Rust builder stages for `services/dns` and `services/ui` to the
   shared `ghcr.io/wiki-mod/lancache-ng/build-tools` image contract.
 - Kept BuildKit secret wiring for `sccache` Redis, `sccache-dist`, and
