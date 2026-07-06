@@ -2128,6 +2128,9 @@ cmd_update() {
         print_step "Updating repo"
         git -C "$install_dir" pull --ff-only \
             || print_warn "git pull failed — continuing with local version"
+        # Quickstart installs keep a copied compose bundle under the install
+        # tree, so a repo update must refresh those assets as well or the tree
+        # would silently keep the previous compose wiring.
         install_quickstart_compose_assets "$install_dir"
         print_ok "quickstart compose assets updated"
     fi

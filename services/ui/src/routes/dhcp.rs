@@ -1254,7 +1254,7 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     let pool_end_addr = parse_ipv4(input.pool_end).ok_or(StatusCode::BAD_REQUEST)?;
     let gateway_addr = parse_ipv4(input.gateway).ok_or(StatusCode::BAD_REQUEST)?;
     let dns_primary_addr = parse_ipv4(input.dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
-    let dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
+    let _dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
         dns_primary_addr
     } else {
         parse_ipv4(input.dns_secondary).ok_or(StatusCode::BAD_REQUEST)?
@@ -1263,8 +1263,6 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     if !ipv4_in_cidr(subnet_addr, prefix_len, pool_start_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, pool_end_addr)
         || !ipv4_in_cidr(subnet_addr, prefix_len, gateway_addr)
-        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_primary_addr)
-        || !ipv4_in_cidr(subnet_addr, prefix_len, dns_secondary_addr)
         || ipv4_to_u32(pool_start_addr) > ipv4_to_u32(pool_end_addr)
     {
         return Err(StatusCode::BAD_REQUEST);
