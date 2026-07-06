@@ -288,7 +288,18 @@ runs:
               fi
 
               distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
-              export DISTCC_HOSTS="$distcc_hosts_without_pump"
+              final_distcc_hosts="$distcc_hosts_without_pump"
+              if [ -n "$distcc_pump_filtered_hosts" ]; then
+                final_distcc_hosts="$distcc_pump_filtered_hosts"
+              fi
+              if [ -z "$final_distcc_hosts" ]; then
+                final_distcc_hosts="$distcc_hosts"
+              fi
+              if [ -z "$final_distcc_hosts" ]; then
+                echo "[INFO] distcc host list still empty after pump handling; forcing localhost fallback."
+                final_distcc_hosts="127.0.0.1"
+              fi
+              export DISTCC_HOSTS="$final_distcc_hosts"
               distcc_log="$preflight_dir/distcc.log"
               run_logged "$distcc_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
               echo "[INFO] distcc preflight completed."
