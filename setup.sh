@@ -69,6 +69,10 @@ is_positive_integer() {
     [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
 }
 
+is_absolute_path() {
+    [[ -n "${1:-}" && "$1" == /* ]]
+}
+
 is_dnsmasq_subnet_start() {
     local ip="$1"
 
@@ -993,8 +997,14 @@ set_optional_env_path_override_if_needed() {
     if [[ -n "$existing_assignment" ]]; then
         if [[ "$existing_assignment" = "$derived_path" ]]; then
             remove_env_key "$key" "$env_file"
-        else
+        elif [[ "$existing_assignment" == *'$'* ]]; then
+            # Preserve intentionally templated values like ${LAN_CACHE_ROOT}/cache.
             set_env_assignment "$key" "$existing_assignment" "$env_file"
+        elif is_absolute_path "$existing_assignment"; then
+            set_env_assignment "$key" "$existing_assignment" "$env_file"
+        else
+            # Repair obviously broken literal values such as "50" or "n".
+            set_env_key "$key" "$desired_path" "$env_file"
         fi
         return 0
     fi
@@ -2174,12 +2184,13 @@ cmd_update() {
     if [[ -d "$install_dir/.git" ]]; then
         print_step "Updating repo"
         sync_repo_to_default_branch "$install_dir"
-        # Quickstart installs keep a copied compose bundle under the install
-        # tree, so a repo update must refresh those assets as well or the tree
-        # would silently keep the previous compose wiring.
-        install_quickstart_compose_assets "$install_dir"
-        print_ok "quickstart compose assets updated"
     fi
+
+    # Quickstart installs keep a copied compose bundle under the install tree.
+    # Refresh those assets on every update, even when the install directory is
+    # not itself a git checkout, or the stack can keep stale compose wiring.
+    install_quickstart_compose_assets "$install_dir"
+    print_ok "quickstart compose assets updated"
 
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
@@ -2818,12 +2829,20 @@ print_ok "quickstart compose assets copied to $INSTALL_DIR"
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
 
-ask "Cache directory" "$INSTALL_DIR/cache/standard"
-CACHE_DIR_STANDARD="$REPLY"
+while true; do
+    ask "Cache directory (absolute path)" "$INSTALL_DIR/cache/standard"
+    CACHE_DIR_STANDARD="$REPLY"
+    is_absolute_path "$CACHE_DIR_STANDARD" && break
+    print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache/standard)."
+done
 
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    ask "Cache directory SSL mode" "$INSTALL_DIR/cache/ssl"
-    CACHE_DIR_SSL="$REPLY"
+    while true; do
+        ask "Cache directory SSL mode (absolute path)" "$INSTALL_DIR/cache/ssl"
+        CACHE_DIR_SSL="$REPLY"
+        is_absolute_path "$CACHE_DIR_SSL" && break
+        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache/ssl)."
+    done
 else
     CACHE_DIR_SSL="$CACHE_DIR_STANDARD"
 fi
@@ -2890,8 +2909,12 @@ UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
 
-    ask "Kea data directory (config + leases)" "$INSTALL_DIR/kea"
-    KEA_DATA_DIR="$REPLY"
+    while true; do
+        ask "Kea data directory (config + leases, absolute path)" "$INSTALL_DIR/kea"
+        KEA_DATA_DIR="$REPLY"
+        is_absolute_path "$KEA_DATA_DIR" && break
+        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/kea)."
+    done
 
     while true; do
         ask "DHCP subnet (CIDR)" "10.0.0.0/24"
