@@ -111,6 +111,10 @@ RUN set -euo pipefail; \
     # rust:latest image was published. Apply Debian upgrades before patching
     # distcc-pump so package updates cannot overwrite the warning fix below.
     apt-get upgrade -y; \
+    # linux-libc-dev is pulled in by the toolchain layer and can lag behind the
+    # base image even after a generic upgrade; force the current security-fixed
+    # package so Trivy does not fail the build-tools image on stale headers.
+    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     chown _apt:root "${distcc_pump_tmp}"; \
