@@ -4,6 +4,8 @@
 # the lancache-ng DNS servers via PXE option 6 alongside an existing DHCP server.
 
 port=0
+no-resolv
+no-poll
 dhcp-range=${DHCP_SUBNET_START},proxy
 dhcp-option-pxe=6,${DHCP_DNS_PRIMARY},${DHCP_DNS_SECONDARY}
 dhcp-proxy=${UPSTREAM_DHCP_IP}
