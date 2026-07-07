@@ -1434,7 +1434,7 @@ jobs:
       # hasn't been published to ghcr.io yet.
       - name: Resolve build-tools image (with tarpaulin required)
         env:
-          EXTRA_REQUIRED_TOOLS: cargo-tarpaulin
+          EXTRA_REQUIRED_TOOLS: "cargo-tarpaulin bc"
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
@@ -1456,7 +1456,7 @@ jobs:
             -e HOME=/tmp \
             -e CARGO_HOME=/tmp/cargo-home \
             -e CARGO_TARGET_DIR=/tmp/target-dns \
-            -v "$PWD:/work:ro" \
+            -v "$PWD:/work" \
             -v "$PWD/coverage-dns:/coverage-dns" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -1477,7 +1477,7 @@ jobs:
             -e HOME=/tmp \
             -e CARGO_HOME=/tmp/cargo-home \
             -e CARGO_TARGET_DIR=/tmp/target-ui \
-            -v "$PWD:/work:ro" \
+            -v "$PWD:/work" \
             -v "$PWD/coverage-ui:/coverage-ui" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \

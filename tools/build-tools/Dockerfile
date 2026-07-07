@@ -41,6 +41,7 @@ RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       bash \
+      bc \
       build-essential \
       ca-certificates \
       clang \
