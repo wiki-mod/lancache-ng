@@ -88,6 +88,15 @@ section_exists_with_content() {
         return 1
     fi
 
+    # A section that still contains the template's own placeholder text
+    # (e.g. "Exact commands run locally") wasn't actually filled in, even
+    # though it isn't empty.
+    for placeholder in "${placeholder_texts[@]}"; do
+        if [[ "$trimmed" == *"$placeholder"* ]]; then
+            return 1
+        fi
+    done
+
     return 0
 }
 
