@@ -138,11 +138,34 @@ actionlint .github/workflows/*.yml
 ```
 
 For Rust services, run the relevant Cargo checks for the service you changed.
-The UI service lives in `services/ui`.
+The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 
 ```bash
 cargo test --locked --manifest-path services/ui/Cargo.toml
+cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 ```
+
+For Rust coverage checks (requires `cargo-tarpaulin`), use:
+
+```bash
+cargo install cargo-tarpaulin
+cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json
+cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json
+```
+
+`--engine llvm` matches what CI uses: tarpaulin's default ptrace-based engine needs a
+capability Docker containers don't grant by default (it fails with "ASLR disable
+failed: EPERM"), so both CI and local instructions use the LLVM source-based engine
+instead.
+
+Rust code coverage has a per-crate minimum threshold, not one shared number:
+`services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
+of this writing), and `services/dns/nats-subscriber` currently has a 0%
+threshold because its existing tests only cover its data model, not its
+subscribe/forward logic (tracked in #504). Raise each crate's threshold
+independently as that crate gains real coverage — do not average or share a
+single "minimum" number across both, since their coverage levels differ by
+an order of magnitude for unrelated reasons.
 
 If you cannot run a relevant check locally, say so in the pull request and
 explain why.

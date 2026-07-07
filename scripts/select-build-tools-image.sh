@@ -30,7 +30,11 @@ fail() {
 smoke_test_image() {
   local image="$1"
 
-  docker run --rm "$image" bash -lc '
+  # EXTRA_REQUIRED_TOOLS lets a specific caller (e.g. the coverage job, which
+  # needs cargo-tarpaulin) widen this check without forcing every other
+  # consumer of this script (cargo-audit jobs, the plain compose-validation
+  # path) to also require a tool they never use.
+  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$image" bash -lc '
     set -euo pipefail
 
     required_tools=(
@@ -54,6 +58,11 @@ smoke_test_image() {
       rsync
       envsubst
     )
+
+    if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
+      read -ra extra_tools <<<"$EXTRA_REQUIRED_TOOLS"
+      required_tools+=("${extra_tools[@]}")
+    fi
 
     for tool in "${required_tools[@]}"; do
       command -v "$tool" >/dev/null
