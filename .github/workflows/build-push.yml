@@ -1422,10 +1422,23 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    env:
-      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # This job resolves its own build-tools image rather than reusing
+      # validate-compose's exported build_tools_image output. That output is
+      # deliberately locked to the published, digest-qualified image (never a
+      # branch-local fallback) because dns_cargo_audit/ui_cargo_audit need a
+      # reproducible, previously-audited image. Coverage measurement has no
+      # such reproducibility requirement, so it can accept a branch-local
+      # rebuild when a PR's own Dockerfile change (like adding tarpaulin)
+      # hasn't been published to ghcr.io yet.
+      - name: Resolve build-tools image (with tarpaulin required)
+        env:
+          EXTRA_REQUIRED_TOOLS: cargo-tarpaulin
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       # Coverage output must land on a writable host path: the repo checkout
       # itself is bind-mounted read-only into the build-tools container below,
       # matching the dns_cargo_audit/ui_cargo_audit pattern.
