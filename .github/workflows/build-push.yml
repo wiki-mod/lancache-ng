@@ -1231,7 +1231,7 @@ jobs:
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
             docker:latest \
-            docker compose config -f docker-compose.yml >/dev/null
+            docker compose -f docker-compose.yml config >/dev/null
 
       # Static config validation above only checks YAML/Compose structure. It
       # cannot catch a service that starts but immediately crash-loops (the
