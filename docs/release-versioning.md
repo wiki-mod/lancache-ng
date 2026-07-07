@@ -49,10 +49,10 @@ must stay consistent with that file.
 publishes `edge` after the required checks pass. Stable release tags publish the
 matching `vX.Y.Z` tag and may move `latest` to the same digest.
 
-`dev` publishes automatically on every push to any version-numbered
-integration branch (`v0.2.0`, `v0.3.0`, `v0.2.x`, ... -- matched by pattern,
-not a hardcoded name, so this keeps working as the active integration branch
-changes over time), mirroring how `master` publishes `edge`. It can
+`dev` publishes automatically on every push to a branch matching `vX.Y.Z`
+(not a hardcoded branch name, so this keeps working as the active
+integration branch changes over time), mirroring how `master` publishes
+`edge`. It can
 additionally be requested from any other ref via the `channel` input on a
 manual `workflow_dispatch` run of `Build & Push` -- e.g. to spot-check a
 feature branch as `dev` without merging it into the integration branch
