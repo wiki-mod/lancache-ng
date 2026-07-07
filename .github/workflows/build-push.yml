@@ -183,6 +183,18 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  pr-template-check:
+    name: PR template validation
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate PR template completeness
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: bash scripts/validate-pr-template.sh
+
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected
     # by validate-compose. That keeps linting independent from whatever happens
@@ -1991,13 +2003,17 @@ jobs:
       - container-scan
       - detect-changes
       - ci_scope_policy
+      - file-headers
+      - pr-template-check
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success')
+        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
