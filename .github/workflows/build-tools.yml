@@ -50,8 +50,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
 
       # tests/bats/** and setup.sh are in this workflow's path filter so the
       # local smoke-test/Bats steps below actually run when setup.sh changes,
@@ -77,6 +75,20 @@ jobs:
           if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
             # No usable base to diff (e.g. the branch's first push): fail
             # safe by publishing rather than silently skipping a real change.
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The default checkout is shallow; fetch just the one missing base
+          # commit on demand instead of a full-history clone (fetch-depth: 0
+          # on this repo hit real "inflate: data stream error" checkout
+          # failures on the runner -- confirmed by actually running this).
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            git fetch --quiet --depth=1 origin "$before_sha" 2>/dev/null || true
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            echo "::notice::Could not fetch base commit $before_sha to diff against; publishing to be safe."
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
