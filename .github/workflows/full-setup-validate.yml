@@ -1,0 +1,155 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Standalone, manually-triggered end-to-end check for the full-setup
+# validation stack (deploy/full-setup/docker-compose.yml). Actually starts
+# the stack with real published images and fails if any service is
+# unhealthy or crash-looping. Deliberately separate from Build & Push: it
+# has no build/push/promote/release jobs, so it can be re-run on demand
+# without any risk of touching production images.
+
+name: Full-Setup Validate
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Stack image tag to validate against.
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  full-setup-validate:
+    name: validate full-setup image
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build full-setup validation image
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
+            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
+            --build-arg LANCACHE_IMAGE_TAG="${{ inputs.image_tag }}" \
+            -t lancache-ng-full-setup:validation \
+            deploy/full-setup
+
+      - name: Validate compose configuration
+        env:
+          LANCACHE_IMAGE_REGISTRY: ghcr.io
+          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+          LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD/deploy/full-setup:/validation:ro" \
+            -w /validation \
+            --env LANCACHE_IMAGE_REGISTRY \
+            --env LANCACHE_IMAGE_PREFIX \
+            --env LANCACHE_IMAGE_TAG \
+            docker:latest \
+            docker compose config -f docker-compose.yml >/dev/null
+
+      # Static config validation above only checks YAML/Compose structure. It
+      # cannot catch a service that starts but immediately crash-loops (the
+      # motivating case: #450/#485, dnsmasq trying to bind an already-used
+      # port). This step actually starts the stack with real published images
+      # and fails if any service is unhealthy or restarting once past its
+      # own healthcheck's start_period.
+      - name: Start full-setup validation stack
+        working-directory: deploy/full-setup
+        env:
+          LANCACHE_IMAGE_REGISTRY: ghcr.io
+          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+          LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker compose pull --quiet
+          docker compose up -d
+
+      - name: Wait for the stack to stabilize and check container health
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+
+          # Services with an explicit healthcheck report a real "healthy"
+          # status; docker-socket-proxy has none, so it's only checked for
+          # "running" plus a restart-count ceiling (catches a crash loop
+          # without needing a healthcheck definition for every service).
+          services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
+          all_services="docker-socket-proxy $services_with_healthcheck"
+
+          deadline=$((SECONDS + 90))
+          while (( SECONDS < deadline )); do
+            all_ready=1
+            for service in $services_with_healthcheck; do
+              cid="$(docker compose ps -q "$service")"
+              status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+              if [[ "$status" != "healthy" ]]; then
+                all_ready=0
+              fi
+            done
+            if [[ "$all_ready" -eq 1 ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          echo "::group::Final container status"
+          docker compose ps
+          echo "::endgroup::"
+
+          failed=0
+          for service in $all_services; do
+            cid="$(docker compose ps -q "$service")"
+            if [[ -z "$cid" ]]; then
+              echo "::error::$service has no running container"
+              failed=1
+              continue
+            fi
+
+            restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
+            container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
+
+            if [[ "$container_status" != "running" ]]; then
+              echo "::error::$service is not running (state: $container_status)"
+              failed=1
+            elif (( restart_count > 1 )); then
+              echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
+              failed=1
+            fi
+
+            if [[ " $services_with_healthcheck " == *" $service "* ]]; then
+              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+              if [[ "$health" != "healthy" ]]; then
+                echo "::error::$service did not become healthy (status: $health)"
+                failed=1
+              fi
+            fi
+          done
+
+          if [[ "$failed" -eq 1 ]]; then
+            echo "::group::Logs from all services (failure diagnostics)"
+            docker compose logs --no-color
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "Full-setup stack is stable: all services running and healthy."
+
+      - name: Tear down full-setup validation stack
+        if: always()
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          docker compose down --volumes --remove-orphans || true
+
+      - name: Clean up image
+        if: always()
+        run: |
+          docker rmi lancache-ng-full-setup:validation || true
