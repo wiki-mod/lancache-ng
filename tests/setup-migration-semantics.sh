@@ -115,7 +115,7 @@ main() {
     # Create a temporary test environment.
     local test_dir
     test_dir=$(mktemp -d) || exit 1
-    trap "rm -rf '$test_dir'" EXIT
+    trap 'rm -rf "$test_dir"' EXIT
 
     local failed=0
 
