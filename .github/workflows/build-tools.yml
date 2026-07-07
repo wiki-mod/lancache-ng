@@ -140,6 +140,7 @@ jobs:
               bash
               cargo
               cargo-audit
+              cargo-tarpaulin
               clippy-driver
               dig
               distcc
@@ -160,6 +161,8 @@ jobs:
             cargo --version
             cargo audit --version
             cargo-audit --version
+            cargo tarpaulin --version
+            cargo-tarpaulin --version
             sccache --version
             actionlint --version
             shellcheck --version

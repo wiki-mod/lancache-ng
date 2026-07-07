@@ -1422,31 +1422,57 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
-        with:
-          toolchain: stable
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --version 0.37.0
-        timeout-minutes: 20
+      # Coverage output must land on a writable host path: the repo checkout
+      # itself is bind-mounted read-only into the build-tools container below,
+      # matching the dns_cargo_audit/ui_cargo_audit pattern.
+      - name: Prepare writable coverage output directories
+        run: |
+          set -euo pipefail
+          mkdir -p coverage-dns coverage-ui
       - name: Run coverage (dns/nats-subscriber)
         run: |
-          cargo tarpaulin \
-            --manifest-path services/dns/nats-subscriber/Cargo.toml \
-            --locked \
-            --timeout 300 \
-            --out json \
-            --output-dir coverage-dns
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -e CARGO_TARGET_DIR=/tmp/target-dns \
+            -v "$PWD:/work:ro" \
+            -v "$PWD/coverage-dns:/coverage-dns" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              cargo tarpaulin \
+                --manifest-path services/dns/nats-subscriber/Cargo.toml \
+                --locked \
+                --timeout 300 \
+                --out json \
+                --output-dir /coverage-dns'
       - name: Run coverage (ui)
         run: |
-          cargo tarpaulin \
-            --manifest-path services/ui/Cargo.toml \
-            --locked \
-            --timeout 300 \
-            --out json \
-            --output-dir coverage-ui
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -e CARGO_TARGET_DIR=/tmp/target-ui \
+            -v "$PWD:/work:ro" \
+            -v "$PWD/coverage-ui:/coverage-ui" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              cargo tarpaulin \
+                --manifest-path services/ui/Cargo.toml \
+                --locked \
+                --timeout 300 \
+                --out json \
+                --output-dir /coverage-ui'
       - name: Merge coverage reports and check threshold
         run: |
           set -euo pipefail

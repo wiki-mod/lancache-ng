@@ -22,6 +22,10 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 
 ARG SCCACHE_VERSION=0.16.0
 ARG CARGO_AUDIT_VERSION=0.22.2
+# Verified against the live crates.io index during development of the coverage
+# CI job (a plain `cargo install cargo-tarpaulin` resolved to this exact
+# version); re-verify before bumping if this drifts from the latest release.
+ARG CARGO_TARPAULIN_VERSION=0.37.0
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
 ARG DOCKER_CLI_VERSION=29.6.1
 ARG DOCKER_COMPOSE_VERSION=5.2.0
@@ -58,6 +62,7 @@ RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --root /usr/local; \
+    cargo install cargo-tarpaulin --locked --version "${CARGO_TARPAULIN_VERSION}" --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
       ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
     done; \
@@ -147,6 +152,7 @@ RUN set -euo pipefail; \
       clippy-driver \
       sccache \
       cargo-audit \
+      cargo-tarpaulin \
       actionlint \
       shellcheck \
       jq \
@@ -211,6 +217,7 @@ RUN set -euo pipefail; \
     cargo clippy --version; \
     sccache --version; \
     cargo audit --version; \
+    cargo tarpaulin --version; \
     actionlint --version; \
     shellcheck --version; \
     docker --version; \
