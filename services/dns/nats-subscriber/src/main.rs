@@ -312,10 +312,7 @@ async fn handle_dns_record(
         Err(e) => {
             // P2 fix: Ack unrecoverable parse failures (unknown action).
             // Nacking would cause infinite retry of malformed messages.
-            eprintln!(
-                "Acking unrecoverable DNS record parse failure ({})",
-                e
-            );
+            eprintln!("Acking unrecoverable DNS record parse failure ({})", e);
             return true;
         }
     };
@@ -594,14 +591,12 @@ mod tests {
             name: "test.lan.".to_string(),
             record_type: "A".to_string(),
             ttl: Some(300),
-            records: Some(vec![
-                {
-                    let mut m = HashMap::new();
-                    m.insert("content".to_string(), json!("10.0.0.1"));
-                    m.insert("disabled".to_string(), json!(false));
-                    m
-                }
-            ]),
+            records: Some(vec![{
+                let mut m = HashMap::new();
+                m.insert("content".to_string(), json!("10.0.0.1"));
+                m.insert("disabled".to_string(), json!(false));
+                m
+            }]),
         };
 
         let update = dns_record_to_zone_update(&record).expect("must succeed");
@@ -660,13 +655,11 @@ mod tests {
             name: "nottl.lan.".to_string(),
             record_type: "TXT".to_string(),
             ttl: None,
-            records: Some(vec![
-                {
-                    let mut m = HashMap::new();
-                    m.insert("content".to_string(), json!("v=spf1 -all"));
-                    m
-                }
-            ]),
+            records: Some(vec![{
+                let mut m = HashMap::new();
+                m.insert("content".to_string(), json!("v=spf1 -all"));
+                m
+            }]),
         };
 
         let update = dns_record_to_zone_update(&record).expect("must succeed");
