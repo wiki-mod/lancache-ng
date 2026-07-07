@@ -21,6 +21,12 @@ services:
       - IP_STANDARD=${VALIDATION_PROXY_IP:-172.30.99.2}
       - IP_SSL=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - SSL_ENABLED=1
+      - CACHE_MEM_MB=64
+      - CACHE_MAX_SIZE=1g
+      - CACHE_INACTIVE=7d
+      - CACHE_SLICE_SIZE=8m
+      - CACHE_VALID_HIT=365d
+      - CACHE_VALID_ANY=1m
     volumes:
       - proxy-cache:/var/cache/nginx/lancache
     networks:
@@ -38,6 +44,7 @@ services:
   dns-standard:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
+      - PROXY_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
       - PDNS_API_KEY=validation-pdns-key
       - DDNS_TSIG_KEY=validation-ddns-key
       - NATS_URL=nats://nats:4222
@@ -63,6 +70,7 @@ services:
   dns-ssl:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
+      - PROXY_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
       - PDNS_API_KEY=validation-pdns-key
       - DDNS_TSIG_KEY=validation-ddns-key
       - NATS_URL=nats://nats:4222
@@ -105,8 +113,9 @@ services:
     depends_on:
       - docker-socket-proxy
     networks:
-      - validation
-      - validation-api
+      validation:
+        ipv4_address: ${VALIDATION_WATCHDOG_IP:-172.30.99.6}
+      validation-api:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "test -f /var/run/watchdog/status.json || exit 1"]
@@ -206,8 +215,9 @@ services:
       - NATS_DNS_READER_USER=validation-dns-reader
       - NATS_DNS_READER_PASSWORD=validation-nats-password
     networks:
-      - validation
-      - validation-api
+      validation:
+        ipv4_address: ${VALIDATION_UI_IP:-172.30.99.9}
+      validation-api:
     depends_on:
       - docker-socket-proxy
       - proxy
@@ -236,7 +246,8 @@ services:
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - validation
+      validation:
+        ipv4_address: ${VALIDATION_NETDATA_IP:-172.30.99.7}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19999/api/v1/info >/dev/null 2>&1 || exit 1"]
