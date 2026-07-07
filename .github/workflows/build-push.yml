@@ -1233,6 +1233,49 @@ jobs:
             docker:latest \
             docker compose -f docker-compose.yml config >/dev/null
 
+      # The validation network's subnet is a fixed default (see
+      # docker-compose.yml) so services can reference each other's IPs
+      # deterministically. That default can collide with an unrelated
+      # network already on the host -- override it via VALIDATION_SUBNET
+      # (and the matching VALIDATION_*_IP / VALIDATION_GATEWAY vars) if it
+      # does. Check for that collision explicitly before starting: a raw
+      # `docker compose up` failure here is a cryptic
+      # "failed to set up container networking: Address already in use"
+      # with no indication of which network is actually at fault.
+      - name: Check for a validation subnet collision
+        run: |
+          set -euo pipefail
+          target_subnet="${VALIDATION_SUBNET:-172.30.99.0/24}"
+          conflict="$(python3 - "$target_subnet" <<'PYEOF'
+          import ipaddress, subprocess, sys
+          target = ipaddress.ip_network(sys.argv[1])
+          # A leftover network from our own project (e.g. an aborted prior run
+          # that never reached the teardown step) is not a real collision --
+          # docker compose reuses/recreates it by name. Only flag networks
+          # that aren't ours.
+          own_prefix = "lancache-ng-validation"
+          ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
+          for network_id in ids:
+              fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
+              line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
+              name, _, subnets_str = line.partition("|")
+              if name.startswith(own_prefix):
+                  continue
+              for subnet_str in subnets_str.split():
+                  try:
+                      existing = ipaddress.ip_network(subnet_str)
+                  except ValueError:
+                      continue
+                  if target.overlaps(existing):
+                      print(f"{name} ({subnet_str})")
+          PYEOF
+          )"
+          if [[ -n "$conflict" ]]; then
+            echo "::error::Validation subnet $target_subnet overlaps an existing Docker network ($conflict) on this runner. Set VALIDATION_SUBNET (and the matching VALIDATION_*_IP / VALIDATION_GATEWAY env vars) to a free range and re-run."
+            exit 1
+          fi
+          echo "Validation subnet $target_subnet is free."
+
       # Static config validation above only checks YAML/Compose structure. It
       # cannot catch a service that starts but immediately crash-loops (the
       # motivating case: #450/#485, dnsmasq trying to bind an already-used

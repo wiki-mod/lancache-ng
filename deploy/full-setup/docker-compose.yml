@@ -18,14 +18,14 @@ services:
   proxy:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
-      - IP_STANDARD=172.28.0.2
-      - IP_SSL=172.28.0.4
+      - IP_STANDARD=${VALIDATION_PROXY_IP:-172.30.99.2}
+      - IP_SSL=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - SSL_ENABLED=1
     volumes:
       - proxy-cache:/var/cache/nginx/lancache
     networks:
       validation:
-        ipv4_address: 172.28.0.2
+        ipv4_address: ${VALIDATION_PROXY_IP:-172.30.99.2}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null"]
@@ -49,7 +49,7 @@ services:
       - pdns-data-standard:/var/lib/powerdns
     networks:
       validation:
-        ipv4_address: 172.28.0.3
+        ipv4_address: ${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}
     depends_on:
       - nats
     restart: unless-stopped
@@ -73,7 +73,7 @@ services:
       - pdns-data-ssl:/var/lib/powerdns
     networks:
       validation:
-        ipv4_address: 172.28.0.5
+        ipv4_address: ${VALIDATION_DNS_SSL_IP:-172.30.99.5}
     depends_on:
       - nats
     restart: unless-stopped
@@ -159,7 +159,7 @@ services:
       - nats-conf:/etc/nats
     networks:
       validation:
-        ipv4_address: 172.28.0.8
+        ipv4_address: ${VALIDATION_NATS_IP:-172.30.99.8}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 4222 || exit 1"]
@@ -189,8 +189,8 @@ services:
       - STANDARD_CACHE_DIR=/var/cache/proxy
       - SSL_CACHE_DIR=/var/cache/proxy
       - CACHE_MAX_GB=1
-      - STANDARD_IP=172.28.0.2
-      - SSL_IP=172.28.0.4
+      - STANDARD_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
+      - SSL_IP=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - UI_AUTH_USER=
       - UI_AUTH_PASSWORD=
       - ALLOW_INSECURE_UI=true
@@ -251,8 +251,8 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 172.28.0.0/16
-          gateway: 172.28.0.1
+        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/24}
+          gateway: ${VALIDATION_GATEWAY:-172.30.99.1}
   validation-api:
     internal: true
 
