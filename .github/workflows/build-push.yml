@@ -1435,6 +1435,7 @@ jobs:
       - name: Resolve build-tools image (with tarpaulin required)
         env:
           EXTRA_REQUIRED_TOOLS: cargo-tarpaulin
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
           image="$(bash scripts/select-build-tools-image.sh)"
