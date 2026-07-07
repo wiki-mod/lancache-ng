@@ -42,6 +42,7 @@ smoke_test_image() {
       clippy-driver
       sccache
       cargo-audit
+      cargo-tarpaulin
       shellcheck
       actionlint
       distcc
@@ -64,6 +65,7 @@ smoke_test_image() {
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
     cargo-audit --version >/dev/null
+    cargo tarpaulin --version >/dev/null
     sccache --version >/dev/null
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
