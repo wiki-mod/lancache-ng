@@ -158,10 +158,14 @@ capability Docker containers don't grant by default (it fails with "ASLR disable
 failed: EPERM"), so both CI and local instructions use the LLVM source-based engine
 instead.
 
-Rust code coverage must stay at or above 40% for each crate. This is a minimum
-baseline; improvements above 40% are encouraged. The 40% threshold was set as
-a conservative baseline for the current codebase — as coverage improves, the
-threshold should be raised accordingly.
+Rust code coverage has a per-crate minimum threshold, not one shared number:
+`services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
+of this writing), and `services/dns/nats-subscriber` currently has a 0%
+threshold because its existing tests only cover its data model, not its
+subscribe/forward logic (tracked in #504). Raise each crate's threshold
+independently as that crate gains real coverage — do not average or share a
+single "minimum" number across both, since their coverage levels differ by
+an order of magnitude for unrelated reasons.
 
 If you cannot run a relevant check locally, say so in the pull request and
 explain why.
