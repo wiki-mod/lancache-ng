@@ -1405,6 +1405,82 @@ jobs:
         with:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
+  rust_coverage:
+    name: coverage (Rust)
+    needs: [validate-compose, dns_test, ui_test, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
+        (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.dns_rust == 'true' ||
+          needs['detect-changes'].outputs.ui == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --version 0.37.0
+        timeout-minutes: 20
+      - name: Run coverage (dns/nats-subscriber)
+        run: |
+          cargo tarpaulin \
+            --manifest-path services/dns/nats-subscriber/Cargo.toml \
+            --locked \
+            --timeout 300 \
+            --out json \
+            --output-dir coverage-dns
+      - name: Run coverage (ui)
+        run: |
+          cargo tarpaulin \
+            --manifest-path services/ui/Cargo.toml \
+            --locked \
+            --timeout 300 \
+            --out json \
+            --output-dir coverage-ui
+      - name: Merge coverage reports and check threshold
+        run: |
+          set -euo pipefail
+
+          # Extract coverage percentages from JSON reports
+          dns_coverage=$(jq -r '.coverage' coverage-dns/tarpaulin-report.json 2>/dev/null || echo "0")
+          ui_coverage=$(jq -r '.coverage' coverage-ui/tarpaulin-report.json 2>/dev/null || echo "0")
+
+          echo "DNS coverage: ${dns_coverage}%"
+          echo "UI coverage: ${ui_coverage}%"
+
+          # Calculate minimum coverage (use lower of the two)
+          min_coverage=$(printf '%s\n' "$dns_coverage" "$ui_coverage" | sort -n | head -1)
+          threshold=40
+
+          echo "Minimum coverage across crates: ${min_coverage}%"
+          echo "Threshold: ${threshold}%"
+
+          if (( $(echo "$min_coverage < $threshold" | bc -l) )); then
+            echo "::error::Coverage ${min_coverage}% is below threshold of ${threshold}%"
+            exit 1
+          fi
+
+          echo "Coverage check passed"
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@5d5d22e592c814662c3a91e9a56c56c49e23aaae # v4.3.6
+        with:
+          name: rust-coverage-reports
+          path: |
+            coverage-dns/tarpaulin-report.json
+            coverage-ui/tarpaulin-report.json
+          retention-days: 30
+
   watchdog_test:
     # Watchdog has its own small shell runtime and therefore its own scoped
     # syntax/executable gate instead of being folded into larger Rust jobs.

@@ -138,11 +138,25 @@ actionlint .github/workflows/*.yml
 ```
 
 For Rust services, run the relevant Cargo checks for the service you changed.
-The UI service lives in `services/ui`.
+The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 
 ```bash
 cargo test --locked --manifest-path services/ui/Cargo.toml
+cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 ```
+
+For Rust coverage checks (requires `cargo-tarpaulin`), use:
+
+```bash
+cargo install cargo-tarpaulin
+cargo tarpaulin --manifest-path services/ui/Cargo.toml --locked --out json
+cargo tarpaulin --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json
+```
+
+Rust code coverage must stay at or above 40% for each crate. This is a minimum
+baseline; improvements above 40% are encouraged. The 40% threshold was set as
+a conservative baseline for the current codebase — as coverage improves, the
+threshold should be raised accordingly.
 
 If you cannot run a relevant check locally, say so in the pull request and
 explain why.
