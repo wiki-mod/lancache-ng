@@ -93,7 +93,21 @@ the remaining operator risk and any rollback or follow-up notes.
 
 ### Quality and release process expectations
 
-- Treat warnings as failures in local checks and workflow validation.
+#### Warning-as-errors policy
+
+All actionable static analysis warnings are treated as build failures under the warnings-as-errors rule:
+
+**Hard failures (block a PR):**
+- `cargo check` warnings — enabled via `RUSTFLAGS: "-D warnings"` in `dns_rust_quality` and `ui_rust_quality` jobs
+- `cargo clippy` warnings — enforced via `cargo clippy -- -D warnings` in the same jobs
+- `shellcheck` warnings — enforced via `shellcheck --severity=warning` in the `shellcheck` job
+- `actionlint` warnings — enforced via `actionlint .github/workflows/*.yml`
+- `docker compose config` warnings — enforce via pattern matching for `warn|warning` in `validate-compose` job
+- File header checks — enforced via `bash scripts/check-file-headers.sh`
+
+**Known exception (tracked in issue #394):**
+GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo check` or `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
+
 - Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
 - Keep workflow changes reviewable:
   - document changed checks,
