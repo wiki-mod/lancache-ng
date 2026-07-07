@@ -263,6 +263,32 @@ async fn handle_message(
     true
 }
 
+fn dns_record_to_zone_update(record: &DNSRecord) -> Result<ZoneUpdate, String> {
+    let (changetype, ttl_val, records_val) = match record.action.as_str() {
+        "delete" => (Some("DELETE".to_string()), None, None),
+        "replace" => (
+            Some("REPLACE".to_string()),
+            record.ttl,
+            record.records.clone(),
+        ),
+        action => {
+            return Err(format!("unknown action: {}", action));
+        }
+    };
+
+    let rrset = RRset {
+        name: record.name.clone(),
+        record_type: record.record_type.clone(),
+        ttl: ttl_val,
+        changetype,
+        records: records_val,
+    };
+
+    Ok(ZoneUpdate {
+        rrsets: vec![rrset],
+    })
+}
+
 async fn handle_dns_record(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
@@ -281,34 +307,17 @@ async fn handle_dns_record(
         }
     };
 
-    let (changetype, ttl_val, records_val) = match record.action.as_str() {
-        "delete" => (Some("DELETE".to_string()), None, None),
-        "replace" => (
-            Some("REPLACE".to_string()),
-            record.ttl,
-            record.records.clone(),
-        ),
-        action => {
+    let update = match dns_record_to_zone_update(&record) {
+        Ok(u) => u,
+        Err(e) => {
             // P2 fix: Ack unrecoverable parse failures (unknown action).
             // Nacking would cause infinite retry of malformed messages.
             eprintln!(
-                "Acking unrecoverable DNS record parse failure (unknown action: {})",
-                action
+                "Acking unrecoverable DNS record parse failure ({})",
+                e
             );
             return true;
         }
-    };
-
-    let rrset = RRset {
-        name: record.name.clone(),
-        record_type: record.record_type.clone(),
-        ttl: ttl_val,
-        changetype,
-        records: records_val,
-    };
-
-    let update = ZoneUpdate {
-        rrsets: vec![rrset],
     };
 
     let payload = match serde_json::to_string(&update) {
@@ -575,5 +584,115 @@ mod tests {
         let record: DNSRecord = serde_json::from_str(json).expect("DNSRecord must deserialize");
         assert_eq!(record.action, "replace");
         assert_eq!(record.zone, "lan");
+    }
+
+    #[test]
+    fn dns_record_to_zone_update_replace_action() {
+        let record = DNSRecord {
+            action: "replace".to_string(),
+            zone: "lan".to_string(),
+            name: "test.lan.".to_string(),
+            record_type: "A".to_string(),
+            ttl: Some(300),
+            records: Some(vec![
+                {
+                    let mut m = HashMap::new();
+                    m.insert("content".to_string(), json!("10.0.0.1"));
+                    m.insert("disabled".to_string(), json!(false));
+                    m
+                }
+            ]),
+        };
+
+        let update = dns_record_to_zone_update(&record).expect("must succeed");
+        assert_eq!(update.rrsets.len(), 1);
+        let rrset = &update.rrsets[0];
+        assert_eq!(rrset.name, "test.lan.");
+        assert_eq!(rrset.record_type, "A");
+        assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
+        assert_eq!(rrset.ttl, Some(300));
+        assert!(rrset.records.is_some());
+    }
+
+    #[test]
+    fn dns_record_to_zone_update_delete_action() {
+        let record = DNSRecord {
+            action: "delete".to_string(),
+            zone: "lan".to_string(),
+            name: "old.lan.".to_string(),
+            record_type: "CNAME".to_string(),
+            ttl: Some(600),
+            records: Some(vec![]),
+        };
+
+        let update = dns_record_to_zone_update(&record).expect("must succeed");
+        assert_eq!(update.rrsets.len(), 1);
+        let rrset = &update.rrsets[0];
+        assert_eq!(rrset.name, "old.lan.");
+        assert_eq!(rrset.record_type, "CNAME");
+        assert_eq!(rrset.changetype, Some("DELETE".to_string()));
+        // For DELETE, ttl and records must be None
+        assert!(rrset.ttl.is_none());
+        assert!(rrset.records.is_none());
+    }
+
+    #[test]
+    fn dns_record_to_zone_update_invalid_action() {
+        let record = DNSRecord {
+            action: "invalid".to_string(),
+            zone: "lan".to_string(),
+            name: "test.lan.".to_string(),
+            record_type: "A".to_string(),
+            ttl: None,
+            records: None,
+        };
+
+        let result = dns_record_to_zone_update(&record);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("unknown action"));
+    }
+
+    #[test]
+    fn dns_record_to_zone_update_replace_without_ttl() {
+        let record = DNSRecord {
+            action: "replace".to_string(),
+            zone: "lan".to_string(),
+            name: "nottl.lan.".to_string(),
+            record_type: "TXT".to_string(),
+            ttl: None,
+            records: Some(vec![
+                {
+                    let mut m = HashMap::new();
+                    m.insert("content".to_string(), json!("v=spf1 -all"));
+                    m
+                }
+            ]),
+        };
+
+        let update = dns_record_to_zone_update(&record).expect("must succeed");
+        let rrset = &update.rrsets[0];
+        assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
+        assert!(rrset.ttl.is_none());
+        assert!(rrset.records.is_some());
+    }
+
+    #[test]
+    fn dns_record_to_zone_update_replace_empty_records() {
+        let record = DNSRecord {
+            action: "replace".to_string(),
+            zone: "lan".to_string(),
+            name: "empty.lan.".to_string(),
+            record_type: "MX".to_string(),
+            ttl: Some(3600),
+            records: Some(vec![]),
+        };
+
+        let update = dns_record_to_zone_update(&record).expect("must succeed");
+        let rrset = &update.rrsets[0];
+        assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
+        assert_eq!(rrset.ttl, Some(3600));
+        // Empty records list should still be present
+        assert!(rrset.records.is_some());
+        assert_eq!(rrset.records.as_ref().unwrap().len(), 0);
     }
 }
