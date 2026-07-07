@@ -21,7 +21,7 @@ Some internal paths, root elements and service details may still change while th
 
 ### Test coverage
 
-The build badge above reflects the status of the primary CI pipeline, which includes Rust test coverage validation. On every push to `master`, the `rust_coverage` job runs `cargo tarpaulin` against the `services/dns/nats-subscriber` and `services/ui` crates, enforcing a minimum 40% coverage threshold (the lower of the two crates' measured coverage). This baseline ensures ongoing visibility of critical service test coverage as the project develops.
+The build badge above reflects the status of the primary CI pipeline, which includes Rust test coverage validation. On every push, the `rust_coverage` job runs `cargo tarpaulin` against the `services/dns/nats-subscriber` and `services/ui` crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber` currently has a 0% threshold because its existing tests only cover its data model, not its subscribe/forward logic (tracked in #504). Each crate's threshold is raised independently as that crate gains real coverage.
 
 ## What this project does
 
