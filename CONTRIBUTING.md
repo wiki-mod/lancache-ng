@@ -79,7 +79,6 @@ after opening the PR.
 
 ### Changelog expectations
 
-There is no checked-in changelog file.
 For each user-facing change, include a short changelog-style summary in the PR body under a clear heading (for example `## Changelog`).
 This summary should be reused in the final release notes text when available.
 Every pull request should include a changelog section that explains user-visible
@@ -87,6 +86,24 @@ behavior, operational impact, validation performed, and any explicit follow-up
 issue. Silent changes are not acceptable for release, setup, CI, or runtime
 behavior. Keep this section current by editing it directly as the PR changes,
 not by appending new comments each time something is fixed or added.
+
+#### Releasing Changes to CHANGELOG.md
+
+lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
+the [Keep a Changelog](https://keepachangelog.com/) format.
+
+When a release ships:
+
+1. Collect the accumulated `## Changelog` sections from all merged PRs since the
+   last release.
+2. Create a new version heading in `CHANGELOG.md` using the format
+   `## [X.Y.Z] - YYYY-MM-DD` with the release date.
+3. Organize the accumulated changes under standard subheadings: `Added`, `Changed`,
+   `Fixed`, `Deprecated`, `Removed`, `Security`.
+4. Include this changelog update as part of the release PR or tag commit.
+
+Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
+reflects user-visible behavior changes across all merged work for that release.
 
 Use the template's visible `Risk / Rollback / Follow-up` section to capture
 the remaining operator risk and any rollback or follow-up notes.
