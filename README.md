@@ -262,9 +262,8 @@ Example values:
 | Standard mode IP | `192.168.1.10` |
 | SSL mode IP | `192.168.1.11` |
 | install directory | `/opt/lancache-ng` |
-| standard cache directory | `/opt/lancache-ng/cache/standard` |
-| SSL cache directory | `/opt/lancache-ng/cache/ssl` |
-| cache size per mode | `500` GiB |
+| cache directory (shared) | `/srv/lancache/cache` |
+| cache size | `500` GiB |
 | Admin UI port | `8080` |
 
 After setup, check the containers:

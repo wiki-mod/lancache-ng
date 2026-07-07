@@ -29,9 +29,8 @@ See `.github/AGENTS.md` for the full coding standards and architecture reference
 ## Architecture
 
 ```
-services/proxy/          # nginx: HTTP + HTTPS caching (SSL mode, CA cert required)
-services/proxy-standard/ # nginx: HTTP caching + HTTPS passthrough (no CA cert needed)
-services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (shared by both modes)
+services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
+services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (split into standard + SSL instances)
 config/dev/              # Settings for local development
 config/prod/             # Settings for production deployment
 certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
@@ -50,12 +49,14 @@ by configuring which DNS server IP they point to:
 | **standard** | `192.168.1.10` | cached | passthrough (SNI) | No |
 | **ssl** | `192.168.1.11` | cached | MITM-cached | Yes — install `certs/ca.crt` |
 
-- **Standard mode** (`services/proxy-standard`): nginx `stream` block reads SNI via
+- **Standard mode** (port 8443 on `IP_STANDARD`): nginx `stream` block reads SNI via
   `ssl_preread` and forwards HTTPS blind to the real CDN. No TLS interception. HTTP
   is cached normally. Suitable for devices that can't or won't import custom CAs.
-- **SSL mode** (`services/proxy`): full TLS interception via per-domain wildcard certs
+- **SSL mode** (port 443 on `IP_SSL`): full TLS interception via per-domain wildcard certs
   signed by the LAN CA. Both HTTP and HTTPS downloads are cached.
-- Each mode gets its own proxy + DNS service, each bound to a distinct LAN IP.
+- **Single unified proxy service** (`services/proxy`): one nginx container handles both modes
+  via separate ports and Docker port mappings. Both modes share a single cache volume.
+- **Two DNS services** (`dns-standard` and `dns-ssl`), each bound to a distinct LAN IP.
   This is enforced by the `${IP_STANDARD}` / `${IP_SSL}` variables in `deploy/*/`env`.
 
 ## How SSL Interception Works (ssl mode)
@@ -91,7 +92,7 @@ by configuring which DNS server IP they point to:
   expiry signatures in the query string. Using `$uri` (path only) means the same file always
   hits the same cache entry regardless of the signature. The full URL (with signature) is still
   forwarded to the origin for validation.
-- **`libnginx-mod-stream`**: The standard proxy needs nginx's stream module for SNI passthrough.
+- **`libnginx-mod-stream`**: The unified proxy uses nginx's stream module for standard-mode SNI passthrough.
   This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
   at the top of `nginx.conf` (before the `events {}` block).
 - **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
@@ -103,7 +104,7 @@ by configuring which DNS server IP they point to:
 | | dev | prod |
 |---|---|---|
 | Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `/opt/lancache-ng/cache` on host |
+| Cache volume | Docker named volume | `/srv/lancache/cache` on host |
 | CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
 | DNS query logging | On | Off |
 | Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
@@ -133,7 +134,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
    Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
    Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
    Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directory: `mkdir -p /opt/lancache-ng/cache`
+   Create cache directory: `mkdir -p /srv/lancache/cache`
 
 ## Adding More CDN Domains
 
