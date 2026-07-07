@@ -1,0 +1,267 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Full-setup validation harness: deterministic compose configuration with
+# dummy service images and minimal dependencies for offline validation workflow
+# testing. All services are pre-configured with deterministic IPs, secrets,
+# and environment variables suitable for testing the stack composition without
+# external network/infrastructure assumptions.
+#
+# This is a validation/testing image only, not part of production deployment.
+# See docs/release-versioning.md and release/stack-images.yml for the
+# production service image list.
+
+name: lancache-ng-validation
+
+services:
+
+  # Minimal proxy image for validation
+  proxy:
+    image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}"
+    environment:
+      - IP_STANDARD=172.28.0.2
+      - IP_SSL=172.28.0.4
+      - SSL_ENABLED=1
+    volumes:
+      - proxy-cache:/var/cache/nginx/lancache
+    networks:
+      validation:
+        ipv4_address: 172.28.0.2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+  # DNS services for validation (both standard and SSL modes)
+  dns-standard:
+    image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
+    environment:
+      - PDNS_API_KEY=validation-pdns-key
+      - DDNS_TSIG_KEY=validation-ddns-key
+      - NATS_URL=nats://nats:4222
+      - NATS_USER=validation-dns-writer
+      - NATS_PASSWORD=validation-nats-password
+      - NATS_CONSUMER=dns-standard
+      - NATS_RECONCILER=1
+    volumes:
+      - pdns-data-standard:/var/lib/powerdns
+    networks:
+      validation:
+        ipv4_address: 172.28.0.3
+    depends_on:
+      - nats
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+  dns-ssl:
+    image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
+    environment:
+      - PDNS_API_KEY=validation-pdns-key
+      - DDNS_TSIG_KEY=validation-ddns-key
+      - NATS_URL=nats://nats:4222
+      - NATS_USER=validation-dns-reader
+      - NATS_PASSWORD=validation-nats-password
+      - NATS_CONSUMER=dns-ssl
+    volumes:
+      - pdns-data-ssl:/var/lib/powerdns
+    networks:
+      validation:
+        ipv4_address: 172.28.0.5
+    depends_on:
+      - nats
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+  # Socket proxy for watchdog health monitoring
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      POST: "1"
+      EXEC: "1"
+    networks:
+      - validation-api
+    restart: unless-stopped
+
+  # Watchdog for health monitoring
+  watchdog:
+    image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
+    volumes:
+      - proxy-cache:/cache/standard
+    depends_on:
+      - docker-socket-proxy
+    networks:
+      - validation
+      - validation-api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/run/watchdog/status.json || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+  # NATS message bus for DNS record sync
+  nats:
+    image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /etc/nats
+        cat > /etc/nats/nats.conf <<'EOF'
+        jetstream {
+          store_dir: /data
+        }
+        authorization {
+          users = [
+            {
+              user: validation-ui
+              password: validation-ui-password
+              permissions = {
+                publish = ["lancache.dns.record", "lancache.dns.flush"]
+              }
+            }
+            {
+              user: validation-dns-writer
+              password: validation-nats-password
+              permissions = {
+                subscribe = ["lancache.dns.>", "_INBOX.>"]
+              }
+            }
+            {
+              user: validation-dns-reader
+              password: validation-nats-password
+              permissions = {
+                subscribe = ["lancache.dns.>", "_INBOX.>"]
+              }
+            }
+          ]
+        }
+        EOF
+        exec nats-server -c /etc/nats/nats.conf
+    volumes:
+      - nats-data:/data
+      - nats-conf:/etc/nats
+    networks:
+      validation:
+        ipv4_address: 172.28.0.8
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4222 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+  # Admin UI for stack control and status
+  ui:
+    image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}"
+    volumes:
+      - nats-conf:/etc/nats
+    ports:
+      - "127.0.0.1:9090:8080"
+    environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      - DNS_STANDARD_SERVICE=dns-standard
+      - DNS_SSL_SERVICE=dns-ssl
+      - PROXY_SERVICE=proxy
+      - SSL_ENABLED=1
+      - PROXY_STANDARD_URL=http://proxy
+      - PROXY_SSL_URL=http://proxy
+      - PROXY_SSL_SERVICE=proxy
+      - STANDARD_LOG=/var/log/nginx/access.log
+      - SSL_LOG=/var/log/nginx/access.log
+      - STANDARD_CACHE_DIR=/var/cache/proxy
+      - SSL_CACHE_DIR=/var/cache/proxy
+      - CACHE_MAX_GB=1
+      - STANDARD_IP=172.28.0.2
+      - SSL_IP=172.28.0.4
+      - UI_AUTH_USER=
+      - UI_AUTH_PASSWORD=
+      - ALLOW_INSECURE_UI=true
+      - DHCP_MODE=disabled
+      - PDNS_AUTH_URL=http://dns-standard:8081
+      - PDNS_REC_URL=http://dns-standard:8082
+      - PDNS_API_KEY=validation-pdns-key
+      - NATS_URL=nats://nats:4222
+      - NATS_UI_USER=validation-ui
+      - NATS_UI_PASSWORD=validation-ui-password
+      - NATS_DNS_WRITER_USER=validation-dns-writer
+      - NATS_DNS_WRITER_PASSWORD=validation-nats-password
+      - NATS_DNS_READER_USER=validation-dns-reader
+      - NATS_DNS_READER_PASSWORD=validation-nats-password
+    networks:
+      - validation
+      - validation-api
+    depends_on:
+      - docker-socket-proxy
+      - proxy
+      - nats
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+  # System metrics backend
+  netdata:
+    image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
+    hostname: lancache-netdata-validation
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - netdataconfig:/etc/netdata
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - validation
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19999/api/v1/info >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+
+networks:
+  validation:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+  validation-api:
+    internal: true
+
+volumes:
+  proxy-cache:
+  pdns-data-standard:
+  pdns-data-ssl:
+  nats-data:
+  nats-conf:
+  netdataconfig:
+  netdatalib:
+  netdatacache:

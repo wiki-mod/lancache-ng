@@ -1189,6 +1189,55 @@ jobs:
               ;;
           esac
 
+  full-setup-validate:
+    name: validate full-setup image
+    needs: detect-changes
+    if: >-
+      ${{
+        always() &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.deploy == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build full-setup validation image
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
+            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
+            --build-arg LANCACHE_IMAGE_TAG=latest \
+            -t lancache-ng-full-setup:validation \
+            deploy/full-setup
+
+      - name: Validate compose configuration
+        env:
+          LANCACHE_IMAGE_REGISTRY: ghcr.io
+          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+          LANCACHE_IMAGE_TAG: latest
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD/deploy/full-setup:/validation:ro" \
+            -w /validation \
+            --env LANCACHE_IMAGE_REGISTRY \
+            --env LANCACHE_IMAGE_PREFIX \
+            --env LANCACHE_IMAGE_TAG \
+            docker:latest \
+            docker compose config -f docker-compose.yml >/dev/null
+
+      - name: Clean up image
+        if: always()
+        run: |
+          docker rmi lancache-ng-full-setup:validation || true
+
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow
     # changes still force it because the CI contract itself may have changed.
