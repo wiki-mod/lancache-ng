@@ -1,5 +1,7 @@
 # lancache-ng
 
+[![Build & Push](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml/badge.svg)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml)
+
 LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.
 
 It stores game and software downloads inside your local network.  
@@ -16,6 +18,10 @@ LanCache NG is still actively changing.
 The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional Watchtower helper updates and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
+
+### Test coverage
+
+The build badge above reflects the status of the primary CI pipeline, which includes Rust test coverage validation. On every push, the `rust_coverage` job runs `cargo tarpaulin` against the `services/dns/nats-subscriber` and `services/ui` crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber` currently has a 0% threshold because its existing tests only cover its data model, not its subscribe/forward logic (tracked in #504). Each crate's threshold is raised independently as that crate gains real coverage.
 
 ## What this project does
 
