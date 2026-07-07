@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Validates that a pull request body contains all required sections from
+# .github/pull_request_template.md. Enforces the policy stated in CONTRIBUTING.md:
+# "Fill in every section rather than deleting the ones that feel redundant for a
+# small change — a short 'N/A, this is a one-line typo fix' is fine, but the
+# section headings themselves should stay."
+#
+# For draft PRs: prints warnings but exits 0 (non-blocking).
+# For non-draft PRs: exits 1 if any required section is missing or empty.
+#
+# Usage:
+#   validate-pr-template.sh <pr-body-file>
+#
+# Environment variables (for CI):
+#   PR_BODY         - PR body content (used if no file argument)
+#   PR_DRAFT        - "true" or "false" (if not set, defaults to non-draft enforcement)
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd "$script_dir/.." && pwd)
+cd "$repo_root"
+
+pr_body_file="${1:-}"
+pr_body=""
+
+# Read PR body from file or environment.
+if [ -n "$pr_body_file" ] && [ -f "$pr_body_file" ]; then
+    pr_body="$(<"$pr_body_file")"
+elif [ -n "${PR_BODY:-}" ]; then
+    pr_body="$PR_BODY"
+else
+    echo "::error::No PR body provided. Pass a file path as argument or set PR_BODY environment variable." >&2
+    exit 1
+fi
+
+# Determine if PR is a draft (default to false/non-draft for CI if not specified).
+pr_draft="${PR_DRAFT:-false}"
+
+# Extract required sections from the PR template.
+# These are the exact section headings (starting with ##) that CONTRIBUTING.md requires to be present.
+# Derived from .github/pull_request_template.md sections.
+declare -a required_sections=(
+    "Summary"
+    "What This Actually Changes"
+    "What This PR Fixes / Adds"
+    "What Changed In Code"
+    "Why This Matters For Users / Operators"
+    "Scope Boundaries"
+    "Local Scope Evidence"
+    "Validation"
+    "Type of change"
+    "Changelog"
+)
+
+# Template placeholders that indicate empty/unfilled sections.
+# These are example text from .github/pull_request_template.md that should be replaced.
+declare -a placeholder_texts=(
+    "Bulleted markdown checklist"
+    "Exact commands run locally"
+)
+
+# Check if a section exists and has content (not just placeholder text).
+section_exists_with_content() {
+    local section="$1"
+    local body="$2"
+
+    # Look for the section heading "## <Section>".
+    if ! echo "$body" | grep -qF "## $section"; then
+        return 1
+    fi
+
+    # Extract content after the section heading until the next ## heading using awk.
+    # This avoids sed delimiter issues with sections containing "/" characters.
+    local section_content
+    section_content=$(echo "$body" | awk -v sec="$section" '
+        /^## / && $0 ~ ("^## " sec "$") {found=1; next}
+        found && /^## / {exit}
+        found {print}
+    ')
+
+    # Remove leading/trailing whitespace and check if empty.
+    local trimmed
+    trimmed=$(printf '%s' "$section_content" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+    if [ -z "$trimmed" ]; then
+        return 1
+    fi
+
+    # A section that still contains the template's own placeholder text
+    # (e.g. "Exact commands run locally") wasn't actually filled in, even
+    # though it isn't empty.
+    for placeholder in "${placeholder_texts[@]}"; do
+        if [[ "$trimmed" == *"$placeholder"* ]]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# Validate all required sections.
+missing_sections=()
+for section in "${required_sections[@]}"; do
+    if ! section_exists_with_content "$section" "$pr_body"; then
+        missing_sections+=("$section")
+    fi
+done
+
+# Report results.
+if [ "${#missing_sections[@]}" -eq 0 ]; then
+    echo "PR template validation passed: all required sections present and filled."
+    exit 0
+fi
+
+# Format error message.
+error_message="$(cat <<EOF
+PR template validation failed: missing or empty required sections.
+
+The following sections from .github/pull_request_template.md are missing or empty:
+EOF
+)"
+for section in "${missing_sections[@]}"; do
+    error_message="$error_message"$'\n'"  - ## $section"
+done
+error_message="$error_message"$'\n\n'"See CONTRIBUTING.md: fill in every section (even 'N/A, ...' is fine)."
+
+# Behavior for draft vs. non-draft PRs.
+if [ "$pr_draft" = "true" ]; then
+    # Draft PR: warn but don't fail.
+    echo "::warning::$error_message" >&2
+    echo ""
+    echo "This is a draft PR, so the template check is non-blocking." >&2
+    echo "Before marking ready for review, please fill in the missing sections." >&2
+    exit 0
+else
+    # Non-draft PR: fail.
+    echo "::error::$error_message" >&2
+    exit 1
+fi
