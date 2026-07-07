@@ -56,10 +56,19 @@ check_dockerfile_base_images() {
 
     # Find any FROM ... :latest except those explicitly documented in comments
     local matches
-    matches=$(grep -n "^FROM .*:latest" services/*/Dockerfile || true)
+    matches=$(grep -nE "$latest_pattern" services/*/Dockerfile || true)
     if [[ -n "$matches" ]]; then
         printf "%b[DOCKERFILE BASE IMAGES]%b :latest tags in FROM statements:\n" "$RED" "$NC"
         printf '%s\n' "$matches"
+        violations_found=1
+    fi
+
+    # Find FROM lines with no tag at all (implicitly :latest).
+    local untagged_matches
+    untagged_matches=$(grep -nE "$untagged_pattern" services/*/Dockerfile || true)
+    if [[ -n "$untagged_matches" ]]; then
+        printf "%b[DOCKERFILE BASE IMAGES]%b untagged FROM statements (implicitly :latest):\n" "$RED" "$NC"
+        printf '%s\n' "$untagged_matches"
         violations_found=1
     fi
 
@@ -130,7 +139,6 @@ echo "Checking workflow image defaults..."
 check_workflow_image_defaults || true
 
 report
-exit_code=$?
 
 # Exit with 1 if violations found (failures), 0 if only warnings or all clean.
 if [[ $violations -gt 0 ]]; then
