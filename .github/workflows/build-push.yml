@@ -1462,6 +1462,7 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               cargo tarpaulin \
+                --engine llvm \
                 --manifest-path services/dns/nats-subscriber/Cargo.toml \
                 --locked \
                 --timeout 300 \
@@ -1482,6 +1483,7 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               cargo tarpaulin \
+                --engine llvm \
                 --manifest-path services/ui/Cargo.toml \
                 --locked \
                 --timeout 300 \

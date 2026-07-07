@@ -149,9 +149,14 @@ For Rust coverage checks (requires `cargo-tarpaulin`), use:
 
 ```bash
 cargo install cargo-tarpaulin
-cargo tarpaulin --manifest-path services/ui/Cargo.toml --locked --out json
-cargo tarpaulin --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json
+cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json
+cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json
 ```
+
+`--engine llvm` matches what CI uses: tarpaulin's default ptrace-based engine needs a
+capability Docker containers don't grant by default (it fails with "ASLR disable
+failed: EPERM"), so both CI and local instructions use the LLVM source-based engine
+instead.
 
 Rust code coverage must stay at or above 40% for each crate. This is a minimum
 baseline; improvements above 40% are encouraged. The 40% threshold was set as
