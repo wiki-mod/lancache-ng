@@ -262,7 +262,7 @@ Example values:
 | Standard mode IP | `192.168.1.10` |
 | SSL mode IP | `192.168.1.11` |
 | install directory | `/opt/lancache-ng` |
-| cache directory (shared) | `/srv/lancache/cache` |
+| cache directory (shared) | `/opt/lancache-ng/cache` |
 | cache size | `500` GiB |
 | Admin UI port | `8080` |
 
