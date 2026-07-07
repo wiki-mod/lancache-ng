@@ -18,12 +18,14 @@ on:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - "tests/bats/**"
+      - "setup.sh"
   pull_request:
     branches: [master, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - "tests/bats/**"
+      - "setup.sh"
 
 permissions:
   contents: read
