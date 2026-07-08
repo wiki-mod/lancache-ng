@@ -41,6 +41,25 @@ jobs:
         include:
           - language: actions
             build-mode: none
+          # CodeQL Rust extraction can silently degrade while the job still reports success.
+          # Observed historical example (PR #357, run 28596839186): the Rust extractor reported
+          # "12 files extracted with errors" vs "2 without error" (partial `macro expansion failed`
+          # for ordinary macros like format!, vec!, json!, tracing::*, assert!) yet the job
+          # concluded `success`. This is a known upstream limitation of CodeQL's Rust extractor,
+          # not a defect in this repository, and it is not tunable here: Rust supports only
+          # `build-mode: none` (manual/autobuild modes do not exist for Rust). Tracked upstream in
+          # github/codeql #19966, #19982, #20643, #20659, and locally in issue #394.
+          #
+          # CodeQL's own authoritative quality gate is the `rust/diagnostic/database-quality`
+          # ("Low Rust analysis quality") diagnostic query. On the observed degraded run it did NOT
+          # fire (the extractor's macro-expansion errors are classified as normal), so CodeQL does
+          # not treat this state as low quality. The raw per-file counts are metric-query output
+          # printed only to the analysis log summary; they are not exposed as a supported,
+          # machine-readable workflow output (github/codeql-action #1742, open since 2023) and the
+          # database is cleaned after `analyze`. The "Report CodeQL Rust extraction-quality signal"
+          # step below therefore surfaces CodeQL's own determination and a standing caveat instead
+          # of a hand-rolled count threshold. A green CodeQL Rust job must NOT be read as full
+          # security-scan coverage of the Rust codebase.
           - language: rust
             build-mode: none
     steps:
@@ -101,3 +120,52 @@ jobs:
         uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         with:
           category: "/language:${{ matrix.language }}"
+          # Persist the interpreted SARIF locally so the extraction-quality step can read
+          # CodeQL's own diagnostic notifications. Results are still uploaded as usual.
+          output: ${{ runner.temp }}/codeql-sarif
+
+      # Make CodeQL's Rust extraction-quality determination visible on every run so a green
+      # CodeQL Rust job is not silently misread as full extraction coverage (issue #394).
+      # This keys on CodeQL's own `rust/diagnostic/database-quality` signal rather than a
+      # hand-rolled count threshold, so it never turns red on the known, upstream, permanent
+      # macro-expansion limitation. It is warn-only and can never fail the job or manufacture
+      # false confidence: it always prints the standing caveat, and warns (not fails) only when
+      # CodeQL itself flags low quality or when the signal cannot be read.
+      - name: Report CodeQL Rust extraction-quality signal
+        if: always() && matrix.language == 'rust'
+        env:
+          SARIF_DIR: ${{ runner.temp }}/codeql-sarif
+        run: |
+          set -uo pipefail
+          {
+            echo '### CodeQL Rust extraction-quality signal'
+            echo
+            echo 'A green CodeQL Rust job does NOT by itself confirm full extraction coverage.'
+            echo 'CodeQL'\''s Rust extractor (build-mode: none is the only supported Rust mode)'
+            echo 'reports partial `macro expansion failed` errors for ordinary macros as a known'
+            echo 'upstream limitation (github/codeql #19966, #19982, #20643, #20659; local #394).'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          sarif_file="$(ls "$SARIF_DIR"/*.sarif 2>/dev/null | head -n1 || true)"
+          if [ -z "$sarif_file" ] || ! command -v jq >/dev/null 2>&1; then
+            echo "::warning::Could not read the CodeQL Rust extraction-quality signal (SARIF or jq unavailable). Do not treat a green CodeQL Rust job as full Rust security-scan coverage (issue #394)."
+            echo '- Extraction-quality signal unavailable this run (SARIF or jq missing).' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # `rust/diagnostic/database-quality` ("Low Rust analysis quality") appears as a SARIF
+          # notification only when CodeQL itself judges extraction degraded beyond the tolerated
+          # macro-expansion errors. Count matches across both possible notification id fields.
+          quality_hits="$(jq '[.runs[]?.invocations[]?.toolExecutionNotifications[]?
+            | select((.descriptor.id? // .associatedRule.id? // "") == "rust/diagnostic/database-quality")]
+            | length' "$sarif_file" 2>/dev/null || echo 0)"
+          quality_hits="${quality_hits:-0}"
+
+          if [ "$quality_hits" -gt 0 ]; then
+            echo "::warning::CodeQL flagged Low Rust analysis quality (rust/diagnostic/database-quality). Rust extraction is degraded beyond the known macro-expansion limitation this run; investigate (issue #394)."
+            echo "- CodeQL flagged Low Rust analysis quality this run (${quality_hits} notification(s)). See issue #394." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '- CodeQL did not flag Low Rust analysis quality this run. That gate tolerates partial macro-expansion extraction, so it is not proof of full semantic coverage (issue #394).' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
