@@ -18,6 +18,7 @@ on:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - "tests/bats/**"
+      - "tests/shellspec/**"
       - "setup.sh"
   pull_request:
     branches: [master, v0.2.0]
@@ -25,6 +26,7 @@ on:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - "tests/bats/**"
+      - "tests/shellspec/**"
       - "setup.sh"
 
 permissions:
@@ -51,13 +53,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # tests/bats/** and setup.sh are in this workflow's path filter so the
-      # local smoke-test/Bats steps below actually run when setup.sh changes,
-      # but a setup.sh-only change must not also rebuild and publish the
-      # build-tools image itself -- that stays tied to build-tools inputs
-      # (tools/build-tools/** or this workflow file), per the "routine PRs
-      # must not rebuild the build-tools image unless build-tools inputs
-      # changed" contract.
+      # tests/bats/**, tests/shellspec/**, and setup.sh are in this workflow's
+      # path filter so the local smoke-test/Bats/ShellSpec steps below
+      # actually run when setup.sh changes, but a setup.sh-only change must
+      # not also rebuild and publish the build-tools image itself -- that
+      # stays tied to build-tools inputs (tools/build-tools/** or this
+      # workflow file), per the "routine PRs must not rebuild the build-tools
+      # image unless build-tools inputs changed" contract.
       - name: Determine whether build-tools inputs actually changed
         id: should-publish
         run: |
@@ -96,7 +98,7 @@ jobs:
           if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Only test-only paths (tests/bats/**, setup.sh) changed; skipping build-tools image rebuild/publish."
+            echo "::notice::Only test-only paths (tests/bats/**, tests/shellspec/**, setup.sh) changed; skipping build-tools image rebuild/publish."
             echo "should-publish=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -205,6 +207,7 @@ jobs:
               rustc
               rustfmt
               sccache
+              shellspec
               shellcheck
             )
 
@@ -220,6 +223,7 @@ jobs:
             sccache --version
             actionlint --version
             bats --version
+            shellspec --version
             shellcheck --version
             distcc --version
             distcc-pump --help >/dev/null
@@ -237,6 +241,17 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bats tests/bats'
+
+      - name: Run ShellSpec setup fixtures
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
 
       - name: Prepare local Trivy cache
         run: |

@@ -29,6 +29,8 @@ ARG CARGO_TARPAULIN_VERSION=0.37.0
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
 ARG DOCKER_CLI_VERSION=29.6.1
 ARG DOCKER_COMPOSE_VERSION=5.2.0
+ARG SHELLSPEC_VERSION=0.28.1
+ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 ARG DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -71,6 +73,16 @@ RUN set -euo pipefail; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
 COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
+
+RUN set -euo pipefail; \
+    shellspec_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$shellspec_tmp"' EXIT; \
+    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
+      -o "$shellspec_tmp/shellspec-dist.tar.gz"; \
+    printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
+    tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
+    ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
+    shellspec --version
 
 RUN set -euo pipefail; \
     arch="$(dpkg --print-architecture)"; \
@@ -157,6 +169,7 @@ RUN set -euo pipefail; \
       cargo-audit \
       cargo-tarpaulin \
       actionlint \
+      shellspec \
       shellcheck \
       jq \
       git \
@@ -223,6 +236,7 @@ RUN set -euo pipefail; \
     cargo tarpaulin --version; \
     actionlint --version; \
     bats --version; \
+    shellspec --version; \
     shellcheck --version; \
     docker --version; \
     docker compose version; \
