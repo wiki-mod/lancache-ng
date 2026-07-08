@@ -1865,6 +1865,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_dhcp_mode_input_round_trips_supported_modes() {
+        use crate::config::DhcpMode;
+        // The mode-switch form is the only writer of DHCP_MODE from the UI, so
+        // every supported value must parse back to its enum, and unknown input
+        // must be rejected rather than silently coerced to a default.
+        for mode in [DhcpMode::Disabled, DhcpMode::Kea, DhcpMode::DnsmasqProxy] {
+            assert_eq!(parse_dhcp_mode_input(mode.as_str()), Some(mode));
+        }
+        // Case/whitespace tolerance mirrors the setup.sh prompt handling.
+        assert_eq!(
+            parse_dhcp_mode_input("  Dnsmasq-Proxy "),
+            Some(DhcpMode::DnsmasqProxy)
+        );
+        assert_eq!(parse_dhcp_mode_input("dnsmasq"), None);
+        assert_eq!(parse_dhcp_mode_input(""), None);
+    }
+
+    #[test]
     fn accepts_valid_dhcp_form() {
         let lease_time = validate_test_dhcp_form!(
             "198.51.100.0/24",

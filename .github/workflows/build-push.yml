@@ -523,6 +523,19 @@ jobs:
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
 
+          # The default (profile-less) renders above skip the dhcp/dhcp-proxy
+          # service blocks entirely, because Compose omits services behind an
+          # inactive profile. Both DHCP modes (issue #343) therefore need
+          # explicit profile activation so their service definitions are
+          # actually parsed and validated, not silently excluded.
+          for compose_file in \
+            deploy/dev/docker-compose.yml \
+            deploy/prod/docker-compose.yml \
+            deploy/quickstart/docker-compose.yml; do
+            validate_compose -f "$compose_file" --profile dhcp-kea
+            validate_compose -f "$compose_file" --profile dhcp-proxy
+          done
+
           validate_nats_config_ownership() {
             local path
 
