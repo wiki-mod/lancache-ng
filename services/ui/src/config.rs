@@ -176,6 +176,13 @@ impl fmt::Display for Config {
     }
 }
 
+// The `effective_*` methods below implement a two-layer config model: the
+// `Config` struct itself holds the container's *startup* values (from env
+// vars, fixed for the process lifetime), while the Admin UI lets an operator
+// change DHCP settings at runtime without a container restart by writing
+// `KEY=value` lines to `ui_settings_file` (see `read_ui_override`). Every
+// `effective_*` getter checks that persisted override file first and only
+// falls back to the startup env value if no override line exists.
 impl Config {
     pub fn effective_dhcp_mode(&self) -> DhcpMode {
         read_dhcp_mode_override(&self.ui_settings_file).unwrap_or(self.dhcp_mode)
@@ -206,6 +213,12 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
     }
 
+    // Renders the current effective DHCP settings back into the same
+    // `KEY=value` line format `read_ui_override` parses, so this is what
+    // gets written to `ui_settings_file` whenever the operator saves DHCP
+    // changes from the Admin UI. Empty values are omitted rather than
+    // written as `KEY=`, so a cleared override falls back to the env default
+    // on the next read instead of pinning an empty string.
     pub fn ui_override_lines(&self) -> Vec<String> {
         let mut lines = vec![format!("DHCP_MODE={}", self.effective_dhcp_mode().as_str())];
         let proxy_subnet_start = self.effective_dhcp_proxy_subnet_start();
@@ -316,6 +329,14 @@ impl Config {
     }
 }
 
+// Guesses which release channel (see docs/release-versioning.md) the
+// currently-running image tag belongs to, for display in the Admin UI only
+// (LANCACHE_IMAGE_CHANNEL should normally be set explicitly by the deploy
+// tooling; this is a best-effort fallback when it isn't). `dev`/`edge`/
+// `latest` tags map straight to their channel name. A `v`- or `sha-`-prefixed
+// tag means a specific release or commit was pinned deliberately, which this
+// function can't distinguish from any other channel, so it reports "pinned"
+// rather than guessing wrong. Anything else defaults to "latest".
 fn derive_lancache_image_channel(tag: &str) -> String {
     if tag == "dev" || tag == "edge" || tag == "latest" {
         tag.to_string()
@@ -341,25 +362,16 @@ fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-// CACHE_DIR is the canonical runtime cache path. Legacy split keys remain as
-// compatibility fallbacks only if they still describe the same shared cache.
+// CACHE_DIR is the only runtime cache path as of v0.2.0. The pre-v0.2.0 split
+// keys (CACHE_DIR_STANDARD/CACHE_DIR_SSL, migrated by setup.sh) are a hard
+// cut: setup.sh's migration folds them into CACHE_DIR before the UI ever
+// starts, so this function does not accept them as a fallback. An earlier
+// revision of this function *did* read a split-key fallback here, but under
+// the wrong names (STANDARD_CACHE_DIR/SSL_CACHE_DIR, reversed from the real
+// CACHE_DIR_STANDARD/CACHE_DIR_SSL used by setup.sh and every other service),
+// so it silently never matched real migrated installs anyway.
 fn resolve_cache_dir() -> String {
-    if let Some(cache_dir) = env_opt("CACHE_DIR") {
-        return cache_dir;
-    }
-
-    let standard_cache_dir = env_opt("STANDARD_CACHE_DIR");
-    let ssl_cache_dir = env_opt("SSL_CACHE_DIR");
-
-    match (standard_cache_dir, ssl_cache_dir) {
-        (Some(standard), Some(ssl)) if standard == ssl => standard,
-        (Some(standard), None) => standard,
-        (None, Some(ssl)) => ssl,
-        (Some(_), Some(_)) => panic!(
-            "STANDARD_CACHE_DIR and SSL_CACHE_DIR point to different cache paths; set CACHE_DIR to one shared directory before starting the UI."
-        ),
-        (None, None) => "/var/cache/proxy".to_string(),
-    }
+    env_opt("CACHE_DIR").unwrap_or_else(|| "/var/cache/proxy".to_string())
 }
 
 // Keep CACHE_MAX_GB canonical while tolerating matching legacy values on old
@@ -415,6 +427,13 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+// DHCP_MODE (kea/dnsmasq-proxy/disabled) is the current setting. DHCP_ENABLED
+// is the older boolean flag from before Kea and dnsmasq-proxy were separate
+// choices; `legacy_enabled` is only honored when DHCP_MODE is unset (empty),
+// so an explicit DHCP_MODE always wins and old installs that never set
+// DHCP_MODE keep working (DHCP_ENABLED=true implied Kea, the only mode that
+// existed at the time). `read_dhcp_mode_override` (the persisted Admin-UI
+// value) never had a legacy boolean, so it always passes `false` here.
 fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
@@ -434,6 +453,11 @@ fn read_dhcp_mode_override(path: &str) -> Option<DhcpMode> {
     read_ui_override(path, "DHCP_MODE").map(|value| parse_dhcp_mode(&value, false))
 }
 
+// Reads a single `KEY=value` line from the Admin UI's persisted settings
+// file (plain text, not a full env-file parser: no quoting, no escaping,
+// first non-comment match for `key` wins). This file only exists once an
+// operator has changed a DHCP setting from the UI; a missing file or a
+// missing key both just mean "no override, use the env default."
 fn read_ui_override(path: &str, key: &str) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let prefix = format!("{key}=");
@@ -544,8 +568,6 @@ mod tests {
             "STANDARD_LOG",
             "SSL_LOG",
             "CACHE_DIR",
-            "STANDARD_CACHE_DIR",
-            "SSL_CACHE_DIR",
             "CACHE_MAX_GB",
             "STANDARD_CACHE_MAX_GB",
             "SSL_CACHE_MAX_GB",
@@ -565,34 +587,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_cache_dir_wins_over_legacy_split_keys() {
+    fn cache_dir_is_read_directly_with_no_legacy_split_key_fallback() {
         let _guard = env_test_lock().lock().unwrap();
 
         env::set_var("CACHE_DIR", "/cache/shared");
-        env::set_var("STANDARD_CACHE_DIR", "/cache/legacy-standard");
-        env::set_var("SSL_CACHE_DIR", "/cache/legacy-ssl");
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_dir, "/cache/shared");
 
         env::remove_var("CACHE_DIR");
-        env::remove_var("STANDARD_CACHE_DIR");
-        env::remove_var("SSL_CACHE_DIR");
-    }
-
-    #[test]
-    fn matching_legacy_cache_dir_values_still_work() {
-        let _guard = env_test_lock().lock().unwrap();
-
-        env::remove_var("CACHE_DIR");
-        env::set_var("STANDARD_CACHE_DIR", "/cache/shared");
-        env::set_var("SSL_CACHE_DIR", "/cache/shared");
-
-        let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.cache_dir, "/cache/shared");
-
-        env::remove_var("STANDARD_CACHE_DIR");
-        env::remove_var("SSL_CACHE_DIR");
     }
 
     #[test]
@@ -667,22 +670,6 @@ mod tests {
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_max_gb, 50.0);
-    }
-
-    #[test]
-    fn mismatched_legacy_cache_dir_values_fail_closed() {
-        let _guard = env_test_lock().lock().unwrap();
-
-        env::remove_var("CACHE_DIR");
-        env::set_var("STANDARD_CACHE_DIR", "/cache/legacy-standard");
-        env::set_var("SSL_CACHE_DIR", "/cache/legacy-ssl");
-
-        let result = std::panic::catch_unwind(Config::from_env);
-
-        env::remove_var("STANDARD_CACHE_DIR");
-        env::remove_var("SSL_CACHE_DIR");
-
-        assert!(result.is_err());
     }
 
     #[test]

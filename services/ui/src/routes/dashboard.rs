@@ -11,6 +11,13 @@ use tera::Context;
 pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let cfg = &state.config;
 
+    // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and
+    // only diverge when an operator explicitly runs standard-mode and
+    // ssl-mode as two separate proxy services with different stub_status
+    // endpoints (see CLAUDE.md's "Two-Mode / Two-IP Architecture"). When
+    // they're equal, the second HTTP call would just re-fetch identical
+    // stats from the same nginx, so it's skipped and the first result is
+    // reused instead.
     let standard_status =
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
     let ssl_status = if !cfg.ssl_enabled {
@@ -21,6 +28,9 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
     };
 
+    // Each of these three stats sources does blocking I/O (`du`, reading
+    // full log files) — run in spawn_blocking so a slow disk doesn't stall
+    // the async runtime's worker threads for other in-flight requests.
     let cache_used_gb = tokio::task::spawn_blocking({
         let d = cfg.cache_dir.clone();
         move || nginx_client::get_cache_size_gb(&d)
@@ -80,6 +90,11 @@ fn cache_usage_pct(used_gb: f64, max_gb: f64) -> u64 {
     }
 }
 
+// JSON counterpart to `dashboard()`'s stub_status section only (registered
+// at GET /api/metrics in main.rs). Deliberately omits the cache-size and
+// log-parsing work above, which is the expensive part of `dashboard()` —
+// intended for cheap polling of just the connection metrics, though nothing
+// in this codebase currently calls this endpoint from the frontend.
 pub async fn metrics_api(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = &state.config;
     let standard_status =

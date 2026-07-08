@@ -205,7 +205,7 @@ services:
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
-      - proxy-cache:/cache/cache
+      - proxy-cache:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy

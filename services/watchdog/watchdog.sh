@@ -57,7 +57,7 @@ resolve_cache_dir() {
         return 0
     fi
 
-    printf '%s\n' "/cache/cache"
+    printf '%s\n' "/var/cache/lancache"
 }
 
 CACHE_DIR="$(resolve_cache_dir)"

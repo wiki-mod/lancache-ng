@@ -15,6 +15,18 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # The shared build-tools image already carries the Rust toolchain, sccache,
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
+#
+# Everything below builds a custom distcc wrapper. It exists because
+# distcc-pump preprocesses every `#include` locally before sending the job to
+# a remote host, and the `aws-lc-sys` crate (a transitive TLS dependency)
+# writes generated C headers into its own Cargo build/target directory at
+# build time. distcc-pump's header discovery cannot see files that don't
+# exist until the build is already underway, so pump-mode compilation of
+# those specific translation units fails. The wrapper below detects an
+# aws-lc-sys generated-header include path in the compiler arguments and, for
+# just that case, routes the job to a non-pump distcc host (or the local
+# compiler if none is configured) instead of letting it go through pump mode
+# and fail.
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \

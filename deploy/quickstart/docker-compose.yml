@@ -326,13 +326,13 @@ services:
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
       - CACHE_VALID_DAYS=365
-      - CACHE_DIR=/cache/cache
+      - CACHE_DIR=/var/cache/lancache
       - CONTAINER_PROXY=lancache-proxy
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - SSL_ENABLED=${SSL_ENABLED:-0}
     volumes:
-      - ${CACHE_DIR:-./cache}:/cache/cache
+      - ${CACHE_DIR:-./cache}:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
