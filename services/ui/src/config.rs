@@ -372,13 +372,13 @@ fn resolve_cache_max_gb() -> f64 {
         return cache_max_gb;
     }
 
-    let legacy_cache_max_gb = match (
+    match (
         env::var("STANDARD_CACHE_MAX_GB").ok(),
         env::var("SSL_CACHE_MAX_GB").ok(),
     ) {
         (Some(standard), Some(ssl)) => {
-            let standard = standard.parse().unwrap_or(50.0);
-            let ssl = ssl.parse().unwrap_or(standard);
+            let standard: f64 = standard.parse().unwrap_or(50.0);
+            let ssl: f64 = ssl.parse().unwrap_or(standard);
             if (standard - ssl).abs() > f64::EPSILON {
                 panic!(
                     "STANDARD_CACHE_MAX_GB and SSL_CACHE_MAX_GB differ without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
@@ -389,9 +389,7 @@ fn resolve_cache_max_gb() -> f64 {
         (Some(standard), None) => standard.parse().unwrap_or(50.0),
         (None, Some(ssl)) => ssl.parse().unwrap_or(50.0),
         (None, None) => 50.0,
-    };
-
-    legacy_cache_max_gb
+    }
 }
 
 fn env_u64(key: &str, default: u64) -> Result<u64, String> {
@@ -463,15 +461,23 @@ fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
         .unwrap_or(default)
 }
 
+// Shared across the crate's test suites (this module's own tests plus
+// main.rs's tests that call `Config::from_env()`). `cargo test` runs tests in
+// parallel threads by default, and `std::env::set_var`/`env::var` are
+// process-global, so any test that reads or writes CACHE_DIR/CACHE_MAX_GB (or
+// their legacy split-key fallbacks) must hold this lock for its whole
+// env-mutation-and-assert window, or it can observe another thread's
+// in-flight legacy values and hit `resolve_cache_dir`/`resolve_cache_max_gb`'s
+// fail-closed panic spuriously.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn hsts_auto_only_sends_for_https_requests() {

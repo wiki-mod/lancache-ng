@@ -705,6 +705,12 @@ mod tests {
 
     #[test]
     fn startup_preflight_rejects_invalid_ttl_before_other_static_checks() {
+        // `Config::from_env()` reads process-global env vars (CACHE_DIR,
+        // CACHE_MAX_GB, and their legacy split-key fallbacks). Hold the same
+        // lock config.rs's own env-mutating tests use so this test never
+        // observes another thread's in-flight legacy values and hits
+        // `resolve_cache_dir`/`resolve_cache_max_gb`'s fail-closed panic.
+        let _guard = config::env_test_lock().lock().unwrap();
         let mut cfg = config::Config::from_env().unwrap();
         cfg.ui_session_ttl_seconds = 0;
         cfg.nats_ui_user = "invalid user".to_string();
