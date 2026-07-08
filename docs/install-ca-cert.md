@@ -58,6 +58,6 @@ sudo trust anchor --store ca.crt
 ## Consoles (PS5, Xbox, Nintendo)
 
 Consoles do not allow custom CA certificates.
-The DNS server routes their CDN connections to the cache anyway,
-but the TLS handshake fails — the device automatically falls back
-to a direct connection. No caching, but full functionality.
+Console CDN domains are intentionally excluded from the DNS list.
+This means consoles resolve their CDN connections directly to the internet
+and bypass the cache entirely. No caching, but full functionality without any certificate issues.

@@ -20,7 +20,7 @@ This document outlines the security threats that lancache-ng is designed to prot
 ├─────────────────────────────────┤
 │  lancache-ng                    │
 │  - Proxy (nginx)                │
-│  - DNS (BIND9)                  │
+│  - DNS (PowerDNS)               │
 │  - Admin UI                     │
 │  - NATS event bus               │
 ├─────────────────────────────────┤
@@ -77,16 +77,18 @@ This document outlines the security threats that lancache-ng is designed to prot
 
 **Threat**: An attacker gains access to the Admin UI and modifies cache settings, purges cache, or stops services.
 
-**Likelihood**: High (no authentication by default)
+**Likelihood**: Low (authentication required by default; opt-out requires explicit configuration)
 
 **Impact**: High (service disruption, cache poisoning)
 
 **Mitigation**:
-- Enable authentication before production (reverse proxy auth, or UI-level auth)
+- Built-in authentication is required by default: both `UI_AUTH_USER` and `UI_AUTH_PASSWORD` environment variables must be set, or the UI fails to start
+- Admin UI can only start without authentication if explicitly opted in via `ALLOW_INSECURE_UI=true`
 - Restrict Admin UI access to trusted IPs via firewall
 - Use network policies to limit Admin UI exposure
+- Do not set `ALLOW_INSECURE_UI=true` on internet-reachable deployments
 
-**Residual Risk**: High (default: unauthenticated; requires user configuration)
+**Residual Risk**: Low (authentication enabled by default; risk only exists if operator explicitly disables it via `ALLOW_INSECURE_UI=true` on an exposed deployment)
 
 ---
 
@@ -259,12 +261,11 @@ The following threats are **not addressed** by lancache-ng:
 
 Potential future improvements:
 
-1. **Built-in Admin UI authentication**: Reduce reliance on external auth proxies
-2. **NATS authentication hardening**: Stronger token-based auth by default
-3. **Rate limiting and DDoS protection**: Configurable limits per IP
-4. **Audit logging**: Track Admin UI and cache operations for forensics
-5. **Content signature verification**: Optional GPG/HMAC validation of cached files
-6. **Prometheus metrics for security events**: Alert on anomalies
+1. **NATS authentication hardening**: Stronger token-based auth by default
+2. **Rate limiting and DDoS protection**: Configurable limits per IP
+3. **Audit logging**: Track Admin UI and cache operations for forensics
+4. **Content signature verification**: Optional GPG/HMAC validation of cached files
+5. **Prometheus metrics for security events**: Alert on anomalies
 
 ---
 
