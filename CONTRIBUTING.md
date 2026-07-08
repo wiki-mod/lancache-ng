@@ -140,48 +140,72 @@ These are required, not stylistic suggestions — a PR missing them will fail CI
 
 ## Local checks
 
-Run the checks that match your change.
+### Using the build-tools container for verification
 
-For shell scripts:
+All project verification (Rust checks, build validation, linting, tool checks) must run inside the project's build-tools container, not against host-local tools. This ensures that your verification matches what CI will test: the same Rust version, the same clippy/rustfmt rules, the same sccache/distcc configuration, and the same versions of shellcheck, actionlint, and other tools.
+
+Treat host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `shellcheck`, `actionlint`, `sccache`) as potentially missing, misconfigured, or stale. They do not prove that your change will pass CI. **Verification with host tools instead of the build-tools container does not count as valid testing**.
+
+To run checks with the build-tools container:
+
+1. The build-tools image is selected automatically: `bash scripts/select-build-tools-image.sh` determines the correct version (published image or local build).
+2. Run checks inside the container with the standard pattern:
 
 ```bash
-bash -n setup.sh
-shellcheck --severity=warning setup.sh
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" <check-command>
 ```
 
-For Compose changes:
+### Specific checks
+
+Run the checks that match your change.
+
+For shell scripts, run the checks inside the build-tools container:
+
+```bash
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+```
+
+For Compose changes, you can validate locally (this does not depend on build-tools):
 
 ```bash
 docker compose -f deploy/quickstart/docker-compose.yml config
 docker compose -f deploy/prod/docker-compose.yml config
 ```
 
-For image inventory, release, or package-channel changes:
+For image inventory, release, or package-channel changes, run inside the build-tools container:
 
 ```bash
-bash scripts/validate-stack-images.sh
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash scripts/validate-stack-images.sh
 ```
 
-For workflow changes:
+For workflow changes, run inside the build-tools container:
 
 ```bash
-actionlint .github/workflows/*.yml
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  actionlint .github/workflows/*.yml
 ```
 
-For Rust services, run the relevant Cargo checks for the service you changed.
-The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
+For Rust services, run the relevant Cargo checks for the service you changed inside
+the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 
 ```bash
-cargo test --locked --manifest-path services/ui/Cargo.toml
-cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
 ```
 
-For Rust coverage checks (requires `cargo-tarpaulin`), use:
+For Rust coverage checks (requires the build-tools container with `cargo-tarpaulin`), use:
 
 ```bash
-cargo install cargo-tarpaulin
-cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json
-cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json && cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json'
 ```
 
 `--engine llvm` matches what CI uses: tarpaulin's default ptrace-based engine needs a
@@ -198,8 +222,8 @@ independently as that crate gains real coverage — do not average or share a
 single "minimum" number across both, since their coverage levels differ by
 an order of magnitude for unrelated reasons.
 
-If you cannot run a relevant check locally, say so in the pull request and
-explain why.
+If you cannot run a relevant check locally (for example, if Docker is unavailable),
+say so in the pull request and explain why.
 
 ## Setup and update safety
 
