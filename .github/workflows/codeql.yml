@@ -138,16 +138,16 @@ jobs:
         run: |
           set -uo pipefail
           {
-            echo '### CodeQL Rust extraction-quality signal'
-            echo
-            echo 'A green CodeQL Rust job does NOT by itself confirm full extraction coverage.'
-            echo 'CodeQL'\''s Rust extractor (build-mode: none is the only supported Rust mode)'
-            echo 'reports partial `macro expansion failed` errors for ordinary macros as a known'
-            echo 'upstream limitation (github/codeql #19966, #19982, #20643, #20659; local #394).'
-            echo
+            printf '%s\n' '### CodeQL Rust extraction-quality signal'
+            printf '\n'
+            printf '%s\n' 'A green CodeQL Rust job does NOT by itself confirm full extraction coverage.'
+            printf '%s\n' "CodeQL's Rust extractor (build-mode: none is the only supported Rust mode)"
+            printf '%s\n' 'reports partial "macro expansion failed" errors for ordinary macros as a known'
+            printf '%s\n' 'upstream limitation (github/codeql #19966, #19982, #20643, #20659; local #394).'
+            printf '\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          sarif_file="$(ls "$SARIF_DIR"/*.sarif 2>/dev/null | head -n1 || true)"
+          sarif_file="$(find "$SARIF_DIR" -maxdepth 1 -name '*.sarif' -print -quit 2>/dev/null || true)"
           if [ -z "$sarif_file" ] || ! command -v jq >/dev/null 2>&1; then
             echo "::warning::Could not read the CodeQL Rust extraction-quality signal (SARIF or jq unavailable). Do not treat a green CodeQL Rust job as full Rust security-scan coverage (issue #394)."
             echo '- Extraction-quality signal unavailable this run (SARIF or jq missing).' >> "$GITHUB_STEP_SUMMARY"
