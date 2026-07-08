@@ -97,6 +97,12 @@ disk_info() {
     printf '{"pct": %s, "status": "%s"}' "$pct" "$status"
 }
 
+# Called once per monitored container each loop iteration. `_fcount` and
+# `_hstring` are bash namerefs (`local -n`) bound to the caller's own
+# F_PROXY/F_DNS_STD/F_DNS_SSL and H_PROXY/H_DNS_STD/H_DNS_SSL variables, so
+# this function can update each container's failure counter and last-known
+# health string in place without returning multiple values or relying on
+# globals named after a specific container.
 check_and_maybe_restart() {
     local name="$1"
     local -n _fcount="$2"
@@ -119,6 +125,14 @@ check_and_maybe_restart() {
     fi
 }
 
+# Writes the status JSON consumed by the Admin UI dashboard. Built with
+# plain string interpolation rather than a JSON library or `jq` (this image
+# doesn't ship jq for writing, only `curl`/`jq` for reading Docker's health
+# API above) — every value going into the template is either a fixed enum
+# (health_color's output), an integer counter, or a container name we
+# ourselves defaulted, so there's no untrusted/arbitrary string that could
+# break the JSON structure. Written to a .tmp file and renamed into place so
+# a concurrent reader never sees a half-written file.
 write_status() {
     local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local disk_cache; disk_cache=$(disk_info "$CACHE_DIR")
