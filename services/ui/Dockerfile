@@ -7,6 +7,8 @@
 # otherwise). The runtime stage is a minimal Debian image that only carries
 # the compiled binary, its Tera templates, and the entrypoint script.
 
+# Intentional ARG default (overridable at build time via --build-arg).
+# Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 

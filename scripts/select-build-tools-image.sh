@@ -5,6 +5,11 @@
 # tooling), and falls back to building a branch-local image only for trusted
 # refs (pushes, or same-repo pull requests) — untrusted forked pull requests
 # never trigger a fallback build. Prints the chosen image reference on stdout.
+#
+# IMPORTANT: This script resolves mutable `:latest` tags to their immutable
+# digest-qualified references before returning. Do not call this script
+# expecting a mutable tag in the output; the returned reference is always
+# pinned to a digest or a branch-local validation image.
 set -euo pipefail
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
