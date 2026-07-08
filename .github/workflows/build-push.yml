@@ -1235,14 +1235,40 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # `latest` is contractually a stable-release-only channel (see
+      # docs/release-versioning.md) -- it is never moved by a v0.2.0 (or any
+      # other pre-release integration branch) push, so it always reflects the
+      # last real release, not this branch's current code. Validating a
+      # pre-release branch against `latest` therefore checks the wrong image
+      # and fails for reasons unrelated to the branch under test. Mirror the
+      # same ref-to-channel mapping the `promote` job uses so this job
+      # validates the channel this branch actually publishes to.
+      - name: Determine validation image channel
+        id: channel
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$BASE_REF" == "master" ]]; then
+            tag=edge
+          elif [[ "$BASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tag=dev
+          else
+            tag=latest
+          fi
+          echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Build full-setup validation image
+        env:
+          IMAGE_TAG: ${{ steps.channel.outputs.tag }}
         run: |
           set -euo pipefail
 
           docker build \
             --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
             --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
-            --build-arg LANCACHE_IMAGE_TAG=latest \
+            --build-arg LANCACHE_IMAGE_TAG="$IMAGE_TAG" \
             -t lancache-ng-full-setup:validation \
             deploy/full-setup
 
@@ -1250,7 +1276,7 @@ jobs:
         env:
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-          LANCACHE_IMAGE_TAG: latest
+          LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
         run: |
           set -euo pipefail
 
@@ -1341,7 +1367,7 @@ jobs:
         env:
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-          LANCACHE_IMAGE_TAG: latest
+          LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
         run: |
           set -euo pipefail
           docker compose pull --quiet
