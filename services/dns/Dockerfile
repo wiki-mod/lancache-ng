@@ -105,22 +105,37 @@ RUN --mount=type=secret,id=sccache_redis_url \
       printf '%s\n' "$jobs"; \
     }; \
     run_cargo_build() { \
-      if [ "${distcc_enabled:-0}" != "1" ]; then cargo build -j "$cargo_jobs" --release --locked; return; fi; \
       cargo_log="$(mktemp)"; \
-      if cargo build -j "$cargo_jobs" --release --locked >"$cargo_log" 2>&1; then \
+      cargo_status_file="$(mktemp)"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      cargo_status="$(cat "$cargo_status_file")"; \
+      rm -f "$cargo_status_file"; \
+      if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
+      if [ "${distcc_enabled:-0}" = "1" ]; then \
+        disable_distcc; \
+        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
+        echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
+        if cargo build -j "$cargo_jobs" --release --locked; then \
+          echo "[INFO] normal local C compiler fallback completed." >&2; \
+          rm -f "$cargo_log"; \
+          return 0; \
+        fi; \
         rm -f "$cargo_log"; \
-        return 0; \
+        return 1; \
       fi; \
-      disable_distcc; \
-      unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-      echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-      if cargo build -j "$cargo_jobs" --release --locked; then \
-        echo "[INFO] normal local C compiler fallback completed." >&2; \
+      if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
+        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
+        echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        return 0; \
+        if cargo build -j "$cargo_jobs" --release --locked; then \
+          echo "[INFO] sccache-disabled fallback completed." >&2; \
+          return 0; \
+        fi; \
+        return 1; \
       fi; \
+      echo "[ERROR] cargo build failed for reasons unrelated to sccache or distcc; not retrying." >&2; \
       rm -f "$cargo_log"; \
-      return 1; \
+      return "$cargo_status"; \
     }; \
     configure_sccache; \
     configure_distcc; \
