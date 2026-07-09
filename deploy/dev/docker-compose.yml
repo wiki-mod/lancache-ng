@@ -81,7 +81,7 @@ services:
       - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
-      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
@@ -401,7 +401,6 @@ services:
     volumes:
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
-      - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
       - proxy-cache:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state

@@ -37,7 +37,10 @@ RUN mkdir -p \
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
 COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
-COPY cdn-ssl-domains.txt /etc/nginx/cdn-ssl-domains.txt
+# Static third-party data (not user-editable, unlike cdn-domains.txt below),
+# so it's baked into the image rather than volume-mounted. See entrypoint.sh
+# for how it's used to derive wildcard cert root domains.
+COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

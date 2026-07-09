@@ -2,13 +2,14 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Nginx proxy entrypoint. Generates TLS interception certificates, renders
-# request policy maps from cdn-ssl-domains.txt, and starts the combined HTTP
-# plus HTTPS proxy configuration.
+# request policy maps derived from cdn-domains.txt, and starts the combined
+# HTTP plus HTTPS proxy configuration.
 set -euo pipefail
 
 CA_DIR="/etc/nginx/ssl/ca"
 CERT_DIR="/etc/nginx/ssl/certs"
-DOMAINS_FILE="/etc/nginx/cdn-ssl-domains.txt"
+DOMAINS_FILE="/etc/nginx/cdn-domains.txt"
+PUBLIC_SUFFIX_LIST_FILE="/etc/nginx/public_suffix_list.dat"
 SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
 STREAM_TARGET_FILE="/etc/nginx/stream.d/00-stream-targets.conf"
 
@@ -124,36 +125,139 @@ _is_valid_domain() {
     return 0
 }
 
-# Reads $DOMAINS_FILE once and populates two globals shared by every
-# generation loop below: _UNIQUE_DOMAINS (first-seen order of unique valid
-# normalized domains) and _DOMAIN_IS_ROOT (domain -> 1 if root coverage is
-# needed, 0 if wildcard-only). This exists because the domains file can now
-# legitimately list both "example.com" (root) and ".example.com"
-# (wildcard-only) as separate lines for the same base domain. Without
-# deduplicating by normalized domain first, each map-generation
-# loop would emit the identical "*.example.com" map key twice — one per
-# source line — and nginx's map directive rejects duplicate keys at
-# "nginx -t" time, leaving the SSL proxy unable to start. When a domain
-# appears as both forms, root wins because the root entry explicitly allows
-# both the exact root and wildcard subdomains.
+# ────────────────────────────────────────────────────────────────────────────
+# Public-suffix-aware root domain derivation
+#
+# cdn-domains.txt is the single source of truth for CDN hostnames (see
+# services/dns/entrypoint.sh, which drives DNS spoofing from the same file).
+# Before v0.2.0, cdn-ssl-domains.txt was a SEPARATE, hand-maintained list of
+# root domains for this file's wildcard cert generation, which an operator
+# had to keep in sync by hand. In practice it never was: it carried three
+# leftover entries from the project's initial commit with no corresponding
+# DNS entry (dead certs, never reachable via any real SNI), and was missing
+# root coverage for at least one real DNS-listed domain (drivers.amd.com had
+# no matching cert because the hand-picked root was downloads.amd.com, a
+# sibling subdomain, not the true registrable root amd.com). This section
+# derives the same root domains automatically and correctly instead.
+#
+# "Correctly" here means using the real Mozilla Public Suffix List
+# (vendored at $PUBLIC_SUFFIX_LIST_FILE, https://publicsuffix.org/list/,
+# MPL-2.0) rather than a naive "last two labels" guess, which silently
+# breaks for any domain under a compound-label TLD like co.uk or com.au
+# (the root of foo.example.co.uk is example.co.uk, not co.uk).
+#
+# Deliberately ICANN-section only: the PSL also has a "PRIVATE DOMAINS"
+# section listing CDN/hosting platforms (including akamaized.net and
+# akamaihd.net, both used by real entries in cdn-domains.txt) where each
+# customer's subdomain is treated as its own independently registrable
+# name. That's the opposite of what this proxy needs — it wants ONE broad
+# wildcard cert covering an entire shared CDN platform regardless of which
+# customer a given hostname belongs to, not a separate cert per customer
+# subdomain. Loading only the ICANN section makes akamaized.net itself the
+# derived root (matching the pre-v0.2.0 hand-curated value), instead of
+# deriving something like epicgames-download1.akamaized.net.
+declare -A _PSL_RULES=()
+declare -A _PSL_WILDCARDS=()
+declare -A _PSL_EXCEPTIONS=()
+
+_load_public_suffix_list() {
+    local line rule
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" == "// ===BEGIN PRIVATE DOMAINS===" ]] && break
+        [[ -z "$line" || "$line" == //* ]] && continue
+        rule="$line"
+        if [[ "$rule" == !* ]]; then
+            _PSL_EXCEPTIONS["${rule#!}"]=1
+        elif [[ "$rule" == \*.* ]]; then
+            _PSL_WILDCARDS["${rule#\*.}"]=1
+        else
+            _PSL_RULES["$rule"]=1
+        fi
+    done < "$PUBLIC_SUFFIX_LIST_FILE"
+}
+
+# Prints the last $2 labels of the array named $1, dot-joined. Bash namerefs
+# let this take the labels array by name instead of needing a global.
+_suffix_from_end() {
+    local -n _sfe_arr="$1"
+    local count="$2"
+    local n=${#_sfe_arr[@]}
+    local start=$((n - count))
+    ((start < 0)) && start=0
+    local IFS=.
+    printf '%s' "${_sfe_arr[*]:$start}"
+}
+
+# Computes the registrable ("root") domain for a normalized hostname using
+# the standard public-suffix matching algorithm: try the longest possible
+# suffix first (the whole domain), then progressively shorter suffixes,
+# stopping at the first one that matches an exception, plain, or wildcard
+# rule. An exception match always wins over a wildcard at the same
+# position (see the "!city.kawasaki.jp" vs "*.kawasaki.jp" case in the real
+# list — without the exception, "city.kawasaki.jp" would otherwise be
+# swallowed as part of the public suffix instead of being a registrable
+# name itself). Falls back to the implicit "*" rule (public suffix = the
+# single trailing label) when nothing in the list matches at all, per spec.
+# Returns non-zero if the domain has no label left over once the suffix is
+# removed — i.e., the input is already at or above the suffix boundary,
+# so there's no sensible root domain to generate a cert for.
+_registrable_domain() {
+    local domain="$1"
+    local -a rd_labels
+    IFS='.' read -r -a rd_labels <<< "$domain"
+    local n=${#rd_labels[@]}
+    local k suffix wildcard_base best_k=0
+
+    for ((k = n; k >= 1; k--)); do
+        suffix="$(_suffix_from_end rd_labels "$k")"
+        if [[ -n "${_PSL_EXCEPTIONS[$suffix]+set}" ]]; then
+            best_k=$((k - 1))
+            break
+        fi
+        if [[ -n "${_PSL_RULES[$suffix]+set}" ]]; then
+            best_k=$k
+            break
+        fi
+        if ((k >= 2)); then
+            wildcard_base="$(_suffix_from_end rd_labels "$((k - 1))")"
+            if [[ -n "${_PSL_WILDCARDS[$wildcard_base]+set}" ]]; then
+                best_k=$k
+                break
+            fi
+        fi
+    done
+    ((best_k == 0)) && best_k=1
+
+    local root_k=$((best_k + 1))
+    ((root_k > n)) && return 1
+    _suffix_from_end rd_labels "$root_k"
+}
+
+_load_public_suffix_list
+
+# Reads $DOMAINS_FILE (cdn-domains.txt) once, derives each line's
+# registrable root domain, and populates two globals shared by every
+# generation loop below: _UNIQUE_DOMAINS (first-seen order of unique
+# derived roots) and _DOMAIN_IS_ROOT (root -> 1, always — every derived
+# root needs both bare and wildcard cert/map coverage, since the DNS side
+# already treats every cdn-domains.txt entry as covering its whole
+# subdomain tree). Multiple DNS entries commonly derive the same root (e.g.
+# drivers.amd.com and pat.downloads.amd.com both derive amd.com), so this
+# also deduplicates by root — without that, each map-generation loop below
+# would emit the identical map key more than once, and nginx's map
+# directive rejects duplicate keys at "nginx -t" time, leaving the SSL
+# proxy unable to start.
 declare -a _UNIQUE_DOMAINS=()
 declare -A _DOMAIN_IS_ROOT=()
 _collect_domain_rows() {
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
-    local raw_domain domain is_wildcard_only
+    local raw_domain domain root
 
     while IFS= read -r raw_domain || [ -n "$raw_domain" ]; do
         domain="${raw_domain#"${raw_domain%%[![:space:]]*}"}"
         domain="${domain%"${domain##*[![:space:]]}"}"
         [[ -z "$domain" || "$domain" == \#* ]] && continue
-
-        # Track wildcard-only intent after trimming, but before normalization
-        # strips the leading dot.
-        is_wildcard_only=0
-        if [[ "$domain" == .* ]]; then
-            is_wildcard_only=1
-        fi
 
         # Validate and normalize domain before using it anywhere
         if ! _is_valid_domain "$domain"; then
@@ -163,13 +267,15 @@ _collect_domain_rows() {
         domain="$(_normalize_domain "$domain")"
         [[ -z "$domain" ]] && continue
 
-        if [[ -z "${_DOMAIN_IS_ROOT[$domain]+set}" ]]; then
-            _UNIQUE_DOMAINS+=("$domain")
-            _DOMAIN_IS_ROOT["$domain"]=0
+        if ! root="$(_registrable_domain "$domain")" || [[ -z "$root" ]]; then
+            echo "[lancache] WARNING: could not derive a root domain for: $domain" >&2
+            continue
         fi
-        if [ "$is_wildcard_only" -eq 0 ]; then
-            _DOMAIN_IS_ROOT["$domain"]=1
+
+        if [[ -z "${_DOMAIN_IS_ROOT[$root]+set}" ]]; then
+            _UNIQUE_DOMAINS+=("$root")
         fi
+        _DOMAIN_IS_ROOT["$root"]=1
     done < "$DOMAINS_FILE"
 }
 
@@ -332,7 +438,7 @@ fi
 # ────────────────────────────────────────────────────────────────────────────
 # 2. Generate request-time access policy maps
 #    lazy  = keep historical behavior and allow any requested upstream host
-#    strict = only proxy hosts listed in cdn-ssl-domains.txt
+#    strict = only proxy hosts derived from cdn-domains.txt (see above)
 # ────────────────────────────────────────────────────────────────────────────
 {
     echo "# Auto-generated by entrypoint — do not edit"
