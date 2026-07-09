@@ -53,7 +53,6 @@ impl HstsMode {
 pub struct Config {
     pub template_dir: String,
     pub cdn_domains_file: String,
-    pub ssl_domains_file: String,
     pub standard_log: String,
     pub ssl_log: String,
     pub standard_cache_dir: String,
@@ -111,7 +110,6 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("template_dir", &self.template_dir)
             .field("cdn_domains_file", &self.cdn_domains_file)
-            .field("ssl_domains_file", &self.ssl_domains_file)
             .field("standard_log", &self.standard_log)
             .field("ssl_log", &self.ssl_log)
             .field("standard_cache_dir", &self.standard_cache_dir)
@@ -270,7 +268,6 @@ impl Config {
         Ok(Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
             cdn_domains_file: env_str("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
-            ssl_domains_file: env_str("SSL_DOMAINS_FILE", "/data/cdn-ssl-domains.txt"),
             standard_log,
             ssl_log,
             standard_cache_dir,

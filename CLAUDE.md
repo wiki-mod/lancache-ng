@@ -152,10 +152,11 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
 
 ## Adding More CDN Domains
 
-- **DNS**: add the hostname to `services/dns/cdn-domains.txt`
-- **SSL cert**: add the root domain to `services/proxy/cdn-ssl-domains.txt`
-  (if the root domain is already listed, subdomains are already covered)
-- Rebuild and restart the containers
+- Add the hostname to `services/dns/cdn-domains.txt` (or via the Admin UI) — this is the only file to maintain.
+- The proxy derives each entry's registrable root domain automatically at
+  startup (using the vendored Mozilla Public Suffix List, see
+  `services/proxy/entrypoint.sh`) and generates a wildcard cert for it.
+- Restart the containers (or wait for the Admin UI to trigger it) so the proxy picks up the new domain.
 
 ## IPv6 Notes
 

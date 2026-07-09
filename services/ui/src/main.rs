@@ -565,8 +565,6 @@ async fn main() -> Result<()> {
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
-        .route("/domains/ssl/add", post(routes::domains::add_ssl))
-        .route("/domains/ssl/remove", post(routes::domains::remove_ssl))
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
         .route(
             "/domains/lan/remove",

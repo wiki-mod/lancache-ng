@@ -1132,7 +1132,6 @@ deploy_prod_repo_input_paths() {
     [[ -d "$repo_root/certs" ]] && printf '%s\n' "$repo_root/certs"
     [[ -d "$repo_root/config/prod" ]] && printf '%s\n' "$repo_root/config/prod"
     [[ -f "$repo_root/services/dns/cdn-domains.txt" ]] && printf '%s\n' "$repo_root/services/dns/cdn-domains.txt"
-    [[ -f "$repo_root/services/proxy/cdn-ssl-domains.txt" ]] && printf '%s\n' "$repo_root/services/proxy/cdn-ssl-domains.txt"
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains

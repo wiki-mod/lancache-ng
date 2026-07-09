@@ -522,15 +522,16 @@ You can manage domains in the Admin UI.
 
 This is the easiest option and usually does not require a rebuild.
 
-Manual domain files:
+Manual domain file:
 
 ```text
 services/dns/cdn-domains.txt
-services/proxy/cdn-ssl-domains.txt
 ```
 
-Use `cdn-domains.txt` for DNS based cache routing.  
-Use `cdn-ssl-domains.txt` for SSL mode certificate coverage.
+One list drives everything: DNS based cache routing, and (as of v0.2.0)
+SSL mode certificate coverage too. The proxy derives each entry's
+registrable root domain automatically at startup and generates a wildcard
+cert for it — there is no separate SSL domain file to keep in sync by hand.
 
 After manual file changes in a repository-based setup, restart the affected
 services so they reload the mounted files:
@@ -639,7 +640,7 @@ Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example pub
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
 - `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
-- `strict` NOT RECOMMENDED! Only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until missing CDN root domains are added. That means, you need to add manually all domains by hand!
+- `strict` NOT RECOMMENDED! Only proxies hosts whose root domain is derived from `services/dns/cdn-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until the missing CDN hostname is added to `cdn-domains.txt` — there is no separate file to maintain, but you still need to add every CDN hostname you want to cache by hand.
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 

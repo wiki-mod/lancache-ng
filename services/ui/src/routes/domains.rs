@@ -56,14 +56,12 @@ pub struct Record {
 
 pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let dns_domains = read_domain_file(&state.config.cdn_domains_file);
-    let ssl_domains = read_domain_file(&state.config.ssl_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
 
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
-    ctx.insert("ssl_domains", &ssl_domains);
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("active_page", "domains");
@@ -96,6 +94,14 @@ pub async fn add_dns(
         tracing::error!("Failed to write dns domain: {}", e);
     } else {
         flush_recursor_cache(&state).await;
+        // The SSL proxy derives its wildcard-cert root domains and nginx
+        // host-allowlist maps from this same file at container startup (see
+        // services/proxy/entrypoint.sh) — there is no separate SSL domain
+        // list to edit anymore, so adding a DNS entry that needs TLS
+        // interception also needs the proxy restarted to pick it up.
+        if state.config.ssl_enabled {
+            restart_ssl(&state).await;
+        }
     }
     Ok(Redirect::to("/domains"))
 }
@@ -119,52 +125,12 @@ pub async fn remove_dns(
         tracing::error!("Failed to remove dns domain: {}", e);
     } else {
         flush_recursor_cache(&state).await;
-    }
-    Ok(Redirect::to("/domains"))
-}
-
-pub async fn add_ssl(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(form): Form<AddForm>,
-) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
-    let Some(domain) = parse_domain_entry(&form.domain) else {
-        tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain");
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    };
-
-    let wrote = {
-        let _guard = state.file_lock.lock().expect("file lock poisoned");
-        append_domain(&state.config.ssl_domains_file, &domain)
-    };
-    if let Err(e) = wrote {
-        tracing::error!("Failed to write ssl domain: {}", e);
-    } else {
-        restart_ssl(&state).await;
-    }
-    Ok(Redirect::to("/domains"))
-}
-
-pub async fn remove_ssl(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(form): Form<AddForm>,
-) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
-    let Some(domain) = normalize_domain_delete_entry(&form.domain) else {
-        tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain delete");
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    };
-
-    let removed = {
-        let _guard = state.file_lock.lock().expect("file lock poisoned");
-        remove_domain(&state.config.ssl_domains_file, &domain)
-    };
-    if let Err(e) = removed {
-        tracing::error!("Failed to remove ssl domain: {}", e);
-    } else {
-        restart_ssl(&state).await;
+        // See the matching comment in add_dns: removing a domain can also
+        // change the SSL proxy's strict-mode host-allowlist, so it needs
+        // the same restart to take effect.
+        if state.config.ssl_enabled {
+            restart_ssl(&state).await;
+        }
     }
     Ok(Redirect::to("/domains"))
 }

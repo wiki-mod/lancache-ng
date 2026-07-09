@@ -73,6 +73,13 @@ services:
     container_name: lancache-proxy
     build:
       context: ../../services/proxy
+      # Bakes in a build-time snapshot of the DNS domain list as a fallback
+      # default for deployments that never mount a live cdn-domains.txt (see
+      # deploy/quickstart, which pulls a pre-built image with no local repo
+      # checkout to bind-mount from). dev/prod always shadow this baked
+      # default with the live bind-mount below at container start.
+      additional_contexts:
+        - dns-domains=../../services/dns
     env_file:
       - ../../config/dev/proxy.env
     environment:
