@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebase onto the current remote base, and verified head before conclusions.
 - Documented the GraphQL Markdown upload guard so PR/issue bodies cannot be
   accidentally written as JSON-escaped strings.
+- Fixed a quickstart-install bug where `lancache-dhcp-probe` failed to start
+  on every fresh install because `setup.sh` never copied `dhcp-probe.sh` into
+  the install directory, and hardened the same install step to recover
+  cleanly if a previous install already hit this bug (#538, #539).
+- CI: the build job's existing push retry now re-authenticates to GHCR and
+  waits before retrying, instead of instantly reusing the same session that
+  just failed, to self-heal intermittent ghcr.io push-auth failures without
+  needing a manual rerun (#540, #541).
 
 ## [0.1.0] - 2026-07-06
 
