@@ -1059,10 +1059,21 @@ install_quickstart_compose_assets() {
     dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
+    # A prior install that hit the missing-copy bug (#538) left Docker's own
+    # auto-vivified bind-mount source behind as an empty directory. GNU
+    # install(1) treats an existing directory target as "copy into", not
+    # "replace" — leaving it in place would install to dhcp-probe.sh/dhcp-probe.sh
+    # and still leave the actual mount source as a directory.
+    if [[ -d "$dhcp_probe_target" ]]; then
+        rm -rf "$dhcp_probe_target"
+    fi
     if [[ "$(realpath -m "$DHCP_PROBE_SCRIPT")" != "$(realpath -m "$dhcp_probe_target")" ]]; then
         install -m 0755 "$DHCP_PROBE_SCRIPT" "$dhcp_probe_target"
     else
         chmod 0755 "$dhcp_probe_target"
+    fi
+    if [[ -d "$socket_proxy_target" ]]; then
+        rm -rf "$socket_proxy_target"
     fi
     if [[ "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" != "$(realpath -m "$socket_proxy_target")" ]]; then
         install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
