@@ -20,7 +20,11 @@ inputs:
     required: false
     default: ""
   build-tools-image:
-    description: Build tools image that provides rustc, sccache, distcc, and distcc-pump.
+    description: |
+      Build tools image that provides rustc, sccache, distcc, and distcc-pump.
+      Primary CI workflows (build-push.yml) pass an explicit pinned digest via
+      scripts/select-build-tools-image.sh; this `:latest` default is a fallback
+      for local developer usage and other callers that do not override it.
     required: false
     default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
   build-network:

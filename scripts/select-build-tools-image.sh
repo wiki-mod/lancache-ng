@@ -5,6 +5,11 @@
 # tooling), and falls back to building a branch-local image only for trusted
 # refs (pushes, or same-repo pull requests) — untrusted forked pull requests
 # never trigger a fallback build. Prints the chosen image reference on stdout.
+#
+# IMPORTANT: This script resolves mutable `:latest` tags to their immutable
+# digest-qualified references before returning. Do not call this script
+# expecting a mutable tag in the output; the returned reference is always
+# pinned to a digest or a branch-local validation image.
 set -euo pipefail
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
@@ -27,6 +32,10 @@ fail() {
   exit 1
 }
 
+# smoke_test_image verifies the provided image contains all required CI tools (cargo,
+# rustc, distcc, docker, etc.) before it is trusted. The published :latest tag is
+# mutable and could become stale, broken, or missing tools between publication and use,
+# so explicit verification is preferable to assuming the tag is current and valid.
 smoke_test_image() {
   local image="$1"
 
@@ -92,6 +101,11 @@ published_image_reference() {
   fi
 }
 
+# A forked pull request (head_repository != base_repository) is NOT allowed to trigger a
+# fallback build, because untrusted PR code would get to build and run an arbitrary
+# Dockerfile as part of this project's trusted CI infrastructure — a real supply-chain risk.
+# Same-repo PRs and pushes are trusted because they went through this project's own
+# contributor approval and branch-protection rules.
 trusted_fallback_allowed=false
 if [[ "$event_name" = "pull_request" ]]; then
   [[ -n "$head_repository" && "$head_repository" = "$base_repository" ]] \
@@ -100,6 +114,9 @@ else
   trusted_fallback_allowed=true
 fi
 
+# Strict mode (require_published=true): some callers opt in to use only the published
+# image or fail outright — no silent fallback to a branch-local build. This is the right
+# trade-off for jobs where an unvalidated fallback image would be worse than a hard failure.
 if [[ "$require_published" = "true" ]]; then
   if docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
@@ -109,6 +126,12 @@ if [[ "$require_published" = "true" ]]; then
   fail "published build-tools image is required for downstream jobs but was not pullable or did not satisfy smoke checks"
 fi
 
+# Three-tier cascade: on trusted refs (non-PR events), always build a branch-local
+# validation image without trying the published one first, since trusted refs want to
+# validate against exactly this branch's Dockerfile. On PR events, try the published
+# image first and smoke-test it; only fall back to a branch-local build if the PR is
+# same-repo (trusted). Forked PRs that fail the published image check get a hard error
+# instead of a fallback build.
 if [[ "$event_name" != "pull_request" ]]; then
   printf '::notice::Building a branch-local build-tools validation image for a trusted ref.\n' >&2
   docker build --pull -t "$fallback_image" "$build_tools_context" >&2

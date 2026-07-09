@@ -1,6 +1,8 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
 
+# Intentional ARG default (overridable at build time via --build-arg).
+# Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 
@@ -27,6 +29,19 @@ ARG CARGO_BUILD_JOBS=
 
 WORKDIR /build
 COPY nats-subscriber/ .
+# The shell functions defined inside this RUN (in call order):
+#   configure_sccache      - opt-in cache wrapper, only if a sccache secret was mounted.
+#   configure_distcc       - opt-in distributed compile, only if a distcc hosts secret was
+#                            mounted; probes the pump daemon with a trivial compile first.
+#   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
+#                            shuts down distcc-pump and restores the pre-distcc PATH/env.
+#   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
+#   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
+#   run_cargo_build        - builds with distcc if enabled, retrying once locally on failure.
+# NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
+# strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
+# in "\" would swallow every following continuation line as commented-out text instead of
+# executable shell, silently dropping the rest of the build. Verified empirically.
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \

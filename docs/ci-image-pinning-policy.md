@@ -112,31 +112,50 @@ All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 
 ### Build-Time Images (Builder Stages)
 
 - `services/dns/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder`
-  - ARG default: `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`)
+  - ARG default (line 6): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback
+  - **Rationale**: This is a documented, overridable ARG default. Production release builds pass a pinned digest via `--build-arg BUILD_TOOLS_IMAGE=<digest>`. Actual digest pinning for the default is tracked in issue #508.
 
 - `services/ui/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS builder`
-  - ARG default: `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`)
+  - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback
+  - **Rationale**: This is a documented, overridable ARG default. Production release builds pass a pinned digest via `--build-arg BUILD_TOOLS_IMAGE=<digest>`. Actual digest pinning for the default is tracked in issue #508.
 
 ### Workflow Build-Tools References
 
 - `.github/workflows/build-push.yml`:
-  - Line 184: Sets `BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest` as a fallback
-  - Lines 186, 215, 219: Uses `scripts/select-build-tools-image.sh` to resolve to a pinned SHA in most cases
-  - **Status**: ⚠️ Fallback path uses mutable tag; primary paths should use pinned digest
+  - There is no standalone `BUILD_TOOLS_IMAGE=...:latest` fallback assignment in this file — that mechanism was replaced by the selector script entirely. Every consumer resolves the image by calling `scripts/select-build-tools-image.sh` and writing its stdout to `$GITHUB_ENV` (see lines 300/314/316 for the two call sites, and line 1719 for a third).
+  - **Status**: ✅ No mutable tag is assigned directly in this workflow; resolution always goes through the selector script.
+  - **Rationale**: The selector script (`scripts/select-build-tools-image.sh`) resolves all `:latest` tags to immutable digest-qualified references before returning them to the workflow. This is the authoritative policy for the active CI path.
 
-## Known Mutable References Pending Pinning
+- `.github/actions/rust-acceleration-preflight/action.yml`:
+  - Input default (line 29): `default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
+  - **Status**: ⚠️ Input default uses mutable tag — intentional fallback for local use
+  - **Rationale**: This action is a validation-only preflight that runs against whatever image the caller specifies. Primary workflows (`build-push.yml`) pass an explicit pinned digest selected via `scripts/select-build-tools-image.sh`. The `:latest` default is provided for developers and other tools that call this action directly without overriding the input.
 
-The following references use mutable tags and should be converted to pinned digests as part of a follow-up effort:
+## Known Mutable References and Decision Summary
+
+### Pending Digest Pinning (Issue #508)
+
+The following references use mutable tags and are planned for actual digest replacement:
 
 1. **`BUILD_TOOLS_IMAGE` ARG defaults** in:
-   - `services/dns/Dockerfile` line 4
-   - `services/ui/Dockerfile` line 10
-   - Should be replaced with a pinned digest from the stable `ghcr.io/wiki-mod/lancache-ng/build-tools:vX.Y.Z` release tag
+   - `services/dns/Dockerfile` line 6
+   - `services/ui/Dockerfile` line 12
+   - **Decision**: Keep as documented fallback ARGs (overridable at build time). Real digest pinning is owned by issue #508.
+   - **Why**: These are intentional ARG defaults that allow override at build time. Release builds must explicitly pass `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` to ensure reproducibility.
 
-2. **Workflow fallback** in `.github/workflows/build-push.yml` line 184:
-   - Should reference a pinned release tag or sha-* tag instead of `:latest`
+### Intentional Mutable Fallbacks (Documented)
+
+The following references use mutable tags and are intentionally kept as fallbacks:
+
+1. **`.github/actions/rust-acceleration-preflight/action.yml` input default** (line 29):
+   - **Decision**: Keep as `:latest` fallback for local developer use.
+   - **Why**: Primary workflows always override this with a pinned digest from `scripts/select-build-tools-image.sh`. The action is validation-only, not build-time critical.
+
+2. **`scripts/select-build-tools-image.sh` internal `published_image` variable** (line 16):
+   - **Decision**: Keep as `:latest` because the script immediately resolves it to a pinned digest (line 98: `printf '%s@%s\n' "${image%:*}" "$digest"`).
+   - **Why**: Callers of this script receive a digest-qualified reference, never the mutable tag.
 
 ## Remediation Steps
 
@@ -189,10 +208,10 @@ This script checks for floating-tag patterns in workflows and Dockerfiles and re
 
 ## CONTRIBUTING.md Alignment
 
-This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations" (line 81):
+This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations" (line 111):
 
 > Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
 
-And reinforces (line 159):
+And reinforces (line 256):
 
 > release-capable paths must not depend on mutable `build-tools:latest`

@@ -7,6 +7,8 @@
 # otherwise). The runtime stage is a minimal Debian image that only carries
 # the compiled binary, its Tera templates, and the entrypoint script.
 
+# Intentional ARG default (overridable at build time via --build-arg).
+# Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
@@ -88,6 +90,24 @@ ARG CARGO_BUILD_JOBS=
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 # Pre-cache dependencies. Acceleration is opt-in through BuildKit secrets.
+# The shell functions defined inside this RUN (in call order):
+#   configure_sccache      - opt-in cache wrapper, only if a sccache secret was mounted.
+#   configure_distcc       - opt-in distributed compile, only if a distcc hosts secret was
+#                            mounted; probes the pump daemon with a trivial compile first.
+#   lancache-distcc-wrapper (installed earlier in this stage) - distcc-pump preprocesses
+#     #includes locally before dispatching, but aws-lc-sys (a transitive TLS dependency)
+#     writes generated C headers into its own build directory during the build, so pump
+#     can't see them yet. The wrapper detects those translation units and falls back to
+#     non-pump distcc / the local compiler for just those compiles.
+#   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
+#                            shuts down distcc-pump and restores the pre-distcc PATH/env.
+#   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
+#   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
+#   run_cargo_build        - builds with distcc if enabled, retrying once locally on failure.
+# NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
+# strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
+# in "\" would swallow every following continuation line as commented-out text instead of
+# executable shell, silently dropping the rest of the build. Verified empirically.
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
@@ -232,6 +252,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
     && rm -rf src
 
 COPY src ./src
+# Same helper functions as the pre-cache RUN above (configure_sccache, configure_distcc,
+# disable_distcc, resolve_distcc_wrapper_dir, resolve_cargo_jobs, run_cargo_build), this
+# time building the real sources instead of the throwaway `fn main() {}` stub.
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
