@@ -1442,7 +1442,34 @@ resolve_lancache_stack_channel_tag() {
 
     printf "\n${BOLD}${CYAN}▶ Resolving image channel %s${RESET}\n" "$channel" >&2
     docker pull "$stack_image" >/dev/null \
-        || die "Failed to pull stack channel pointer ${stack_image}. Check GHCR access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+        || {
+            if [[ "$channel" = "latest" ]]; then
+                cat >&2 <<EOF
+
+${RED}✗${RESET} Cannot resolve the 'latest' stable release channel.
+
+This project is currently in active development (pre-1.0). While images are published
+to the 'edge' testing channel daily from master, a formal stable release with a
+published 'latest' channel tag has not yet been created.
+
+To proceed, choose one of these options:
+
+  1. Use the 'edge' testing channel (pre-release, may change frequently):
+     LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install
+
+  2. Pin to a specific release version or commit (immutable):
+     LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
+     LANCACHE_IMAGE_TAG=sha-abc1234 ./setup.sh install   # specific commit build
+
+For details on release channels and their stability, see:
+  docs/release-versioning.md
+
+EOF
+                die "Cannot resolve stack channel pointer ${stack_image}."
+            else
+                die "Failed to pull stack channel pointer ${stack_image}. Check GHCR access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+            fi
+        }
 
     container_id=$(docker create "$stack_image") \
         || die "Failed to create temporary container from ${stack_image}."
