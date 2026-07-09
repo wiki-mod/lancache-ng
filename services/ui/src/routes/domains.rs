@@ -125,9 +125,11 @@ pub async fn remove_dns(
         tracing::error!("Failed to remove dns domain: {}", e);
     } else {
         flush_recursor_cache(&state).await;
-        // See the matching comment in add_dns: removing a domain can also
-        // change the SSL proxy's strict-mode host-allowlist, so it needs
-        // the same restart to take effect.
+        // The SSL proxy derives its wildcard-cert root domains and nginx
+        // host-allowlist maps from this same file at container startup (see
+        // services/proxy/entrypoint.sh) — removing a domain here means the
+        // proxy must no longer accept TLS-intercepted connections for it,
+        // so it needs the same restart as adding one to pick up the removal.
         if state.config.ssl_enabled {
             restart_ssl(&state).await;
         }
