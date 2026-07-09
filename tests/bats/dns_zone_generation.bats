@@ -65,10 +65,10 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     # Each domain should generate: base domain record + wildcard record
-    grep -qx 'steam\.com 60 IN A 192\.0\.2\.1'
-    grep -qx '\*\.steam\.com 60 IN A 192\.0\.2\.1'
-    grep -qx 'epic\.com 60 IN A 192\.0\.2\.1'
-    grep -qx '\*\.epic\.com 60 IN A 192\.0\.2\.1'
+    grep -qx 'steam\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx '\*\.steam\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx 'epic\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx '\*\.epic\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 @test "zone generates AAAA records when IPv6 is provided" {
@@ -80,8 +80,8 @@ count_record_type() {
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1 "2001:db8::1"
 
     [ "$status" -eq 0 ]
-    grep -qx 'content\.steam\.com 60 IN AAAA 2001:db8::1'
-    grep -qx '\*\.content\.steam\.com 60 IN AAAA 2001:db8::1'
+    grep -qx 'content\.steam\.com 60 IN AAAA 2001:db8::1' "$zone_file"
+    grep -qx '\*\.content\.steam\.com 60 IN AAAA 2001:db8::1' "$zone_file"
 }
 
 @test "zone skips AAAA records when IPv6 is empty" {
@@ -94,7 +94,7 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     # Should have A records but no AAAA records
-    grep -qx 'example\.com 60 IN A 192\.0\.2\.1'
+    grep -qx 'example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     ! grep -q 'AAAA' "$zone_file"
 }
 
@@ -108,8 +108,8 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     # Should only have records for the two valid domains
-    grep -qx 'valid\.com 60 IN A 192\.0\.2\.1'
-    grep -qx 'another\.com 60 IN A 192\.0\.2\.1'
+    grep -qx 'valid\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx 'another\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     # Should not include comment lines
     ! grep -q '^#' "$zone_file"
 }
@@ -123,9 +123,9 @@ count_record_type() {
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
 
     [ "$status" -eq 0 ]
-    grep -qx 'domain1\.com 60 IN A 192\.0\.2\.1'
-    grep -qx 'domain2\.com 60 IN A 192\.0\.2\.1'
-    grep -qx 'domain3\.com 60 IN A 192\.0\.2\.1'
+    grep -qx 'domain1\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx 'domain2\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx 'domain3\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 @test "zone handles wildcard-only domains (leading dot)" {
@@ -138,11 +138,11 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     # Wildcard-only domain should only have wildcard record, not base domain
-    ! grep -qx 'wildcard\.com 60 IN A 192\.0\.2\.1'
-    grep -qx '\*\.wildcard\.com 60 IN A 192\.0\.2\.1'
+    ! grep -qx 'wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx '\*\.wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     # Normal domain should have both
-    grep -qx 'normal\.com 60 IN A 192\.0\.2\.1'
-    grep -qx '\*\.normal\.com 60 IN A 192\.0\.2\.1'
+    grep -qx 'normal\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx '\*\.normal\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 @test "zone serial is monotonically increasing across regenerations" {
