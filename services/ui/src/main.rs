@@ -174,6 +174,14 @@ async fn security_headers(
     response
 }
 
+// Shallow liveness check for container healthchecks: proves the HTTP server
+// is accepting connections, mirroring the proxy service's unauthenticated
+// `/healthz` (see services/proxy/conf.d/http.conf) rather than probing NATS,
+// Docker, or DNS reachability here.
+async fn health() -> &'static str {
+    "ok"
+}
+
 async fn admin_css() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -533,7 +541,7 @@ async fn main() -> Result<()> {
     }
 
     // Routes that are always public (protected by their own token).
-    let public_routes = Router::new().route(
+    let public_routes = Router::new().route("/health", get(health)).route(
         "/api/secondary/register",
         post(routes::secondaries::register_secondary),
     );

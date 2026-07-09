@@ -1232,10 +1232,23 @@ jobs:
 
   full-setup-validate:
     name: validate full-setup image
-    needs: detect-changes
+    # On a pull_request event, `promote` never runs at all (see its own `if:`
+    # condition) -- there is no channel image for THIS PR to wait for, so this
+    # job validates whatever channel image is already live, same as before.
+    # On push events (master/vX.Y.Z), this job used to run in parallel with
+    # build/promote instead of after them, so it tried to pull the channel
+    # image THIS PUSH was about to publish before promote had actually
+    # published it -- pulling a tag that doesn't exist yet on the very push
+    # that would have created it, rather than "the house isn't inspected
+    # before the roof tiles are on." Depending on `promote` here makes this
+    # job validate the freshly-promoted state of the commit it's actually
+    # running for, instead of racing ahead of it or checking a stale channel
+    # tag left over from a previous push.
+    needs: [detect-changes, promote]
     if: >-
       ${{
         always() &&
+        (github.event_name == 'pull_request' || needs.promote.result == 'success') &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
