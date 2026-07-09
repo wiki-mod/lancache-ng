@@ -902,6 +902,8 @@ append_env_assignment_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
+# Remove a given KEY= line from an env file (used to clean up deprecated
+# split-cache keys CACHE_DIR_STANDARD and CACHE_DIR_SSL during migration).
 remove_env_key() {
     local key="$1" env_file="$2"
 
