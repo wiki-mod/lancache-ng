@@ -18,10 +18,19 @@ bind UDP port 67, so only one can be active at a time.
 
 ## When to use Kea mode
 
-Choose `kea` when LanCache NG is allowed to be the network's DHCP server —
-typically because you can turn the router's built-in DHCP server off.
+Choose `kea` when you are comfortable making this change to your network and
+have access to your router's settings — Kea mode replaces your router as the
+network's DHCP server entirely, and only one DHCP server may be active on a
+LAN at a time.
 
-Kea mode is the preferred, full-featured mode:
+**Before switching**, set `DHCP_MODE=kea` and configure it here first, then
+disable your router's built-in DHCP server — not the other way around.
+Disabling your router's DHCP first, before LanCache NG's Kea server is
+actually running, leaves clients (especially over Wi-Fi, where a router
+reboot commonly forces a reconnect) with no DHCP server to get an address
+from at all, and no obvious reason why.
+
+Kea mode is the full-featured mode:
 
 - Hands out IP address, gateway, and DNS servers to every client.
 - Sets the LanCache NG DNS servers as the DNS option for all leases, so all

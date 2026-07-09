@@ -390,8 +390,11 @@ clients. `setup.sh` lets you pick one of three DHCP modes (stored as
   right starting point for most users.
 - `kea` — LanCache NG runs a full Kea DHCP server that hands out IP address,
   gateway, and the correct cache DNS servers, and supports reservations and
-  lease management in the Admin UI. Use this only when LanCache NG is allowed
-  to be the network's DHCP server (your router's DHCP is turned off).
+  lease management in the Admin UI. Use this only when you are ready to make
+  LanCache NG the network's DHCP server — configure and confirm Kea is running
+  here first, then disable your router's built-in DHCP server, not the other
+  way around (see [docs/dhcp-modes.md](docs/dhcp-modes.md) for why the order
+  matters).
 - `dnsmasq-proxy` — LanCache NG runs dnsmasq in proxy-DHCP mode next to an
   existing DHCP server for networks where the router or ISP gateway keeps DHCP
   enabled and cannot be disabled. It does not own leases and is limited to

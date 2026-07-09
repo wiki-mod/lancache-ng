@@ -16,6 +16,8 @@ setup() {
 
 # ─── DHCP mode validation ───
 
+# These three values—disabled, kea, and dnsmasq-proxy—are the exact valid
+# values that setup.sh's DHCP_MODE config variable accepts.
 @test "is_valid_dhcp_mode accepts the three supported modes" {
     run is_valid_dhcp_mode disabled
     [ "$status" -eq 0 ]
@@ -25,6 +27,8 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+# Testing "dnsmasq" (not "dnsmasq-proxy") specifically is important because it is
+# a plausible typo or confusion for someone who knows the underlying tool is dnsmasq.
 @test "is_valid_dhcp_mode rejects unknown modes" {
     run is_valid_dhcp_mode dnsmasq
     [ "$status" -ne 0 ]
@@ -50,6 +54,10 @@ setup() {
 
 # ─── Mutual exclusion (the core #343 safety invariant) ───
 
+# The following three tests establish the basic mode-to-profile mapping baseline:
+# each DHCP mode (kea, dnsmasq-proxy, disabled) must emit the correct profile(s).
+# The mutual-exclusion test below builds on this baseline by verifying that
+# switching modes always removes the unneeded profile.
 @test "compose_profiles_for_runtime emits dhcp-kea for kea mode" {
     run compose_profiles_for_runtime "" 0 kea
     [ "$status" -eq 0 ]
