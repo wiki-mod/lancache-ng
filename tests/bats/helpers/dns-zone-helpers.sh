@@ -28,6 +28,9 @@ generate_rpz_zone() {
         echo "@ SOA localhost. admin.rpz. $serial 3600 900 604800 60"
         echo "@ NS localhost."
         echo ""
+        # For each domain, emit RPZ A (and AAAA if proxy_ipv6 is set) records for both the base
+        # domain and its *.domain wildcard subdomain. Domains with a leading dot in the input
+        # (wildcard-only marker) only emit wildcard records, not base-domain records.
         while IFS= read -r domain || [ -n "$domain" ]; do
             # Strip leading and trailing whitespace
             domain="${domain#"${domain%%[![:space:]]*}"}"

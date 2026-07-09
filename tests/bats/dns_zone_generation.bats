@@ -25,6 +25,9 @@ count_record_type() {
     grep -c "^\S\+\s\+60\s\+IN\s\+${record_type}\s\+" "$zone_file" || true
 }
 
+# PowerDNS's RPZ (Response Policy Zone) mechanism requires a specific SOA and NS header structure
+# to load the zone file at all; a malformed header results in silent DNS resolution failure,
+# not an obvious parse error.
 @test "zone file has required RPZ header structure" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -40,6 +43,9 @@ count_record_type() {
     grep -q '^\s*@\s\+NS\s\+localhost\.' "$zone_file"
 }
 
+# The SOA serial format (10 digits derived from unix timestamp) is critical because PowerDNS
+# and downstream secondaries use it to detect zone changes; this test checks the format itself,
+# separately from the monotonic-increase invariant (tested in later tests).
 @test "zone SOA record contains valid serial number" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -55,6 +61,8 @@ count_record_type() {
     [[ "$serial" =~ ^[0-9]{10}$ ]]
 }
 
+# This is the core case: each domain generates both a base record and a wildcard record.
+# The wildcard-handling, AAAA-generation, and record-order tests below all depend on this behavior.
 @test "zone generates A records for each domain" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -214,6 +222,8 @@ count_record_type() {
     [ "$aaaa_count" -eq 6 ]  # Same for IPv6
 }
 
+# Verifies the generated zone file is accessible (readable) after generation, since PowerDNS
+# may run as a different user and needs to be able to read the zone file to load it.
 @test "zone file is world-readable but not writable by zone generation" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -228,6 +238,8 @@ count_record_type() {
     [ -r "$zone_file" ]
 }
 
+# Keeps the generated zone file easy to read and diff: the base domain record immediately
+# followed by its wildcard record, not interleaved with other domains.
 @test "zone preserves record order (base domain before wildcard)" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
