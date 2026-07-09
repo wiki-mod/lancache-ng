@@ -83,8 +83,20 @@ jobs:
           : "${BASE_SHA:?pull request base SHA is required}"
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
+          # BASE_SHA is the base branch's CURRENT tip at run time, not the
+          # commit this PR branch actually forked from. A plain two-dot
+          # `git diff BASE_SHA GITHUB_SHA` between two independently-moved
+          # branches shows the union of everything different between those
+          # two snapshots -- including files an unrelated, already-merged PR
+          # changed on the base branch after this branch forked, which then
+          # gets misattributed as "this PR changed it" and defeats path
+          # scoping for every job below (confirmed real occurrence: #536).
+          # Diffing from the actual merge-base instead of BASE_SHA directly
+          # fixes that; actions/checkout above already runs with
+          # fetch-depth: 0, so merge-base has the full history it needs.
+          merge_base="$(git merge-base "$BASE_SHA" "$GITHUB_SHA")"
           changed_files="$(mktemp)"
-          git diff --name-only "$BASE_SHA" "$GITHUB_SHA" > "$changed_files"
+          git diff --name-only "$merge_base" "$GITHUB_SHA" > "$changed_files"
           printf 'Changed files:\n'
           cat "$changed_files"
 
