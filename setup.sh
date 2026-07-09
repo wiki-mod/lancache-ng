@@ -21,6 +21,7 @@ export LANG=C LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
+DHCP_PROBE_SCRIPT="$SCRIPT_DIR/services/ui/dhcp-probe.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -1052,11 +1053,17 @@ runtime_env_file_for_install_dir() {
 }
 
 install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target
+    local install_dir="$1" socket_proxy_target dhcp_probe_target
 
     socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
+    dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
+    if [[ "$(realpath -m "$DHCP_PROBE_SCRIPT")" != "$(realpath -m "$dhcp_probe_target")" ]]; then
+        install -m 0755 "$DHCP_PROBE_SCRIPT" "$dhcp_probe_target"
+    else
+        chmod 0755 "$dhcp_probe_target"
+    fi
     if [[ "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" != "$(realpath -m "$socket_proxy_target")" ]]; then
         install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
     else
