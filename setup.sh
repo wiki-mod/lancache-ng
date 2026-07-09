@@ -1458,7 +1458,7 @@ To proceed, choose one of these options:
      LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install
 
   2. Pin to a specific release version or commit (immutable):
-     LANCACHE_IMAGE_TAG=v0.1.0-rc.1 ./setup.sh install   # specific pre-release
+     LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
      LANCACHE_IMAGE_TAG=sha-abc1234 ./setup.sh install   # specific commit build
 
 For details on release channels and their stability, see:
