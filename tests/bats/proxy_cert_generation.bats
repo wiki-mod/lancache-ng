@@ -16,9 +16,12 @@ setup() {
     test_cert_dir="$BATS_TEST_TMPDIR/certs"
     mkdir -p "$test_ca_dir" "$test_cert_dir"
 
-    # Setup test CA
-    test_ca_crt="$test_ca_dir/test-ca.crt"
-    test_ca_key="$test_ca_dir/test-ca.key"
+    # Setup test CA. _sign_cert (see entrypoint.sh) hardcodes "$CA_DIR/ca.crt"
+    # and "$CA_DIR/ca.key" rather than taking the CA paths as arguments, so
+    # these must use exactly those filenames, not an arbitrary name under
+    # $test_ca_dir.
+    test_ca_crt="$test_ca_dir/ca.crt"
+    test_ca_key="$test_ca_dir/ca.key"
     test_serial_file="$test_ca_dir/ca.srl"
 
     # Generate test CA certificate
