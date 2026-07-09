@@ -23,15 +23,14 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
 - **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
-- **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
+- **Project language**: Rust (and shell for scripts) for code *we write*. This is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool (e.g. `actionlint`) that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib with known CVEs baked into its upstream prebuilt release binary). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, every time, not just once.
 - **No direct pushes to master**: all changes go through pull requests.
 
 ## Architecture
 
 ```
-services/proxy/          # nginx: HTTP + HTTPS caching (SSL mode, CA cert required)
-services/proxy-standard/ # nginx: HTTP caching + HTTPS passthrough (no CA cert needed)
-services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (shared by both modes)
+services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
+services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (split into standard + SSL instances)
 config/dev/              # Settings for local development
 config/prod/             # Settings for production deployment
 certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
@@ -50,12 +49,14 @@ by configuring which DNS server IP they point to:
 | **standard** | `192.168.1.10` | cached | passthrough (SNI) | No |
 | **ssl** | `192.168.1.11` | cached | MITM-cached | Yes — install `certs/ca.crt` |
 
-- **Standard mode** (`services/proxy-standard`): nginx `stream` block reads SNI via
+- **Standard mode** (port 8443 on `IP_STANDARD`): nginx `stream` block reads SNI via
   `ssl_preread` and forwards HTTPS blind to the real CDN. No TLS interception. HTTP
   is cached normally. Suitable for devices that can't or won't import custom CAs.
-- **SSL mode** (`services/proxy`): full TLS interception via per-domain wildcard certs
+- **SSL mode** (port 443 on `IP_SSL`): full TLS interception via per-domain wildcard certs
   signed by the LAN CA. Both HTTP and HTTPS downloads are cached.
-- Each mode gets its own proxy + DNS service, each bound to a distinct LAN IP.
+- **Single unified proxy service** (`services/proxy`): one nginx container handles both modes
+  via separate ports and Docker port mappings. Both modes share a single cache volume.
+- **Two DNS services** (`dns-standard` and `dns-ssl`), each bound to a distinct LAN IP.
   This is enforced by the `${IP_STANDARD}` / `${IP_SSL}` variables in `deploy/*/`env`.
 
 ## How SSL Interception Works (ssl mode)
@@ -91,19 +92,33 @@ by configuring which DNS server IP they point to:
   expiry signatures in the query string. Using `$uri` (path only) means the same file always
   hits the same cache entry regardless of the signature. The full URL (with signature) is still
   forwarded to the origin for validation.
-- **`libnginx-mod-stream`**: The standard proxy needs nginx's stream module for SNI passthrough.
+- **`libnginx-mod-stream`**: The unified proxy uses nginx's stream module for standard-mode SNI passthrough.
   This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
   at the top of `nginx.conf` (before the `events {}` block).
 - **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
   serial file is always written to `/tmp/lancache-ca.srl` rather than the certs directory,
   and passed with `-CAserial`.
+- **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
+  concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
+  prebuilt release binaries — they're Rust, so there's no behavioral difference from building
+  them ourselves, just wasted build time. `actionlint` is the one exception, built from source
+  against `golang:latest`: Go statically embeds its entire standard library into every compiled
+  binary, so a stale upstream release binary permanently carries whatever stdlib CVEs existed
+  when *its* maintainers last cut a release — confirmed for real (2026-07-09): actionlint's
+  latest release (v1.7.12, published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings
+  (crypto/x509, crypto/tls, net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building
+  the same version from source with `golang:latest` picks up a current Go toolchain (1.26.5 as
+  of this writing) and scores 0. This is a narrow, justified exception to the "Rust and shell
+  only" project-language rule (see above), not a general license to add other language
+  toolchains — re-justify it the same way (a real Trivy/CVE finding, not a hypothetical one)
+  before reaching for a compiled-from-source dependency in another language again.
 
 ## Dev vs Prod Split
 
 | | dev | prod |
 |---|---|---|
 | Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `/opt/lancache-ng/cache` on host |
+| Cache volume | Docker named volume | `${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache` on host |
 | CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
 | DNS query logging | On | Off |
 | Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
@@ -133,7 +148,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
    Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
    Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
    Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directory: `mkdir -p /opt/lancache-ng/cache`
+   Create cache directory: `mkdir -p /opt/lancache-ng/cache` (or wherever `LANCACHE_STATE_DIR` points)
 
 ## Adding More CDN Domains
 

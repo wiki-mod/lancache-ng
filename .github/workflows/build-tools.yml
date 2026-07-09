@@ -13,15 +13,21 @@ on:
     # product-code change.
     - cron: "23 3 * * 0"
   push:
-    branches: [master]
+    branches: [master, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "tests/bats/**"
+      - "tests/shellspec/**"
+      - "setup.sh"
   pull_request:
-    branches: [master]
+    branches: [master, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "tests/bats/**"
+      - "tests/shellspec/**"
+      - "setup.sh"
 
 permissions:
   contents: read
@@ -46,6 +52,55 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # tests/bats/**, tests/shellspec/**, and setup.sh are in this workflow's
+      # path filter so the local smoke-test/Bats/ShellSpec steps below
+      # actually run when setup.sh changes, but a setup.sh-only change must
+      # not also rebuild and publish the build-tools image itself -- that
+      # stays tied to build-tools inputs (tools/build-tools/** or this
+      # workflow file), per the "routine PRs must not rebuild the build-tools
+      # image unless build-tools inputs changed" contract.
+      - name: Determine whether build-tools inputs actually changed
+        id: should-publish
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            # workflow_dispatch and the weekly schedule are explicit,
+            # intentional rebuild requests; always publish. pull_request
+            # never publishes regardless (gated separately below).
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before_sha="${{ github.event.before }}"
+          if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
+            # No usable base to diff (e.g. the branch's first push): fail
+            # safe by publishing rather than silently skipping a real change.
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The default checkout is shallow; fetch just the one missing base
+          # commit on demand instead of a full-history clone (fetch-depth: 0
+          # on this repo hit real "inflate: data stream error" checkout
+          # failures on the runner -- confirmed by actually running this).
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            git fetch --quiet --depth=1 origin "$before_sha" 2>/dev/null || true
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            echo "::notice::Could not fetch base commit $before_sha to diff against; publishing to be safe."
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Only test-only paths (tests/bats/**, tests/shellspec/**, setup.sh) changed; skipping build-tools image rebuild/publish."
+            echo "should-publish=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -87,7 +142,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
@@ -104,7 +159,7 @@ jobs:
 
       - name: Compute immutable pushed source tag
         id: source-tag
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         run: |
           set -euo pipefail
 
@@ -138,8 +193,10 @@ jobs:
             required_tools=(
               actionlint
               bash
+              bats
               cargo
               cargo-audit
+              cargo-tarpaulin
               clippy-driver
               dig
               distcc
@@ -150,6 +207,7 @@ jobs:
               rustc
               rustfmt
               sccache
+              shellspec
               shellcheck
             )
 
@@ -160,14 +218,40 @@ jobs:
             cargo --version
             cargo audit --version
             cargo-audit --version
+            cargo tarpaulin --version
+            cargo-tarpaulin --version
             sccache --version
             actionlint --version
+            bats --version
+            shellspec --version
             shellcheck --version
             distcc --version
             distcc-pump --help >/dev/null
             docker --version
             docker compose version
           '
+
+      - name: Run Bats setup fixtures
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bats tests/bats'
+
+      - name: Run ShellSpec setup fixtures
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
 
       - name: Prepare local Trivy cache
         run: |
@@ -201,7 +285,7 @@ jobs:
       # Trivy and provenance attestation.
       - name: Build and push multi-architecture build-tools image
         id: build
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         timeout-minutes: 90
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -215,13 +299,13 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
 
       - name: Prepare pushed build-tools Trivy cache
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         run: |
           set -euo pipefail
           mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
 
       - name: Scan pushed build-tools digest with Trivy
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -238,7 +322,7 @@ jobs:
           exit-code: "1"
 
       - name: Attest build-tools image provenance
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -246,7 +330,7 @@ jobs:
           push-to-registry: true
 
       - name: Promote build-tools mutable tags
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PUSHED_DIGEST: ${{ steps.build.outputs.digest }}

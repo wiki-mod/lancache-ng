@@ -9,11 +9,17 @@ name: Build & Push
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Also promote this channel from the dispatched ref, in addition to the automatic branch/tag rule below (e.g. spot-check a feature branch as "dev" without merging it first).
+        type: choice
+        options: [none, dev, edge]
+        default: none
   push:
-    branches: [master]
+    branches: [master, "v[0-9]*"]
     tags: ["v*"]
   pull_request:
-    branches: [master]
+    branches: [master, "v[0-9]*"]
 
 permissions:
   contents: read
@@ -77,8 +83,20 @@ jobs:
           : "${BASE_SHA:?pull request base SHA is required}"
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
+          # BASE_SHA is the base branch's CURRENT tip at run time, not the
+          # commit this PR branch actually forked from. A plain two-dot
+          # `git diff BASE_SHA GITHUB_SHA` between two independently-moved
+          # branches shows the union of everything different between those
+          # two snapshots -- including files an unrelated, already-merged PR
+          # changed on the base branch after this branch forked, which then
+          # gets misattributed as "this PR changed it" and defeats path
+          # scoping for every job below (confirmed real occurrence: #536).
+          # Diffing from the actual merge-base instead of BASE_SHA directly
+          # fixes that; actions/checkout above already runs with
+          # fetch-depth: 0, so merge-base has the full history it needs.
+          merge_base="$(git merge-base "$BASE_SHA" "$GITHUB_SHA")"
           changed_files="$(mktemp)"
-          git diff --name-only "$BASE_SHA" "$GITHUB_SHA" > "$changed_files"
+          git diff --name-only "$merge_base" "$GITHUB_SHA" > "$changed_files"
           printf 'Changed files:\n'
           cat "$changed_files"
 
@@ -183,6 +201,29 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  pr-template-check:
+    name: PR template validation
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate PR template completeness
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: bash scripts/validate-pr-template.sh
+
+  file-headers-hosted:
+    name: file purpose headers (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check repository header on all tracked files
+        run: bash scripts/check-file-headers.sh
+
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected
     # by validate-compose. That keeps linting independent from whatever happens
@@ -232,6 +273,18 @@ jobs:
             -e GOVERNANCE_PR_BODY \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+
+      - name: Run setup migration semantics tests
+        run: |
+          set -euo pipefail
+          # tests/setup-migration-semantics.sh only reads setup.sh and writes to
+          # mktemp -d (container /tmp), so the read-only repo mount is sufficient.
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash tests/setup-migration-semantics.sh
 
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
@@ -481,6 +534,19 @@ jobs:
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
+
+          # The default (profile-less) renders above skip the dhcp/dhcp-proxy
+          # service blocks entirely, because Compose omits services behind an
+          # inactive profile. Both DHCP modes (issue #343) therefore need
+          # explicit profile activation so their service definitions are
+          # actually parsed and validated, not silently excluded.
+          for compose_file in \
+            deploy/dev/docker-compose.yml \
+            deploy/prod/docker-compose.yml \
+            deploy/quickstart/docker-compose.yml; do
+            validate_compose -f "$compose_file" --profile dhcp-kea
+            validate_compose -f "$compose_file" --profile dhcp-proxy
+          done
 
           validate_nats_config_ownership() {
             local path
@@ -1189,6 +1255,255 @@ jobs:
               ;;
           esac
 
+  full-setup-validate:
+    name: validate full-setup image
+    # On a pull_request event, `promote` never runs at all (see its own `if:`
+    # condition) -- there is no channel image for THIS PR to wait for, so this
+    # job validates whatever channel image is already live, same as before.
+    # On push events (master/vX.Y.Z), this job used to run in parallel with
+    # build/promote instead of after them, so it tried to pull the channel
+    # image THIS PUSH was about to publish before promote had actually
+    # published it -- pulling a tag that doesn't exist yet on the very push
+    # that would have created it, rather than "the house isn't inspected
+    # before the roof tiles are on." Depending on `promote` here makes this
+    # job validate the freshly-promoted state of the commit it's actually
+    # running for, instead of racing ahead of it or checking a stale channel
+    # tag left over from a previous push.
+    needs: [detect-changes, promote]
+    if: >-
+      ${{
+        always() &&
+        (github.event_name == 'pull_request' || needs.promote.result == 'success') &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.deploy == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # `latest` is contractually a stable-release-only channel (see
+      # docs/release-versioning.md) -- it is never moved by a v0.2.0 (or any
+      # other pre-release integration branch) push, so it always reflects the
+      # last real release, not this branch's current code. Validating a
+      # pre-release branch against `latest` therefore checks the wrong image
+      # and fails for reasons unrelated to the branch under test. Mirror the
+      # same ref-to-channel mapping the `promote` job uses so this job
+      # validates the channel this branch actually publishes to.
+      - name: Determine validation image channel
+        id: channel
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$BASE_REF" == "master" ]]; then
+            tag=edge
+          elif [[ "$BASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tag=dev
+          else
+            tag=latest
+          fi
+          echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build full-setup validation image
+        env:
+          IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
+            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
+            --build-arg LANCACHE_IMAGE_TAG="$IMAGE_TAG" \
+            -t lancache-ng-full-setup:validation \
+            deploy/full-setup
+
+      - name: Validate compose configuration
+        env:
+          LANCACHE_IMAGE_REGISTRY: ghcr.io
+          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+          LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD/deploy/full-setup:/validation:ro" \
+            -w /validation \
+            --env LANCACHE_IMAGE_REGISTRY \
+            --env LANCACHE_IMAGE_PREFIX \
+            --env LANCACHE_IMAGE_TAG \
+            docker:latest \
+            docker compose -f docker-compose.yml config >/dev/null
+
+      # The validation network's subnet is a fixed default (see
+      # docker-compose.yml) so services can reference each other's IPs
+      # deterministically. That default can collide with an unrelated
+      # network already on the host -- override it via VALIDATION_SUBNET
+      # (and the matching VALIDATION_*_IP / VALIDATION_GATEWAY vars) if it
+      # does. Check for that collision explicitly before starting: a raw
+      # `docker compose up` failure here is a cryptic
+      # "failed to set up container networking: Address already in use"
+      # with no indication of which network is actually at fault.
+      - name: Check for a validation subnet collision
+        run: |
+          set -euo pipefail
+          target_subnet="${VALIDATION_SUBNET:-172.30.99.0/24}"
+          conflict="$(python3 - "$target_subnet" <<'PYEOF'
+          import ipaddress, subprocess, sys
+          target = ipaddress.ip_network(sys.argv[1])
+          # A leftover network from our own project (e.g. an aborted prior run
+          # that never reached the teardown step) is not a real collision --
+          # docker compose reuses/recreates it by name. Only flag networks
+          # that aren't ours.
+          own_prefix = "lancache-ng-validation"
+
+          # Docker-managed networks only cover Docker's own view. A route or
+          # interface address already on the host (another NIC, a VPN, a
+          # leftover bridge from something outside Docker entirely) doesn't
+          # show up in `docker network ls` at all, but the kernel still
+          # refuses to create an overlapping bridge for it -- confirmed for
+          # real: this exact check found zero Docker-network conflicts while
+          # `docker compose up` still failed with "Address already in use".
+          ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
+          for network_id in ids:
+              fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
+              line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
+              name, _, subnets_str = line.partition("|")
+              if name.startswith(own_prefix):
+                  continue
+              for subnet_str in subnets_str.split():
+                  try:
+                      existing = ipaddress.ip_network(subnet_str)
+                  except ValueError:
+                      continue
+                  if target.overlaps(existing):
+                      print(f"docker network {name} ({subnet_str})")
+
+          route_output = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
+          for line in route_output.splitlines():
+              parts = line.split()
+              try:
+                  inet_index = parts.index("inet")
+                  iface = parts[1]
+                  cidr = parts[inet_index + 1]
+              except (ValueError, IndexError):
+                  continue
+              try:
+                  existing = ipaddress.ip_interface(cidr).network
+              except ValueError:
+                  continue
+              if target.overlaps(existing):
+                  print(f"host interface {iface} ({cidr})")
+          PYEOF
+          )"
+          if [[ -n "$conflict" ]]; then
+            echo "::error::Validation subnet $target_subnet overlaps existing network state on this runner: $conflict. Set VALIDATION_SUBNET (and the matching VALIDATION_*_IP / VALIDATION_GATEWAY env vars) to a free range and re-run."
+            exit 1
+          fi
+          echo "Validation subnet $target_subnet is free."
+
+      # Static config validation above only checks YAML/Compose structure. It
+      # cannot catch a service that starts but immediately crash-loops (the
+      # motivating case: #450/#485, dnsmasq trying to bind an already-used
+      # port). This step actually starts the stack with real published images
+      # and fails if any service is unhealthy or restarting once past its
+      # own healthcheck's start_period.
+      - name: Start full-setup validation stack
+        working-directory: deploy/full-setup
+        env:
+          LANCACHE_IMAGE_REGISTRY: ghcr.io
+          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+          LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker compose pull --quiet
+          docker compose up -d
+
+      - name: Wait for the stack to stabilize and check container health
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+
+          # Services with an explicit healthcheck report a real "healthy"
+          # status; docker-socket-proxy has none, so it's only checked for
+          # "running" plus a restart-count ceiling (catches a crash loop
+          # without needing a healthcheck definition for every service).
+          services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
+          all_services="docker-socket-proxy $services_with_healthcheck"
+
+          deadline=$((SECONDS + 90))
+          while (( SECONDS < deadline )); do
+            all_ready=1
+            for service in $services_with_healthcheck; do
+              cid="$(docker compose ps -q "$service")"
+              status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+              if [[ "$status" != "healthy" ]]; then
+                all_ready=0
+              fi
+            done
+            if [[ "$all_ready" -eq 1 ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          echo "::group::Final container status"
+          docker compose ps
+          echo "::endgroup::"
+
+          failed=0
+          for service in $all_services; do
+            cid="$(docker compose ps -q "$service")"
+            if [[ -z "$cid" ]]; then
+              echo "::error::$service has no running container"
+              failed=1
+              continue
+            fi
+
+            restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
+            container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
+
+            if [[ "$container_status" != "running" ]]; then
+              echo "::error::$service is not running (state: $container_status)"
+              failed=1
+            elif (( restart_count > 1 )); then
+              echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
+              failed=1
+            fi
+
+            if [[ " $services_with_healthcheck " == *" $service "* ]]; then
+              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+              if [[ "$health" != "healthy" ]]; then
+                echo "::error::$service did not become healthy (status: $health)"
+                failed=1
+              fi
+            fi
+          done
+
+          if [[ "$failed" -eq 1 ]]; then
+            echo "::group::Logs from all services (failure diagnostics)"
+            docker compose logs --no-color
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "Full-setup stack is stable: all services running and healthy."
+
+      - name: Tear down full-setup validation stack
+        if: always()
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          docker compose down --volumes --remove-orphans || true
+
+      - name: Clean up image
+        if: always()
+        run: |
+          docker rmi lancache-ng-full-setup:validation || true
+
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow
     # changes still force it because the CI contract itself may have changed.
@@ -1404,6 +1719,141 @@ jobs:
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
+
+  rust_coverage:
+    name: coverage (Rust)
+    needs: [validate-compose, dns_test, ui_test, detect-changes]
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
+        (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.dns_rust == 'true' ||
+          needs['detect-changes'].outputs.ui == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # This job resolves its own build-tools image rather than reusing
+      # validate-compose's exported build_tools_image output. That output is
+      # deliberately locked to the published, digest-qualified image (never a
+      # branch-local fallback) because dns_cargo_audit/ui_cargo_audit need a
+      # reproducible, previously-audited image. Coverage measurement has no
+      # such reproducibility requirement, so it can accept a branch-local
+      # rebuild when a PR's own Dockerfile change (like adding tarpaulin)
+      # hasn't been published to ghcr.io yet.
+      - name: Resolve build-tools image (with tarpaulin required)
+        env:
+          EXTRA_REQUIRED_TOOLS: "cargo-tarpaulin bc"
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+      # Coverage output must land on a writable host path: the repo checkout
+      # itself is bind-mounted read-only into the build-tools container below,
+      # matching the dns_cargo_audit/ui_cargo_audit pattern.
+      - name: Prepare writable coverage output directories
+        run: |
+          set -euo pipefail
+          mkdir -p coverage-dns coverage-ui
+      - name: Run coverage (dns/nats-subscriber)
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -e CARGO_TARGET_DIR=/tmp/target-dns \
+            -v "$PWD:/work" \
+            -v "$PWD/coverage-dns:/coverage-dns" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              cargo tarpaulin \
+                --engine llvm \
+                --manifest-path services/dns/nats-subscriber/Cargo.toml \
+                --locked \
+                --timeout 300 \
+                --out json \
+                --output-dir /coverage-dns'
+      - name: Run coverage (ui)
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -e CARGO_TARGET_DIR=/tmp/target-ui \
+            -v "$PWD:/work" \
+            -v "$PWD/coverage-ui:/coverage-ui" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              cargo tarpaulin \
+                --engine llvm \
+                --manifest-path services/ui/Cargo.toml \
+                --locked \
+                --timeout 300 \
+                --out json \
+                --output-dir /coverage-ui'
+      - name: Merge coverage reports and check threshold
+        run: |
+          set -euo pipefail
+
+          # Extract coverage percentages from JSON reports
+          dns_coverage=$(jq -r '.coverage' coverage-dns/tarpaulin-report.json 2>/dev/null || echo "0")
+          ui_coverage=$(jq -r '.coverage' coverage-ui/tarpaulin-report.json 2>/dev/null || echo "0")
+
+          echo "DNS coverage: ${dns_coverage}%"
+          echo "UI coverage: ${ui_coverage}%"
+
+          # Per-crate thresholds, not a shared minimum: the two crates' real
+          # coverage differs by an order of magnitude (measured on CI:
+          # ui ~38.6%, nats-subscriber ~0%, since nats-subscriber's 4 tests
+          # only cover its data model, not its subscribe/forward logic --
+          # tracked in #504). A single shared "minimum" threshold would
+          # either block ui's real coverage from ever mattering (if set low
+          # enough for nats-subscriber to pass) or permanently fail
+          # nats-subscriber (if set for ui's level). Each crate's threshold
+          # is raised independently as that crate gains real tests.
+          ui_threshold=35
+          dns_threshold=0
+
+          echo "UI threshold: ${ui_threshold}%"
+          echo "DNS threshold: ${dns_threshold}% (tracked gap: #504)"
+
+          failed=0
+          if (( $(echo "$ui_coverage < $ui_threshold" | bc -l) )); then
+            echo "::error::UI coverage ${ui_coverage}% is below threshold of ${ui_threshold}%"
+            failed=1
+          fi
+          if (( $(echo "$dns_coverage < $dns_threshold" | bc -l) )); then
+            echo "::error::DNS coverage ${dns_coverage}% is below threshold of ${dns_threshold}%"
+            failed=1
+          fi
+
+          if [[ "$failed" -eq 1 ]]; then
+            exit 1
+          fi
+
+          echo "Coverage check passed"
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
+        with:
+          name: rust-coverage-reports
+          path: |
+            coverage-dns/tarpaulin-report.json
+            coverage-ui/tarpaulin-report.json
+          retention-days: 30
 
   watchdog_test:
     # Watchdog has its own small shell runtime and therefore its own scoped
@@ -1991,13 +2441,17 @@ jobs:
       - container-scan
       - detect-changes
       - ci_scope_policy
+      - file-headers
+      - pr-template-check
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success')
+        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
@@ -2379,6 +2833,43 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      - name: Wait before retrying the push
+        # The first attempt and the retry below share the same "Log in to
+        # GHCR" session from earlier in this job. Observed pattern: ghcr.io
+        # push-token issuance intermittently fails with "403 Forbidden" or
+        # "denied: denied" for the two slowest (Rust) builds in this matrix;
+        # a manual `gh run rerun` (a brand-new job, fresh login, some time
+        # elapsed) has fixed every occurrence so far. This sleep gives a
+        # transient condition the same chance to clear before the in-job
+        # retry, instead of retrying instantly against whatever just failed.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        run: sleep 30
+
+      - name: Re-authenticate to GHCR before retry
+        # Get a fresh push token rather than reusing the session from the
+        # "Log in to GHCR" step above, in case that session (not just the
+        # image build) was what the first attempt's auth failure was tied to.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Retry Build and push
         # Retry once with the same declared image inputs. Dockerfile-level
         # fallback disables broken acceleration while preserving the normal
@@ -2520,9 +3011,31 @@ jobs:
   promote:
     # Promotion is intentionally separate from image build. It moves coherent
     # channel tags only after all sha-* source images for the same commit exist.
+    #
+    # The `if:` below must stay in an explicit `<status-fn>() && needs.X.result
+    # == 'success'` form, not a bare `github.event_name != 'pull_request'`. A
+    # bare condition with no status-check function gets an implicit
+    # `&& success()` appended by GitHub Actions, and `success()` walks the
+    # WHOLE transitive needs graph (promote -> build -> detect-changes,
+    # file-headers, pr-template-check, ...), not just this job's own direct
+    # `needs: build`. detect-changes/file-headers/pr-template-check are
+    # intentionally `if: github.event_name == 'pull_request'` (they skip on
+    # every push), but `success()` treats a skipped job the same as a failed
+    # one -- so on every real push to master or a vX.Y.Z branch, the implicit
+    # success() check silently evaluated false and this job never ran, even
+    # though `build` itself completed successfully (confirmed directly: run
+    # 28958519247 on v0.2.0, all 7 build matrix legs succeeded, promote still
+    # skipped). This is why dev/edge were never actually promoted despite the
+    # channel-resolution logic in this job being correct (see issue #532).
+    #
+    # Use `!cancelled()`, not `always()`, as the status function: `always()`
+    # would also make this job proceed to move public tags even if a
+    # maintainer cancels the run after build succeeds -- `!cancelled()`
+    # suppresses the same implicit-success()-over-skipped-deps problem while
+    # still correctly stopping the job if the run is actually cancelled.
     name: promote stack image channels
     needs: build
-    if: github.event_name != 'pull_request'
+    if: "!cancelled() && needs.build.result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read
@@ -2547,6 +3060,7 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
 
@@ -2600,6 +3114,10 @@ jobs:
 
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(edge)
+          elif [[ "$GITHUB_REF" = refs/heads/v[0-9]* ]]; then
+            # Any version-numbered integration branch (v0.2.0, v0.3.0, v0.2.x,
+            # ...), not just whichever one happens to be active right now.
+            channel_tags+=(dev)
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
@@ -2610,6 +3128,21 @@ jobs:
             else
               echo "::error::Unsupported release tag '${GITHUB_REF_NAME}'. Use vX.Y.Z or vX.Y.Z-rc.N."
               exit 1
+            fi
+          fi
+
+          # workflow_dispatch can additionally request one channel move from
+          # whatever ref it's dispatched against, independent of the
+          # automatic branch/tag rule above -- e.g. spot-check a feature
+          # branch as "dev" without merging it into v0.2.0 first. "none"
+          # (the default) adds nothing.
+          if [[ -n "$REQUESTED_CHANNEL" && "$REQUESTED_CHANNEL" != "none" ]]; then
+            already_requested=false
+            for existing_channel in "${channel_tags[@]}"; do
+              [[ "$existing_channel" = "$REQUESTED_CHANNEL" ]] && already_requested=true
+            done
+            if [[ "$already_requested" = false ]]; then
+              channel_tags+=("$REQUESTED_CHANNEL")
             fi
           fi
 
@@ -2685,9 +3218,17 @@ jobs:
   release:
     # Release source archives must match the same commit that produced the
     # images. This keeps source, image tags, and attestations traceable together.
+    #
+    # Same reasoning as promote's `if:` above: use an explicit
+    # needs.promote.result check under a status function rather than a bare
+    # condition, so this job isn't silently skipped by the implicit success()
+    # walking back through promote's own transitively-skipped dependencies
+    # (detect-changes, file-headers, pr-template-check on non-PR events).
+    # `!cancelled()`, not `always()`, so a maintainer cancelling the run can
+    # still stop this from publishing a release source archive.
     name: publish release source
     needs: promote
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: write

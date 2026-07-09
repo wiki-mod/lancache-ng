@@ -21,6 +21,7 @@ export LANG=C LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
+DHCP_PROBE_SCRIPT="$SCRIPT_DIR/services/ui/dhcp-probe.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -1052,11 +1053,28 @@ runtime_env_file_for_install_dir() {
 }
 
 install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target
+    local install_dir="$1" socket_proxy_target dhcp_probe_target
 
     socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
+    dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
+    # A prior install that hit the missing-copy bug (#538) left Docker's own
+    # auto-vivified bind-mount source behind as an empty directory. GNU
+    # install(1) treats an existing directory target as "copy into", not
+    # "replace" — leaving it in place would install to dhcp-probe.sh/dhcp-probe.sh
+    # and still leave the actual mount source as a directory.
+    if [[ -d "$dhcp_probe_target" ]]; then
+        rm -rf "$dhcp_probe_target"
+    fi
+    if [[ "$(realpath -m "$DHCP_PROBE_SCRIPT")" != "$(realpath -m "$dhcp_probe_target")" ]]; then
+        install -m 0755 "$DHCP_PROBE_SCRIPT" "$dhcp_probe_target"
+    else
+        chmod 0755 "$dhcp_probe_target"
+    fi
+    if [[ -d "$socket_proxy_target" ]]; then
+        rm -rf "$socket_proxy_target"
+    fi
     if [[ "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" != "$(realpath -m "$socket_proxy_target")" ]]; then
         install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
     else
@@ -1442,7 +1460,34 @@ resolve_lancache_stack_channel_tag() {
 
     printf "\n${BOLD}${CYAN}▶ Resolving image channel %s${RESET}\n" "$channel" >&2
     docker pull "$stack_image" >/dev/null \
-        || die "Failed to pull stack channel pointer ${stack_image}. Check GHCR access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+        || {
+            if [[ "$channel" = "latest" ]]; then
+                cat >&2 <<EOF
+
+${RED}✗${RESET} Cannot resolve the 'latest' stable release channel.
+
+This project is currently in active development (pre-1.0). While images are published
+to the 'edge' testing channel daily from master, a formal stable release with a
+published 'latest' channel tag has not yet been created.
+
+To proceed, choose one of these options:
+
+  1. Use the 'edge' testing channel (pre-release, may change frequently):
+     LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install
+
+  2. Pin to a specific release version or commit (immutable):
+     LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
+     LANCACHE_IMAGE_TAG=sha-abc1234 ./setup.sh install   # specific commit build
+
+For details on release channels and their stability, see:
+  docs/release-versioning.md
+
+EOF
+                die "Cannot resolve stack channel pointer ${stack_image}."
+            else
+                die "Failed to pull stack channel pointer ${stack_image}. Check GHCR access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+            fi
+        }
 
     container_id=$(docker create "$stack_image") \
         || die "Failed to create temporary container from ${stack_image}."

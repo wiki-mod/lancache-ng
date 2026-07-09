@@ -79,7 +79,6 @@ after opening the PR.
 
 ### Changelog expectations
 
-There is no checked-in changelog file.
 For each user-facing change, include a short changelog-style summary in the PR body under a clear heading (for example `## Changelog`).
 This summary should be reused in the final release notes text when available.
 Every pull request should include a changelog section that explains user-visible
@@ -88,12 +87,46 @@ issue. Silent changes are not acceptable for release, setup, CI, or runtime
 behavior. Keep this section current by editing it directly as the PR changes,
 not by appending new comments each time something is fixed or added.
 
+#### Releasing Changes to CHANGELOG.md
+
+lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
+the [Keep a Changelog](https://keepachangelog.com/) format.
+
+When a release ships:
+
+1. Collect the accumulated `## Changelog` sections from all merged PRs since the
+   last release.
+2. Create a new version heading in `CHANGELOG.md` using the format
+   `## [X.Y.Z] - YYYY-MM-DD` with the release date.
+3. Organize the accumulated changes under standard subheadings: `Added`, `Changed`,
+   `Fixed`, `Deprecated`, `Removed`, `Security`.
+4. Include this changelog update as part of the release PR or tag commit.
+
+Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
+reflects user-visible behavior changes across all merged work for that release.
+
 Use the template's visible `Risk / Rollback / Follow-up` section to capture
 the remaining operator risk and any rollback or follow-up notes.
 
 ### Quality and release process expectations
 
-- Treat warnings as failures in local checks and workflow validation.
+#### Warning-as-errors policy
+
+All actionable static analysis warnings are treated as build failures under the warnings-as-errors rule:
+
+**Hard failures (block a PR):**
+- `cargo check` warnings — enabled via `RUSTFLAGS: "-D warnings"` in `dns_rust_quality` and `ui_rust_quality` jobs
+- `cargo clippy` warnings — enforced via `cargo clippy -- -D warnings` in the same jobs
+- `shellcheck` warnings — enforced via `shellcheck --severity=warning` in the `shellcheck` job
+- `actionlint` warnings — enforced via `actionlint .github/workflows/*.yml`
+- `docker compose config` warnings — enforce via pattern matching for `warn|warning` in `validate-compose` job
+- File header checks — enforced via `bash scripts/check-file-headers.sh`
+
+**Known exception (tracked in issue #394):**
+GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo check` or `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
+
+Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). Rust security correctness continues to be enforced separately by the `dns_rust_quality`, `ui_rust_quality`, `dns_test`, and `ui_test` jobs, which are independent of CodeQL extraction quality.
+
 - Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
 - Keep workflow changes reviewable:
   - document changed checks,
@@ -109,43 +142,90 @@ These are required, not stylistic suggestions — a PR missing them will fail CI
 
 ## Local checks
 
-Run the checks that match your change.
+### Using the build-tools container for verification
 
-For shell scripts:
+All project verification (Rust checks, build validation, linting, tool checks) must run inside the project's build-tools container, not against host-local tools. This ensures that your verification matches what CI will test: the same Rust version, the same clippy/rustfmt rules, the same sccache/distcc configuration, and the same versions of shellcheck, actionlint, and other tools.
+
+Treat host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `shellcheck`, `actionlint`, `sccache`) as potentially missing, misconfigured, or stale. They do not prove that your change will pass CI. **Verification with host tools instead of the build-tools container does not count as valid testing**.
+
+To run checks with the build-tools container:
+
+1. The build-tools image is selected automatically: `bash scripts/select-build-tools-image.sh` determines the correct version (published image or local build).
+2. Run checks inside the container with the standard pattern:
 
 ```bash
-bash -n setup.sh
-shellcheck --severity=warning setup.sh
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" <check-command>
 ```
 
-For Compose changes:
+### Specific checks
+
+Run the checks that match your change.
+
+For shell scripts, run the checks inside the build-tools container:
+
+```bash
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+```
+
+For Compose changes, you can validate locally (this does not depend on build-tools):
 
 ```bash
 docker compose -f deploy/quickstart/docker-compose.yml config
 docker compose -f deploy/prod/docker-compose.yml config
 ```
 
-For image inventory, release, or package-channel changes:
+For image inventory, release, or package-channel changes, run inside the build-tools container:
 
 ```bash
-bash scripts/validate-stack-images.sh
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash scripts/validate-stack-images.sh
 ```
 
-For workflow changes:
+For workflow changes, run inside the build-tools container:
 
 ```bash
-actionlint .github/workflows/*.yml
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  actionlint .github/workflows/*.yml
 ```
 
-For Rust services, run the relevant Cargo checks for the service you changed.
-The UI service lives in `services/ui`.
+For Rust services, run the relevant Cargo checks for the service you changed inside
+the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 
 ```bash
-cargo test --locked --manifest-path services/ui/Cargo.toml
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
 ```
 
-If you cannot run a relevant check locally, say so in the pull request and
-explain why.
+For Rust coverage checks (requires the build-tools container with `cargo-tarpaulin`), use:
+
+```bash
+BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json && cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json'
+```
+
+`--engine llvm` matches what CI uses: tarpaulin's default ptrace-based engine needs a
+capability Docker containers don't grant by default (it fails with "ASLR disable
+failed: EPERM"), so both CI and local instructions use the LLVM source-based engine
+instead.
+
+Rust code coverage has a per-crate minimum threshold, not one shared number:
+`services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
+of this writing), and `services/dns/nats-subscriber` currently has a 0%
+threshold because its existing tests only cover its data model, not its
+subscribe/forward logic (tracked in #504). Raise each crate's threshold
+independently as that crate gains real coverage — do not average or share a
+single "minimum" number across both, since their coverage levels differ by
+an order of magnitude for unrelated reasons.
+
+If you cannot run a relevant check locally (for example, if Docker is unavailable),
+say so in the pull request and explain why.
 
 ## Setup and update safety
 

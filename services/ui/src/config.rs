@@ -754,4 +754,29 @@ mod tests {
         env::remove_var("UI_SETTINGS_FILE");
         let _ = fs::remove_file(settings_path);
     }
+
+    #[test]
+    fn derive_lancache_image_channel_resolves_semantic_tags() {
+        // Test mutable channel tags: "dev", "edge", and "latest"
+        // are passed through unchanged.
+        assert_eq!(derive_lancache_image_channel("dev"), "dev");
+        assert_eq!(derive_lancache_image_channel("edge"), "edge");
+        assert_eq!(derive_lancache_image_channel("latest"), "latest");
+
+        // Test immutable pinned references: tags starting with "sha-"
+        // (commit SHAs) or "v" (semantic versions) resolve to "pinned".
+        assert_eq!(derive_lancache_image_channel("sha-deadbeef"), "pinned");
+        assert_eq!(derive_lancache_image_channel("sha-abc123def456"), "pinned");
+        assert_eq!(derive_lancache_image_channel("v1.2.3"), "pinned");
+        assert_eq!(derive_lancache_image_channel("v0.2.0"), "pinned");
+
+        // Test release-candidate tags are also immutable pinned references.
+        assert_eq!(derive_lancache_image_channel("v1.2.3-rc.1"), "pinned");
+
+        // Test unknown tags default to "latest" to maintain compatibility
+        // with image registries that may introduce new tag formats in the future.
+        assert_eq!(derive_lancache_image_channel("custom-tag"), "latest");
+        assert_eq!(derive_lancache_image_channel("nightly"), "latest");
+        assert_eq!(derive_lancache_image_channel("main"), "latest");
+    }
 }
