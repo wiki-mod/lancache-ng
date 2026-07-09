@@ -4,14 +4,35 @@
 # Intentional build-tools default: use rust:latest so developer and CI
 # validation sees current Rust tooling early. Production service Dockerfiles
 # stay separately pinned for reproducible runtime image builds.
+FROM golang:latest AS actionlint-builder
+
+ARG ACTIONLINT_VERSION=1.7.12
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# actionlint is a Go binary, and Go statically embeds its entire standard
+# library into every compiled binary -- unlike a dynamically-linked C tool,
+# there is no way to get security fixes into an already-built Go binary
+# short of recompiling it. actionlint's own upstream release binaries are
+# only cut when actionlint itself has a new feature/fix to ship, not on
+# every Go stdlib security release, so the latest available release
+# (v1.7.12, published 2026-03-30) is built against a Go toolchain old enough
+# to carry 11 known stdlib CVEs (crypto/x509, crypto/tls, net/mail, HTTP/2 --
+# confirmed via Trivy scanning that exact release binary). Building from
+# source with whatever Go toolchain `golang:latest` resolves to at build
+# time is the only way to get a current, patched stdlib into this specific
+# tool. cargo-audit and cargo-tarpaulin below don't have this problem: they
+# are Rust binaries, not Go, so they carry no equivalent statically-embedded
+# runtime to go stale.
+RUN set -euo pipefail; \
+    GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
+    /out/actionlint --version
+
 FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
 ARG SCCACHE_VERSION=0.16.0
-ARG ACTIONLINT_VERSION=1.7.12
-ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
 ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd
@@ -68,21 +89,20 @@ RUN set -euo pipefail; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-# actionlint, cargo-audit, and cargo-tarpaulin all publish prebuilt release
-# binaries -- unlike sccache, none of them need a non-default feature set, so
-# building them from source would only add a compiler dependency (a Go
-# toolchain, in actionlint's case) for no behavioral difference. Fetch and
-# checksum-verify the official release asset for each instead, matching the
-# existing docker/docker-compose/shellspec pattern below.
+# cargo-audit and cargo-tarpaulin publish prebuilt release binaries and,
+# unlike sccache, neither needs a non-default feature set -- so building
+# them from source would only add build time for no behavioral difference.
+# Fetch and checksum-verify the official release asset for each instead,
+# matching the existing docker/docker-compose/shellspec pattern below.
+# actionlint is not included here -- see the actionlint-builder stage above
+# for why it's built from source instead.
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
-        actionlint_arch="linux_amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}"; \
         cargo_audit_arch="x86_64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_AMD64}"; \
         tarpaulin_arch="x86_64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_AMD64}" \
         ;; \
       arm64) \
-        actionlint_arch="linux_arm64"; actionlint_sha256="${ACTIONLINT_SHA256_ARM64}"; \
         cargo_audit_arch="aarch64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_ARM64}"; \
         tarpaulin_arch="aarch64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_ARM64}" \
         ;; \
@@ -90,11 +110,6 @@ RUN set -euo pipefail; \
     esac; \
     prebuilt_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$prebuilt_tmp"' EXIT; \
-    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${actionlint_arch}.tar.gz" \
-      -o "$prebuilt_tmp/actionlint.tar.gz"; \
-    printf '%s  %s\n' "$actionlint_sha256" "$prebuilt_tmp/actionlint.tar.gz" | sha256sum -c -; \
-    tar -xzf "$prebuilt_tmp/actionlint.tar.gz" -C "$prebuilt_tmp" actionlint; \
-    install -m 0755 "$prebuilt_tmp/actionlint" /usr/local/bin/actionlint; \
     curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}.tgz" \
       -o "$prebuilt_tmp/cargo-audit.tgz"; \
     printf '%s  %s\n' "$cargo_audit_sha256" "$prebuilt_tmp/cargo-audit.tgz" | sha256sum -c -; \
@@ -107,6 +122,8 @@ RUN set -euo pipefail; \
     install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
+
+COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
 
 RUN set -euo pipefail; \
     shellspec_tmp="$(mktemp -d)"; \

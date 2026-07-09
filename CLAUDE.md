@@ -23,7 +23,7 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
 - **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
-- **Project language**: Rust (and shell for scripts). No Go, Python, Node.js, or other runtimes without explicit approval from the user.
+- **Project language**: Rust (and shell for scripts) for code *we write*. This is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool (e.g. `actionlint`) that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib with known CVEs baked into its upstream prebuilt release binary). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, every time, not just once.
 - **No direct pushes to master**: all changes go through pull requests.
 
 ## Architecture
@@ -98,6 +98,20 @@ by configuring which DNS server IP they point to:
 - **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
   serial file is always written to `/tmp/lancache-ca.srl` rather than the certs directory,
   and passed with `-CAserial`.
+- **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
+  concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
+  prebuilt release binaries — they're Rust, so there's no behavioral difference from building
+  them ourselves, just wasted build time. `actionlint` is the one exception, built from source
+  against `golang:latest`: Go statically embeds its entire standard library into every compiled
+  binary, so a stale upstream release binary permanently carries whatever stdlib CVEs existed
+  when *its* maintainers last cut a release — confirmed for real (2026-07-09): actionlint's
+  latest release (v1.7.12, published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings
+  (crypto/x509, crypto/tls, net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building
+  the same version from source with `golang:latest` picks up a current Go toolchain (1.26.5 as
+  of this writing) and scores 0. This is a narrow, justified exception to the "Rust and shell
+  only" project-language rule (see above), not a general license to add other language
+  toolchains — re-justify it the same way (a real Trivy/CVE finding, not a hypothetical one)
+  before reaching for a compiled-from-source dependency in another language again.
 
 ## Dev vs Prod Split
 
