@@ -2937,8 +2937,8 @@ jobs:
     # Promotion is intentionally separate from image build. It moves coherent
     # channel tags only after all sha-* source images for the same commit exist.
     #
-    # The `if:` below must stay in the explicit `always() && needs.X.result ==
-    # 'success'` form, not a bare `github.event_name != 'pull_request'`. A
+    # The `if:` below must stay in an explicit `<status-fn>() && needs.X.result
+    # == 'success'` form, not a bare `github.event_name != 'pull_request'`. A
     # bare condition with no status-check function gets an implicit
     # `&& success()` appended by GitHub Actions, and `success()` walks the
     # WHOLE transitive needs graph (promote -> build -> detect-changes,
@@ -2952,9 +2952,15 @@ jobs:
     # 28958519247 on v0.2.0, all 7 build matrix legs succeeded, promote still
     # skipped). This is why dev/edge were never actually promoted despite the
     # channel-resolution logic in this job being correct (see issue #532).
+    #
+    # Use `!cancelled()`, not `always()`, as the status function: `always()`
+    # would also make this job proceed to move public tags even if a
+    # maintainer cancels the run after build succeeds -- `!cancelled()`
+    # suppresses the same implicit-success()-over-skipped-deps problem while
+    # still correctly stopping the job if the run is actually cancelled.
     name: promote stack image channels
     needs: build
-    if: always() && needs.build.result == 'success' && github.event_name != 'pull_request'
+    if: "!cancelled() && needs.build.result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read
@@ -3139,13 +3145,15 @@ jobs:
     # images. This keeps source, image tags, and attestations traceable together.
     #
     # Same reasoning as promote's `if:` above: use an explicit
-    # needs.promote.result check under always() rather than a bare condition,
-    # so this job isn't silently skipped by the implicit success() walking
-    # back through promote's own transitively-skipped dependencies
+    # needs.promote.result check under a status function rather than a bare
+    # condition, so this job isn't silently skipped by the implicit success()
+    # walking back through promote's own transitively-skipped dependencies
     # (detect-changes, file-headers, pr-template-check on non-PR events).
+    # `!cancelled()`, not `always()`, so a maintainer cancelling the run can
+    # still stop this from publishing a release source archive.
     name: publish release source
     needs: promote
-    if: always() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')
+    if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: write
