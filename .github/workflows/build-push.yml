@@ -2936,9 +2936,25 @@ jobs:
   promote:
     # Promotion is intentionally separate from image build. It moves coherent
     # channel tags only after all sha-* source images for the same commit exist.
+    #
+    # The `if:` below must stay in the explicit `always() && needs.X.result ==
+    # 'success'` form, not a bare `github.event_name != 'pull_request'`. A
+    # bare condition with no status-check function gets an implicit
+    # `&& success()` appended by GitHub Actions, and `success()` walks the
+    # WHOLE transitive needs graph (promote -> build -> detect-changes,
+    # file-headers, pr-template-check, ...), not just this job's own direct
+    # `needs: build`. detect-changes/file-headers/pr-template-check are
+    # intentionally `if: github.event_name == 'pull_request'` (they skip on
+    # every push), but `success()` treats a skipped job the same as a failed
+    # one -- so on every real push to master or a vX.Y.Z branch, the implicit
+    # success() check silently evaluated false and this job never ran, even
+    # though `build` itself completed successfully (confirmed directly: run
+    # 28958519247 on v0.2.0, all 7 build matrix legs succeeded, promote still
+    # skipped). This is why dev/edge were never actually promoted despite the
+    # channel-resolution logic in this job being correct (see issue #532).
     name: promote stack image channels
     needs: build
-    if: github.event_name != 'pull_request'
+    if: always() && needs.build.result == 'success' && github.event_name != 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read
@@ -3121,9 +3137,15 @@ jobs:
   release:
     # Release source archives must match the same commit that produced the
     # images. This keeps source, image tags, and attestations traceable together.
+    #
+    # Same reasoning as promote's `if:` above: use an explicit
+    # needs.promote.result check under always() rather than a bare condition,
+    # so this job isn't silently skipped by the implicit success() walking
+    # back through promote's own transitively-skipped dependencies
+    # (detect-changes, file-headers, pr-template-check on non-PR events).
     name: publish release source
     needs: promote
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: write
