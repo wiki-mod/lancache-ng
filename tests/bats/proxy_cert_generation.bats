@@ -54,6 +54,12 @@ teardown() {
 
 # ────────────────────────────────────────────────────────────────────────────
 # Domain Validation Tests
+#
+# _is_valid_domain_label enforces RFC 1035's DNS label grammar (letters,
+# digits, hyphens; must not start/end with a hyphen; max 63 octets) before a
+# domain is trusted enough to get a signed wildcard cert. These tests pin
+# down that boundary precisely, both sides of each rule, rather than just
+# checking a handful of "looks fine"/"looks broken" examples.
 # ────────────────────────────────────────────────────────────────────────────
 
 @test "valid domain label passes single letter labels" {
@@ -76,6 +82,10 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+# A leading hyphen is specifically excluded by RFC 1035 even though a hyphen
+# is otherwise a legal label character -- this and the next test each check
+# one side of that asymmetry rather than assuming "no hyphens at the edges"
+# is a single symmetric rule.
 @test "invalid domain label rejects labels starting with hyphen" {
     run _is_valid_domain_label "-invalid"
     [ "$status" -ne 0 ]
@@ -86,6 +96,8 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+# 63 octets is DNS's hard per-label ceiling (RFC 1035 section 2.3.4); one
+# character over that limit must be rejected, not silently truncated.
 @test "invalid domain label rejects labels longer than 63 chars" {
     run _is_valid_domain_label "$(printf 'a%.0s' {1..64})"
     [ "$status" -ne 0 ]
@@ -96,6 +108,11 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+# _normalize_domain exists because entries in cdn-domains.txt come from
+# operators typing/pasting them by hand -- case, a stray leading dot (from
+# copying a wildcard-style ".example.com" entry), and surrounding whitespace
+# are all realistic input, and each must collapse to the same canonical form
+# so the same domain isn't accidentally treated as two different entries.
 @test "normalize domain converts to lowercase" {
     result="$(_normalize_domain "Example.COM")"
     [ "$result" = "example.com" ]
@@ -121,11 +138,17 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+# _is_valid_domain must normalize before validating, not just after -- an
+# operator-pasted domain with stray case/whitespace should be accepted, not
+# rejected for a formatting problem _normalize_domain already knows how to fix.
 @test "valid domain normalizes during validation" {
     run _is_valid_domain "  Example.COM  "
     [ "$status" -eq 0 ]
 }
 
+# A single label (no dot at all) is rejected regardless of content -- this
+# service only ever proxies real internet domains, so "localhost" is a
+# realistic operator typo to guard against, not just an arbitrary example.
 @test "invalid domain rejects single-label names" {
     run _is_valid_domain "localhost"
     [ "$status" -ne 0 ]
@@ -141,6 +164,10 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+# 253 octets is the overall FQDN ceiling (RFC 1035 section 3.1), separate
+# from and in addition to the 63-octet per-label ceiling already covered
+# above -- a domain can fail this check even if every individual label is
+# well under 63 characters.
 @test "invalid domain rejects names longer than 253 chars" {
     run _is_valid_domain "$(printf 'a%.0s' {1..250}).example.com"
     [ "$status" -ne 0 ]
@@ -148,6 +175,13 @@ teardown() {
 
 # ────────────────────────────────────────────────────────────────────────────
 # Certificate Generation Tests
+#
+# _sign_cert produces the wildcard certs the SSL-mode proxy presents during
+# MITM interception (see services/proxy/entrypoint.sh and the "How SSL
+# Interception Works" section of CLAUDE.md). A client's TLS stack will only
+# accept the impersonated cert if its CN/SAN and issuing CA are exactly
+# right, so these tests check that output structure directly against real
+# openssl output rather than just asserting `_sign_cert` returned success.
 # ────────────────────────────────────────────────────────────────────────────
 
 @test "certificate generation creates signed cert for test domain" {
@@ -172,7 +206,9 @@ teardown() {
 
     _sign_cert "$domain" "$key" "$crt" "$san"
 
-    # Check CN in certificate
+    # CN must be the exact domain being impersonated -- a client's TLS stack
+    # checks this alongside SAN, so a wrong CN would be a real (if unlikely
+    # to be the only) way for the interception to visibly fail.
     cn=$(openssl x509 -noout -subject -in "$crt" | grep -oP 'CN=\K[^,/]*')
     [ "$cn" = "$domain" ]
 }
@@ -185,11 +221,20 @@ teardown() {
 
     _sign_cert "$domain" "$key" "$crt" "$san"
 
-    # Verify certificate is signed by test CA (using -CAfile and -CAkey for verification)
+    # A client only trusts the impersonated cert because it chains to the
+    # LAN's own CA (which the operator installed once, per
+    # docs/install-ca-cert.md) -- this is the one assertion that actually
+    # exercises that trust chain end-to-end via openssl's own verifier,
+    # rather than just inspecting fields on the cert in isolation.
     run openssl verify -CAfile "$test_ca_crt" "$crt"
     [ "$status" -eq 0 ]
 }
 
+# CLAUDE.md's design covers one root domain per wildcard cert (e.g.
+# *.steamcontent.com covers every subdomain), but the root domain itself
+# also needs to resolve -- so _sign_cert always requests both the bare
+# domain and its wildcard in one SAN, and this checks both landed, not just
+# whichever one a looser substring match would find first.
 @test "certificate has correct wildcard SAN" {
     local domain="cdn.example.com"
     local key="$test_cert_dir/${domain}.key"
@@ -206,6 +251,12 @@ teardown() {
     echo "$san_output" | grep -q "DNS:\*.${domain}" || return 1
 }
 
+# _sign_cert hardcodes `-days 3650` (see entrypoint.sh) so operators never
+# have to notice or renew per-domain certs -- the CA itself is the only
+# thing they manage. This test asserts the actual ~3650-day span between
+# notBefore/notAfter (via `date -d`, which parses openssl's "Mon DD
+# HH:MM:SS YYYY GMT" format directly), not just that both date fields are
+# non-empty, which would also pass for a cert expiring tomorrow.
 @test "certificate expires in 10 years (3650 days)" {
     local domain="longterm.example.com"
     local key="$test_cert_dir/${domain}.key"
@@ -214,17 +265,33 @@ teardown() {
 
     _sign_cert "$domain" "$key" "$crt" "$san"
 
-    # Check validity period
     not_after=$(openssl x509 -noout -enddate -in "$crt" | cut -d= -f2)
     not_before=$(openssl x509 -noout -startdate -in "$crt" | cut -d= -f2)
 
-    # Verify both dates are present
     [ -n "$not_after" ]
     [ -n "$not_before" ]
+
+    local not_after_epoch not_before_epoch validity_days
+    not_after_epoch="$(date -d "$not_after" +%s)"
+    not_before_epoch="$(date -d "$not_before" +%s)"
+    validity_days=$(( (not_after_epoch - not_before_epoch) / 86400 ))
+
+    # Allow a 1-day slack for the test's own clock skew relative to when
+    # openssl computed the validity window, not for any real tolerance in
+    # entrypoint.sh's own `-days 3650` value.
+    [ "$validity_days" -ge 3649 ]
+    [ "$validity_days" -le 3650 ]
 }
 
 # ────────────────────────────────────────────────────────────────────────────
 # Serial File Management Tests
+#
+# X.509 requires every certificate issued by the same CA to carry a unique
+# serial number; a repeat serial from the same issuer is grounds for a
+# client to distrust the cert outright. _sign_cert relies on openssl's
+# `-CAserial` to bump a shared counter file per signing, so these tests
+# check that file's lifecycle directly (created, incrementing, surviving
+# repeated use) rather than only checking each individual cert in isolation.
 # ────────────────────────────────────────────────────────────────────────────
 
 @test "serial file is initialized on first certificate generation" {
@@ -244,6 +311,11 @@ teardown() {
     [ -s "$SERIAL_FILE" ]
 }
 
+# A serial that merely differs between two certs isn't enough to prove the
+# counter is well-behaved (a random/hash-based scheme would also produce
+# different-looking values) -- this specifically checks the second serial is
+# numerically greater, matching the monotonic counter `-CAserial` actually
+# implements.
 @test "certificate serials increment monotonically" {
     local domain1="first.example.com"
     local domain2="second.example.com"
@@ -268,6 +340,10 @@ teardown() {
     [ "$serial2_dec" -gt "$serial1_dec" ]
 }
 
+# Beyond just "increments" (the previous test), the counter file itself must
+# stay a single valid hex value across many signings in the same process --
+# this is the regression case for a serial file that gets truncated,
+# corrupted, or replaced instead of updated in place.
 @test "serial file survives multiple certificate generations" {
     local domain1="domain1.example.com"
     local domain2="domain2.example.com"
@@ -294,6 +370,10 @@ teardown() {
 # Edge Cases
 # ────────────────────────────────────────────────────────────────────────────
 
+# Real CDN hostnames aren't always `cdn.example.com` -- some are several
+# labels deep (e.g. a regional edge node under a vendor's own subdomain
+# structure). This checks _sign_cert doesn't have a hidden assumption about
+# label count baked in anywhere (e.g. in how it builds the CN or SAN string).
 @test "certificate generation handles domains with many subdomains" {
     local domain="a.b.c.d.e.example.com"
     local key="$test_cert_dir/${domain}.key"
@@ -330,6 +410,14 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+# _sign_cert writes its intermediate CSR to a single hardcoded path,
+# /tmp/lancache-cert.csr (see entrypoint.sh), rather than a per-call
+# temp file, and removes it with `rm -f` on both the success and every
+# failure path. This test's name says "on generation failure" but exercises
+# the success path (a real deployment signs many domains back-to-back, so
+# a leftover CSR after a *successful* sign is just as real a leak as one
+# left behind by a failure); the invalid-CN test above covers the failure
+# path for the same cleanup behavior.
 @test "CSR cleanup prevents orphaned files on generation failure" {
     local domain="cleanup-test.example.com"
     local key="$test_cert_dir/${domain}.key"
