@@ -541,12 +541,10 @@ async fn main() -> Result<()> {
     }
 
     // Routes that are always public (protected by their own token).
-    let public_routes = Router::new()
-        .route("/health", get(health))
-        .route(
-            "/api/secondary/register",
-            post(routes::secondaries::register_secondary),
-        );
+    let public_routes = Router::new().route("/health", get(health)).route(
+        "/api/secondary/register",
+        post(routes::secondaries::register_secondary),
+    );
 
     // Routes that are protected by Basic Auth when auth is enabled. The
     // middleware also issues per-session CSRF state for every request.
