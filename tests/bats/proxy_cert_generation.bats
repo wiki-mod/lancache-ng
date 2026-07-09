@@ -309,7 +309,16 @@ teardown() {
 }
 
 @test "certificate generation fails gracefully with invalid CN" {
-    local invalid_cn="invalid_domain_with_underscores"
+    # openssl's -subj parser is permissive about hostname-shaped content —
+    # underscores, even embedded characters, don't make it fail (verified
+    # directly: `openssl req -subj "/CN=invalid_domain_with_underscores"`
+    # exits 0). The X.509 CN field does have a hard length limit enforced by
+    # OpenSSL itself (ASN.1 string length, max 64 bytes), so a CN past that
+    # limit is a real, reproducible failure to exercise _sign_cert's error
+    # path against (verified directly: exits 1 with "string too long:
+    # maxsize=64").
+    local invalid_cn
+    invalid_cn="$(printf 'a%.0s' {1..300})"
     local key="$test_cert_dir/test.key"
     local crt="$test_cert_dir/test.crt"
 
