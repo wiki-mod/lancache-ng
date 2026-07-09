@@ -214,6 +214,7 @@ services:
       - NATS_DNS_WRITER_PASSWORD=validation-nats-password
       - NATS_DNS_READER_USER=validation-dns-reader
       - NATS_DNS_READER_PASSWORD=validation-nats-password
+      - SECONDARY_REGISTRATION_TOKEN=validation-secondary-registration-token
     networks:
       validation:
         ipv4_address: ${VALIDATION_UI_IP:-172.30.99.9}
