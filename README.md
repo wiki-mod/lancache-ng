@@ -378,32 +378,40 @@ Set it to the LanCache NG standard IP if you want all clients to use standard mo
 
 For SSL mode, only point clients to the SSL IP after the CA certificate was installed.
 
-## Optional DHCP server
+## Optional DHCP
 
-LanCache NG can optionally run a Kea DHCP server.
+LanCache NG only caches traffic for clients that resolve CDN hostnames through
+its DNS servers. DHCP is the most reliable way to hand those DNS servers to
+clients. `setup.sh` lets you pick one of three DHCP modes (stored as
+`DHCP_MODE` in `.env`):
 
-This can automatically give clients:
+- `disabled` — LanCache NG does not manage or proxy DHCP. You point clients at
+  its DNS yourself (router DHCP option or static client config). This is the
+  right starting point for most users.
+- `kea` — LanCache NG runs a full Kea DHCP server that hands out IP address,
+  gateway, and the correct cache DNS servers, and supports reservations and
+  lease management in the Admin UI. Use this only when you are ready to make
+  LanCache NG the network's DHCP server — configure and confirm Kea is running
+  here first, then disable your router's built-in DHCP server, not the other
+  way around (see [docs/dhcp-modes.md](docs/dhcp-modes.md) for why the order
+  matters).
+- `dnsmasq-proxy` — LanCache NG runs dnsmasq in proxy-DHCP mode next to an
+  existing DHCP server for networks where the router or ISP gateway keeps DHCP
+  enabled and cannot be disabled. It does not own leases and is limited to
+  proxy/PXE clients; it does not reliably replace the DNS option handed out by
+  a normal router DHCP server.
 
-- an IP address
-- gateway
-- DNS server
-- the correct cache DNS IP
+The three modes are mutually exclusive — Kea and dnsmasq both bind DHCP port
+`67/udp`, so setup activates exactly one, and switching modes in the Admin UI
+stops the other service.
 
-Use this only if you know which DHCP server should be active in your network.
+Important: do not run two normal DHCP servers in the same network unless you
+planned it carefully. If your router already provides DHCP, either keep using
+the router (and set DNS another way) or switch DHCP fully to LanCache NG.
 
-Important:
-
-Do not run two normal DHCP servers in the same network unless you planned it carefully.  
-If your router already provides DHCP, either keep using the router or switch DHCP fully to LanCache NG.
-
-## Optional DHCP proxy
-
-The repository also contains a DHCP proxy service.
-
-This is useful for advanced setups where another DHCP server still exists, but LanCache NG should help provide specific network options.
-
-Most users should start without this.  
-Use normal DNS configuration first.
+See [docs/dhcp-modes.md](docs/dhcp-modes.md) for when to use each mode, what is
+not available in `dnsmasq-proxy` mode, how to set the upstream DHCP IP, and how
+to verify clients actually receive the LanCache NG DNS servers.
 
 ## Admin UI
 
