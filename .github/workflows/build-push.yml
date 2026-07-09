@@ -2833,6 +2833,43 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      - name: Wait before retrying the push
+        # The first attempt and the retry below share the same "Log in to
+        # GHCR" session from earlier in this job. Observed pattern: ghcr.io
+        # push-token issuance intermittently fails with "403 Forbidden" or
+        # "denied: denied" for the two slowest (Rust) builds in this matrix;
+        # a manual `gh run rerun` (a brand-new job, fresh login, some time
+        # elapsed) has fixed every occurrence so far. This sleep gives a
+        # transient condition the same chance to clear before the in-job
+        # retry, instead of retrying instantly against whatever just failed.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        run: sleep 30
+
+      - name: Re-authenticate to GHCR before retry
+        # Get a fresh push token rather than reusing the session from the
+        # "Log in to GHCR" step above, in case that session (not just the
+        # image build) was what the first attempt's auth failure was tied to.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Retry Build and push
         # Retry once with the same declared image inputs. Dockerfile-level
         # fallback disables broken acceleration while preserving the normal
