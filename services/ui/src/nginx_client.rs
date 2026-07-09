@@ -234,8 +234,8 @@ fn unique_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
     unique
 }
 
-// Matches nginx's custom lancache log_format (see services/proxy/nginx.conf
-// and services/proxy-standard/nginx.conf). Capture groups, in order:
+// Matches nginx's custom lancache log_format (see services/proxy/nginx.conf).
+// Capture groups, in order:
 //   1: client IP        2: timestamp       3: HTTP method
 //   4: request path     5: HTTP status     6: response bytes
 //   7: cache status (nginx $upstream_cache_status: HIT/MISS/EXPIRED/...)
