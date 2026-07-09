@@ -97,7 +97,7 @@ services:
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
-      - ${CACHE_DIR:-./cache}:/var/cache/nginx/lancache
+      - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
       - "${IP_STANDARD}:80:80"
@@ -332,7 +332,7 @@ services:
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - SSL_ENABLED=${SSL_ENABLED:-0}
     volumes:
-      - ${CACHE_DIR:-./cache}:/var/cache/lancache
+      - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
@@ -443,7 +443,7 @@ services:
     volumes:
       - ui-data:/data
       - proxy-logs:/var/log/nginx:ro
-      - ${CACHE_DIR:-./cache}:/var/cache/proxy:ro
+      - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats
     ports:
