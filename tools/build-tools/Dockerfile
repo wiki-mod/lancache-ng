@@ -4,28 +4,23 @@
 # Intentional build-tools default: use rust:latest so developer and CI
 # validation sees current Rust tooling early. Production service Dockerfiles
 # stay separately pinned for reproducible runtime image builds.
-FROM golang:latest AS actionlint-builder
-
-ARG ACTIONLINT_VERSION=1.7.12
-
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Build actionlint with the current Go toolchain so image scans do not inherit
-# stale Go runtime vulnerabilities from upstream release binaries.
-RUN set -euo pipefail; \
-    GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
-    /out/actionlint --version
-
 FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
 ARG SCCACHE_VERSION=0.16.0
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
 ARG CARGO_AUDIT_VERSION=0.22.2
+ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
+ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd
 # Verified against the live crates.io index during development of the coverage
 # CI job (a plain `cargo install cargo-tarpaulin` resolved to this exact
 # version); re-verify before bumping if this drifts from the latest release.
 ARG CARGO_TARPAULIN_VERSION=0.37.0
+ARG CARGO_TARPAULIN_SHA256_AMD64=398ca437e9f2b2baee46ef9d3d03966112f03f2cce8b1655a8ba0b61cef08bff
+ARG CARGO_TARPAULIN_SHA256_ARM64=d6ae06b7126fb44414dd65165f9aec9e330146513f709af69e6a7927093f277a
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
 ARG DOCKER_CLI_VERSION=29.6.1
 ARG DOCKER_COMPOSE_VERSION=5.2.0
@@ -60,19 +55,58 @@ RUN set -euo pipefail; \
       xz-utils; \
     rm -rf /var/lib/apt/lists/*
 
-# Keep sccache source-built and version-pinned. Only Redis and sccache-dist
-# client support are needed for this project's CI acceleration.
+# Keep sccache source-built and version-pinned: the official release binary's
+# default feature set also bundles s3/memcached/gcs/azure/gha/webdav/oss/cos
+# backends this project never uses, so building --no-default-features with
+# only the two backends actually needed (Redis and sccache-dist client
+# support) keeps the binary smaller and its dependency surface narrower.
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
-    cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --root /usr/local; \
-    cargo install cargo-tarpaulin --locked --version "${CARGO_TARPAULIN_VERSION}" --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
       ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
+# actionlint, cargo-audit, and cargo-tarpaulin all publish prebuilt release
+# binaries -- unlike sccache, none of them need a non-default feature set, so
+# building them from source would only add a compiler dependency (a Go
+# toolchain, in actionlint's case) for no behavioral difference. Fetch and
+# checksum-verify the official release asset for each instead, matching the
+# existing docker/docker-compose/shellspec pattern below.
+RUN set -euo pipefail; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) \
+        actionlint_arch="linux_amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}"; \
+        cargo_audit_arch="x86_64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_AMD64}"; \
+        tarpaulin_arch="x86_64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_AMD64}" \
+        ;; \
+      arm64) \
+        actionlint_arch="linux_arm64"; actionlint_sha256="${ACTIONLINT_SHA256_ARM64}"; \
+        cargo_audit_arch="aarch64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_ARM64}"; \
+        tarpaulin_arch="aarch64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_ARM64}" \
+        ;; \
+      *) echo "Unsupported architecture for prebuilt CI tool binaries: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    prebuilt_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$prebuilt_tmp"' EXIT; \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${actionlint_arch}.tar.gz" \
+      -o "$prebuilt_tmp/actionlint.tar.gz"; \
+    printf '%s  %s\n' "$actionlint_sha256" "$prebuilt_tmp/actionlint.tar.gz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/actionlint.tar.gz" -C "$prebuilt_tmp" actionlint; \
+    install -m 0755 "$prebuilt_tmp/actionlint" /usr/local/bin/actionlint; \
+    curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}.tgz" \
+      -o "$prebuilt_tmp/cargo-audit.tgz"; \
+    printf '%s  %s\n' "$cargo_audit_sha256" "$prebuilt_tmp/cargo-audit.tgz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/cargo-audit.tgz" -C "$prebuilt_tmp" "cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}/cargo-audit"; \
+    install -m 0755 "$prebuilt_tmp/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}/cargo-audit" /usr/local/cargo/bin/cargo-audit; \
+    curl -fsSL "https://github.com/xd009642/tarpaulin/releases/download/${CARGO_TARPAULIN_VERSION}/cargo-tarpaulin-${tarpaulin_arch}.tar.gz" \
+      -o "$prebuilt_tmp/cargo-tarpaulin.tar.gz"; \
+    printf '%s  %s\n' "$tarpaulin_sha256" "$prebuilt_tmp/cargo-tarpaulin.tar.gz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/cargo-tarpaulin.tar.gz" -C "$prebuilt_tmp" cargo-tarpaulin; \
+    install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
+    ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
+    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
 
 RUN set -euo pipefail; \
     shellspec_tmp="$(mktemp -d)"; \
