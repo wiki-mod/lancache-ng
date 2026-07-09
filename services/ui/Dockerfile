@@ -384,6 +384,7 @@ RUN set -eu; \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     coreutils \
+    curl \
     isc-dhcp-client \
     locales \
     nmap \
