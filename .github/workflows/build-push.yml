@@ -1065,6 +1065,14 @@ jobs:
           grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
             && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }
+          awk '
+            /name: Merge coverage reports and check threshold/ { in_merge = 1; has_docker = 0; has_build_tools = 0; next }
+            in_merge && /^[[:space:]]+- name: / { exit (has_docker && has_build_tools) ? 0 : 1 }
+            in_merge && /docker run --rm/ { has_docker = 1 }
+            in_merge && /BUILD_TOOLS_IMAGE/ { has_build_tools = 1 }
+            END { if (in_merge) exit (has_docker && has_build_tools) ? 0 : 1; exit 1 }
+          ' .github/workflows/build-push.yml \
+            || { echo "::error::Coverage merge must use the selected build-tools image instead of bare host jq/bc."; exit 1; }
           grep -F 'needs: validate-compose' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
           grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
@@ -1818,43 +1826,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Extract coverage percentages from JSON reports
-          dns_coverage=$(jq -r '.coverage' coverage-dns/tarpaulin-report.json 2>/dev/null || echo "0")
-          ui_coverage=$(jq -r '.coverage' coverage-ui/tarpaulin-report.json 2>/dev/null || echo "0")
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
 
-          echo "DNS coverage: ${dns_coverage}%"
-          echo "UI coverage: ${ui_coverage}%"
+              # Extract coverage percentages from JSON reports inside the
+              # selected build-tools image, not from incidental host binaries.
+              dns_coverage=$(jq -r ".coverage" coverage-dns/tarpaulin-report.json 2>/dev/null || echo "0")
+              ui_coverage=$(jq -r ".coverage" coverage-ui/tarpaulin-report.json 2>/dev/null || echo "0")
 
-          # Per-crate thresholds, not a shared minimum: the two crates' real
-          # coverage differs by an order of magnitude (measured on CI:
-          # ui ~38.6%, nats-subscriber ~0%, since nats-subscriber's 4 tests
-          # only cover its data model, not its subscribe/forward logic --
-          # tracked in #504). A single shared "minimum" threshold would
-          # either block ui's real coverage from ever mattering (if set low
-          # enough for nats-subscriber to pass) or permanently fail
-          # nats-subscriber (if set for ui's level). Each crate's threshold
-          # is raised independently as that crate gains real tests.
-          ui_threshold=35
-          dns_threshold=0
+              echo "DNS coverage: ${dns_coverage}%"
+              echo "UI coverage: ${ui_coverage}%"
 
-          echo "UI threshold: ${ui_threshold}%"
-          echo "DNS threshold: ${dns_threshold}% (tracked gap: #504)"
+              # Per-crate thresholds, not a shared minimum: the two crates'"'"' real
+              # coverage differs by an order of magnitude (measured on CI:
+              # ui ~38.6%, nats-subscriber ~0%, since nats-subscriber'"'"'s 4 tests
+              # only cover its data model, not its subscribe/forward logic --
+              # tracked in #504). A single shared "minimum" threshold would
+              # either block ui'"'"'s real coverage from ever mattering (if set low
+              # enough for nats-subscriber to pass) or permanently fail
+              # nats-subscriber (if set for ui'"'"'s level). Each crate'"'"'s threshold
+              # is raised independently as that crate gains real tests.
+              ui_threshold=35
+              dns_threshold=0
 
-          failed=0
-          if (( $(echo "$ui_coverage < $ui_threshold" | bc -l) )); then
-            echo "::error::UI coverage ${ui_coverage}% is below threshold of ${ui_threshold}%"
-            failed=1
-          fi
-          if (( $(echo "$dns_coverage < $dns_threshold" | bc -l) )); then
-            echo "::error::DNS coverage ${dns_coverage}% is below threshold of ${dns_threshold}%"
-            failed=1
-          fi
+              echo "UI threshold: ${ui_threshold}%"
+              echo "DNS threshold: ${dns_threshold}% (tracked gap: #504)"
 
-          if [[ "$failed" -eq 1 ]]; then
-            exit 1
-          fi
+              failed=0
+              if (( $(echo "$ui_coverage < $ui_threshold" | bc -l) )); then
+                echo "::error::UI coverage ${ui_coverage}% is below threshold of ${ui_threshold}%"
+                failed=1
+              fi
+              if (( $(echo "$dns_coverage < $dns_threshold" | bc -l) )); then
+                echo "::error::DNS coverage ${dns_coverage}% is below threshold of ${dns_threshold}%"
+                failed=1
+              fi
 
-          echo "Coverage check passed"
+              if [[ "$failed" -eq 1 ]]; then
+                exit 1
+              fi
+
+              echo "Coverage check passed"'
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
