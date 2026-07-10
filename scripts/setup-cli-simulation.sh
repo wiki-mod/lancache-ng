@@ -106,14 +106,14 @@ spawn bash setup.sh
 
 expect_prompt {Server IP \(Standard mode\)} "127.0.0.1"
 expect_prompt {Enable SSL mode\? \[y/N\]} ""
-expect_prompt {Directory \[} $install_dir
+expect_prompt {Directory[^\n]*\[} $install_dir
 expect_prompt {Cache directory \(absolute path\)} ""
 expect_prompt {Cache size in GiB} ""
 expect_prompt {Cache RAM buffer in MB} ""
 expect_prompt {Enable optional Watchtower} ""
 expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy\)} ""
 expect_prompt {Protect Admin-UI with password\? \[Y/n\]} ""
-expect_prompt {Username \[admin\]} ""
+expect_prompt {Username[^\n]*\[admin\]} ""
 expect_prompt {Start now\? \[Y/n\]} ""
 
 set timeout 300
