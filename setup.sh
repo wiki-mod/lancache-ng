@@ -319,8 +319,16 @@ run_kea_dhcp_activation_preflight() {
     print_step "DHCP activation preflight"
     printf "  Discovery-only check: the Kea image will run nmap and exit without starting Kea.\n"
 
+    # No -e/--interface flag: nmap has no "any" pseudo-interface (confirmed
+    # directly -- "I cannot figure out what source address to use for
+    # device any, does it even exist?"), so passing one made this probe
+    # fail its own execution on every single run, unconditionally forcing
+    # the "could not be executed" confirmation path below regardless of
+    # whether a real conflict existed. Letting nmap auto-select the
+    # interface (no -e at all) matches the already-proven working
+    # invocation in services/ui/dhcp-probe.sh.
     if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
-        nmap --script broadcast-dhcp-discover -e any --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
+        nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \
@@ -328,15 +336,11 @@ run_kea_dhcp_activation_preflight() {
         return 0
     fi
 
-    while IFS= read -r line; do
-        case "$line" in
-            *"Server Identifier:"*)
-                server_identifier="${line#*Server Identifier:}"
-                server_identifier="${server_identifier# }"
-                break
-                ;;
-        esac
-    done <<< "$output"
+    # Matches services/ui/dhcp-probe.sh's already-proven parsing: anchor at
+    # the start of the line (after stripping nmap's leading |/_ prefixes and
+    # whitespace) instead of a bare substring match, and take the first
+    # match rather than assuming there is exactly one.
+    server_identifier="$(printf '%s\n' "$output" | sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' | sed -n '1p')"
 
     if [[ -n "$server_identifier" ]]; then
         print_warn "An existing DHCP server answered before Kea activation: $server_identifier"
