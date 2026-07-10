@@ -2361,10 +2361,15 @@ jobs:
             coverage-ui/tarpaulin-report.json
           retention-days: 30
       - name: Publish Rust coverage badge endpoint
+        # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
+        # so pushes to master and to the active vX.Y.Z integration branch don't
+        # overwrite each other's badge data -- the workflow-level concurrency
+        # group only serializes writes, it doesn't stop two different branches
+        # from racing to own the same file.
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
         env:
           BADGE_BRANCH: badges
-          BADGE_FILE: coverage/rust.json
+          BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
