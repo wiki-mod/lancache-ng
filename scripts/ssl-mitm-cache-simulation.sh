@@ -49,12 +49,18 @@ cp -a services/dns "$dns_context"
 printf '\n# Added by scripts/ssl-mitm-cache-simulation.sh for issue #597 -- not a real CDN domain, never committed.\n%s\n' \
     "$test_domain" >> "$dns_context/cdn-domains.txt"
 
-docker build --pull -q \
+# Plain `docker build` uses the legacy builder, which does not understand
+# the dns Dockerfile's `RUN --mount=type=secret` lines (BuildKit-only) --
+# confirmed directly: "the --mount option requires BuildKit". buildx is
+# already set up on this runner (used elsewhere in this project's CI, e.g.
+# the container-scan job); --load makes the result available to `docker
+# run`/`docker compose` afterward, same as a normal build.
+docker buildx build --load --pull -q \
     --build-arg "BUILD_TOOLS_IMAGE=${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
     -t "lancache-ng-mitm-sim-dns:$run_id" \
     "$dns_context" >/dev/null
 
-docker build --pull -q \
+docker buildx build --load --pull -q \
     --build-context "dns-domains=$dns_context" \
     -t "lancache-ng-mitm-sim-proxy:$run_id" \
     services/proxy >/dev/null
