@@ -221,10 +221,10 @@ This script checks for floating-tag patterns in workflows and Dockerfiles and re
 
 ## CONTRIBUTING.md Alignment
 
-This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations" (line 111):
+This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations":
 
-> Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
+> Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
 
-And reinforces (line 256):
+And reinforces:
 
 > release-capable paths must not depend on mutable `build-tools:latest`
