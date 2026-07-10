@@ -308,6 +308,46 @@ confirm() {
     [[ "${REPLY,,}" = "y" || "${REPLY,,}" = "yes" ]]
 }
 
+# The Kea path must stay discovery-first: run a non-invasive broadcast probe
+# before the stack is activated so we can stop or warn before becoming a
+# second active DHCP server on the LAN.
+run_kea_dhcp_activation_preflight() {
+    local env_file="$1" output server_identifier=""
+
+    [[ "$DHCP_MODE" = "kea" ]] || return 0
+
+    print_step "DHCP activation preflight"
+    printf "  Discovery-only check: the Kea image will run nmap and exit without starting Kea.\n"
+
+    if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
+        nmap --script broadcast-dhcp-discover -e any --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
+        print_warn "DHCP discovery preflight could not be executed inside the Kea image."
+        print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
+        confirm "Continue with Kea activation anyway? [y/N]" "N" \
+            || die "Cancelled DHCP activation."
+        return 0
+    fi
+
+    while IFS= read -r line; do
+        case "$line" in
+            *"Server Identifier:"*)
+                server_identifier="${line#*Server Identifier:}"
+                server_identifier="${server_identifier# }"
+                break
+                ;;
+        esac
+    done <<< "$output"
+
+    if [[ -n "$server_identifier" ]]; then
+        print_warn "An existing DHCP server answered before Kea activation: $server_identifier"
+        print_warn "Kea would become a second active DHCP server if you continue."
+        confirm "Continue with Kea activation anyway? [y/N]" "N" \
+            || die "Cancelled DHCP activation."
+    else
+        print_ok "No DHCP server answer was detected before Kea activation."
+    fi
+}
+
 # Installs the given packages via whichever supported package manager is
 # present (apt/dnf/yum/pacman), after an explicit operator confirmation since
 # this mutates the host outside setup.sh's own config. Fails closed if no
@@ -3335,6 +3375,7 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     done
 
     print_ok "DHCP enabled in Kea mode — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
+    print_warn "Before Kea is activated, setup will run a non-invasive DHCP discovery preflight."
     print_warn "Kea Control Agent port 8000 should be restricted by firewall"
     printf "  iptables (legacy):  iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n"
     printf "  nftables:           nft add rule inet filter input tcp dport 8000 ip saddr != 172.28.0.0/16 drop\n"
@@ -3715,6 +3756,8 @@ cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
 docker compose --env-file "$INSTALL_DIR/.env" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
+
+run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"
 
 print_step "Starting stack"
 if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then

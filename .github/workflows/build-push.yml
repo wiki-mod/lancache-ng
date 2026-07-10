@@ -804,6 +804,17 @@ jobs:
               || { echo "::error::setup.sh must generate or migrate required runtime key ${key}."; exit 1; }
           done
 
+          grep -F 'run_kea_dhcp_activation_preflight()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must define a DHCP discovery preflight before Kea activation."; exit 1; }
+          grep -F 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must call the Kea discovery preflight before starting the stack."; exit 1; }
+          grep -F 'nmap --script broadcast-dhcp-discover -e any --script-args broadcast-dhcp-discover.timeout=5' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must probe DHCP discovery with the Kea image before activation."; exit 1; }
+          grep -F 'nmap' services/dhcp/Dockerfile >/dev/null \
+            || { echo "::error::services/dhcp/Dockerfile must install nmap for the Kea discovery preflight."; exit 1; }
+          grep -F 'nmap|/usr/bin/nmap|/bin/nmap)' services/dhcp/entrypoint.sh >/dev/null \
+            || { echo "::error::services/dhcp/entrypoint.sh must pass through the nmap preflight command without starting Kea."; exit 1; }
+
           setup_update_required_repairs=(
             CACHE_INACTIVE
             CACHE_MAX_GB
