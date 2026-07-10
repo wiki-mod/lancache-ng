@@ -29,7 +29,21 @@ cd "$repo_root"
 # real latent issue for `sudo ./setup.sh` against a repo cloned by a
 # different user too -- see issue filed against setup.sh separately.
 git config --global --add safe.directory "$repo_root"
-install_dir="$(mktemp -d /tmp/lancache-ng-setup-sim.XXXXXX)"
+
+# install_dir must be a path this container and the host Docker daemon both
+# resolve to the same real directory. docker compose (run through the
+# bind-mounted host socket) always resolves bind-mount sources against the
+# HOST filesystem, not this container's -- a plain /tmp/... path only exists
+# inside this container's own ephemeral layer, so the host daemon can't find
+# it and silently auto-creates it as an empty directory instead, then fails
+# trying to bind-mount that directory onto a file destination (e.g.
+# dhcp-probe.sh). Confirmed directly: that produced exactly this "mount
+# src=... dst=/usr/local/bin/dhcp-probe.sh: not a directory" failure. /work
+# (this checkout, bind-mounted from the same host path the workflow step
+# runs in) is the only path both sides agree on, so the install directory
+# has to live under it instead of under /tmp.
+mkdir -p "$repo_root/.setup-cli-simulation-tmp"
+install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
 # cmd_backup's --dest defaults to /var/backups/lancache-ng and cmd_update
 # never overrides it, so that is where the pre-update rollback backup this
 # script verifies in Phase 3 actually lands -- a container-local path with no
@@ -42,7 +56,7 @@ cleanup() {
     if [[ -f "$install_dir/docker-compose.yml" ]]; then
         docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env" down -v --remove-orphans >/dev/null 2>&1 || true
     fi
-    rm -rf "$install_dir" "$backup_root"
+    rm -rf "$install_dir" "$repo_root/.setup-cli-simulation-tmp" "$backup_root"
     exit "$status"
 }
 trap cleanup EXIT
