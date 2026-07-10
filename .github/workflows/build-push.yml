@@ -224,6 +224,24 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  # GitHub-hosted fallback is deliberately limited to cheap lint jobs (this
+  # one, shellcheck-hosted, ci_scope_policy-hosted). Rust builds, image scans,
+  # and publish paths stay on self-hosted runners because they still depend
+  # on the shared build-tools image, sccache/distcc acceleration, or registry
+  # credentials that do not have a safe hosted equivalent yet.
+  #
+  # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
+  # second acceptance criterion): NOT feasible as a real fallback today, and
+  # deliberately not attempted here. ci_scope_policy's whole job is to check
+  # the *results* of dns_rust_quality/ui_rust_quality/dns_test/ui_test/
+  # watchdog_test/dns_cargo_audit/ui_cargo_audit -- all self-hosted-only Rust
+  # jobs with no hosted equivalent of their own yet. A "ci_scope_policy-hosted"
+  # job would have to depend on those same self-hosted jobs, so if self-hosted
+  # runners are genuinely unavailable (the scenario this fallback exists for),
+  # it would sit queued waiting on its own needs: forever, same as the jobs
+  # it's meant to be a fallback for. There is no real fallback for this check
+  # until the Rust build/test jobs themselves get a hosted path -- tracked
+  # separately, not solved by this workflow file alone.
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected
     # by validate-compose. That keeps linting independent from whatever happens
@@ -285,6 +303,38 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash tests/setup-migration-semantics.sh
+
+  shellcheck-hosted:
+    name: shellcheck (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Select build-tools image
+        # Always resolve through the digest-pinned, smoke-tested selector --
+        # never fall back to a bare :latest tag here. This job exists so
+        # ShellCheck/ActionLint still run when self-hosted runners are down;
+        # it shouldn't trade the self-hosted job's verified image for an
+        # unpinned, unverified one just because the runner changed.
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true matches validate-compose's own
+        # resolution (no local-build fallback -- this hosted runner shouldn't
+        # need to build the toolchain image itself for a lint-only job).
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Run ShellCheck and ActionLint
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
 
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
@@ -2513,10 +2563,13 @@ jobs:
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
   build:
-    # This job is the only place that publishes service sha-* images. It waits
-    # for lightweight validation, policy checks, and trusted-ref vulnerability
-    # scans before publishing. For build-tools, it also scans the exact pushed
-    # digest before attestation/promotion can proceed.
+    # This job is the only place that publishes service sha-* images. It stays
+    # on self-hosted runners because the heavy Rust/image path depends on the
+    # shared build-tools image, sccache/distcc acceleration, and registry
+    # credentials. It still waits for lightweight validation, policy checks,
+    # and trusted-ref vulnerability scans before publishing. For build-tools,
+    # it also scans the exact pushed digest before attestation/promotion can
+    # proceed.
     needs:
       - shellcheck
       - validate-compose
