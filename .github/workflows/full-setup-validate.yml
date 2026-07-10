@@ -13,9 +13,16 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
+        # latest is intentionally not the default: this project has not cut
+        # a stable release yet, so every first-party service's :latest tag
+        # is an untouched leftover from before the promote/versioning
+        # contract existed (confirmed directly: ui/proxy/dns/watchdog/dhcp/
+        # dhcp-proxy:latest are all 1-2 weeks stale, and stack:latest --
+        # the coherent multi-service pointer -- does not exist at all). edge
+        # is the channel actually promoted daily from master.
         description: Stack image tag to validate against.
         required: false
-        default: latest
+        default: edge
 
 permissions:
   contents: read
