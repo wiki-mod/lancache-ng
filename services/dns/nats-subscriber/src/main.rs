@@ -256,7 +256,7 @@ async fn handle_message(
     }
 
     if subject == "lancache.dns.flush" {
-        return handle_dns_flush(pdns_api_key, http_client).await;
+        return handle_dns_flush(msg, pdns_api_key, http_client).await;
     }
 
     println!("Unknown subject: {}", subject);
@@ -385,12 +385,35 @@ async fn handle_dns_record(
     }
 }
 
-async fn handle_dns_flush(pdns_api_key: &str, http_client: &Arc<Client>) -> bool {
-    let url = "http://127.0.0.1:8082/api/v1/servers/localhost/cache/flush?type=packet";
+#[derive(Debug, Deserialize)]
+struct FlushRequest {
+    domain: String,
+}
+
+async fn handle_dns_flush(
+    msg: &async_nats::jetstream::Message,
+    pdns_api_key: &str,
+    http_client: &Arc<Client>,
+) -> bool {
+    // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
+    // parameter and only flushes an exact name match, not a subtree --
+    // confirmed live while building issue #400's integration test:
+    // `?type=packet` (the previous call) always returned 422 Unprocessable
+    // Entity, and even `?domain=.` (root) leaves a just-changed leaf record
+    // resolving from cache until its TTL naturally expires. The publisher
+    // (services/ui/src/routes/domains.rs's flush_recursor_cache) now sends
+    // the exact domain that changed; fall back to "." only for messages
+    // published before this fix, or from any other future publisher that
+    // doesn't include one.
+    let domain = match serde_json::from_slice::<FlushRequest>(&msg.payload) {
+        Ok(req) => req.domain,
+        Err(_) => ".".to_string(),
+    };
+    let url = format!("http://127.0.0.1:8082/api/v1/servers/localhost/cache/flush?domain={domain}");
 
     // #68 fix: use shared client instead of creating new one
     let result = http_client
-        .put(url)
+        .put(&url)
         .header("X-API-Key", pdns_api_key)
         .send()
         .await;
