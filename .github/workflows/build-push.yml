@@ -224,11 +224,24 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
-  # GitHub-hosted fallback is deliberately limited to cheap lint and policy
-  # jobs. Rust builds, image scans, and publish paths stay on self-hosted
-  # runners because they still depend on the shared build-tools image,
-  # sccache/distcc acceleration, or registry credentials that do not have a
-  # safe hosted equivalent yet.
+  # GitHub-hosted fallback is deliberately limited to cheap lint jobs (this
+  # one, shellcheck-hosted, ci_scope_policy-hosted). Rust builds, image scans,
+  # and publish paths stay on self-hosted runners because they still depend
+  # on the shared build-tools image, sccache/distcc acceleration, or registry
+  # credentials that do not have a safe hosted equivalent yet.
+  #
+  # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
+  # second acceptance criterion): NOT feasible as a real fallback today, and
+  # deliberately not attempted here. ci_scope_policy's whole job is to check
+  # the *results* of dns_rust_quality/ui_rust_quality/dns_test/ui_test/
+  # watchdog_test/dns_cargo_audit/ui_cargo_audit -- all self-hosted-only Rust
+  # jobs with no hosted equivalent of their own yet. A "ci_scope_policy-hosted"
+  # job would have to depend on those same self-hosted jobs, so if self-hosted
+  # runners are genuinely unavailable (the scenario this fallback exists for),
+  # it would sit queued waiting on its own needs: forever, same as the jobs
+  # it's meant to be a fallback for. There is no real fallback for this check
+  # until the Rust build/test jobs themselves get a hosted path -- tracked
+  # separately, not solved by this workflow file alone.
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected
     # by validate-compose. That keeps linting independent from whatever happens
@@ -297,17 +310,19 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select build-tools image
+        # Always resolve through the digest-pinned, smoke-tested selector --
+        # never fall back to a bare :latest tag here. This job exists so
+        # ShellCheck/ActionLint still run when self-hosted runners are down;
+        # it shouldn't trade the self-hosted job's verified image for an
+        # unpinned, unverified one just because the runner changed.
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true matches validate-compose's own
+        # resolution (no local-build fallback -- this hosted runner shouldn't
+        # need to build the toolchain image itself for a lint-only job).
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" = "pull_request" ]]; then
-            printf 'BUILD_TOOLS_IMAGE=ghcr.io/%s/build-tools:latest\n' "$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
-          else
-            printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-          fi
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -2028,170 +2043,6 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - name: Enforce scoped CI gates
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          DETECT_RESULT: ${{ needs['detect-changes'].result }}
-          DNS_RUST_CHANGED: ${{ needs['detect-changes'].outputs.dns_rust }}
-          UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
-          WATCHDOG_CHANGED: ${{ needs['detect-changes'].outputs.watchdog }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
-          DOCS_CHANGED: ${{ needs['detect-changes'].outputs.docs }}
-          DOCS_ONLY: ${{ needs['detect-changes'].outputs.docs_only }}
-          GOVERNANCE_CHANGED: ${{ needs['detect-changes'].outputs.governance }}
-          SETUP_RUNTIME_CHANGED: ${{ needs['detect-changes'].outputs.setup_runtime }}
-          DEPLOY_CHANGED: ${{ needs['detect-changes'].outputs.deploy }}
-          RELEASE_CONTRACT_CHANGED: ${{ needs['detect-changes'].outputs.release_contract }}
-          SCRIPTS_CHANGED: ${{ needs['detect-changes'].outputs.scripts }}
-          DNS_RUST_QUALITY_RESULT: ${{ needs.dns_rust_quality.result }}
-          UI_RUST_QUALITY_RESULT: ${{ needs.ui_rust_quality.result }}
-          DNS_TEST_RESULT: ${{ needs.dns_test.result }}
-          UI_TEST_RESULT: ${{ needs.ui_test.result }}
-          WATCHDOG_TEST_RESULT: ${{ needs.watchdog_test.result }}
-          DNS_CARGO_AUDIT_RESULT: ${{ needs.dns_cargo_audit.result }}
-          UI_CARGO_AUDIT_RESULT: ${{ needs.ui_cargo_audit.result }}
-        run: |
-          set -euo pipefail
-
-          grep -n "Set up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
-            echo "::error::validate-compose must set up Buildx before resolving digest-qualified build-tools images."
-            exit 1
-          }
-
-          require_boolean() {
-            local name="$1" value="$2"
-            case "$value" in
-              true|false)
-                ;;
-              *)
-                echo "::error::detect-changes output '$name' must be true or false, got '${value:-<empty>}'."
-                exit 1
-                ;;
-            esac
-          }
-
-          require_success() {
-            local name="$1" value="$2"
-            if [ "$value" != "success" ]; then
-              echo "::error::$name must succeed for this change set, got '$value'."
-              exit 1
-            fi
-          }
-
-          require_success_or_intentional_skip() {
-            local name="$1" value="$2"
-            case "$value" in
-              success|skipped)
-                ;;
-              *)
-                echo "::error::$name may only be skipped by the PR path filter, got '$value'."
-                exit 1
-                ;;
-            esac
-          }
-
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
-            require_success "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
-            require_success "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success "test (ui)" "$UI_TEST_RESULT"
-            require_success "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
-            require_success "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
-            exit 0
-          fi
-
-          require_success "detect changed paths" "$DETECT_RESULT"
-
-          for output in \
-            DNS_RUST_CHANGED \
-            UI_CHANGED \
-            WATCHDOG_CHANGED \
-            WORKFLOW_CHANGED \
-            DOCS_CHANGED \
-            DOCS_ONLY \
-            GOVERNANCE_CHANGED \
-            SETUP_RUNTIME_CHANGED \
-            DEPLOY_CHANGED \
-            RELEASE_CONTRACT_CHANGED \
-            SCRIPTS_CHANGED
-          do
-            require_boolean "$output" "${!output}"
-          done
-
-          dns_rust_required=false
-          ui_required=false
-          watchdog_required=false
-          if [ "$WORKFLOW_CHANGED" = "true" ]; then
-            dns_rust_required=true
-            ui_required=true
-            watchdog_required=true
-          fi
-          if [ "$DNS_RUST_CHANGED" = "true" ]; then
-            dns_rust_required=true
-          fi
-          if [ "$UI_CHANGED" = "true" ]; then
-            ui_required=true
-          fi
-          if [ "$WATCHDOG_CHANGED" = "true" ]; then
-            watchdog_required=true
-          fi
-
-          if [ "$dns_rust_required" = "true" ]; then
-            require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
-            require_success "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
-          else
-            require_success_or_intentional_skip "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
-            require_success_or_intentional_skip "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
-          fi
-
-          if [ "$ui_required" = "true" ]; then
-            require_success "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
-            require_success "test (ui)" "$UI_TEST_RESULT"
-            require_success "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
-          else
-            require_success_or_intentional_skip "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
-            require_success_or_intentional_skip "test (ui)" "$UI_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
-          fi
-
-          if [ "$watchdog_required" = "true" ]; then
-            require_success "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-          else
-            require_success_or_intentional_skip "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-          fi
-
-          if [ "$DOCS_ONLY" = "true" ]; then
-            echo "::notice::Docs-only PR: heavy Rust and Docker checks may be skipped, but unconditional policy checks still ran."
-          fi
-          if [ "$GOVERNANCE_CHANGED" = "true" ]; then
-            echo "::notice::Governance files changed; keep review focused on project rules, not only generated artifacts."
-          fi
-          if [ "$SETUP_RUNTIME_CHANGED" = "true" ] || [ "$DEPLOY_CHANGED" = "true" ] || [ "$RELEASE_CONTRACT_CHANGED" = "true" ]; then
-            echo "::notice::Runtime/deploy/release contract files changed; validate-compose remains the lightweight project-wide guard."
-          fi
-
-  ci_scope_policy-hosted:
-    # GitHub-hosted mirror of the same CI scope policy. It keeps the policy
-    # check visible on hosted runners without changing the underlying rules.
-    name: CI scope policy (GitHub-hosted fallback)
-    needs:
-      - detect-changes
-      - dns_rust_quality
-      - ui_rust_quality
-      - dns_test
-      - ui_test
-      - watchdog_test
-      - dns_cargo_audit
-      - ui_cargo_audit
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running CI scope policy on GitHub-hosted runner as fallback for non-LAN-dependent policy checks."
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
