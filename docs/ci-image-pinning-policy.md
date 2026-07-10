@@ -100,6 +100,19 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 
 All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 digests:
 
+The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
+for Debian runtime bases, including `services/ui/Dockerfile`. This is a
+project-wide cache decision, not a one-off oversight in the Admin UI image:
+the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
+configured pull source for these public Docker Hub bases. If Google evicts a
+cached digest and a build can no longer pull it, the build must fail closed and
+the base reference must be refreshed in a reviewed PR; Dockerfiles must not
+carry a second fallback `FROM` path because Dockerfile syntax cannot express a
+trusted registry-fallback chain without changing the built image provenance.
+Operators or CI runners that require Docker Hub as the source should configure
+that at the Docker daemon or build infrastructure layer, not by adding
+undocumented per-Dockerfile fallback logic.
+
 - `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
