@@ -224,6 +224,28 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  line-endings:
+    # Cheap repository hygiene gate (issue #601). .gitattributes already
+    # normalizes line endings for files git touches going forward, but does
+    # not catch files where that normalization was bypassed.
+    name: line endings
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check tracked files use Unix (LF) line endings
+        run: bash scripts/check-line-endings.sh
+
+  line-endings-hosted:
+    name: line endings (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check tracked files use Unix (LF) line endings
+        run: bash scripts/check-line-endings.sh
+
   # GitHub-hosted fallback is deliberately limited to cheap lint jobs (this
   # one, shellcheck-hosted, ci_scope_policy-hosted). Rust builds, image scans,
   # and publish paths stay on self-hosted runners because they still depend
