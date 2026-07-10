@@ -436,6 +436,10 @@ fn register_lancache_image_template_functions(templates: &mut Tera, cfg: &config
 fn load_templates(cfg: &config::Config) -> Tera {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
+    // Functions must be registered before any template is added: Tera
+    // validates function calls at parse time, so a template calling one of
+    // these (e.g. base.html) would fail to parse if added first.
+    register_lancache_image_template_functions(&mut t, cfg);
     for name in TEMPLATE_NAMES {
         let path = format!("{}/{}", cfg.template_dir, name);
         let content = std::fs::read_to_string(&path)
@@ -443,7 +447,6 @@ fn load_templates(cfg: &config::Config) -> Tera {
         t.add_raw_template(name, &content)
             .unwrap_or_else(|e| panic!("Cannot parse template {}: {}", name, e));
     }
-    register_lancache_image_template_functions(&mut t, cfg);
     t
 }
 
