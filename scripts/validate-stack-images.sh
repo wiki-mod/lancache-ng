@@ -73,11 +73,14 @@ runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
   require_manifest_platform "$image" linux/amd64
+  require_manifest_platform "$image" linux/arm64
 done
 require_name "$tooling_names" build-tools tooling
 require_manifest_platform build-tools linux/amd64
+require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
+require_manifest_platform stack linux/arm64
 for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
   require_name "$external_names" "$image" external
 done
@@ -252,7 +255,7 @@ require_grep 'bash scripts/check-stable-external-images.sh' \
 require_grep 'expected_prerelease=' \
   .github/workflows/build-push.yml \
   'release job must derive RC prerelease status from the tag'
-require_grep '^  RELEASE_PLATFORMS: linux/amd64$' \
+require_grep '^  RELEASE_PLATFORMS: linux/amd64,linux/arm64$' \
   .github/workflows/build-push.yml \
   'build workflow must publish every platform declared by the stack manifest'
 require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLATFORMS"' \

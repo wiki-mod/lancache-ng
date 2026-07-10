@@ -48,6 +48,7 @@ runtime:
     source: services/proxy/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
@@ -56,6 +57,7 @@ runtime:
     source: services/dns/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
@@ -65,6 +67,7 @@ runtime:
     source: services/watchdog/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
@@ -73,6 +76,7 @@ runtime:
     source: services/dhcp/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
   - name: dhcp-proxy
@@ -80,6 +84,7 @@ runtime:
     source: services/dhcp-proxy/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
   - name: ui
@@ -87,6 +92,7 @@ runtime:
     source: services/ui/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
@@ -96,6 +102,7 @@ tooling:
     source: tools/build-tools/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     consumers:
       - .github/workflows/build-push.yml
       - docs/self-hosted-actions-runner.md
@@ -106,6 +113,7 @@ metadata:
     source: .github/workflows/build-push.yml
     platforms:
       - linux/amd64
+      - linux/arm64
     description: Single channel pointer that resolves mutable stack channels to an immutable sha-* image set.
 legacy:
   - name: proxy-standard

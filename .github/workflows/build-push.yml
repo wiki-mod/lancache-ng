@@ -31,7 +31,7 @@ concurrency:
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
-  RELEASE_PLATFORMS: linux/amd64
+  RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
 defaults:
@@ -2245,7 +2245,12 @@ jobs:
     # build job because the multi-arch published image is produced there.
     if: github.event_name != 'pull_request'
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Each matrix row carries its own JSON-encoded runner selector so amd64
+    # rows stay on the self-hosted pool (with LAN acceleration available) and
+    # arm64 rows run natively on a GitHub-hosted arm64 runner -- QEMU on the
+    # self-hosted pool would reintroduce the emulated-Rust-compile risk this
+    # scan is meant to catch before build/build-arm64 push anything real.
+    runs-on: ${{ fromJSON(matrix.runner) }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     strategy:
@@ -2261,6 +2266,7 @@ jobs:
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dns
             context: services/dns
             build_contexts: ""
@@ -2268,24 +2274,28 @@ jobs:
             rust: true
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
             context: services/watchdog
             build_contexts: ""
             description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp
             context: services/dhcp
             build_contexts: ""
             description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -2293,12 +2303,65 @@ jobs:
             rust: true
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: build-tools
             context: tools/build-tools
             build_contexts: ""
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
             platform: linux/amd64
             platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: proxy
+            context: services/proxy
+            build_contexts: dns-domains=services/dns
+            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: dns
+            context: services/dns
+            build_contexts: ""
+            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
+            rust: true
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: watchdog
+            context: services/watchdog
+            build_contexts: ""
+            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: dhcp
+            context: services/dhcp
+            build_contexts: ""
+            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
+            build_contexts: ""
+            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: ui
+            context: services/ui
+            build_contexts: ""
+            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
+            rust: true
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: build-tools
+            context: tools/build-tools
+            build_contexts: ""
+            description: Prebuilt lancache-ng CI and developer validation toolchain image.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -2309,7 +2372,7 @@ jobs:
           set -euo pipefail
 
           should_scan=true
-          echo "::notice::build-tools scan remains enabled on trusted refs so publish coverage includes the sha-* source image. Arm64 scan coverage is deferred separately."
+          echo "::notice::build-tools scan remains enabled on trusted refs so publish coverage includes the sha-* source image, for both the amd64 and arm64 matrix rows."
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
@@ -2346,6 +2409,9 @@ jobs:
         # Trusted Rust image builds may use Redis sccache, sccache-dist, and
         # distcc as CI infrastructure. Secrets are written to temporary files for
         # BuildKit and are never exposed to fork PRs or Dependabot runs.
+        # Only the amd64 rows run on the self-hosted LAN pool that can reach
+        # this acceleration infrastructure -- the arm64 rows run on a
+        # GitHub-hosted runner and always scan an unaccelerated native build.
         if: >-
           ${{
             (
@@ -2353,6 +2419,7 @@ jobs:
               steps.build-tools-scan-changes.outputs.should-scan == 'true'
             ) &&
             matrix.rust == true &&
+            matrix.platform_tag == 'amd64' &&
             github.actor != 'dependabot[bot]' &&
             github.event_name != 'pull_request'
           }}
@@ -2455,7 +2522,7 @@ jobs:
         # BuildKit host networking is only enabled when secret-backed
         # acceleration needs access to private runner services. Normal builds
         # stay on the default isolated network.
-        if: matrix.rust == true
+        if: matrix.rust == true && matrix.platform_tag == 'amd64'
         env:
           SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
         run: |
@@ -2471,7 +2538,7 @@ jobs:
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
       - name: Validate acceleration infrastructure outside BuildKit cache
-        if: matrix.rust == true
+        if: matrix.rust == true && matrix.platform_tag == 'amd64'
         uses: ./.github/actions/rust-acceleration-preflight
         with:
           service: ${{ matrix.service }}
@@ -2724,13 +2791,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
+        # This job only ever publishes the linux/amd64 leg of each service
+        # image, under a platform-suffixed tag. The merge-manifests job below
+        # combines this tag with build-arm64's linux/arm64 tag into the real
+        # sha-<commit> multi-platform tag that promote/release/setup.sh
+        # actually consume -- see docs/self-hosted-actions-runner.md.
         if: steps.should-build.outputs.should-build == 'true'
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=short,suffix=-amd64
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -2835,7 +2907,6 @@ jobs:
           SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
           DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
-          RELEASE_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
         run: |
           set -euo pipefail
 
@@ -2891,7 +2962,11 @@ jobs:
             echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ "$RELEASE_PLATFORMS" = "linux/amd64" ]; then
+          # This job only ever builds linux/amd64 (see build-arm64 for the
+          # native arm64 leg), so dist/distcc acceleration -- LAN-only
+          # infrastructure tied to the self-hosted amd64 runner pool -- is
+          # unconditionally applicable here.
+          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
             dist_config_file="${{ runner.temp }}/sccache-dist-config"
             {
               printf '[dist]\n'
@@ -2904,11 +2979,9 @@ jobs:
             } > "$dist_config_file"
             secret_files+=("sccache_dist_config=$dist_config_file")
             echo "dist-config-file=$dist_config_file" >> "$GITHUB_OUTPUT"
-          elif [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
-            echo "::notice::Skipping sccache-dist secret for multi-platform build; current dist toolchains are amd64-only."
           fi
 
-          if [ -n "$DISTCC_POTENTIAL_HOSTS" ] && [ "$RELEASE_PLATFORMS" = "linux/amd64" ]; then
+          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
             if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
               echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
               exit 1
@@ -2918,8 +2991,6 @@ jobs:
             printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
             secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
             echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
-          elif [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
-            echo "::notice::Skipping distcc secret for multi-platform build; current distcc hosts are amd64-only."
           fi
 
           {
@@ -2986,7 +3057,7 @@ jobs:
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           annotations: |
             org.opencontainers.image.description=${{ matrix.description }}
-          platforms: ${{ env.RELEASE_PLATFORMS }}
+          platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
@@ -3061,7 +3132,7 @@ jobs:
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           annotations: |
             org.opencontainers.image.description=${{ matrix.description }}
-          platforms: ${{ env.RELEASE_PLATFORMS }}
+          platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
@@ -3167,6 +3238,421 @@ jobs:
           subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
           push-to-registry: true
 
+  build-arm64:
+    # Native linux/arm64 leg of the same publish contract as build above.
+    # Runs on a GitHub-hosted arm64 runner (free for this public repo, GA
+    # since 2026-08-07) instead of QEMU on the self-hosted amd64 pool, so
+    # ui/dns compile Rust natively rather than emulated. This runner is
+    # outside the self-hosted LAN and cannot reach Redis-backed sccache,
+    # sccache-dist, or distcc -- see docs/self-hosted-actions-runner.md.
+    # merge-manifests below combines this job's per-service linux/arm64 tag
+    # with build's linux/amd64 tag into the real sha-<commit> multi-platform
+    # tag; this job never writes that tag directly.
+    needs:
+      - shellcheck
+      - validate-compose
+      - container-scan
+      - detect-changes
+      - ci_scope_policy
+      - file-headers
+      - pr-template-check
+    if: >-
+      ${{
+        always() &&
+        needs.shellcheck.result == 'success' &&
+        needs['validate-compose'].result == 'success' &&
+        needs.ci_scope_policy.result == 'success' &&
+        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
+      }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: proxy
+            context: services/proxy
+            build_contexts: dns-domains=services/dns
+            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+          - service: dns
+            context: services/dns
+            build_contexts: ""
+            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
+            rust: true
+          - service: watchdog
+            context: services/watchdog
+            build_contexts: ""
+            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+          - service: dhcp
+            context: services/dhcp
+            build_contexts: ""
+            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+          - service: dhcp-proxy
+            context: services/dhcp-proxy
+            build_contexts: ""
+            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ui
+            context: services/ui
+            build_contexts: ""
+            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
+            rust: true
+          - service: build-tools
+            context: tools/build-tools
+            build_contexts: ""
+            description: Prebuilt lancache-ng CI and developer validation toolchain image.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Determine whether this service needs building
+        id: should-build
+        env:
+          MATRIX_SERVICE: ${{ matrix.service }}
+          DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
+        run: |
+          set -euo pipefail
+
+          should_build=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            if [ "$DETECT_CHANGES_RESULT" != "success" ]; then
+              echo "::error::Pull request build scoping requires detect-changes to succeed, got '$DETECT_CHANGES_RESULT'."
+              exit 1
+            fi
+            case "$MATRIX_SERVICE" in
+              proxy) should_build="${{ needs['detect-changes'].outputs.proxy }}" ;;
+              dns) should_build="${{ needs['detect-changes'].outputs.dns_image }}" ;;
+              watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
+              dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
+              dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
+              build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
+              *)
+                echo "::error::Unknown matrix service '$MATRIX_SERVICE' has no path-scoping mapping."
+                exit 1
+                ;;
+            esac
+            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+              should_build=true
+            fi
+          elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
+            should_build=true
+          fi
+
+          case "$should_build" in
+            true|false)
+              ;;
+            *)
+              echo "::error::Build scope for $MATRIX_SERVICE must resolve to true or false, got '${should_build:-<empty>}'."
+              exit 1
+              ;;
+          esac
+
+          if [ "$should_build" = "true" ]; then
+            echo "::notice::$MATRIX_SERVICE inputs changed (or this is not a pull request); image build remains enabled."
+          else
+            echo "::notice::$MATRIX_SERVICE inputs did not change in this pull request; skipping routine image rebuild."
+          fi
+          echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.should-build.outputs.should-build == 'true'
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            )
+          }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        # Suffixed the same way as build's linux/amd64 tag, just for the
+        # arm64 leg -- see the comment on build's own "Extract metadata" step.
+        if: steps.should-build.outputs.should-build == 'true'
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          tags: |
+            type=sha,prefix=sha-,format=short,suffix=-arm64
+
+      - name: Resolve build-tools base image digests
+        id: build-tools-base-digests
+        if: matrix.service == 'build-tools' && steps.should-build.outputs.should-build == 'true'
+        run: |
+          set -euo pipefail
+
+          digest_for_image() {
+            local image=$1 digest
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            if [[ -z "$digest" || "$digest" = "null" ]]; then
+              echo "::error::Could not read digest for $image."
+              exit 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          {
+            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute Docker build parallelism
+        if: steps.should-build.outputs.should-build == 'true'
+        id: docker-build-jobs
+        run: |
+          set -euo pipefail
+
+          if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+            case "$CARGO_BUILD_JOBS" in
+              ''|*[!0-9]*)
+                echo "::error::CARGO_BUILD_JOBS must be a positive integer."
+                exit 1
+                ;;
+            esac
+            if [ "$CARGO_BUILD_JOBS" -le 0 ]; then
+              echo "::error::CARGO_BUILD_JOBS must be greater than zero."
+              exit 1
+            fi
+            jobs="$CARGO_BUILD_JOBS"
+            echo "::notice::Using CARGO_BUILD_JOBS=$jobs from repository variable for Docker builds."
+          else
+            detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+            jobs=$((detected_cores - 2))
+            if [ "$jobs" -lt 4 ]; then
+              jobs=4
+            fi
+            echo "::notice::Using CARGO_BUILD_JOBS=$jobs from $detected_cores detected cores for Docker builds."
+          fi
+
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        # No secret-files/network/allow here: this runner cannot reach the
+        # LAN-only Redis/sccache-dist/distcc acceleration infrastructure, so
+        # this always builds as a plain, uncached (but native) cargo build.
+        # Uses the GitHub Actions cache backend (type=gha) instead of the
+        # self-hosted local Buildx cache, since this runner is ephemeral and
+        # has no persistent /var/tmp to reuse across runs.
+        id: build
+        if: steps.should-build.outputs.should-build == 'true'
+        timeout-minutes: 90
+        continue-on-error: true
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
+          build-args: |
+            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
+            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+          annotations: |
+            org.opencontainers.image.description=${{ matrix.description }}
+          platforms: linux/arm64
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.service }}-arm64
+          cache-to: type=gha,scope=${{ matrix.service }}-arm64,mode=max
+
+      - name: Wait before retrying the push
+        # Same transient ghcr.io push-token pattern documented on build's
+        # equivalent step.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        run: sleep 30
+
+      - name: Re-authenticate to GHCR before retry
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry Build and push
+        id: retry-build
+        if: >-
+          ${{
+            (
+              steps.should-build.outputs.should-build == 'true'
+            ) &&
+            steps.build.outcome == 'failure'
+          }}
+        timeout-minutes: 90
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
+          build-args: |
+            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
+            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+          annotations: |
+            org.opencontainers.image.description=${{ matrix.description }}
+          platforms: linux/arm64
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.service }}-arm64
+          cache-to: type=gha,scope=${{ matrix.service }}-arm64,mode=max
+
+      - name: Scan pushed build-tools digest with Trivy
+        # Same exact-pushed-digest scan build performs for its linux/amd64
+        # build-tools image, mirrored here for the linux/arm64 digest.
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            matrix.service == 'build-tools' &&
+            (
+              steps.build.outcome == 'success' ||
+              steps.retry-build.outcome == 'success'
+            )
+          }}
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Log in to GHCR for provenance attestation
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            )
+          }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest image build provenance
+        if: >-
+          ${{
+            github.event_name != 'pull_request' &&
+            (
+              steps.should-build.outputs.should-build == 'true'
+            )
+          }}
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          push-to-registry: true
+
+  merge-manifests:
+    # Combines build's linux/amd64 per-service tag with build-arm64's
+    # linux/arm64 per-service tag into the real sha-<commit> multi-platform
+    # tag that promote/release/setup.sh consume. Uses imagetools create --
+    # the same tool promote already uses to move channel tags -- so no image
+    # is rebuilt here, only a manifest list assembled from two already-pushed
+    # digests.
+    name: merge multi-platform manifests
+    needs: [build, build-arm64]
+    if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success' && github.event_name != 'pull_request'"
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-platform manifests
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+        run: |
+          set -euo pipefail
+
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          short_sha="${COMMIT_SHA::7}"
+          source_tag="sha-${short_sha}"
+
+          for service in "${services[@]}"; do
+            amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
+            arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
+            target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+
+            if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
+              echo "::notice::Skipping $service: no linux/amd64 image was published for this commit (likely unchanged on a pull request)."
+              continue
+            fi
+            if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
+              echo "::error::$service has a linux/amd64 image but no linux/arm64 image ($arm64_image); refusing to publish a single-platform tag under the multi-platform contract."
+              exit 1
+            fi
+
+            docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
+            bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+          done
+
   promote:
     # Promotion is intentionally separate from image build. It moves coherent
     # channel tags only after all sha-* source images for the same commit exist.
@@ -3175,14 +3661,15 @@ jobs:
     # == 'success'` form, not a bare `github.event_name != 'pull_request'`. A
     # bare condition with no status-check function gets an implicit
     # `&& success()` appended by GitHub Actions, and `success()` walks the
-    # WHOLE transitive needs graph (promote -> build -> detect-changes,
-    # file-headers, pr-template-check, ...), not just this job's own direct
-    # `needs: build`. detect-changes/file-headers/pr-template-check are
-    # intentionally `if: github.event_name == 'pull_request'` (they skip on
-    # every push), but `success()` treats a skipped job the same as a failed
-    # one -- so on every real push to master or a vX.Y.Z branch, the implicit
-    # success() check silently evaluated false and this job never ran, even
-    # though `build` itself completed successfully (confirmed directly: run
+    # WHOLE transitive needs graph (promote -> merge-manifests -> build,
+    # build-arm64 -> detect-changes, file-headers, pr-template-check, ...),
+    # not just this job's own direct `needs: merge-manifests`.
+    # detect-changes/file-headers/pr-template-check are intentionally
+    # `if: github.event_name == 'pull_request'` (they skip on every push),
+    # but `success()` treats a skipped job the same as a failed one -- so on
+    # every real push to master or a vX.Y.Z branch, the implicit success()
+    # check silently evaluated false and this job never ran, even though
+    # `build` itself completed successfully (confirmed directly: run
     # 28958519247 on v0.2.0, all 7 build matrix legs succeeded, promote still
     # skipped). This is why dev/edge were never actually promoted despite the
     # channel-resolution logic in this job being correct (see issue #532).
@@ -3193,8 +3680,8 @@ jobs:
     # suppresses the same implicit-success()-over-skipped-deps problem while
     # still correctly stopping the job if the run is actually cancelled.
     name: promote stack image channels
-    needs: build
-    if: "!cancelled() && needs.build.result == 'success' && github.event_name != 'pull_request'"
+    needs: merge-manifests
+    if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read

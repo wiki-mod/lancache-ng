@@ -52,6 +52,40 @@ As a rule of thumb:
 - preferred: use the accelerator when available, but keep a documented fallback
 - gate: the job must have the accelerator or fail closed before doing work
 
+## Native arm64 builds on GitHub-hosted runners
+
+Prebuilt service images (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ui`,
+`build-tools`) publish both `linux/amd64` and `linux/arm64` under one coherent
+multi-platform tag per service. The two platforms are built natively in
+separate lanes, never through QEMU emulation for these images:
+
+- `linux/amd64` still builds on the self-hosted `lancache-heavy` runner pool
+  described above, with the same Redis/sccache-dist/distcc acceleration
+  contract.
+- `linux/arm64` builds natively on GitHub-hosted `ubuntu-24.04-arm` runners (or
+  a newer non-EOL arm64 hosted image — never pin to a runner image GitHub has
+  marked for retirement). These runners are free for public repositories and
+  give real arm64 CPUs, so `ui` and `dns` (the two services that compile Rust
+  from source) build at native speed instead of under QEMU emulation, which
+  was judged too slow and too failure-prone for real `cargo build --release`
+  runs when this was last evaluated (issues #348 / #395).
+
+Each platform lane pushes its image by digest only (no mutable tag). A
+separate merge step combines the two digests into the real `sha-<commit>` tag
+per service with `docker buildx imagetools create` -- the same tool the
+`promote` job already uses to move channel tags without rebuilding anything.
+This keeps the amd64 and arm64 build lanes fully independent: either one can
+fail, retry, or take longer without racing the other for the same tag.
+
+GitHub-hosted arm64 runners are outside the self-hosted LAN, so they cannot
+reach the Redis-backed `sccache` cache, the `sccache-dist` scheduler, or the
+`distcc` hosts described in the Acceleration contract above. The arm64 lane
+therefore always builds as an uncached, optional-acceleration `cargo build
+--release` -- slower per build than the accelerated amd64 lane, but still a
+native compile, not an emulated one. This is a deliberate, documented
+tradeoff and not a bug: extending the LAN-only acceleration infrastructure to
+a transient cloud runner is out of scope here.
+
 ## Debian runner packages
 
 On a Debian runner, install the baseline tools used by the workflows:

@@ -659,7 +659,7 @@ the source tree.
 The resulting install/update path still stays pull-only and does not depend on
 local compiler caches or remote compiler services.
 
-Current prebuilt first-party images are published for `linux/amd64`. Multi-architecture images are tracked separately; non-amd64 production installs should not assume the prebuilt pull-only path is available yet.
+Current prebuilt first-party images are published for both `linux/amd64` and `linux/arm64`, built natively on GitHub-hosted arm64 runners rather than emulated -- see `docs/self-hosted-actions-runner.md`.
 
 Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
