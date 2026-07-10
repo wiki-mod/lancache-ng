@@ -85,7 +85,7 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 - **[AG-VAL-003]** Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
 - **[AG-VAL-004]** Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
 - **[AG-VAL-005]** Use local Bash tools such as `rg` for text searches; do not rely on vague manual inspection when a deterministic search is possible.
-- **[AG-REL-001]** Do not add Python scripts, Python dependencies, or another runtime language to the project without explicit maintainer approval. Local, one-off `python3` commands for inspection or validation (e.g. checking JSON/YAML, a quick text transform) are fine as long as nothing Python-related is committed to the repository.
+- **[AG-REL-001]** Do not introduce another runtime language (Go, Python, Node.js, etc.) into the project without explicit approval from @djdomi. Local, one-off commands for inspection or validation (e.g. a quick `python3` JSON/YAML check, a one-off text transform) are fine as long as nothing from that language is committed to or into the repository. If a different language or tool was used for testing, you must state which language/tool was used and exactly what was tested with it.
 - **[AG-GH-007]** Project-facing text must be in English.
 - Take the big picture
 - Think big.
@@ -123,7 +123,7 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 
 **[AG-REL-004]** This project is written in **Rust**. Shell scripts are permitted for entrypoints and automation.
 
-**[AG-REL-005]** No other runtime language (Go, Python, Node.js, etc.) may be introduced without explicit approval from @djdomi.
+No other runtime language may be introduced without explicit maintainer approval; see Rule-Ref: AG-REL-001 for the full language-approval rule, its examples, and its local one-off command exception. (AG-REL-005 retired 2026-07-10: merged into AG-REL-001, which said the same thing with more detail. Not reused per AG-WF-016.)
 
 **[AG-REL-006]** Shell automation should use Bash by default when it relies on project fail-closed behavior such as `set -euo pipefail`, arrays, `[[ ... ]]`, process substitution, or other Bash-specific syntax. POSIX `sh` is acceptable only for intentionally small portable scripts that are validated with ShellCheck in `sh` mode.
 
@@ -221,7 +221,7 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 - **[AG-WF-014]** Do not push directly to `master`. All changes go through pull requests.
 - **[AG-SEC-007]** Do not hardcode LAN IP addresses in Dockerfiles or source files.
-- **[AG-REL-007]** Do not introduce a new programming language without explicit approval.
+- Do not introduce a new programming language without explicit approval; see Rule-Ref: AG-REL-001. (AG-REL-007 retired 2026-07-10: merged into AG-REL-001, which said the same thing with more detail. Not reused per AG-WF-016.)
 - **[AG-OP-012]** Do not use `proxy_cache_key $request_uri` — query strings contain per-request CDN signatures.
 
 ## Documented Exceptions to Hard Rules
@@ -328,13 +328,13 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
 | AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
 | AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
-| AG-REL-001 | No new languages without approval | Manual review (new file type / import detection) |
+| AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
 | AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
 | AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
 | AG-REL-004 | Project language is Rust | Manual review |
-| AG-REL-005 | No new languages without approval (redundant) | Manual review |
+| AG-REL-005 | Retired 2026-07-10, merged into AG-REL-001 (was redundant) | N/A |
 | AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
-| AG-REL-007 | No new languages without approval (triplicative) | Manual review |
+| AG-REL-007 | Retired 2026-07-10, merged into AG-REL-001 (was triplicative) | N/A |
 | AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
 | AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
 | AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
