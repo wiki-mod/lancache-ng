@@ -75,3 +75,28 @@ setup() {
     [ "$channel" = "pinned" ]
     [ "$output" = "v0.2.0" ]
 }
+
+@test "proxy security migration restores lazy default for legacy strict without allowlist" {
+    printf '%s\n' \
+        'PROXY_SECURITY_MODE=strict' \
+        'PROXY_ALLOWED_CLIENT_CIDRS=' > "$env_file"
+
+    run migrate_proxy_security_mode_for_update "$env_file"
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^PROXY_SECURITY_MODE=' "$env_file")" -eq 1 ]
+    grep -qx 'PROXY_SECURITY_MODE=lazy' "$env_file"
+}
+
+@test "proxy security migration preserves explicit strict mode with allowlist" {
+    printf '%s\n' \
+        'PROXY_SECURITY_MODE=strict' \
+        'PROXY_ALLOWED_CLIENT_CIDRS=192.168.1.0/24' > "$env_file"
+
+    run migrate_proxy_security_mode_for_update "$env_file"
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^PROXY_SECURITY_MODE=' "$env_file")" -eq 1 ]
+    grep -qx 'PROXY_SECURITY_MODE=strict' "$env_file"
+    grep -qx 'PROXY_ALLOWED_CLIENT_CIDRS=192.168.1.0/24' "$env_file"
+}
