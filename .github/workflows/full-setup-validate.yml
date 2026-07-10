@@ -349,13 +349,26 @@ jobs:
         # containers setup.sh starts inside this container are real sibling
         # containers on the runner's own Docker daemon, not nested
         # docker-in-docker.
+        #
+        # Mounted at the SAME absolute path ($PWD) inside this container as
+        # on the host, not at an arbitrary path like /work: docker compose,
+        # run from inside this container, resolves its bind-mount sources
+        # against the HOST daemon, which has no idea this container's
+        # filesystem exists. A path that only looks valid from inside this
+        # container (e.g. /work/...) resolves to nothing on the host, so the
+        # host daemon silently auto-creates it as an empty directory and
+        # then fails mounting that directory onto a file destination.
+        # Confirmed directly. Using the identical path on both sides is what
+        # makes any bind mount setup.sh itself declares (e.g.
+        # ./scripts/dhcp-probe.sh) resolve correctly no matter which side
+        # evaluates it.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD:/work" \
-            -w /work \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
             "$BUILD_TOOLS_IMAGE" \
             bash scripts/setup-cli-simulation.sh
