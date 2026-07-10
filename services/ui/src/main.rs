@@ -652,11 +652,20 @@ async fn main() -> Result<()> {
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
         .route("/dhcp/subnet/remove", post(routes::dhcp::remove_subnet))
+        .route(
+            "/dhcp/subnet/option/add",
+            post(routes::dhcp::add_subnet_option),
+        )
+        .route(
+            "/dhcp/subnet/option/remove",
+            post(routes::dhcp::remove_subnet_option),
+        )
         .route("/dhcp/static/add", post(routes::dhcp::add_reservation))
         .route(
             "/dhcp/static/remove",
             post(routes::dhcp::remove_reservation),
         )
+        .route("/dhcp/lease/release", post(routes::dhcp::release_lease))
         .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
