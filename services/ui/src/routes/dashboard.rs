@@ -18,43 +18,63 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     // they're equal, the second HTTP call would just re-fetch identical
     // stats from the same nginx, so it's skipped and the first result is
     // reused instead.
-    let standard_status =
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
-    let ssl_status = if !cfg.ssl_enabled {
-        None
-    } else if cfg.proxy_standard_url == cfg.proxy_ssl_url {
-        standard_status.clone()
-    } else {
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
+    let standard_status_future =
+        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url);
+    let ssl_status_future = async {
+        if cfg.ssl_enabled && cfg.proxy_standard_url != cfg.proxy_ssl_url {
+            nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
+        } else {
+            None
+        }
     };
 
     // Each of these three stats sources does blocking I/O (`du`, reading
     // full log files) — run in spawn_blocking so a slow disk doesn't stall
-    // the async runtime's worker threads for other in-flight requests.
-    let cache_used_gb = tokio::task::spawn_blocking({
+    // the async runtime's worker threads for other in-flight requests. Start
+    // every independent collector before awaiting so dashboard latency is the
+    // slowest collector, not the sum of all collectors.
+    let cache_used_task = tokio::task::spawn_blocking({
         let d = cfg.cache_dir.clone();
         move || nginx_client::get_cache_size_gb(&d)
-    })
-    .await
-    .unwrap_or(0.0);
-    let log_stats = tokio::task::spawn_blocking({
+    });
+    let log_stats_task = tokio::task::spawn_blocking({
         let sl = cfg.standard_log.clone();
         let xl = cfg.ssl_log.clone();
         move || nginx_client::get_log_stats(&sl, &xl)
-    })
-    .await
-    .unwrap_or_default();
+    });
 
-    let recent_logs = tokio::task::spawn_blocking({
+    let recent_logs_task = tokio::task::spawn_blocking({
         let path = if cfg.standard_log == cfg.ssl_log {
             cfg.standard_log.clone()
         } else {
             cfg.ssl_log.clone()
         };
         move || nginx_client::parse_log_tail(&path, 10)
-    })
-    .await
-    .unwrap_or_default();
+    });
+
+    let (
+        standard_status,
+        distinct_ssl_status,
+        cache_used_result,
+        log_stats_result,
+        recent_logs_result,
+    ) = tokio::join!(
+        standard_status_future,
+        ssl_status_future,
+        cache_used_task,
+        log_stats_task,
+        recent_logs_task
+    );
+    let ssl_status = if !cfg.ssl_enabled {
+        None
+    } else if cfg.proxy_standard_url == cfg.proxy_ssl_url {
+        standard_status.clone()
+    } else {
+        distinct_ssl_status
+    };
+    let cache_used_gb = cache_used_result.unwrap_or(0.0);
+    let log_stats = log_stats_result.unwrap_or_default();
+    let recent_logs = recent_logs_result.unwrap_or_default();
 
     let cache_pct = cache_usage_pct(cache_used_gb, cfg.cache_max_gb);
 
