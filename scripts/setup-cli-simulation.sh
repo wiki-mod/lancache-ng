@@ -243,7 +243,20 @@ echo "setup.sh update migrated the legacy .env value and left a healthy running 
 echo "== Phase 3: rollback safety (forced pull failure during update) =="
 
 cp "$install_dir/.env" "$install_dir/.env.before-forced-failure"
-sed -i 's/^LANCACHE_IMAGE_TAG=.*/LANCACHE_IMAGE_TAG=lancache-ng-setup-sim-nonexistent-tag/' "$install_dir/.env"
+# LANCACHE_IMAGE_CHANNEL must move to "pinned" too, not just the tag: with
+# channel=edge still set (from the fresh install in Phase 1),
+# resolve_lancache_image_tag() resolves the tag from the edge channel
+# pointer and never even looks at the literal LANCACHE_IMAGE_TAG value --
+# confirmed directly, the update just silently re-pulled the real edge
+# images and succeeded instead of failing. pinned is the one channel value
+# that makes resolution use LANCACHE_IMAGE_TAG verbatim. The fake tag still
+# has to match the real sha-* format (validate_lancache_image_tag rejects
+# anything else before a pull is even attempted), so this is a
+# syntactically valid but non-existent digest, not an arbitrary string.
+sed -i \
+    -e 's/^LANCACHE_IMAGE_CHANNEL=.*/LANCACHE_IMAGE_CHANNEL=pinned/' \
+    -e 's/^LANCACHE_IMAGE_TAG=.*/LANCACHE_IMAGE_TAG=sha-0000000/' \
+    "$install_dir/.env"
 
 set +e
 bash setup.sh update "$install_dir" >"$install_dir/update-failure.log" 2>&1
@@ -257,7 +270,9 @@ grep -qF 'Failed to pull required container images' "$install_dir/update-failure
 
 [[ -s "$install_dir/.env" ]] \
     || { echo "::error::setup.sh update left .env empty after a failed update -- unsafe partial state." >&2; exit 1; }
-diff -q <(grep -v '^LANCACHE_IMAGE_TAG=' "$install_dir/.env.before-forced-failure") <(grep -v '^LANCACHE_IMAGE_TAG=' "$install_dir/.env") >/dev/null \
+diff -q \
+    <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.before-forced-failure") \
+    <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
     || { echo "::error::setup.sh update changed unrelated .env keys during a failed update -- unsafe partial state." >&2; exit 1; }
 find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . \
     || { echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2; exit 1; }
