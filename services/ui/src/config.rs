@@ -12,6 +12,12 @@ use std::fs;
 const DEFAULT_UI_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_UI_SETTINGS_FILE: &str = "/data/lancache-ui-settings.env";
 
+// Controls whether the Admin UI sends `Strict-Transport-Security` on a
+// response. `Auto` (the default) sends it only when the current request
+// itself arrived over HTTPS, so plain-HTTP deployments never get an HSTS
+// header. `Always`/`Never` override that per-request check for setups that
+// terminate TLS elsewhere (a reverse proxy) or intentionally never want HSTS
+// enforced, regardless of what this process sees.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HstsMode {
     Auto,
@@ -19,6 +25,14 @@ pub enum HstsMode {
     Never,
 }
 
+// Which DHCP service, if any, this deployment runs -- mutually exclusive
+// with each other since both `Kea` and `DnsmasqProxy` bind DHCP port 67/udp.
+// `Disabled`: no DHCP here, the existing LAN router/DHCP server is
+// untouched. `Kea`: full DHCP server (isc-kea), this deployment owns
+// leases/reservations for the LAN. `DnsmasqProxy`: a proxy-DHCP relay that
+// runs *alongside* an existing DHCP server and only answers PXE/network-boot
+// clients -- it does not lease addresses or reliably replace DNS options for
+// ordinary clients (see docs/dhcp-modes.md).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DhcpMode {
     Disabled,
@@ -321,6 +335,9 @@ impl Config {
             nats_dns_reader_user: env_str("NATS_DNS_READER_USER", ""),
             nats_dns_reader_password: env_str("NATS_DNS_READER_PASSWORD", ""),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
+            // Kept as separate fields so the UI can display the running
+            // release/channel without reconstructing image references from
+            // hardcoded GHCR assumptions.
             lancache_image_registry: env_str("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
             lancache_image_prefix: env_str("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
             lancache_image_channel,

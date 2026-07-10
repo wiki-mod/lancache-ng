@@ -552,6 +552,8 @@ async fn main() -> Result<()> {
     let ui_session_secret = load_or_create_session_secret()?;
 
     let db = {
+        // This SQLite DB stores Admin-UI-local secondary registration metadata.
+        // Runtime DNS/DHCP/proxy state stays in PowerDNS, Kea, NATS, and Docker.
         let conn = Connection::open("/data/lancache-ui.db").expect("Cannot open UI database");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS secondaries (

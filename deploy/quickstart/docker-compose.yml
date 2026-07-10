@@ -97,6 +97,8 @@ services:
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ./certs:/etc/nginx/ssl/ca
+      # One host cache directory is mounted into the unified proxy. Older
+      # standard/ssl split-cache installs must be migrated before using this stack.
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
@@ -332,6 +334,8 @@ services:
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - SSL_ENABLED=${SSL_ENABLED:-0}
     volumes:
+      # The watchdog reports and purges the same shared cache path the proxy uses.
+      # Do not point this at a per-mode subdirectory; the split paths no longer exist.
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
@@ -443,6 +447,7 @@ services:
     volumes:
       - ui-data:/data
       - proxy-logs:/var/log/nginx:ro
+      # Read-only cache mount is for size reporting only. Mutations stay in the proxy/watchdog.
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats

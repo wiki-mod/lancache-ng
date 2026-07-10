@@ -139,6 +139,9 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     let mut stats = LogStats::default();
     let mut total_bytes: u64 = 0;
 
+    // Standard and SSL proxy traffic now share one cache but still write
+    // separate access logs. De-duplicate paths so deployments that point both
+    // modes at the same log file are not counted twice.
     for path in unique_paths([standard_log, ssl_log]) {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);

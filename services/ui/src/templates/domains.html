@@ -51,6 +51,8 @@
 
       <form action="/domains/dns/add" method="post" class="flex gap-2">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# CDN-domain writes update the authoritative DNS source list and can
+           trigger proxy reload behavior; keep this form scoped to one domain. #}
         <input type="text" name="domain" placeholder="z.B. steamcontent.com"
                required
                class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -67,6 +69,8 @@
           <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
           <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {# The hidden value must be the exact file entry so removal is
+               deterministic even when display sorting/filtering changes later. #}
             <input type="hidden" name="domain" value="{{ domain }}">
             <button type="submit"
                     onclick="return confirm('{{ domain }} aus der Domain-Liste entfernen?\nDer SSL-Proxy wird ggf. neu gestartet, falls SSL-Modus aktiv ist.')"
@@ -92,6 +96,8 @@
 
       <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# LAN records are written through PowerDNS, not the CDN domain file;
+           record type and content stay separate to avoid stringly typed parsing. #}
         <div class="flex gap-2">
           <input type="text" name="name" placeholder="z.B. myserver.lan."
                  required
@@ -134,6 +140,8 @@
           </div>
           <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {# Include name, type, and joined content so the backend can remove
+               the intended RRset without relying on table row position. #}
             <input type="hidden" name="name" value="{{ record.name }}">
             <input type="hidden" name="record_type" value="{{ record.type }}">
             <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
@@ -166,6 +174,8 @@
 
       <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# This setting toggles Recursor-side AAAA suppression globally; it does
+           not edit individual domain rows above. #}
         <div class="flex items-center gap-2">
           <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
                  {% if aaaa_filter_enabled %}checked{% endif %}
