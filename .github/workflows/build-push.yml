@@ -1045,7 +1045,7 @@ jobs:
             || { echo "::error::Docker Rust builds must pass computed CARGO_BUILD_JOBS as a build argument."; exit 1; }
           grep -F 'build_tools_image:' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must expose the selected build-tools image as a job output."; exit 1; }
-          grep -F "printf 'build_tools_image=ghcr.io/%s/build-tools:latest\\n' \"\$GITHUB_REPOSITORY\" >> \"\$GITHUB_OUTPUT\"" .github/workflows/build-push.yml >/dev/null \
+          grep -F "printf 'build_tools_image=ghcr.io/%s/build-tools@sha256:7894724a413b44f7a2dffc3af29ecdfd82c363f9e4a8d138c48b92a27ee006d6\\n' \"\$GITHUB_REPOSITORY\" >> \"\$GITHUB_OUTPUT\"" .github/workflows/build-push.yml >/dev/null \
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
@@ -1098,7 +1098,7 @@ jobs:
             exit 1
           fi
           for dockerfile in services/dns/Dockerfile services/ui/Dockerfile; do
-            grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest' "$dockerfile" >/dev/null \
+            grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:7894724a413b44f7a2dffc3af29ecdfd82c363f9e4a8d138c48b92a27ee006d6' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must declare the shared build-tools image as a build argument."; exit 1; }
             grep -F 'FROM ${BUILD_TOOLS_IMAGE}' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must use the shared build-tools image in the Rust builder stage."; exit 1; }

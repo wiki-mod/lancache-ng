@@ -9,7 +9,7 @@
 
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
-ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:7894724a413b44f7a2dffc3af29ecdfd82c363f9e4a8d138c48b92a27ee006d6
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
