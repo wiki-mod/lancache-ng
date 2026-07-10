@@ -1152,7 +1152,12 @@ jobs:
             && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'retry-build.outputs.digest' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
           grep -F 'Note arm64 scan coverage deferral' .github/workflows/build-tools.yml >/dev/null \
-            || { echo "::error::The build-tools workflow must make its arm64 scan deferral explicit."; exit 1; }
+            && { echo "::error::The build-tools workflow must not keep the stale arm64 scan deferral notice."; exit 1; }
+          grep -F 'Build local arm64 scan image' .github/workflows/build-tools.yml >/dev/null \
+            && grep -F 'BUILD_TOOLS_SCAN_IMAGE_ARM64' .github/workflows/build-tools.yml >/dev/null \
+            && grep -F 'smoke_test_image "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}" linux/arm64' .github/workflows/build-tools.yml >/dev/null \
+            && grep -F 'Scan local build-tools arm64 image with Trivy' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must build, smoke-test, and Trivy-scan the local arm64 scan image before publishing."; exit 1; }
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
               && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \

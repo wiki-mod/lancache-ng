@@ -39,7 +39,8 @@ permissions:
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
   BUILD_TOOLS_PLATFORMS: linux/amd64,linux/arm64
-  BUILD_TOOLS_SCAN_IMAGE: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}
+  BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
+  BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
 
 defaults:
   run:
@@ -48,7 +49,13 @@ defaults:
 jobs:
   build-tools:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 120
+    # Raised from 120: the new arm64 scan build (QEMU-emulated) now writes to
+    # the shared local cache too, so subsequent runs are fast, but the first
+    # run after this changes -- and any run after a cache-losing runner
+    # change -- still does a cold emulated build. The per-step budgets below
+    # (60 amd64 + 90 arm64 + 90 multi-arch publish) can exceed 120 minutes
+    # even though they rarely all run at their worst case together.
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -166,10 +173,10 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           printf 'image=%s:sha-%s\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
-      # Pull requests cannot push to GHCR, so they build a local amd64 image and
-      # run the same smoke/Trivy checks before the workflow can pass.
-      - name: Build local scan image
-        id: local-build
+      # Pull requests cannot push to GHCR, so they build local per-architecture
+      # scan images and run the smoke/Trivy checks before the workflow can pass.
+      - name: Build local amd64 scan image
+        id: local-build-amd64
         timeout-minutes: 60
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -177,8 +184,23 @@ jobs:
           context: tools/build-tools
           load: true
           pull: true
-          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           platforms: linux/amd64
+          provenance: false
+          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
+          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
+
+      - name: Build local arm64 scan image
+        id: local-build-arm64
+        timeout-minutes: 90
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          load: true
+          pull: true
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          platforms: linux/arm64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
@@ -187,7 +209,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm "${BUILD_TOOLS_SCAN_IMAGE}" bash -c '
+          smoke_test_image() {
+            local image="$1"
+            local platform="$2"
+
+            docker run --rm --platform "$platform" "$image" bash -c '
             set -euo pipefail
 
             required_tools=(
@@ -230,6 +256,10 @@ jobs:
             docker --version
             docker compose version
           '
+          }
+
+          smoke_test_image "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" linux/amd64
+          smoke_test_image "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}" linux/arm64
 
       - name: Run Bats setup fixtures
         run: |
@@ -239,7 +269,7 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" \
             bash -lc 'set -euo pipefail; bats tests/bats'
 
       - name: Run ShellSpec setup fixtures
@@ -250,19 +280,20 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" \
             bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
 
       - name: Prepare local Trivy cache
         run: |
           set -euo pipefail
           mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools
+          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-arm64
 
-      - name: Scan local build-tools image with Trivy
+      - name: Scan local build-tools amd64 image with Trivy
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -274,11 +305,21 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Note arm64 scan coverage deferral
-        run: |
-          set -euo pipefail
-
-          echo "::notice::The build-tools workflow validates the amd64 scan image before publishing multi-architecture tags. Arm64 scan coverage is deferred for v0.1.0-alpha."
+      - name: Scan local build-tools arm64 image with Trivy
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-arm64
+          timeout: 10m
+          exit-code: "1"
 
       # Trusted refs publish only an immutable sha-* source tag first. Mutable
       # branch/latest tags are promoted after the exact pushed digest has passed
@@ -355,7 +396,8 @@ jobs:
         if: >-
           ${{
             always() &&
-            steps.local-build.outcome == 'success' &&
+            steps.local-build-amd64.outcome == 'success' &&
+            steps.local-build-arm64.outcome == 'success' &&
             (
               github.event_name == 'pull_request' ||
               steps.build.outcome == 'success'
@@ -383,4 +425,6 @@ jobs:
 
       - name: Remove local scan image
         if: always()
-        run: docker rmi "${BUILD_TOOLS_SCAN_IMAGE}" || true
+        run: |
+          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
+          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
