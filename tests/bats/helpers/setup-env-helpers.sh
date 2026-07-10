@@ -12,7 +12,7 @@ load_setup_env_helpers() {
         printf '%s\n' 'print_ok() { :; }'
         awk '
             /^_compose_parse_env_value\(\)/ { capture = 1 }
-            /^# Full \.env rewrites/ { capture = 0 }
+            /^# Update migrations/ { capture = 0 }
             capture { print }
         ' "$repo_root/setup.sh"
     } > "$helper_file"

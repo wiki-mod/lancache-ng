@@ -1801,6 +1801,13 @@ resolve_lancache_image_tag() {
             if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
                 tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
             fi
+            if [[ -z "$tag" ]]; then
+                if release_tag=$(derive_release_archive_image_tag); then
+                    tag="$release_tag"
+                elif [[ "$?" = "2" ]]; then
+                    die "Cannot derive a valid release image tag from this checkout/archive."
+                fi
+            fi
             [[ -n "$tag" ]] \
                 || die "LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag."
             ;;
