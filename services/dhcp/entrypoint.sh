@@ -12,6 +12,12 @@ set -e
 install -d -m 750 /run/kea
 mkdir -p /var/lib/kea
 
+case "${1:-}" in
+    nmap|/usr/bin/nmap|/bin/nmap)
+        exec "$@"
+        ;;
+esac
+
 # Defaults
 : "${DHCP_SUBNET:=10.0.0.0/24}"
 : "${DHCP_RANGE_START:=10.0.0.128}"
