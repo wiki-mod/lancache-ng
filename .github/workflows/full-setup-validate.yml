@@ -230,18 +230,20 @@ jobs:
 
   ssl-mitm-cache-simulation:
     # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
-    # (issue #597, part of #557 scenario 1) -- game CDN domains need signed
-    # URLs and won't serve a plain curl request, so this builds throwaway
-    # dns/proxy images with a Debian mirror hostname added to a test-only
-    # cdn-domains.txt copy (that file is baked in at image build time, no
-    # runtime override exists) and reuses deploy/full-setup/docker-
-    # compose.yml for everything else via an image-only override.
-    # Independent of full-setup-validate above (this job builds its own
-    # throwaway images and starts only proxy/dns-standard/dns-ssl/nats, not
-    # the full compose profile), but shares the same compose project name
-    # and fixed validation-network IPs, so it must not run concurrently
-    # with that job -- confirmed directly during #403/#594 that two jobs
-    # binding the same fixed addresses on this shared runner tier collide.
+    # (issue #597, part of #557 scenario 1). Most cdn-domains.txt entries
+    # are game CDNs that need signed/session URLs and won't serve a plain
+    # curl request -- but this project also caches Linux distro mirrors
+    # (see the "Debian"/"Fedora"/etc. sections of that file), and
+    # deb.debian.org is already one of them. So this uses the real,
+    # already-published dns/proxy images as-is, no custom build needed, via
+    # deploy/full-setup/docker-compose.yml (NATS, networking, healthchecks
+    # already proven there).
+    # Independent of full-setup-validate above (this job starts only
+    # proxy/dns-standard/dns-ssl/nats, not the full compose profile), but
+    # shares the same compose project name and fixed validation-network
+    # IPs, so it must not run concurrently with that job -- confirmed
+    # directly during #403/#594 that two jobs binding the same fixed
+    # addresses on this shared runner tier collide.
     name: SSL MITM cache simulation
     needs: full-setup-validate
     if: always()
@@ -257,17 +259,11 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run SSL MITM cache simulation
-        # Runs directly on the runner, not wrapped in the build-tools
-        # container: building the test images needs BuildKit (services/dns/
-        # Dockerfile's RUN --mount=type=secret lines), and the build-tools
-        # image does not have the buildx CLI plugin installed -- confirmed
-        # directly ("unknown flag: --load", then "BuildKit is enabled but
-        # the buildx component is missing" even with DOCKER_BUILDKIT=1).
-        # The runner's own docker installation already has a working buildx
-        # builder (used elsewhere in this project's CI), so building here
-        # avoids that gap entirely. Only the dig/curl client verification
-        # inside the script runs through build-tools, matching the existing
-        # scripts/full-setup-client-simulation.sh pattern.
+        # dig/curl client verification runs through build-tools (matching
+        # the existing scripts/full-setup-client-simulation.sh pattern);
+        # starting the real proxy/dns-standard/dns-ssl/nats containers
+        # happens directly via the runner's own docker, same as
+        # full-setup-validate's own steps above.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |

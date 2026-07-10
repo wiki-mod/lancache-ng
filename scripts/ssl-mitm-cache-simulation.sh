@@ -2,27 +2,23 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
-# (issue #597, part of #557 scenario 1). Game CDN domains in the real
-# cdn-domains.txt need signed/session URLs and won't serve a plain curl
-# request, so this test adds a Debian mirror hostname to a test-only copy
-# of that domain list and builds throwaway dns/proxy images from it --
-# cdn-domains.txt is COPY-ed into both images at build time (see
-# services/dns/Dockerfile, services/proxy/Dockerfile), there is no runtime
-# override. Reuses deploy/full-setup/docker-compose.yml for everything else
-# (NATS, networking, healthchecks already proven there) via an image-only
-# override file.
+# (issue #597, part of #557 scenario 1). Game CDN domains in cdn-domains.txt
+# mostly need signed/session URLs and won't serve a plain curl request --
+# but this project already caches Linux distro mirrors too (see the
+# "Debian"/"Fedora"/etc. sections of services/dns/cdn-domains.txt), and
+# deb.debian.org is one of them. That means this test needs no custom-built
+# images at all: it uses the real, already-published dns/proxy images
+# (matching the LANCACHE_IMAGE_CHANNEL default full-setup-validate.yml uses)
+# and reuses deploy/full-setup/docker-compose.yml as-is for everything
+# (NATS, networking, healthchecks already proven there).
 #
-# Runs directly on the self-hosted runner, not wrapped in the build-tools
-# container: building the test images needs BuildKit (services/dns/
-# Dockerfile's RUN --mount=type=secret lines), and the build-tools image
-# does not have the buildx CLI plugin installed (confirmed directly:
-# "unknown flag: --load", then "BuildKit is enabled but the buildx
-# component is missing" even with DOCKER_BUILDKIT=1) -- the runner's own
-# docker installation already has a working buildx builder (used
-# elsewhere in this project's CI), so building here avoids that gap
-# entirely instead of trying to vendor the plugin into build-tools too.
-# Only the dig/curl client verification below runs through build-tools,
-# matching the existing scripts/full-setup-client-simulation.sh pattern.
+# (An earlier version of this script built throwaway images with a domain
+# appended to a test-only cdn-domains.txt copy, before noticing
+# deb.debian.org was already a real entry -- that approach also hit a
+# missing-buildx-plugin gap in the build-tools image. Not needed now, but
+# worth remembering if a *different* test domain is ever needed here: that
+# file is baked into the dns/proxy images at build time, no runtime
+# override exists.)
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -30,7 +26,6 @@ cd "$repo_root"
 
 test_domain="deb.debian.org"
 test_path="/debian/README"
-run_id="mitm-sim-$$"
 work_dir="$repo_root/.ssl-mitm-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
@@ -41,54 +36,26 @@ proxy_ip="172.30.99.2"
 dns_standard_ip="172.30.99.3"
 dns_ssl_ip="172.30.99.5"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 
 cleanup() {
     local status=$?
-    docker compose -p "$compose_project" \
-        -f deploy/full-setup/docker-compose.yml -f "$work_dir/image-override.yml" \
+    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
         down -v --remove-orphans >/dev/null 2>&1 || true
-    docker rmi "lancache-ng-mitm-sim-dns:$run_id" "lancache-ng-mitm-sim-proxy:$run_id" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
 
-echo "== Building test-scoped dns/proxy images with $test_domain added =="
+echo "== Starting proxy/dns-standard/dns-ssl/nats from the published $image_tag images =="
 
-dns_context="$work_dir/dns-context"
-cp -a services/dns "$dns_context"
-printf '\n# Added by scripts/ssl-mitm-cache-simulation.sh for issue #597 -- not a real CDN domain, never committed.\n%s\n' \
-    "$test_domain" >> "$dns_context/cdn-domains.txt"
-
-DOCKER_BUILDKIT=1 docker build --pull -q \
-    --build-arg "BUILD_TOOLS_IMAGE=$build_tools_image" \
-    -t "lancache-ng-mitm-sim-dns:$run_id" \
-    "$dns_context" >/dev/null
-
-DOCKER_BUILDKIT=1 docker build --pull -q \
-    --build-context "dns-domains=$dns_context" \
-    -t "lancache-ng-mitm-sim-proxy:$run_id" \
-    services/proxy >/dev/null
-
-cat > "$work_dir/image-override.yml" <<EOF
-services:
-  proxy:
-    image: lancache-ng-mitm-sim-proxy:$run_id
-  dns-standard:
-    image: lancache-ng-mitm-sim-dns:$run_id
-  dns-ssl:
-    image: lancache-ng-mitm-sim-dns:$run_id
-EOF
-
-echo "== Starting the full-setup stack with the test images =="
-
-docker compose -p "$compose_project" \
-    -f deploy/full-setup/docker-compose.yml -f "$work_dir/image-override.yml" \
+LANCACHE_IMAGE_TAG="$image_tag" \
+    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
     up -d proxy dns-standard dns-ssl nats
 
 # Mirrors the health-wait pattern already proven in full-setup-validate.yml
 # and scripts/setup-cli-simulation.sh.
-compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml -f "$work_dir/image-override.yml")
+compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
@@ -109,7 +76,7 @@ for service in proxy dns-standard dns-ssl; do
         exit 1
     fi
 done
-echo "proxy, dns-standard, and dns-ssl are healthy with the test images."
+echo "proxy, dns-standard, and dns-ssl are healthy."
 
 proxy_cid="$("${compose[@]}" ps -q proxy)"
 docker cp "$proxy_cid:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca.crt"
@@ -125,9 +92,14 @@ echo "== DNS: verifying $test_domain resolves to the proxy on both dns-standard 
 for label_ip in "dns-standard:$dns_standard_ip" "dns-ssl:$dns_ssl_ip"; do
     label="${label_ip%%:*}"
     ip="${label_ip##*:}"
-    resolved="$(run_client "dig +time=3 +tries=2 +short @$ip A $test_domain")"
+    # sort -u: PowerDNS RPZ answered this domain with the same A record on
+    # two lines during development (see the earlier duplicate-domain note
+    # above) -- tolerate a duplicate answer rather than assuming exactly
+    # one line, since the substantive check is "every answer is the proxy",
+    # not "there is exactly one answer".
+    resolved="$(run_client "dig +time=3 +tries=2 +short @$ip A $test_domain" | sort -u)"
     if [[ "$resolved" != "$proxy_ip" ]]; then
-        echo "::error::$label resolved $test_domain to '$resolved', expected $proxy_ip." >&2
+        echo "::error::$label resolved $test_domain to '$resolved', expected only $proxy_ip." >&2
         exit 1
     fi
     echo "$label correctly resolves $test_domain to the proxy."
