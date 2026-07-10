@@ -567,10 +567,22 @@ async fn main() -> Result<()> {
     }
 
     // Routes that are always public (protected by their own token).
-    let public_routes = Router::new().route("/health", get(health)).route(
-        "/api/secondary/register",
-        post(routes::secondaries::register_secondary),
-    );
+    let public_routes = Router::new()
+        .route("/health", get(health))
+        .route(
+            "/api/secondary/register",
+            post(routes::secondaries::register_secondary),
+        )
+        // Not behind basic_auth on purpose: these are non-sensitive brand
+        // assets, not gated content. Serving them through the protected
+        // router would attach a session-issuing Set-Cookie to a response
+        // already marked publicly cacheable, letting a shared cache in
+        // front of the Admin UI replay one client's session cookie to
+        // another (see PR #553 review). The browser's own Basic Auth
+        // prompt still blocks every request to this origin regardless, so
+        // this doesn't change when a client can actually fetch them.
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/static/logo-icon.png", get(logo_icon));
 
     // Routes that are protected by Basic Auth when auth is enabled. The
     // middleware also issues per-session CSRF state for every request.
@@ -609,8 +621,6 @@ async fn main() -> Result<()> {
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/static/admin.css", get(admin_css))
         .route("/static/chart.umd.min.js", get(chart_js))
-        .route("/favicon.ico", get(favicon_ico))
-        .route("/static/logo-icon.png", get(logo_icon))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
         .route(
             "/api/secondary/{name}",
