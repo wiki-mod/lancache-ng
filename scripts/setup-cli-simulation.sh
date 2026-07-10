@@ -15,6 +15,20 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+
+# Without this, git inside this container treats the bind-mounted repo (owned
+# by the host runner's UID, not this container's root) as having "dubious
+# ownership" and refuses every git command, including the `git describe
+# --tags --exact-match` setup.sh's derive_release_archive_image_tag() relies
+# on to distinguish "no exact release tag, use the edge/latest channel"
+# from "this is a source archive with no .git at all, read VERSION instead".
+# Confirmed directly: without this line, a fresh install on a non-tagged
+# commit incorrectly fell through to the VERSION file (currently "1.0.1")
+# and tried to pull an ghcr.io/.../ui:v1.0.1 image that was never published,
+# instead of resolving the intended edge/latest channel. This is likely a
+# real latent issue for `sudo ./setup.sh` against a repo cloned by a
+# different user too -- see issue filed against setup.sh separately.
+git config --global --add safe.directory "$repo_root"
 install_dir="$(mktemp -d /tmp/lancache-ng-setup-sim.XXXXXX)"
 # cmd_backup's --dest defaults to /var/backups/lancache-ng and cmd_update
 # never overrides it, so that is where the pre-update rollback backup this
