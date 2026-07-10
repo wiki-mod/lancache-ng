@@ -1092,6 +1092,22 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
     fi
 }
 
+migrate_proxy_security_mode_for_update() {
+    local env_file="$1" proxy_security_mode proxy_allowed_client_cidrs
+
+    proxy_security_mode=$(get_env_var PROXY_SECURITY_MODE "$env_file")
+    proxy_allowed_client_cidrs=$(get_env_var PROXY_ALLOWED_CLIENT_CIDRS "$env_file")
+
+    # Early setup versions generated strict mode before lazy was restored as
+    # the default. Without an allowlist there is no usable strict policy to
+    # preserve, so update those legacy defaults back to lazy while leaving
+    # explicit strict+allowlist operator configurations intact.
+    if [[ "$proxy_security_mode" = "strict" && -z "$proxy_allowed_client_cidrs" ]]; then
+        set_env_key PROXY_SECURITY_MODE "lazy" "$env_file"
+        print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to lazy"
+    fi
+}
+
 readonly LEGACY_STATE_ROOT="/srv/lancache"
 readonly -a LEGACY_STATE_CHILDREN=(cache pdns-standard pdns-ssl pdns-filter-state kea nats nats-conf)
 
@@ -1947,9 +1963,10 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing CACHE_VALID_ANY "1m" "$env_file"
     set_env_key_if_empty_or_missing CACHE_INACTIVE "365d" "$env_file"
 
-    set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
-    set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
+    set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
+    migrate_proxy_security_mode_for_update "$env_file"
+    set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
