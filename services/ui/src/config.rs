@@ -55,8 +55,7 @@ pub struct Config {
     pub cdn_domains_file: String,
     pub standard_log: String,
     pub ssl_log: String,
-    pub standard_cache_dir: String,
-    pub ssl_cache_dir: String,
+    pub cache_dir: String,
     pub dns_standard_state_dir: String,
     pub dns_ssl_state_dir: String,
     pub proxy_standard_url: String,
@@ -66,8 +65,7 @@ pub struct Config {
     pub dns_ssl_service: String,
     pub proxy_ssl_service: String,
     pub ssl_enabled: bool,
-    pub standard_cache_max_gb: f64,
-    pub ssl_cache_max_gb: f64,
+    pub cache_max_gb: f64,
     pub standard_ip: String,
     pub ssl_ip: String,
     pub dhcp_dns_primary: String,
@@ -114,8 +112,7 @@ impl fmt::Debug for Config {
             .field("cdn_domains_file", &self.cdn_domains_file)
             .field("standard_log", &self.standard_log)
             .field("ssl_log", &self.ssl_log)
-            .field("standard_cache_dir", &self.standard_cache_dir)
-            .field("ssl_cache_dir", &self.ssl_cache_dir)
+            .field("cache_dir", &self.cache_dir)
             .field("dns_standard_state_dir", &self.dns_standard_state_dir)
             .field("dns_ssl_state_dir", &self.dns_ssl_state_dir)
             .field("proxy_standard_url", &self.proxy_standard_url)
@@ -125,8 +122,7 @@ impl fmt::Debug for Config {
             .field("dns_ssl_service", &self.dns_ssl_service)
             .field("proxy_ssl_service", &self.proxy_ssl_service)
             .field("ssl_enabled", &self.ssl_enabled)
-            .field("standard_cache_max_gb", &self.standard_cache_max_gb)
-            .field("ssl_cache_max_gb", &self.ssl_cache_max_gb)
+            .field("cache_max_gb", &self.cache_max_gb)
             .field("standard_ip", &self.standard_ip)
             .field("ssl_ip", &self.ssl_ip)
             .field("dhcp_dns_primary", &self.dhcp_dns_primary)
@@ -180,6 +176,13 @@ impl fmt::Display for Config {
     }
 }
 
+// The `effective_*` methods below implement a two-layer config model: the
+// `Config` struct itself holds the container's *startup* values (from env
+// vars, fixed for the process lifetime), while the Admin UI lets an operator
+// change DHCP settings at runtime without a container restart by writing
+// `KEY=value` lines to `ui_settings_file` (see `read_ui_override`). Every
+// `effective_*` getter checks that persisted override file first and only
+// falls back to the startup env value if no override line exists.
 impl Config {
     // The `effective_*` getters let a value the operator changed live in the
     // Admin UI (persisted to `ui_settings_file`, see `read_ui_override`) win over
@@ -214,6 +217,12 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
     }
 
+    // Renders the current effective DHCP settings back into the same
+    // `KEY=value` line format `read_ui_override` parses, so this is what
+    // gets written to `ui_settings_file` whenever the operator saves DHCP
+    // changes from the Admin UI. Empty values are omitted rather than
+    // written as `KEY=`, so a cleared override falls back to the env default
+    // on the next read instead of pinning an empty string.
     pub fn ui_override_lines(&self) -> Vec<String> {
         let mut lines = vec![format!("DHCP_MODE={}", self.effective_dhcp_mode().as_str())];
         let proxy_subnet_start = self.effective_dhcp_proxy_subnet_start();
@@ -243,22 +252,12 @@ impl Config {
         let proxy_service = env_or("PROXY_SERVICE", "proxy".to_string());
         let standard_log = env_or("STANDARD_LOG", "/var/log/nginx/access.log".to_string());
         let ssl_log = env_or("SSL_LOG", standard_log.clone());
-        let standard_cache_dir = env_or("STANDARD_CACHE_DIR", "/var/cache/proxy".to_string());
-        let ssl_cache_dir = env_or("SSL_CACHE_DIR", standard_cache_dir.clone());
+        let cache_dir = resolve_cache_dir();
         let proxy_standard_url = env_or("PROXY_STANDARD_URL", format!("http://{proxy_service}"));
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
         let ssl_enabled = env_bool("SSL_ENABLED", true);
-        // CACHE_MAX_GB is the current, single shared cache limit. If it is set, it
-        // wins outright over the legacy per-mode STANDARD_CACHE_MAX_GB/SSL_CACHE_MAX_GB
-        // pair below, so installs upgrading from the old split-cache model don't end
-        // up silently averaging or ignoring the new shared value.
-        let cache_max_gb_set = env_present("CACHE_MAX_GB");
-        let shared_cache_max_gb = if cache_max_gb_set {
-            env_f64("CACHE_MAX_GB", 50.0)
-        } else {
-            env_f64("STANDARD_CACHE_MAX_GB", env_f64("SSL_CACHE_MAX_GB", 50.0))
-        };
+        let cache_max_gb = resolve_cache_max_gb();
         let standard_ip = env_str("STANDARD_IP", "192.168.234.10");
         let ssl_ip = env_str("SSL_IP", "192.168.234.11");
         let dhcp_mode = env_dhcp_mode("DHCP_MODE", env_bool("DHCP_ENABLED", false));
@@ -280,8 +279,7 @@ impl Config {
             cdn_domains_file: env_str("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
             standard_log,
             ssl_log,
-            standard_cache_dir,
-            ssl_cache_dir,
+            cache_dir,
             dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
             dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
             proxy_standard_url,
@@ -291,16 +289,7 @@ impl Config {
             dns_ssl_service: env_str("DNS_SSL_SERVICE", "dns-ssl"),
             proxy_ssl_service,
             ssl_enabled,
-            standard_cache_max_gb: if cache_max_gb_set {
-                shared_cache_max_gb
-            } else {
-                env_f64("STANDARD_CACHE_MAX_GB", shared_cache_max_gb)
-            },
-            ssl_cache_max_gb: if cache_max_gb_set {
-                shared_cache_max_gb
-            } else {
-                env_f64("SSL_CACHE_MAX_GB", shared_cache_max_gb)
-            },
+            cache_max_gb,
             standard_ip,
             ssl_ip,
             dhcp_dns_primary,
@@ -343,10 +332,14 @@ impl Config {
     }
 }
 
-// Classifies an image tag into the channel shown in the UI: the three
-// mutable-by-design channel names pass through unchanged; `sha-*`/`v*` tags are
-// immutable release/commit references and are labelled "pinned"; anything else
-// is an unrecognized tag format, which defaults to "latest" rather than failing.
+// Guesses which release channel (see docs/release-versioning.md) the
+// currently-running image tag belongs to, for display in the Admin UI only
+// (LANCACHE_IMAGE_CHANNEL should normally be set explicitly by the deploy
+// tooling; this is a best-effort fallback when it isn't). `dev`/`edge`/
+// `latest` tags map straight to their channel name. A `v`- or `sha-`-prefixed
+// tag means a specific release or commit was pinned deliberately, which this
+// function can't distinguish from any other channel, so it reports "pinned"
+// rather than guessing wrong. Anything else defaults to "latest".
 fn derive_lancache_image_channel(tag: &str) -> String {
     if tag == "dev" || tag == "edge" || tag == "latest" {
         tag.to_string()
@@ -379,18 +372,46 @@ fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_present(key: &str) -> bool {
-    env::var(key)
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+// CACHE_DIR is the only runtime cache path as of v0.2.0. The pre-v0.2.0 split
+// keys (CACHE_DIR_STANDARD/CACHE_DIR_SSL, migrated by setup.sh) are a hard
+// cut: setup.sh's migration folds them into CACHE_DIR before the UI ever
+// starts, so this function does not accept them as a fallback. An earlier
+// revision of this function *did* read a split-key fallback here, but under
+// the wrong names (STANDARD_CACHE_DIR/SSL_CACHE_DIR, reversed from the real
+// CACHE_DIR_STANDARD/CACHE_DIR_SSL used by setup.sh and every other service),
+// so it silently never matched real migrated installs anyway.
+fn resolve_cache_dir() -> String {
+    env_opt("CACHE_DIR").unwrap_or_else(|| "/var/cache/proxy".to_string())
 }
 
-fn env_f64(key: &str, default: f64) -> f64 {
-    env::var(key)
+// Keep CACHE_MAX_GB canonical while tolerating matching legacy values on old
+// installs. Diverging legacy size keys only matter when CACHE_MAX_GB is absent.
+fn resolve_cache_max_gb() -> f64 {
+    if let Some(cache_max_gb) = env::var("CACHE_MAX_GB")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+        .and_then(|value| value.parse::<f64>().ok())
+    {
+        return cache_max_gb;
+    }
+
+    match (
+        env::var("STANDARD_CACHE_MAX_GB").ok(),
+        env::var("SSL_CACHE_MAX_GB").ok(),
+    ) {
+        (Some(standard), Some(ssl)) => {
+            let standard: f64 = standard.parse().unwrap_or(50.0);
+            let ssl: f64 = ssl.parse().unwrap_or(standard);
+            if (standard - ssl).abs() > f64::EPSILON {
+                panic!(
+                    "STANDARD_CACHE_MAX_GB and SSL_CACHE_MAX_GB differ without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
+                );
+            }
+            standard
+        }
+        (Some(standard), None) => standard.parse().unwrap_or(50.0),
+        (None, Some(ssl)) => ssl.parse().unwrap_or(50.0),
+        (None, None) => 50.0,
+    }
 }
 
 fn env_u64(key: &str, default: u64) -> Result<u64, String> {
@@ -416,10 +437,13 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-// The `"" if legacy_enabled` arm exists purely for backward compatibility: installs
-// that predate DHCP_MODE only had the boolean DHCP_ENABLED flag, which meant "run
-// Kea" and nothing else. An unset DHCP_MODE with the legacy flag still true must
-// keep resolving to Kea, not silently fall back to Disabled.
+// DHCP_MODE (kea/dnsmasq-proxy/disabled) is the current setting. DHCP_ENABLED
+// is the older boolean flag from before Kea and dnsmasq-proxy were separate
+// choices; `legacy_enabled` is only honored when DHCP_MODE is unset (empty),
+// so an explicit DHCP_MODE always wins and old installs that never set
+// DHCP_MODE keep working (DHCP_ENABLED=true implied Kea, the only mode that
+// existed at the time). `read_dhcp_mode_override` (the persisted Admin-UI
+// value) never had a legacy boolean, so it always passes `false` here.
 fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
@@ -439,9 +463,11 @@ fn read_dhcp_mode_override(path: &str) -> Option<DhcpMode> {
     read_ui_override(path, "DHCP_MODE").map(|value| parse_dhcp_mode(&value, false))
 }
 
-// `ui_settings_file` is a small, UI-managed `KEY=value` file (same shape as a
-// .env file) used to persist operator changes made through the Admin UI, so
-// they survive independently of whatever the container's env vars say.
+// Reads a single `KEY=value` line from the Admin UI's persisted settings
+// file (plain text, not a full env-file parser: no quoting, no escaping,
+// first non-comment match for `key` wins). This file only exists once an
+// operator has changed a DHCP setting from the UI; a missing file or a
+// missing key both just mean "no override, use the env default."
 fn read_ui_override(path: &str, key: &str) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let prefix = format!("{key}=");
@@ -469,15 +495,23 @@ fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
         .unwrap_or(default)
 }
 
+// Shared across the crate's test suites (this module's own tests plus
+// main.rs's tests that call `Config::from_env()`). `cargo test` runs tests in
+// parallel threads by default, and `std::env::set_var`/`env::var` are
+// process-global, so any test that reads or writes CACHE_DIR/CACHE_MAX_GB (or
+// their legacy split-key fallbacks) must hold this lock for its whole
+// env-mutation-and-assert window, or it can observe another thread's
+// in-flight legacy values and hit `resolve_cache_dir`/`resolve_cache_max_gb`'s
+// fail-closed panic spuriously.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn hsts_auto_only_sends_for_https_requests() {
@@ -532,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn single_proxy_fallbacks_match_current_runtime_layout() {
+    fn cache_dir_fallbacks_match_current_runtime_layout() {
         let _guard = env_test_lock().lock().unwrap();
 
         for key in [
@@ -543,8 +577,10 @@ mod tests {
             "SSL_ENABLED",
             "STANDARD_LOG",
             "SSL_LOG",
-            "STANDARD_CACHE_DIR",
-            "SSL_CACHE_DIR",
+            "CACHE_DIR",
+            "CACHE_MAX_GB",
+            "STANDARD_CACHE_MAX_GB",
+            "SSL_CACHE_MAX_GB",
         ] {
             env::remove_var(key);
         }
@@ -556,8 +592,20 @@ mod tests {
         assert!(cfg.ssl_enabled);
         assert_eq!(cfg.standard_log, "/var/log/nginx/access.log");
         assert_eq!(cfg.ssl_log, "/var/log/nginx/access.log");
-        assert_eq!(cfg.standard_cache_dir, "/var/cache/proxy");
-        assert_eq!(cfg.ssl_cache_dir, "/var/cache/proxy");
+        assert_eq!(cfg.cache_dir, "/var/cache/proxy");
+        assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    #[test]
+    fn cache_dir_is_read_directly_with_no_legacy_split_key_fallback() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::set_var("CACHE_DIR", "/cache/shared");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.cache_dir, "/cache/shared");
+
+        env::remove_var("CACHE_DIR");
     }
 
     #[test]
@@ -592,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_limit_env_wins_over_legacy_values() {
+    fn cache_max_gb_wins_over_legacy_values() {
         let _guard = env_test_lock().lock().unwrap();
 
         env::set_var("STANDARD_CACHE_MAX_GB", "77");
@@ -600,8 +648,7 @@ mod tests {
         env::set_var("CACHE_MAX_GB", "42.5");
 
         let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.standard_cache_max_gb, 42.5);
-        assert_eq!(cfg.ssl_cache_max_gb, 42.5);
+        assert_eq!(cfg.cache_max_gb, 42.5);
 
         env::remove_var("CACHE_MAX_GB");
         env::remove_var("STANDARD_CACHE_MAX_GB");
@@ -609,17 +656,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_ssl_cache_limit_can_drive_shared_cache_fallback() {
+    fn matching_legacy_cache_limits_can_drive_shared_fallback() {
         let _guard = env_test_lock().lock().unwrap();
 
         env::remove_var("CACHE_MAX_GB");
-        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::set_var("STANDARD_CACHE_MAX_GB", "88");
         env::set_var("SSL_CACHE_MAX_GB", "88");
 
         let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.standard_cache_max_gb, 88.0);
-        assert_eq!(cfg.ssl_cache_max_gb, 88.0);
+        assert_eq!(cfg.cache_max_gb, 88.0);
 
+        env::remove_var("STANDARD_CACHE_MAX_GB");
         env::remove_var("SSL_CACHE_MAX_GB");
     }
 
@@ -632,8 +679,23 @@ mod tests {
         env::remove_var("SSL_CACHE_MAX_GB");
 
         let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.standard_cache_max_gb, 50.0);
-        assert_eq!(cfg.ssl_cache_max_gb, 50.0);
+        assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    #[test]
+    fn mismatched_legacy_cache_limits_fail_closed() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("CACHE_MAX_GB");
+        env::set_var("STANDARD_CACHE_MAX_GB", "88");
+        env::set_var("SSL_CACHE_MAX_GB", "99");
+
+        let result = std::panic::catch_unwind(Config::from_env);
+
+        env::remove_var("STANDARD_CACHE_MAX_GB");
+        env::remove_var("SSL_CACHE_MAX_GB");
+
+        assert!(result.is_err());
     }
 
     #[test]

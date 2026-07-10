@@ -1032,6 +1032,16 @@ append_env_assignment_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
+# Remove a given KEY= line from an env file (used to clean up deprecated
+# split-cache keys CACHE_DIR_STANDARD and CACHE_DIR_SSL during migration).
+remove_env_key() {
+    local key="$1" env_file="$2"
+
+    env_key_exists "$key" "$env_file" || return 0
+
+    awk -F= -v key="$key" '$1 != key { print }' "$env_file" | write_env_file "$env_file"
+}
+
 # Migrates an optional key from an old name (source_key) to a new one
 # (target_key), or seeds fallback_value if there is nothing to migrate. Used
 # for renamed .env keys where an empty target value is a valid, intentional
@@ -1846,6 +1856,7 @@ migrate_env_for_update() {
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
+    local legacy_cache_std legacy_cache_ssl
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     [[ -f "$env_file" ]] \
@@ -1871,15 +1882,24 @@ migrate_env_for_update() {
     state_dir="${state_dir:-$(legacy_state_root_or_default "$state_root_default")}"
     set_env_key_if_empty_or_missing LANCACHE_STATE_DIR "$state_dir" "$env_file"
 
-    # Cache settings. Older installs may only have CACHE_DIR, so keep that path
-    # and map both proxy modes to the same cache directory by default.
-    cache_dir=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    # CACHE_DIR is the canonical install-time cache path.
+    # Legacy split cache keys can still be present on disk, but they must
+    # collapse to one shared directory before update continues. Fall back to the
+    # legacy /srv path or the shared state root when nothing is configured yet.
+    cache_dir=$(get_env_var CACHE_DIR "$env_file")
+    legacy_cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
+    legacy_cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
     if [[ -z "$cache_dir" ]]; then
-        cache_dir=$(get_env_var CACHE_DIR "$env_file")
+        if [[ -n "$legacy_cache_std" && -n "$legacy_cache_ssl" && "$legacy_cache_std" != "$legacy_cache_ssl" ]]; then
+            die "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths in $env_file. Set CACHE_DIR to one shared cache directory before rerunning setup.sh update. The update will not keep two cache directories."
+        fi
+
+        cache_dir="${legacy_cache_std:-$legacy_cache_ssl}"
     fi
     cache_dir="${cache_dir:-$(legacy_dir_or_default "$(legacy_state_path cache)" "$state_dir/cache")}"
-    set_optional_env_path_override_if_needed CACHE_DIR_STANDARD "$cache_dir" "$state_dir/cache" "$env_file"
-    set_optional_env_path_override_if_needed CACHE_DIR_SSL "$cache_dir" "$state_dir/cache" "$env_file"
+    set_env_key CACHE_DIR "$cache_dir" "$env_file"
+    remove_env_key CACHE_DIR_STANDARD "$env_file"
+    remove_env_key CACHE_DIR_SSL "$env_file"
 
     # Older repository-based prod installs stored state below one legacy root.
     # Preserve that root first, then derive per-service defaults from it so both
@@ -2070,11 +2090,12 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    local cache_dir cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
     state_dir="${state_dir:-$(legacy_state_root_or_default "$(production_state_root_default "$install_dir")")}"
+    cache_dir=$(get_env_var CACHE_DIR "$env_file")
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
     kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
@@ -2109,6 +2130,7 @@ backup_manifest() {
     [[ -d "$(legacy_state_path nats-conf)" ]] && printf '%s\n' "$(legacy_state_path nats-conf)"
     [[ -n "${kea_dir:-}" && -d "$kea_dir" ]] && printf '%s\n' "$kea_dir"
     if [[ "$mode" = "full" ]]; then
+        [[ -n "${cache_dir:-}" && -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
         [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
         [[ -n "${cache_ssl:-}" && "$cache_ssl" != "$cache_std" && -d "$cache_ssl" ]] && printf '%s\n' "$cache_ssl"
         [[ -d "$(legacy_state_path cache)" ]] && printf '%s\n' "$(legacy_state_path cache)"
@@ -2568,11 +2590,19 @@ cmd_debug() {
     cd "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    local ip_standard ip_ssl cache_std cache_ssl
+    local ip_standard ip_ssl cache_dir cache_std cache_ssl
     ip_standard=$(get_env_var IP_STANDARD "$env_file")
     ip_ssl=$(get_env_var IP_SSL "$env_file")
+    cache_dir=$(get_env_var CACHE_DIR "$env_file")
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
+    if [[ -z "$cache_dir" ]]; then
+        if [[ -n "$cache_std" && -n "$cache_ssl" && "$cache_std" != "$cache_ssl" ]]; then
+            print_error "Legacy cache paths differ; set CACHE_DIR before relying on cache debug output."
+        else
+            cache_dir="${cache_std:-$cache_ssl}"
+        fi
+    fi
 
     print_step "Container status"
     docker compose --env-file "$env_file" ps
@@ -2589,15 +2619,13 @@ cmd_debug() {
     done
 
     print_step "Cache usage"
-    local dir
-    for dir in "$cache_std" "$cache_ssl"; do
-        [[ -z "$dir" ]] && continue
-        if [[ -d "$dir" ]]; then
-            du -sh "$dir"
+    if [[ -n "$cache_dir" ]]; then
+        if [[ -d "$cache_dir" ]]; then
+            du -sh "$cache_dir"
         else
-            print_warn "Directory not found: $dir"
+            print_warn "Directory not found: $cache_dir"
         fi
-    done
+    fi
 
     print_step "Network (LAN IPs)"
     ip -4 addr show | grep "inet " | grep -v " 127\." | grep -v " 172\." || true
@@ -3178,22 +3206,11 @@ print_ok "quickstart compose assets copied to $INSTALL_DIR"
 print_step "Cache configuration"
 
 while true; do
-    ask "Cache directory (absolute path)" "$INSTALL_DIR/cache/standard"
-    CACHE_DIR_STANDARD="$REPLY"
-    is_absolute_path "$CACHE_DIR_STANDARD" && break
-    print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache/standard)."
+    ask "Cache directory (absolute path)" "$INSTALL_DIR/cache"
+    CACHE_DIR="$REPLY"
+    is_absolute_path "$CACHE_DIR" && break
+    print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache)."
 done
-
-if [[ "$SSL_ENABLED" = "1" ]]; then
-    while true; do
-        ask "Cache directory SSL mode (absolute path)" "$INSTALL_DIR/cache/ssl"
-        CACHE_DIR_SSL="$REPLY"
-        is_absolute_path "$CACHE_DIR_SSL" && break
-        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache/ssl)."
-    done
-else
-    CACHE_DIR_SSL="$CACHE_DIR_STANDARD"
-fi
 
 while true; do
     ask "Cache size in GiB" "50"
@@ -3416,8 +3433,7 @@ validate_env_values_for_initial_write \
     "IP_STANDARD=${IP_STANDARD}" \
     "IP_SSL=${IP_SSL}" \
     "SSL_ENABLED=${SSL_ENABLED}" \
-    "CACHE_DIR_STANDARD=${CACHE_DIR_STANDARD}" \
-    "CACHE_DIR_SSL=${CACHE_DIR_SSL}" \
+    "CACHE_DIR=${CACHE_DIR}" \
     "CACHE_MAX_SIZE=${cache_gb}g" \
     "CACHE_MEM_MB=${CACHE_MEM_MB}" \
     "CACHE_SLICE_SIZE=8m" \
@@ -3473,8 +3489,7 @@ IP_SSL=${IP_SSL}
 SSL_ENABLED=${SSL_ENABLED}
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
-CACHE_DIR_STANDARD=${CACHE_DIR_STANDARD}
-CACHE_DIR_SSL=${CACHE_DIR_SSL}
+CACHE_DIR=${CACHE_DIR}
 
 CACHE_MAX_SIZE=${cache_gb}g
 CACHE_MEM_MB=${CACHE_MEM_MB}
@@ -3558,12 +3573,8 @@ print_ok ".env written: $INSTALL_DIR/.env"
 
 # ── 9. Creating directories ───────────────────────────────────────────────────
 print_step "Creating directories"
-mkdir -p "$CACHE_DIR_STANDARD"
-print_ok "Standard cache: $CACHE_DIR_STANDARD"
-if [[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]]; then
-    mkdir -p "$CACHE_DIR_SSL"
-    print_ok "SSL cache:      $CACHE_DIR_SSL"
-fi
+mkdir -p "$CACHE_DIR"
+print_ok "Cache:          $CACHE_DIR"
 if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
     mkdir -p "$KEA_DATA_DIR"
     print_ok "Kea data:       $KEA_DATA_DIR"
@@ -3639,9 +3650,7 @@ else
     printf "  %-26s %s\n" "SSL mode:"                "disabled"
 fi
 printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
-printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR_STANDARD"
-[[ "$SSL_ENABLED" = "1" && "$CACHE_DIR_SSL" != "$CACHE_DIR_STANDARD" ]] \
-    && printf "  %-26s %s\n" "Cache SSL:"            "$CACHE_DIR_SSL"
+printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
 printf "  %-26s %s\n"    "DHCP mode:"               "$DHCP_MODE"
