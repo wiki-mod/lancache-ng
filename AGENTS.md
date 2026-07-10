@@ -221,7 +221,7 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 - **[AG-WF-014]** Do not push directly to `master`. All changes go through pull requests.
 - **[AG-SEC-007]** Do not hardcode LAN IP addresses in Dockerfiles or source files.
-- **[AG-REL-007]** Do not introduce a new programming language without explicit approval.
+- **[AG-REL-007]** Do not introduce a new programming language without explicit approval; see Rule-Ref: AG-REL-001 for the full project-language rule and its local one-off command exception.
 - **[AG-OP-012]** Do not use `proxy_cache_key $request_uri` — query strings contain per-request CDN signatures.
 
 ## Documented Exceptions to Hard Rules
@@ -334,7 +334,7 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-REL-004 | Project language is Rust | Manual review |
 | AG-REL-005 | No new languages without approval (redundant) | Manual review |
 | AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
-| AG-REL-007 | No new languages without approval (triplicative) | Manual review |
+| AG-REL-007 | No new languages without approval; full rule is AG-REL-001 | Manual review |
 | AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
 | AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
 | AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
