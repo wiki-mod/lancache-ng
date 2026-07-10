@@ -321,10 +321,18 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve build-tools image
+        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true: this workflow
+        # only ever runs via workflow_dispatch (event_name != pull_request),
+        # so select-build-tools-image.sh's trusted-ref path already always
+        # builds a fresh branch-local image from this checkout's Dockerfile
+        # instead of trying the published tag first. That is what's actually
+        # wanted here -- expect (added to tools/build-tools/Dockerfile in
+        # this same change) only exists on this branch, not yet in any
+        # published build-tools image.
         id: build-tools-image
         run: |
           set -euo pipefail
-          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          image="$(bash scripts/select-build-tools-image.sh)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run setup.sh CLI simulation
