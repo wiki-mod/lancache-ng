@@ -227,3 +227,45 @@ jobs:
         if: always()
         run: |
           docker rmi lancache-ng-full-setup:validation || true
+
+  ssl-mitm-cache-simulation:
+    # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
+    # (issue #597, part of #557 scenario 1). Most cdn-domains.txt entries
+    # are game CDNs that need signed/session URLs and won't serve a plain
+    # curl request -- but this project also caches Linux distro mirrors
+    # (see the "Debian"/"Fedora"/etc. sections of that file), and
+    # deb.debian.org is already one of them. So this uses the real,
+    # already-published dns/proxy images as-is, no custom build needed, via
+    # deploy/full-setup/docker-compose.yml (NATS, networking, healthchecks
+    # already proven there).
+    # Independent of full-setup-validate above (this job starts only
+    # proxy/dns-standard/dns-ssl/nats, not the full compose profile), but
+    # shares the same compose project name and fixed validation-network
+    # IPs, so it must not run concurrently with that job -- confirmed
+    # directly during #403/#594 that two jobs binding the same fixed
+    # addresses on this shared runner tier collide.
+    name: SSL MITM cache simulation
+    needs: full-setup-validate
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run SSL MITM cache simulation
+        # dig/curl client verification runs through build-tools (matching
+        # the existing scripts/full-setup-client-simulation.sh pattern);
+        # starting the real proxy/dns-standard/dns-ssl/nats containers
+        # happens directly via the runner's own docker, same as
+        # full-setup-validate's own steps above.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          scripts/ssl-mitm-cache-simulation.sh
