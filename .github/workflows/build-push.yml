@@ -1502,6 +1502,13 @@ jobs:
 
           echo "Full-setup stack is stable: all services running and healthy."
 
+      - name: Run client simulation against the full-setup stack
+        env:
+          FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ steps.channel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          scripts/full-setup-client-simulation.sh
+
       - name: Tear down full-setup validation stack
         if: always()
         working-directory: deploy/full-setup
