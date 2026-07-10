@@ -91,6 +91,7 @@ RUN set -euo pipefail; \
       clang \
       cmake \
       curl \
+      expect \
       git \
       jq \
       libssl-dev \
@@ -260,6 +261,7 @@ RUN set -euo pipefail; \
       docker \
       dpkg \
       envsubst \
+      expect \
       find \
       flock \
       getent \
@@ -306,6 +308,7 @@ RUN set -euo pipefail; \
     shellcheck --version; \
     docker --version; \
     docker compose version; \
+    expect -v; \
     printf 'PATH=%s\n' "$PATH"; \
     case ":$PATH:" in \
       *:/usr/local/cargo/bin:*) ;; \

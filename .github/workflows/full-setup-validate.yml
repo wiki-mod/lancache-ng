@@ -300,3 +300,47 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ui-nats-dns-integration-simulation.sh
+
+  setup-cli-simulation:
+    # Runs the real setup.sh CLI end-to-end (fresh install through its
+    # interactive prompts, update/migration, and one rollback-safety
+    # scenario) instead of only bash -n syntax checking it -- see issue
+    # #403. Deliberately independent of full-setup-validate above: that job
+    # exercises deploy/full-setup/docker-compose.yml directly; this one
+    # exercises the setup.sh installer itself, which generates and manages
+    # its own deploy/quickstart-derived install directory. Chained after
+    # ui-nats-dns-integration-simulation anyway (not because it shares the
+    # fixed validation-network IPs -- it doesn't, setup.sh manages its own
+    # install directory and compose project) but to avoid piling concurrent
+    # Docker-heavy jobs onto the same shared runner tier.
+    name: setup.sh CLI simulation
+    needs: ui-nats-dns-integration-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run setup.sh CLI simulation
+        # expect and the Docker CLI needed to drive setup.sh's interactive
+        # prompts and manage the resulting stack both live in the build-tools
+        # image, per AG-VAL-016. The host's Docker socket is mounted so
+        # containers setup.sh starts inside this container are real sibling
+        # containers on the runner's own Docker daemon, not nested
+        # docker-in-docker.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/work" \
+            -w /work \
+            "$BUILD_TOOLS_IMAGE" \
+            bash scripts/setup-cli-simulation.sh
