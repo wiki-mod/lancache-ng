@@ -142,7 +142,7 @@ proc expect_prompt {pattern reply} {
 set env(LANCACHE_IMAGE_CHANNEL) "edge"
 spawn bash setup.sh
 
-expect_prompt {Server IP \(Standard mode\)} "127.0.0.1"
+expect_prompt {Server IP \(Standard mode\)} "127.0.0.2"
 expect_prompt {Enable SSL mode\? \[y/N\]} ""
 expect_prompt {Directory[^\n]*\[} $install_dir
 expect_prompt {Cache directory \(absolute path\)} ""
@@ -172,15 +172,18 @@ if {$exit_code != 0} {
 EXPECT_SCRIPT
 }
 
-# This runs on a shared self-hosted runner tier that also runs
-# full-setup-validate's own compose stack, sequenced but not guaranteed to
-# leave a cooldown gap between one job's teardown and the next job's start.
-# Confirmed directly: hit "port is already allocated" for 127.0.0.1:443
-# immediately after the other job's teardown step reported success, even
-# though a direct check on the runner afterward found no lingering
-# container or bound port -- a transient release race, not a stuck
-# leftover. Retries a few times on this specific, known-transient error
-# instead of trying to precisely time a pre-check, mirroring the existing
+# This runs on a shared self-hosted runner tier where other jobs (and other
+# concurrent workflow runs) can bind the common 127.0.0.1 loopback address
+# too. Confirmed directly: hit "port is already allocated" for
+# 127.0.0.1:443 repeatedly, with no lingering container or bound port
+# visible on the runner moments later -- not a stuck leftover from one
+# specific job, just contention over the one address every other host-bound
+# stack on this runner also defaults to. The real fix is IP_STANDARD =
+# 127.0.0.2 above (loopback range is 127.0.0.0/8, so any 127.x.x.x address
+# routes locally without needing a real interface) instead of 127.0.0.1,
+# giving this simulation its own address nothing else on the runner
+# specifically targets. This retry loop stays as a second line of defense
+# in case something else ever binds 127.0.0.2 too, mirroring the existing
 # retry-on-transient-GHCR-403 pattern already used elsewhere in this
 # project's CI.
 fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
@@ -208,7 +211,7 @@ done
 
 [[ -f "$install_dir/.env" ]] \
     || { echo "::error::Fresh install did not produce $install_dir/.env." >&2; exit 1; }
-grep -qF 'IP_STANDARD=127.0.0.1' "$install_dir/.env" \
+grep -qF 'IP_STANDARD=127.0.0.2' "$install_dir/.env" \
     || { echo "::error::.env is missing the expected IP_STANDARD value." >&2; exit 1; }
 grep -qF 'UI_AUTH_USER=admin' "$install_dir/.env" \
     || { echo "::error::.env is missing the expected UI_AUTH_USER value." >&2; exit 1; }
