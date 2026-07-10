@@ -38,6 +38,7 @@ section headings themselves should stay so reviewers always know where to
 look. At minimum, each pull request should explain:
 
 - whether AI assistance was used, using the optional transparency notice when applicable
+  - Its okay for us if you used it, but please be fair enought to tell it. 
 - what changed
 - what the PR actually changes in before/after terms, with a concrete example where possible
 - why the change is needed and what it fixes or adds
