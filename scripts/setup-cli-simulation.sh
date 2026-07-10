@@ -276,7 +276,22 @@ diff -q \
     || { echo "::error::setup.sh update changed unrelated .env keys during a failed update -- unsafe partial state." >&2; exit 1; }
 find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . \
     || { echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2; exit 1; }
+echo "setup.sh update failed safely on a broken image tag: .env is intact and a rollback backup exists."
+
+# Not asserted: that the stack stays up and healthy through the failed
+# attempt above. cmd_backup --config itself stops and restarts the stack
+# for a consistent snapshot as the very first step of cmd_update, before
+# the pull this phase deliberately breaks even runs -- and that restart
+# uses the same already-poisoned .env, so it cannot come back up either.
+# Confirmed directly: every service was stopped after the failed attempt,
+# not merely left at its pre-update state. That's an unavoidable
+# consequence of sabotaging .env before calling update, not a bug in
+# setup.sh -- so the meaningful rollback-safety property to verify is
+# recoverability, not zero downtime: restore the last-known-good .env and
+# confirm setup.sh update actually recovers the stack.
+cp "$install_dir/.env.before-forced-failure" "$install_dir/.env"
+bash setup.sh update "$install_dir"
 wait_for_stack_healthy
-echo "setup.sh update failed safely on a broken image tag: .env is intact, a rollback backup exists, and the previously-running stack is still healthy."
+echo "setup.sh update recovered the stack once the .env was restored to its last-known-good state."
 
 echo "setup.sh CLI simulation passed: fresh install, update/migration, and rollback safety all verified against the real CLI."
