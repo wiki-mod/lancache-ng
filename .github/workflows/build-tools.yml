@@ -296,6 +296,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
           provenance: false
+          pull: true
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
 
       - name: Prepare pushed build-tools Trivy cache
