@@ -1069,8 +1069,13 @@ jobs:
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
           grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must run on the heavy runner tier."; exit 1; }
-          grep -F 'pull: true' .github/workflows/build-tools.yml >/dev/null \
-            || { echo "::error::The build-tools workflow must pull fresh mutable bases before scan and publish builds."; exit 1; }
+          awk '
+            /name: Build and push multi-architecture build-tools image/ { in_publish = 1; found = 0; next }
+            in_publish && /name: / { exit found ? 0 : 1 }
+            in_publish && /pull: true/ { found = 1 }
+            END { if (in_publish) exit found ? 0 : 1; exit 1 }
+          ' .github/workflows/build-tools.yml \
+            || { echo "::error::The build-tools multi-arch publish step must pull fresh mutable bases before publishing."; exit 1; }
           grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
             && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'retry-build.outputs.digest' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
