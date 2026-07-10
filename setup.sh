@@ -1405,17 +1405,17 @@ cache_size_gb_from_env() {
     printf '%s\n' "$cache_max_size"
 }
 
-# Production installs consume prebuilt service images. Until multi-arch images
-# are explicitly published and tested, reject unsupported host architectures
-# before writing or mutating runtime state.
+# Production installs consume prebuilt service images. Prebuilt images are
+# published for linux/amd64 and linux/arm64 (see #395); reject any other host
+# architecture before writing or mutating runtime state.
 assert_prebuilt_image_platform_supported() {
     local arch
     arch=$(uname -m)
     case "$arch" in
-        x86_64|amd64)
+        x86_64|amd64|aarch64|arm64)
             ;;
         *)
-            die "Prebuilt production images are currently published for linux/amd64 only. This host reports '${arch}'. Multi-architecture images are tracked separately."
+            die "Prebuilt production images are currently published for linux/amd64 and linux/arm64 only. This host reports '${arch}'."
             ;;
     esac
 }
