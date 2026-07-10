@@ -1032,6 +1032,12 @@ jobs:
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
+          grep -F 'allow_args+=(--allow network.host)' .github/workflows/build-push.yml >/dev/null \
+            && grep -F '"${allow_args[@]}" \' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Local docker build scan must pass --allow network.host when host networking is selected."; exit 1; }
+          grep -F 'name: Set up Docker Buildx for scan build' .github/workflows/build-push.yml >/dev/null \
+            && grep -F 'docker buildx build \' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Local scan build must use an explicit docker-container Buildx builder (docker buildx build), not the plain docker driver -- network.host entitlement is only granted by default on container-driver builders."; exit 1; }
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -2414,6 +2420,19 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: ${{ matrix.platform }}
 
+      - name: Set up Docker Buildx for scan build
+        # A docker-container builder is required for --allow network.host to
+        # actually take effect: that entitlement is enabled by default for
+        # container-driver builders since buildx v0.13 (docker/buildx#2266),
+        # but the plain `docker` driver (the daemon's own embedded BuildKit,
+        # what a bare `docker build` uses with no builder set up) additionally
+        # requires the daemon itself to be started with
+        # --allow-insecure-entitlement network.host -- an infrastructure-level
+        # flag this workflow can't set. Using an explicit container-driver
+        # builder here avoids that dependency entirely.
+        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
       - name: Build local scan image
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         env:
@@ -2445,11 +2464,17 @@ jobs:
           if [ "$scan_build_network" = "bridge" ]; then
             scan_build_network=default
           fi
+          allow_args=()
+          if [ "$scan_build_network" = "host" ]; then
+            allow_args+=(--allow network.host)
+          fi
 
-          DOCKER_BUILDKIT=1 docker build \
+          docker buildx build \
+            --load \
             --pull \
             --platform ${{ matrix.platform }} \
             --network "$scan_build_network" \
+            "${allow_args[@]}" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
