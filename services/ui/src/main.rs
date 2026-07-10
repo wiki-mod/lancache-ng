@@ -205,6 +205,32 @@ async fn chart_js() -> impl IntoResponse {
     )
 }
 
+async fn favicon_ico() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/x-icon"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_bytes!("static/favicon.ico").as_slice(),
+    )
+}
+
+async fn logo_icon() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_bytes!("static/logo-icon.png").as_slice(),
+    )
+}
+
 fn basic_auth_is_valid(headers: &HeaderMap, user: &str, pass: &str) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -583,6 +609,8 @@ async fn main() -> Result<()> {
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/static/admin.css", get(admin_css))
         .route("/static/chart.umd.min.js", get(chart_js))
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/static/logo-icon.png", get(logo_icon))
         .route("/secondaries", get(routes::secondaries::secondaries_page))
         .route(
             "/api/secondary/{name}",
