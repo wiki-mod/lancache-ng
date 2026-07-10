@@ -16,6 +16,27 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# This runs on a shared self-hosted runner tier that also runs
+# full-setup-validate's own compose stack, sequenced but not necessarily
+# with any cooldown gap between one job's teardown and the next job's
+# start. Fresh install below binds 127.0.0.1:80/443/53/8080 directly (see
+# the IP_STANDARD note further down), so wait for those to actually be free
+# on the host's Docker daemon rather than racing a just-finished teardown.
+# Confirmed directly: hit "port is already allocated" here immediately
+# after full-setup-validate's own teardown step reported success.
+wait_for_host_ports_free() {
+    local attempt bound
+    for attempt in $(seq 1 12); do
+        bound="$(docker ps --format '{{.Ports}}' | grep -E '127\.0\.0\.1:(80|443|53|8080)->' || true)"
+        [[ -z "$bound" ]] && return 0
+        sleep 5
+    done
+    echo "::error::Host ports 80/443/53/8080 on 127.0.0.1 are still bound by another container after waiting; refusing to start a colliding stack." >&2
+    docker ps --format '{{.Names}}\t{{.Ports}}'
+    return 1
+}
+wait_for_host_ports_free
+
 # Without this, git inside this container treats the bind-mounted repo (owned
 # by the host runner's UID, not this container's root) as having "dubious
 # ownership" and refuses every git command, including the `git describe
