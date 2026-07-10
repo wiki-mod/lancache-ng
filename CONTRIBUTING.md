@@ -37,7 +37,7 @@ change — a short "N/A, this is a one-line typo fix" is fine, but the
 section headings themselves should stay so reviewers always know where to
 look. At minimum, each pull request should explain:
 
-- whether AI assistance was used, using the optional transparency notice when applicable
+- whether AI assistance was used — this is welcome, not a problem; just say so honestly with the transparency notice at the top of the template. Keep and edit it if AI assistance was used, delete it if it wasn't, and never leave it in place saying something that isn't true for this PR
 - what changed
 - what the PR actually changes in before/after terms, with a concrete example where possible
 - why the change is needed and what it fixes or adds
