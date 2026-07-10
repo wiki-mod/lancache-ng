@@ -2204,6 +2204,8 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # This job resolves its own build-tools image rather than reusing
@@ -2272,13 +2274,16 @@ jobs:
                 --out json \
                 --output-dir /coverage-ui'
       - name: Merge coverage reports and check threshold
+        id: coverage
         run: |
           set -euo pipefail
 
+          mkdir -p coverage-badge
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -v "$PWD:/work:ro" \
+            -v "$PWD/coverage-badge:/coverage-badge" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
@@ -2320,7 +2325,32 @@ jobs:
                 exit 1
               fi
 
+              # Badge generation reuses this same containerized jq instead of
+              # assuming a host-installed jq, matching why the coverage
+              # extraction above already runs in here (issue #566).
+              ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
+              dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
+              badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
+              badge_color=yellow
+              if awk -v ui="$ui_coverage" -v dns="$dns_coverage" "BEGIN { exit !(ui >= 80 && dns >= 80) }"; then
+                badge_color=brightgreen
+              fi
+
+              jq -n \
+                --arg message "$badge_message" \
+                --arg color "$badge_color" \
+                "{schemaVersion: 1, label: \"rust coverage\", message: \$message, color: \$color}" \
+                > /coverage-badge/rust.json
+
+              {
+                printf "ui=%s\n" "$ui_coverage_display"
+                printf "dns=%s\n" "$dns_coverage_display"
+                printf "message=%s\n" "$badge_message"
+              } > /coverage-badge/output.env
+
               echo "Coverage check passed"'
+
+          cat coverage-badge/output.env >> "$GITHUB_OUTPUT"
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
@@ -2330,6 +2360,45 @@ jobs:
             coverage-dns/tarpaulin-report.json
             coverage-ui/tarpaulin-report.json
           retention-days: 30
+      - name: Publish Rust coverage badge endpoint
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          BADGE_BRANCH: badges
+          BADGE_FILE: coverage/rust.json
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          : "${GITHUB_TOKEN:?GITHUB_TOKEN is required to publish the coverage badge endpoint}"
+          : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
+          : "${BADGE_FILE:?BADGE_FILE is required}"
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          cp coverage-badge/rust.json "$tmp_dir/rust.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "$BADGE_BRANCH" || true
+          if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
+            git switch --create "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
+          else
+            git switch --orphan "$BADGE_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "$(dirname "$BADGE_FILE")"
+          cp "$tmp_dir/rust.json" "$BADGE_FILE"
+          git add "$BADGE_FILE"
+
+          if git diff --cached --quiet; then
+            echo "::notice::Rust coverage badge endpoint already up to date."
+            exit 0
+          fi
+
+          git commit -m "chore: update rust coverage badge"
+          git push origin "$BADGE_BRANCH"
 
   watchdog_test:
     # Watchdog has its own small shell runtime and therefore its own scoped
