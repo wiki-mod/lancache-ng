@@ -116,6 +116,15 @@ proc expect_prompt {pattern reply} {
     }
 }
 
+
+# The project has no stable release yet, so setup.sh's own deliberate
+# "default to the stable latest channel unless asked otherwise" behavior
+# (see resolve_lancache_image_channel's comment) means an unqualified fresh
+# install correctly refuses to proceed with a clear error right now --
+# confirmed directly against a real run. edge is what actually has published
+# images (see docs/release-versioning.md), so request it explicitly, exactly
+# as setup.sh's own error message suggests.
+set env(LANCACHE_IMAGE_CHANNEL) "edge"
 spawn bash setup.sh
 
 expect_prompt {Server IP \(Standard mode\)} "127.0.0.1"
