@@ -64,6 +64,8 @@ CACHE_DIR="$(resolve_cache_dir)"
 
 get_health() {
     local name="$1"
+    # Docker socket access is routed through the narrowed proxy, so health reads
+    # must stay on the allowed container-inspect endpoint rather than exec.
     curl -sf "${DOCKER_PROXY_URL}/containers/${name}/json" 2>/dev/null \
         | jq -r '.State.Health.Status // "none"' 2>/dev/null \
         || echo "unreachable"
@@ -72,11 +74,14 @@ get_health() {
 restart_container() {
     local name="$1"
     log "RESTARTING $name"
+    # Restart is intentionally the only mutating Docker operation watchdog uses.
+    # Container creation/exec remain unavailable through the proxy allowlist.
     curl -sf -X POST "${DOCKER_PROXY_URL}/containers/${name}/restart" >/dev/null 2>&1 \
         || log "WARNING: restart call failed for $name"
 }
 
 health_color() {
+    # Dashboard cards consume these stable color names directly.
     case "$1" in
         healthy)   echo "green" ;;
         starting)  echo "yellow" ;;
@@ -89,6 +94,8 @@ disk_info() {
     local dir="$1"
     [ -d "$dir" ] || { printf '{"pct": 0, "status": "unknown"}'; return; }
     local pct
+    # df reports the filesystem behind CACHE_DIR, which is the operator-visible
+    # capacity limit for the single shared cache path.
     pct=$(df "$dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}') || pct=0
     local status="green"
     if   [ "${pct:-0}" -ge "$DISK_ALARM_PCT" ]; then status="red"
@@ -164,6 +171,8 @@ maybe_purge() {
     local now; now=$(date +%s)
     local last=0
 
+    # Purging is rate-limited by a stamp file so a restarted watchdog does not
+    # repeatedly scan a large cache tree on every boot loop.
     # Validate and read purge stamp
     if [ -f "$PURGE_STAMP" ]; then
         last=$(cat "$PURGE_STAMP")

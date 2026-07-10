@@ -476,6 +476,8 @@ RUN groupadd --system --gid 10001 lancache \
 
 EXPOSE 8080
 
+# Runtime defaults mirror the compose files: one shared cache path is mounted
+# read-only for dashboard reporting, while writes remain owned by proxy/watchdog.
 ENV TEMPLATE_DIR=/templates \
     CDN_DOMAINS_FILE=/data/cdn-domains.txt \
     STANDARD_LOG=/var/log/nginx/access.log \

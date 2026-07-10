@@ -81,6 +81,8 @@ services:
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
       - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
+      # Named volume resolves to the single host CACHE_DIR device below.
+      # Both standard and SSL proxy paths write into this same cache tree.
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
@@ -205,6 +207,8 @@ services:
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
+      # Watchdog sees the same cache tree as nginx so disk alerts and purge
+      # decisions match the real proxy cache, not a stale split-cache path.
       - proxy-cache:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
@@ -412,6 +416,7 @@ services:
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - proxy-logs:/var/log/nginx:ro
+      # Admin UI only reads this mount for cache-size reporting.
       - proxy-cache:/var/cache/proxy:ro
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats   # shared with NATS: UI writes nats.conf here

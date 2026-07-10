@@ -89,6 +89,8 @@ services:
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
       - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
+      # Dev also uses one shared proxy cache volume so it exercises the same
+      # single-CACHE_DIR behavior as prod/quickstart.
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
@@ -205,6 +207,8 @@ services:
     env_file:
       - ../../config/dev/watchdog.env
     volumes:
+      # Watchdog validates the unified cache path in dev; it should not grow a
+      # second standard/ssl split-cache convention.
       - proxy-cache:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
@@ -409,6 +413,7 @@ services:
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - proxy-logs:/var/log/nginx:ro
+      # Read-only cache view used for dashboard size reporting.
       - proxy-cache:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats          # shared with NATS: UI writes nats.conf here

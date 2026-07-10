@@ -321,6 +321,9 @@ impl Config {
             nats_dns_reader_user: env_str("NATS_DNS_READER_USER", ""),
             nats_dns_reader_password: env_str("NATS_DNS_READER_PASSWORD", ""),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
+            // Kept as separate fields so the UI can display the running
+            // release/channel without reconstructing image references from
+            // hardcoded GHCR assumptions.
             lancache_image_registry: env_str("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
             lancache_image_prefix: env_str("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
             lancache_image_channel,
