@@ -269,3 +269,34 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ssl-mitm-cache-simulation.sh
+
+  ui-nats-dns-integration-simulation:
+    # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test
+    # (issue #400, sub-item of #398 priority 1). Adds a LAN DNS record
+    # through the real Admin UI HTTP route, verifies it resolves via a real
+    # DNS query, removes it, verifies it's gone. Building this surfaced
+    # three independent, real product bugs (see #607) that made this
+    # feature completely non-functional -- fixed in the same PR as this job.
+    # Shares the ssl-mitm-cache-simulation job's collision constraint: same
+    # compose project name and fixed validation-network IPs as
+    # full-setup-validate, so it must not run concurrently with either.
+    name: UI/NATS/DNS integration simulation
+    needs: ssl-mitm-cache-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run UI/NATS/DNS integration simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          scripts/ui-nats-dns-integration-simulation.sh
