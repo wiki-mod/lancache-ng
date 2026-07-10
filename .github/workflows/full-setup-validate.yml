@@ -257,21 +257,19 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run SSL MITM cache simulation
-        # Mounted at the same absolute path ($PWD) on both sides of the
-        # socket, not an arbitrary path like /work: this script builds
-        # images and starts containers against the host Docker daemon, and
-        # a path that only looks valid from inside this container resolves
-        # to nothing real on the host. Confirmed the hard way in #403/#594
-        # (scripts/setup-cli-simulation.sh's own comments have the long-form
-        # story) -- applying the same fix here from the start.
+        # Runs directly on the runner, not wrapped in the build-tools
+        # container: building the test images needs BuildKit (services/dns/
+        # Dockerfile's RUN --mount=type=secret lines), and the build-tools
+        # image does not have the buildx CLI plugin installed -- confirmed
+        # directly ("unknown flag: --load", then "BuildKit is enabled but
+        # the buildx component is missing" even with DOCKER_BUILDKIT=1).
+        # The runner's own docker installation already has a working buildx
+        # builder (used elsewhere in this project's CI), so building here
+        # avoids that gap entirely. Only the dig/curl client verification
+        # inside the script runs through build-tools, matching the existing
+        # scripts/full-setup-client-simulation.sh pattern.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD:$PWD" \
-            -w "$PWD" \
-            -e BUILD_TOOLS_IMAGE \
-            "$BUILD_TOOLS_IMAGE" \
-            bash scripts/ssl-mitm-cache-simulation.sh
+          scripts/ssl-mitm-cache-simulation.sh

@@ -10,13 +10,23 @@
 # services/dns/Dockerfile, services/proxy/Dockerfile), there is no runtime
 # override. Reuses deploy/full-setup/docker-compose.yml for everything else
 # (NATS, networking, healthchecks already proven there) via an image-only
-# override file. Meant to run inside the build-tools container against the
-# mounted Docker socket, same pattern as scripts/setup-cli-simulation.sh.
+# override file.
+#
+# Runs directly on the self-hosted runner, not wrapped in the build-tools
+# container: building the test images needs BuildKit (services/dns/
+# Dockerfile's RUN --mount=type=secret lines), and the build-tools image
+# does not have the buildx CLI plugin installed (confirmed directly:
+# "unknown flag: --load", then "BuildKit is enabled but the buildx
+# component is missing" even with DOCKER_BUILDKIT=1) -- the runner's own
+# docker installation already has a working buildx builder (used
+# elsewhere in this project's CI), so building here avoids that gap
+# entirely instead of trying to vendor the plugin into build-tools too.
+# Only the dig/curl client verification below runs through build-tools,
+# matching the existing scripts/full-setup-client-simulation.sh pattern.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-git config --global --add safe.directory "$repo_root"
 
 test_domain="deb.debian.org"
 test_path="/debian/README"
@@ -30,6 +40,7 @@ network_name="${compose_project}_validation"
 proxy_ip="172.30.99.2"
 dns_standard_ip="172.30.99.3"
 dns_ssl_ip="172.30.99.5"
+build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
 cleanup() {
     local status=$?
@@ -49,16 +60,8 @@ cp -a services/dns "$dns_context"
 printf '\n# Added by scripts/ssl-mitm-cache-simulation.sh for issue #597 -- not a real CDN domain, never committed.\n%s\n' \
     "$test_domain" >> "$dns_context/cdn-domains.txt"
 
-# Plain `docker build` uses the legacy builder, which does not understand
-# the dns Dockerfile's `RUN --mount=type=secret` lines (BuildKit-only) --
-# confirmed directly: "the --mount option requires BuildKit". `docker
-# buildx build` needs the buildx CLI plugin, which the build-tools image
-# this script runs inside does not have installed (confirmed directly:
-# "unknown flag: --load") -- DOCKER_BUILDKIT=1 gets the same BuildKit
-# support from the classic docker CLI talking to the same daemon, without
-# needing that plugin.
 DOCKER_BUILDKIT=1 docker build --pull -q \
-    --build-arg "BUILD_TOOLS_IMAGE=${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+    --build-arg "BUILD_TOOLS_IMAGE=$build_tools_image" \
     -t "lancache-ng-mitm-sim-dns:$run_id" \
     "$dns_context" >/dev/null
 
@@ -114,7 +117,7 @@ docker cp "$proxy_cid:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca.crt"
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/ca.crt:/ca.crt:ro" \
-        "$BUILD_TOOLS_IMAGE" bash -c "$1"
+        "$build_tools_image" bash -c "$1"
 }
 
 echo "== DNS: verifying $test_domain resolves to the proxy on both dns-standard and dns-ssl =="
