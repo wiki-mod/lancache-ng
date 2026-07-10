@@ -55,3 +55,23 @@ setup() {
     [ "$status" -eq 0 ]
     grep -qx 'CACHE_DIR_STANDARD=/opt/lancache-ng/cache' "$env_file"
 }
+
+@test "fresh pinned release install carries derived VERSION tag into image tag resolution" {
+    release_dir="$BATS_TEST_TMPDIR/release-archive"
+    missing_env="$BATS_TEST_TMPDIR/missing.env"
+    mkdir -p "$release_dir"
+    printf '%s\n' '0.2.0' > "$release_dir/VERSION"
+
+    SCRIPT_DIR="$release_dir"
+    export SCRIPT_DIR
+    unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG
+
+    channel=$(resolve_lancache_image_channel "$missing_env")
+
+    run env SCRIPT_DIR="$release_dir" LANCACHE_IMAGE_CHANNEL="$channel" LANCACHE_IMAGE_TAG= \
+        bash -c '. "$1"; resolve_lancache_image_tag "$2"' _ "$helper_file" "$missing_env"
+
+    [ "$status" -eq 0 ]
+    [ "$channel" = "pinned" ]
+    [ "$output" = "v0.2.0" ]
+}
