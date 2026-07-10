@@ -51,16 +51,18 @@ printf '\n# Added by scripts/ssl-mitm-cache-simulation.sh for issue #597 -- not 
 
 # Plain `docker build` uses the legacy builder, which does not understand
 # the dns Dockerfile's `RUN --mount=type=secret` lines (BuildKit-only) --
-# confirmed directly: "the --mount option requires BuildKit". buildx is
-# already set up on this runner (used elsewhere in this project's CI, e.g.
-# the container-scan job); --load makes the result available to `docker
-# run`/`docker compose` afterward, same as a normal build.
-docker buildx build --load --pull -q \
+# confirmed directly: "the --mount option requires BuildKit". `docker
+# buildx build` needs the buildx CLI plugin, which the build-tools image
+# this script runs inside does not have installed (confirmed directly:
+# "unknown flag: --load") -- DOCKER_BUILDKIT=1 gets the same BuildKit
+# support from the classic docker CLI talking to the same daemon, without
+# needing that plugin.
+DOCKER_BUILDKIT=1 docker build --pull -q \
     --build-arg "BUILD_TOOLS_IMAGE=${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
     -t "lancache-ng-mitm-sim-dns:$run_id" \
     "$dns_context" >/dev/null
 
-docker buildx build --load --pull -q \
+DOCKER_BUILDKIT=1 docker build --pull -q \
     --build-context "dns-domains=$dns_context" \
     -t "lancache-ng-mitm-sim-proxy:$run_id" \
     services/proxy >/dev/null
