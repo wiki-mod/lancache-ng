@@ -370,7 +370,18 @@ jobs:
           # - manual prod keeps one normal root knob (LANCACHE_STATE_DIR)
           # - optional per-service keys are preserved only for real legacy/custom paths
           # - setup.sh must not treat a bare /srv/lancache directory as active state
-          for key in CACHE_DIR_STANDARD CACHE_DIR_SSL PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+          #
+          # CACHE_DIR_STANDARD/CACHE_DIR_SSL are deliberately NOT in this loop.
+          # Every other key here is a legitimate, permanent advanced override
+          # an operator may still want (see set_optional_env_path_override_if_needed's
+          # own "preserve intentionally templated/custom values" behavior). The two
+          # cache keys are different: they are being fully retired in favor of one
+          # shared CACHE_DIR, so setup.sh update collapses them into CACHE_DIR and
+          # unconditionally removes them (remove_env_key) instead of preserving them
+          # as an optional override -- keeping them "preservable" would recreate the
+          # exact split-brain (two possible cache locations) this migration exists
+          # to eliminate.
+          for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
               || { echo "::error::setup.sh update must preserve ${key} only when legacy/custom state would otherwise move away from the one-root contract."; exit 1; }
             grep -F "${key}" deploy/prod/.env >/dev/null \

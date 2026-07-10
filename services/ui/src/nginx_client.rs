@@ -37,6 +37,15 @@ pub async fn get_stub_status(client: &reqwest::Client, base_url: &str) -> Option
     parse_stub_status(&text)
 }
 
+// nginx's stub_status module always renders exactly this 4-line, fixed-field
+// text format (see http://nginx.org/en/docs/http/ngx_http_stub_status_module.html):
+//   Active connections: N
+//   server accepts handled requests
+//    A H R
+//   Reading: X Writing: Y Waiting: Z
+// The "accepts handled requests" line is a label; its three numbers are on
+// the line *after* it, which is why that branch looks at `lines[i + 1]`
+// instead of the matched line itself.
 fn parse_stub_status(text: &str) -> Option<NginxStatus> {
     let mut s = NginxStatus::default();
     let lines: Vec<&str> = text.lines().collect();
@@ -96,6 +105,10 @@ pub struct LogStats {
     pub hit_pct: f64,
 }
 
+// Streams the file line-by-line rather than reading it fully into memory,
+// keeping only the last `limit` lines in a bounded ring buffer (VecDeque).
+// Access logs can grow to gigabytes, so this avoids holding the whole file
+// in memory just to show the operator its most recent entries.
 pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
     if limit == 0 {
         return vec![];
@@ -172,13 +185,12 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
     }
 
     // Only allow supported cache locations. /opt/lancache-ng is the normal
-    // production install path; /var/cache and /data remain container/dev paths.
+    // production install path; /var/cache and /data remain container/dev
+    // paths. There is only one shared CACHE_DIR as of v0.2.0 (no per-mode
+    // standard/ssl subdirectory split), so this list intentionally has no
+    // "/standard" or "/ssl" suffixed entries.
     let allowed_prefixes = [
         "/opt/lancache-ng/cache",
-        "/opt/lancache-ng/cache/standard",
-        "/opt/lancache-ng/cache/ssl",
-        "/var/cache/standard",
-        "/var/cache/ssl",
         "/var/cache/proxy",
         "/data/lancache",
     ];
@@ -189,6 +201,12 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         return 0.0;
     }
 
+    // Shells out to `du` rather than walking the tree in Rust: recursively
+    // summing file sizes for a cache directory that can hold hundreds of GB
+    // across many files is exactly what `du` is optimized for. This blocks
+    // the calling thread, which is why routes/dashboard.rs runs it inside
+    // `tokio::task::spawn_blocking` instead of calling it directly from an
+    // async handler.
     let output = Command::new("du").args(["-sb", path]).output();
     match output {
         Ok(out) => {
@@ -216,6 +234,15 @@ fn unique_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
     unique
 }
 
+// Matches nginx's custom lancache log_format (see services/proxy/nginx.conf).
+// Capture groups, in order:
+//   1: client IP        2: timestamp       3: HTTP method
+//   4: request path     5: HTTP status     6: response bytes
+//   7: cache status (nginx $upstream_cache_status: HIT/MISS/EXPIRED/...)
+//   8: request Host header
+// `parse_log_line` and `get_log_stats` both index into `caps[N]` using these
+// fixed positions, so the group count/order here and the log_format
+// directive in nginx.conf must stay in sync.
 fn log_regex() -> &'static Regex {
     LOG_REGEX.get_or_init(|| {
         Regex::new(r#"^(\S+) - \[([^\]]+)\] "(\S+) (\S+) [^"]+" (\d+) (\d+) "([^"]*)" "([^"]*)""#)

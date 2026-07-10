@@ -109,7 +109,7 @@ services:
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
-      - proxy-cache:/cache/standard
+      - proxy-cache:/var/cache/lancache
     depends_on:
       - docker-socket-proxy
     networks:
@@ -195,8 +195,7 @@ services:
       - PROXY_SSL_SERVICE=proxy
       - STANDARD_LOG=/var/log/nginx/access.log
       - SSL_LOG=/var/log/nginx/access.log
-      - STANDARD_CACHE_DIR=/var/cache/proxy
-      - SSL_CACHE_DIR=/var/cache/proxy
+      - CACHE_DIR=/var/cache/proxy
       - CACHE_MAX_GB=1
       - STANDARD_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
       - SSL_IP=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}

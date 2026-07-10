@@ -609,11 +609,9 @@ SSL_ENABLED=1
 
 LANCACHE_STATE_DIR=/opt/lancache-ng
 
-# Optional per-service overrides. Leave unset unless you intentionally split
-# state across multiple disks; compose derives normal state paths from
-# LANCACHE_STATE_DIR.
-# CACHE_DIR_STANDARD=/opt/lancache-ng/cache
-# CACHE_DIR_SSL=/opt/lancache-ng/cache
+# Optional cache directory override. Leave unset unless you intentionally place
+# the cache on a separate disk; compose derives it from LANCACHE_STATE_DIR.
+# CACHE_DIR=/opt/lancache-ng/cache
 
 CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512

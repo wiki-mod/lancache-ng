@@ -28,167 +28,100 @@
     {% endif %}
   </div>
 
-  <!-- Cache-Übersicht -->
-  {% if shared_cache %}
+  <!-- Cache overview: cache_dir/cache_used_gb/cache_pct come from a single
+       shared CACHE_DIR (see config.rs), used by both standard and SSL mode.
+       There is no separate standard-mode/SSL-mode cache size to show here. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-slate-200">Gemeinsamer Proxy-Cache</h2>
-      <span class="text-xs text-slate-500">HTTP + HTTPS · ein Cache</span>
+      <div>
+        <h2 class="font-semibold text-slate-200">Shared proxy cache</h2>
+        <span class="text-xs text-slate-500">HTTP + HTTPS · one cache</span>
+      </div>
+      <span class="text-xs text-slate-500 font-mono">{{ cache_dir }}</span>
     </div>
     <div class="mb-3">
       <div class="flex justify-between text-sm mb-1">
-        <span class="text-slate-400">Speicher</span>
-        <span class="text-white font-mono">{{ shared_cache_used_gb }} / {{ shared_cache_max_gb }} GB</span>
+        <span class="text-slate-400">Storage</span>
+        <span class="text-white font-mono">{{ cache_used_gb }} / {{ cache_max_gb }} GB</span>
       </div>
       <div class="w-full bg-slate-700 rounded-full h-2">
-        <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ shared_cache_pct }}%"></div>
+        <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ cache_pct }}%"></div>
       </div>
-      <p class="text-xs text-slate-500 mt-1">{{ shared_cache_pct }}% belegt</p>
+      <p class="text-xs text-slate-500 mt-1">{{ cache_pct }}% used</p>
     </div>
   </div>
+  <!-- Per-mode connection metrics: standard mode (services/proxy-standard,
+       HTTP caching + HTTPS SNI passthrough, no CA cert needed) and SSL mode
+       (services/proxy, HTTP + HTTPS with TLS interception) are two separate
+       running nginx processes with independent stub_status endpoints, even
+       though they now share the one cache directory above. The `id`
+       attributes on the numbers below are updated live by the auto-refresh
+       script at the bottom of this template, which polls GET /api/metrics
+       (routes/dashboard.rs::metrics_api) every few seconds. -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">Standard-Modus</h2>
-        <span class="text-xs text-slate-500">HTTP · SNI-Passthrough</span>
+        <h2 class="font-semibold text-slate-200">Standard mode</h2>
+        <span class="text-xs text-slate-500">HTTP · SNI passthrough</span>
       </div>
       {% if standard_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3">
+      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="standard-metrics">
         <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.active }}</p>
-          <p class="text-xs text-slate-400">Verbindungen</p>
+          <p class="text-2xl font-bold text-white" id="standard-active">{{ standard_status.active }}</p>
+          <p class="text-xs text-slate-400">Connections</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.requests }}</p>
+          <p class="text-2xl font-bold text-white" id="standard-requests">{{ standard_status.requests }}</p>
           <p class="text-xs text-slate-400">Requests</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Wartend</p>
+          <p class="text-2xl font-bold text-white" id="standard-waiting">{{ standard_status.waiting }}</p>
+          <p class="text-xs text-slate-400">Waiting</p>
         </div>
       </div>
       {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
+      <p class="text-sm text-slate-500 mt-3">Proxy unreachable</p>
       {% endif %}
     </div>
 
     <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">SSL-Modus</h2>
+        <h2 class="font-semibold text-slate-200">SSL mode</h2>
         <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
       </div>
       {% if not ssl_enabled %}
       <p class="text-sm text-slate-500 mt-3">SSL mode disabled</p>
       {% elif ssl_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3">
+      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="ssl-metrics">
         <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
-          <p class="text-xs text-slate-400">Verbindungen</p>
+          <p class="text-2xl font-bold text-white" id="ssl-active">{{ ssl_status.active }}</p>
+          <p class="text-xs text-slate-400">Connections</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.requests }}</p>
+          <p class="text-2xl font-bold text-white" id="ssl-requests">{{ ssl_status.requests }}</p>
           <p class="text-xs text-slate-400">Requests</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Wartend</p>
+          <p class="text-2xl font-bold text-white" id="ssl-waiting">{{ ssl_status.waiting }}</p>
+          <p class="text-xs text-slate-400">Waiting</p>
         </div>
       </div>
       {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
+      <p class="text-sm text-slate-500 mt-3">Proxy unreachable</p>
       {% endif %}
     </div>
   </div>
-  {% else %}
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 
-    <!-- Standard Cache -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">Standard Cache</h2>
-        <span class="text-xs text-slate-500">HTTP · SNI-Passthrough</span>
-      </div>
-      <div class="mb-3">
-        <div class="flex justify-between text-sm mb-1">
-          <span class="text-slate-400">Speicher</span>
-          <span class="text-white font-mono">{{ standard_used_gb }} / {{ standard_max_gb }} GB</span>
-        </div>
-        <div class="w-full bg-slate-700 rounded-full h-2">
-          <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ standard_pct }}%"></div>
-        </div>
-        <p class="text-xs text-slate-500 mt-1">{{ standard_pct }}% belegt</p>
-      </div>
-      {% if standard_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
-        <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.active }}</p>
-          <p class="text-xs text-slate-400">Verbindungen</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.requests }}</p>
-          <p class="text-xs text-slate-400">Requests</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ standard_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Wartend</p>
-        </div>
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
-      {% endif %}
-    </div>
-
-    <!-- SSL Cache -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">SSL Cache</h2>
-        <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
-      </div>
-      {% if ssl_enabled %}
-      <div class="mb-3">
-        <div class="flex justify-between text-sm mb-1">
-          <span class="text-slate-400">Speicher</span>
-          <span class="text-white font-mono">{{ ssl_used_gb }} / {{ ssl_max_gb }} GB</span>
-        </div>
-        <div class="w-full bg-slate-700 rounded-full h-2">
-          <div class="bg-purple-500 h-2 rounded-full transition-all" style="width: {{ ssl_pct }}%"></div>
-        </div>
-        <p class="text-xs text-slate-500 mt-1">{{ ssl_pct }}% belegt</p>
-      </div>
-      {% endif %}
-      {% if not ssl_enabled %}
-      <p class="text-sm text-slate-500 mt-3">SSL mode disabled</p>
-      {% elif ssl_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3 border-t border-slate-700 pt-3">
-        <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.active }}</p>
-          <p class="text-xs text-slate-400">Verbindungen</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.requests }}</p>
-          <p class="text-xs text-slate-400">Requests</p>
-        </div>
-        <div>
-          <p class="text-2xl font-bold text-white">{{ ssl_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Wartend</p>
-        </div>
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy nicht erreichbar</p>
-      {% endif %}
-    </div>
-  </div>
-  {% endif %}
-
-  <!-- Cache-Trefferquote -->
+  <!-- Cache hit-rate summary, computed from parsing the access log tail
+       (see nginx_client::get_log_stats) rather than from nginx itself. -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="card text-center">
       <p class="text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
-      <p class="text-sm text-slate-400 mt-1">Cache-Trefferquote</p>
+      <p class="text-sm text-slate-400 mt-1">Cache hit rate</p>
     </div>
     <div class="card text-center">
       <p class="text-3xl font-bold text-white">{{ log_stats.total_requests }}</p>
-      <p class="text-sm text-slate-400 mt-1">Requests gesamt</p>
+      <p class="text-sm text-slate-400 mt-1">Total requests</p>
     </div>
     <div class="card text-center">
       <p class="text-3xl font-bold text-emerald-400">{{ log_stats.hits }}</p>
@@ -196,22 +129,24 @@
     </div>
     <div class="card text-center">
       <p class="text-3xl font-bold text-white">{{ log_stats.total_bytes_gb | round(precision=1) }} GB</p>
-      <p class="text-sm text-slate-400 mt-1">Daten ausgeliefert</p>
+      <p class="text-sm text-slate-400 mt-1">Data served</p>
     </div>
   </div>
 
-  <!-- Letzte Requests -->
+  <!-- Recent requests: last N lines tailed from the access log
+       (nginx_client::parse_log_tail), newest-to-oldest is not guaranteed —
+       this is simply the tail of the file. -->
   <div class="card">
-    <h2 class="font-semibold text-slate-200 mb-3">Letzte Anfragen (Proxy)</h2>
+    <h2 class="font-semibold text-slate-200 mb-3">Recent requests (proxy)</h2>
     {% if recent_logs %}
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead>
           <tr class="text-slate-400 text-left border-b border-slate-700">
             <th class="pb-2 pr-4 font-medium">Host</th>
-            <th class="pb-2 pr-4 font-medium">Pfad</th>
+            <th class="pb-2 pr-4 font-medium">Path</th>
             <th class="pb-2 pr-4 font-medium">Status</th>
-            <th class="pb-2 pr-4 font-medium">Größe</th>
+            <th class="pb-2 pr-4 font-medium">Size</th>
             <th class="pb-2 font-medium">Cache</th>
           </tr>
         </thead>
@@ -243,9 +178,48 @@
       </table>
     </div>
     {% else %}
-    <p class="text-slate-500 text-sm">Noch keine Anfragen protokolliert.</p>
+    <p class="text-slate-500 text-sm">No requests logged yet.</p>
     {% endif %}
   </div>
 
 </div>
+<script>
+  // Polls GET /api/metrics (routes/dashboard.rs::metrics_api) every 10s and
+  // patches just the connection-count numbers in place, so the dashboard's
+  // live connection counters stay current without re-running the much
+  // heavier cache-size/log-tail work behind a full page reload. If a
+  // section isn't present (e.g. SSL mode disabled, or the proxy was
+  // unreachable on initial page load so the numbered elements were never
+  // rendered), its update is silently skipped.
+  function updateMetricsSection(prefix, status) {
+    if (!status) {
+      return;
+    }
+    const active = document.getElementById(prefix + '-active');
+    const requests = document.getElementById(prefix + '-requests');
+    const waiting = document.getElementById(prefix + '-waiting');
+    if (active) active.textContent = status.active;
+    if (requests) requests.textContent = status.requests;
+    if (waiting) waiting.textContent = status.waiting;
+  }
+
+  async function refreshDashboardMetrics() {
+    try {
+      const response = await fetch('/api/metrics');
+      if (!response.ok) {
+        return;
+      }
+      const data = await response.json();
+      updateMetricsSection('standard', data.standard);
+      if (data.ssl_enabled) {
+        updateMetricsSection('ssl', data.ssl);
+      }
+    } catch (err) {
+      // Network hiccup or proxy unreachable — leave the last known values
+      // on screen and try again on the next interval tick.
+    }
+  }
+
+  setInterval(refreshDashboardMetrics, 10000);
+</script>
 {% endblock %}

@@ -205,7 +205,7 @@ services:
     env_file:
       - ../../config/prod/watchdog.env
     volumes:
-      - proxy-cache:/cache/standard
+      - proxy-cache:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
@@ -429,8 +429,7 @@ services:
       - PROXY_SSL_SERVICE=proxy
       - STANDARD_LOG=/var/log/nginx/access.log
       - SSL_LOG=/var/log/nginx/access.log
-      - STANDARD_CACHE_DIR=/var/cache/proxy
-      - SSL_CACHE_DIR=/var/cache/proxy
+      - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
       - STANDARD_IP=${IP_STANDARD}
@@ -508,9 +507,9 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      # CACHE_DIR_STANDARD stays available as an advanced override, but the
+      # CACHE_DIR stays available as an advanced override, but the
       # normal production path is derived from the shared state root.
-      device: ${CACHE_DIR_STANDARD:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
+      device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
   watchdog-status:
   netdataconfig:
