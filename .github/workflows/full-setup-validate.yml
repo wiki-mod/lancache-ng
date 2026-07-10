@@ -305,14 +305,21 @@ jobs:
     # Runs the real setup.sh CLI end-to-end (fresh install through its
     # interactive prompts, update/migration, and one rollback-safety
     # scenario) instead of only bash -n syntax checking it -- see issue
-    # #403. Deliberately independent of full-setup-validate above: that job
-    # exercises deploy/full-setup/docker-compose.yml directly; this one
-    # exercises the setup.sh installer itself, which generates and manages
-    # its own deploy/quickstart-derived install directory. Chained after
-    # ui-nats-dns-integration-simulation anyway (not because it shares the
-    # fixed validation-network IPs -- it doesn't, setup.sh manages its own
-    # install directory and compose project) but to avoid piling concurrent
-    # Docker-heavy jobs onto the same shared runner tier.
+    # #403. Independent of full-setup-validate above in what it exercises
+    # (that job runs deploy/full-setup/docker-compose.yml directly; this one
+    # runs the setup.sh installer itself, which generates and manages its
+    # own deploy/quickstart-derived install directory), but both jobs bind
+    # the same host ports (127.0.0.1:443, :8080, ...) on this shared
+    # self-hosted runner tier. Confirmed directly: running both jobs
+    # concurrently on the same workflow_dispatch produced "port is already
+    # allocated" here and a flaky "ui did not become healthy" in the other
+    # job. Chained after ui-nats-dns-integration-simulation (the last job in
+    # the full-setup-validate -> ssl-mitm-cache-simulation ->
+    # ui-nats-dns-integration-simulation sequence, all of which were added
+    # after this port-collision test and were never specifically re-tested
+    # against setup-cli-simulation) rather than directly after
+    # full-setup-validate, so this job is guaranteed to never run
+    # concurrently with any of them, not just the one it was tested against.
     name: setup.sh CLI simulation
     needs: ui-nats-dns-integration-simulation
     if: always()
