@@ -16,27 +16,6 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-# This runs on a shared self-hosted runner tier that also runs
-# full-setup-validate's own compose stack, sequenced but not necessarily
-# with any cooldown gap between one job's teardown and the next job's
-# start. Fresh install below binds 127.0.0.1:80/443/53/8080 directly (see
-# the IP_STANDARD note further down), so wait for those to actually be free
-# on the host's Docker daemon rather than racing a just-finished teardown.
-# Confirmed directly: hit "port is already allocated" here immediately
-# after full-setup-validate's own teardown step reported success.
-wait_for_host_ports_free() {
-    local attempt bound
-    for attempt in $(seq 1 12); do
-        bound="$(docker ps --format '{{.Ports}}' | grep -E '127\.0\.0\.1:(80|443|53|8080)->' || true)"
-        [[ -z "$bound" ]] && return 0
-        sleep 5
-    done
-    echo "::error::Host ports 80/443/53/8080 on 127.0.0.1 are still bound by another container after waiting; refusing to start a colliding stack." >&2
-    docker ps --format '{{.Names}}\t{{.Ports}}'
-    return 1
-}
-wait_for_host_ports_free
-
 # Without this, git inside this container treats the bind-mounted repo (owned
 # by the host runner's UID, not this container's root) as having "dubious
 # ownership" and refuses every git command, including the `git describe
@@ -138,7 +117,8 @@ wait_for_stack_healthy() {
 
 echo "== Phase 1: fresh install (expect-driven) =="
 
-expect -f - <<'EXPECT_SCRIPT'
+run_fresh_install_expect() {
+    expect -f - <<'EXPECT_SCRIPT'
 set timeout 60
 log_user 1
 set install_dir $env(SETUP_SIM_INSTALL_DIR)
@@ -190,6 +170,41 @@ if {$exit_code != 0} {
     exit $exit_code
 }
 EXPECT_SCRIPT
+}
+
+# This runs on a shared self-hosted runner tier that also runs
+# full-setup-validate's own compose stack, sequenced but not guaranteed to
+# leave a cooldown gap between one job's teardown and the next job's start.
+# Confirmed directly: hit "port is already allocated" for 127.0.0.1:443
+# immediately after the other job's teardown step reported success, even
+# though a direct check on the runner afterward found no lingering
+# container or bound port -- a transient release race, not a stuck
+# leftover. Retries a few times on this specific, known-transient error
+# instead of trying to precisely time a pre-check, mirroring the existing
+# retry-on-transient-GHCR-403 pattern already used elsewhere in this
+# project's CI.
+fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
+attempt=1
+while true; do
+    if run_fresh_install_expect >"$fresh_install_log" 2>&1; then
+        cat "$fresh_install_log"
+        break
+    fi
+    cat "$fresh_install_log"
+    if grep -qF 'port is already allocated' "$fresh_install_log" && [[ "$attempt" -lt 5 ]]; then
+        echo "::warning::Fresh install attempt $attempt hit a transient port-allocation race; retrying." >&2
+        docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env" down -v --remove-orphans >/dev/null 2>&1 || true
+        rm -rf "$install_dir"
+        install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
+        export SETUP_SIM_INSTALL_DIR="$install_dir"
+        fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
+        attempt=$((attempt + 1))
+        sleep 10
+        continue
+    fi
+    echo "::error::Fresh install failed (attempt $attempt)." >&2
+    exit 1
+done
 
 [[ -f "$install_dir/.env" ]] \
     || { echo "::error::Fresh install did not produce $install_dir/.env." >&2; exit 1; }
