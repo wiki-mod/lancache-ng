@@ -1,283 +1,583 @@
 # lancache-ng Threat Model
 
-This document outlines the security threats that lancache-ng is designed to protect against, and identifies risks that are out of scope.
+> **Last reviewed against release: `v0.2.0`**
+> **Last review date: 2026-07-09**
+>
+> This document must be re-audited for every release. It describes the security
+> posture of a *specific* architecture, and that architecture changes between
+> versions. Wording alone going stale (e.g. a service renamed, a mitigation
+> narrowed) silently turns this file into misinformation, which is worse than
+> having no threat model. Before tagging a release, work through
+> [How to re-audit this document](#how-to-re-audit-this-document-per-release) and
+> bump the marker above.
 
-## Assets Protected
+This document outlines the security threats that lancache-ng is designed to
+protect against, the mitigations that actually exist in the current codebase,
+and the risks that are explicitly out of scope.
 
-1. **Network bandwidth**: Caching downloads locally reduces WAN bandwidth consumption
-2. **Download speed**: Clients receive faster downloads from the local cache vs. remote CDNs
-3. **Cache integrity**: Downloaded content should not be modified or poisoned
-4. **Client privacy (HTTP)**: HTTP traffic should be cached without unencrypted content being logged externally
-5. **Deployment confidentiality**: The cache itself should not be exposed to untrusted networks
+lancache-ng is a **trusted-LAN appliance**. It intercepts and caches
+game/software downloads for devices on a local network, optionally decrypting
+HTTPS via a locally-trusted CA. Its entire security model assumes the LAN is
+trusted; it is **not** hardened for internet exposure. Everything below is
+framed against that assumption.
 
-## Threat Model Overview
+---
 
-### Trust Boundaries
+## Component currency inventory
+
+A reviewer can use this table to see, at a glance, which parts of the system
+this document was last checked against. When a component's implementation
+changes in a release, update its row (and the threats that reference it) and set
+"Last verified" to that release. A row whose version lags the release marker at
+the top is a signal that its threats need re-checking.
+
+| Component | Primary source of truth | Last verified | Threats |
+|---|---|---|---|
+| DNS spoofing (PowerDNS RPZ) | `services/dns/entrypoint.sh`, `services/dns/cdn-domains.txt` | v0.2.0 | T1, T4, T11 |
+| TLS interception + local CA | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
+| Proxy request policy (client CIDR + host allowlists) | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/http.conf` | v0.2.0 | T2, T9 |
+| Admin UI authentication | `services/ui/src/main.rs`, `services/ui/src/config.rs` | v0.2.0 | T3 |
+| Docker access mediation (socket-proxy) | `deploy/quickstart/docker-compose.yml` | v0.2.0 | T6 |
+| DHCP — Kea mode | `services/dhcp/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12 |
+| DHCP — dnsmasq-proxy mode | `services/dhcp-proxy/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12, T13 |
+| NATS event bus + role-scoped credentials | `deploy/quickstart/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
+| Secondary-node registration / remote NATS | `deploy/prod/docker-compose.nats-secondary.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
+| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
+
+---
+
+## Assets to protect
+
+1. **Cache integrity** — cached content must not be modified or poisoned; a
+   poisoned entry is served to every subsequent client.
+2. **WAN bandwidth / download speed** — the reason the appliance exists; a
+   bypass or DoS that defeats caching degrades the service.
+3. **Client trust in the local CA (SSL mode only)** — the CA private key can mint
+   certificates every client trusts. Its compromise is the highest-impact event
+   in the whole system.
+4. **Control-plane integrity** — the Admin UI, PowerDNS API, Kea Control Agent
+   API, NATS event bus, and the Docker control path. Anyone who can drive these
+   can redirect traffic, poison the cache, or (via Docker) take the host.
+5. **Deployment confidentiality** — the appliance must not be reachable from
+   untrusted networks.
+
+Note on **client privacy**: in SSL mode the proxy decrypts client HTTPS
+downloads by design. This is an intentional capability, not an asset the system
+protects *from the operator*. It is called out again in "Out of scope".
+
+---
+
+## Trust boundaries
 
 ```
-┌─────────────────────────────────┐
-│   TRUSTED: LAN Boundary         │
-├─────────────────────────────────┤
-│  lancache-ng                    │
-│  - Proxy (nginx)                │
-│  - DNS (PowerDNS)               │
-│  - Admin UI                     │
-│  - NATS event bus               │
-├─────────────────────────────────┤
-│  UNTRUSTED: Internet (WAN)      │
-│  - CDN servers                  │
-│  - External DNS                 │
-│  - Potential attackers          │
-└─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  UNTRUSTED: Internet (WAN)                                             │
+│    - Real CDN origins            - External/public DNS resolvers       │
+│    - Potential MITM on WAN path  - Internet-based attackers            │
+└───────────────────────────────▲──────────────────────────────────────┘
+                                 │  proxy → CDN over TLS (verified),
+                                 │  resolved via NGINX_UPSTREAM_RESOLVER
+                                 │  (real DNS, never the LAN spoof DNS)
+┌───────────────────────────────┴──────────────────────────────────────┐
+│  TRUSTED: LAN boundary  (core assumption: every device here is trusted)│
+│                                                                        │
+│  ┌──────────────── lancache-ng appliance (single Docker host) ──────┐ │
+│  │  DATA PLANE                          CONTROL PLANE                │ │
+│  │   - proxy (nginx): HTTP cache,        - Admin UI (auth-gated)     │ │
+│  │     SSL-mode MITM cache, standard-     - PowerDNS HTTP API        │ │
+│  │     mode SNI passthrough              - Kea Control Agent API     │ │
+│  │   - DNS (PowerDNS auth + recursor)      (port 8000, host-net)     │ │
+│  │   - DHCP (Kea) OR dnsmasq-proxy       - NATS event bus (4222)     │ │
+│  │                                       - docker-socket-proxy       │ │
+│  │  Local CA key (SSL mode) lives on       (HAProxy allowlist) ──────┼─┼─► Docker
+│  │  host: <install>/certs/ca.key                                    │ │   daemon
+│  └──────────────────────────────────────────────────────────────────┘ │
+│                                                                        │
+│  LAN clients: PCs, Steam Deck, phones (install CA for SSL mode)        │
+│  Consoles (PS5/Xbox/Switch): cannot install CA → excluded from spoof   │
+│    list → use appliance purely as an unrestricted DNS resolver         │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key assumption**: All clients and services on the LAN are considered trusted. Attackers are assumed to be:
-- External (attempting to exploit the cache from the internet)
-- LAN-based (compromised client or internal attacker)
+**Key assumptions:**
+
+- Every device on the LAN is trusted. There is **no** isolation between clients.
+- Attackers are modelled as either (a) external/WAN, or (b) a compromised or
+  rogue device that has somehow reached the LAN despite assumption 1.
+- The operator is trusted and is responsible for firewalling the appliance's
+  control-plane ports off from any untrusted network segment.
 
 ---
 
-## Threat Analysis
+## Architecture in scope (for context)
 
-### Threat 1: Cache Poisoning from CDN
+Threats below reference these mechanisms. This is a summary, not the
+authoritative description — see `CLAUDE.md` and the per-component sources in the
+inventory table.
 
-**Threat**: An attacker compromises a CDN or intercepts traffic to a CDN, injecting malicious content that gets cached.
-
-**Likelihood**: Low (CDNs use HTTPS; would require CDN compromise or network-level interception)
-
-**Impact**: High (all clients would receive poisoned content)
-
-**Mitigation**:
-- nginx validates upstream TLS certificates via `proxy_ssl_verify` (enabled for real CDN connections)
-- Use real DNS (`NGINX_UPSTREAM_RESOLVER`, default `8.8.8.8 8.8.4.4`) for upstream resolution, not the spoofed DNS
-- Monitor cache hit rates for anomalies
-
-**Residual Risk**: Medium (requires external compromise, not a local design flaw)
-
----
-
-### Threat 2: LAN Attacker Poisoning the Cache
-
-**Threat**: A compromised LAN client or rogue device sends crafted requests to the cache proxy, attempting to inject malicious content into the cache.
-
-**Likelihood**: Medium (depends on LAN security)
-
-**Impact**: High (poisoned content served to other clients)
-
-**Mitigation**:
-- Cache key includes the request Host header (`$host$uri`)
-- nginx validates upstream responses before caching
-- Implement rate limiting and request validation if needed
-
-**Residual Risk**: Medium (mitigated by proper LAN isolation)
+- **DNS spoofing** — PowerDNS (authoritative + recursor + a NATS subscriber) in
+  one container. At startup `services/dns/entrypoint.sh` builds an **RPZ zone**
+  from `cdn-domains.txt`, pointing each listed CDN hostname (and its wildcards)
+  at the proxy IP via A/AAAA records. Everything *not* listed is resolved
+  normally by the recursor against real upstream DNS.
+- **Two proxy modes** (one nginx container, selected by which DNS IP the client
+  uses): **standard mode** reads SNI via `ssl_preread` and forwards HTTPS blind
+  to the real CDN (no CA needed); **SSL mode** terminates TLS using a per-domain
+  wildcard cert signed by the local CA, caches, then re-fetches from the origin
+  over verified TLS.
+- **Local CA (SSL mode)** — generated on first start (RSA-4096, 10-year) into
+  `<install>/certs/`. `ca.key` is the crown jewel and is gitignored; `ca.crt` is
+  a public certificate distributed to clients.
+- **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default / `strict`)
+  controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
+  optionally restricts which client source networks the proxy answers at all
+  (returns 403 otherwise).
+- **Admin UI** — Rust/axum service. Fail-closed auth (see T3). Reaches Docker
+  only through the scoped `docker-socket-proxy`.
+- **DHCP** — optional, three mutually-exclusive modes (`disabled` / `kea` /
+  `dnsmasq-proxy`) so clients receive the appliance's DNS automatically.
+- **NATS event bus** — carries DNS record changes from the Admin UI to the
+  PowerDNS node(s), including optional remote **secondary** DNS nodes.
 
 ---
 
-### Threat 3: Unauthorized Access to Admin UI
+## Threat analysis
 
-**Threat**: An attacker gains access to the Admin UI and modifies cache settings, purges cache, or stops services.
+Each threat lists likelihood and impact *within the trusted-LAN model*.
+"Likelihood: High (if exposed to internet)" means the risk is realised primarily
+when the operator breaks the core assumption by exposing a control-plane port.
 
-**Likelihood**: Low (authentication required by default; opt-out requires explicit configuration)
+### T1: Cache poisoning from a compromised/MITM'd CDN
 
-**Impact**: High (service disruption, cache poisoning)
+**Threat**: An attacker who compromises a CDN, or intercepts the proxy→CDN path,
+injects malicious content that the proxy caches and serves to every client.
 
-**Mitigation**:
-- Built-in authentication is required by default: both `UI_AUTH_USER` and `UI_AUTH_PASSWORD` environment variables must be set, or the UI fails to start
-- Admin UI can only start without authentication if explicitly opted in via `ALLOW_INSECURE_UI=true`
-- Restrict Admin UI access to trusted IPs via firewall
-- Use network policies to limit Admin UI exposure
-- Do not set `ALLOW_INSECURE_UI=true` on internet-reachable deployments
+**Likelihood**: Low · **Impact**: High
 
-**Residual Risk**: Low (authentication enabled by default; risk only exists if operator explicitly disables it via `ALLOW_INSECURE_UI=true` on an exposed deployment)
+**Mitigations**:
+- The proxy fetches origins over TLS with `proxy_ssl_verify on` and the Debian CA
+  bundle (`proxy_ssl_trusted_certificate`); see also T8.
+- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`),
+  never the LAN spoof DNS — `services/proxy/entrypoint.sh` refuses to start if the
+  resolver is set to a lancache DNS/proxy IP, preventing a resolve-to-self loop.
+- Cache key is `$host$uri` (query-string signatures stripped), so a per-request
+  signature cannot be used to smuggle a distinct poisoned object under a shared
+  key without also passing origin validation.
 
----
-
-### Threat 4: DNS Spoofing Bypass or Failure
-
-**Threat**: An attacker tricks the cache or client into using a malicious DNS server, bypassing the cache.
-
-**Likelihood**: Low (clients are pre-configured to use the cache's DNS)
-
-**Impact**: Medium (clients bypass cache but no local compromise)
-
-**Mitigation**:
-- Document DNS configuration for clients
-- Use static IP binding for the cache's DNS servers
-- Monitor DNS query patterns for anomalies
-
-**Residual Risk**: Low (user responsibility to configure DNS correctly)
+**Residual risk**: Medium — a genuine CDN compromise or trusted-CA misissuance is
+outside the appliance's control.
 
 ---
 
-### Threat 5: NATS Event Bus Exposure
+### T2: LAN client poisons the cache
 
-**Threat**: An untrusted external client connects to the NATS event bus (port 4222) and publishes malicious events or retrieves cache metadata.
+**Threat**: A compromised or rogue LAN device sends crafted requests to trick the
+proxy into caching attacker-controlled content under a legitimate key.
 
-**Likelihood**: High (if exposed to internet)
+**Likelihood**: Medium · **Impact**: High (poison served to all clients)
 
-**Impact**: Medium (service disruption, information disclosure)
+**Mitigations**:
+- Cache key includes the `Host` header (`$host$uri`); responses are only cached
+  after the origin fetch succeeds over verified TLS.
+- `PROXY_SECURITY_MODE=strict` limits proxied hosts to those in
+  `cdn-ssl-domains.txt` (deny-by-default `$cdn_host_allowed` map), removing the
+  "proxy anything" behaviour of the default `lazy` mode.
+- `PROXY_ALLOWED_CLIENT_CIDRS` optionally restricts which client networks the
+  proxy will answer at all (`$lancache_client_allowed` → 403).
 
-**Mitigation**:
-- Production Compose does not publish NATS port `4222` by default; it is exposed only on the internal Docker network.
-- Remote secondary deployments must opt in with `deploy/prod/docker-compose.nats-secondary.yml` and set `NATS_BIND_IP` to a trusted LAN/VPN interface.
-- NATS must be restricted to LAN-only via firewall rules when the optional secondary binding is enabled.
-- Enable NATS authentication (username/password) in production.
-- Use network policies to prevent internet-facing access.
-
-**Residual Risk**: Medium (requires user to configure firewall correctly)
-
----
-
-### Threat 6: Docker Socket Exposure
-
-**Threat**: An attacker gains access to the Docker socket and uses it to spawn privileged containers or escape the sandbox.
-
-**Likelihood**: Medium (socket is mounted in UI container)
-
-**Impact**: Critical (full host compromise)
-
-**Mitigation**:
-- Restrict Docker socket access via file permissions
-- Use Docker rootless mode if available
-- Enable Admin UI authentication (prevents unauthorized access to socket)
-- Do not run untrusted containers on the same host
-
-**Residual Risk**: Medium (documented in SECURITY.md; requires user awareness)
+**Residual risk**: Medium — `lazy` mode (the default) will proxy any requested
+host; strict mode and client CIDR limits are opt-in. Ultimately bounded by the
+trusted-LAN assumption.
 
 ---
 
-### Threat 7: TLS Certificate Spoofing (SSL Mode)
+### T3: Unauthorized access to the Admin UI
 
-**Threat**: An attacker intercepts client-to-proxy traffic and presents their own certificate, impersonating the cache.
+**Threat**: An attacker reaches the Admin UI and purges the cache, edits domain
+lists, switches DHCP mode, or drives the (scoped) Docker control path.
 
-**Likelihood**: Low (requires MitM on LAN or compromised network)
+**Likelihood**: Low on a firewalled LAN; High if the UI port is exposed to an
+untrusted network · **Impact**: High
 
-**Impact**: High (client data interception)
+**Mitigations** (verified in `services/ui/src/main.rs` / `config.rs`):
+- **Authentication is fail-closed by default.** `resolve_admin_ui_auth_mode`
+  requires *both* `UI_AUTH_USER` and `UI_AUTH_PASSWORD`. If both are unset the UI
+  **refuses to start** unless the operator has *explicitly* set
+  `ALLOW_INSECURE_UI=true`. A partial config (only one of the two) is a hard
+  startup error. There is no silent unauthenticated default.
+- A valid session cookie never substitutes for required Basic auth on protected
+  routes (regression-tested).
+- Startup also fails closed if `SECONDARY_REGISTRATION_TOKEN` is empty (an empty
+  token would authenticate any secondary; see T14).
 
-**Mitigation**:
-- Clients validate the cache's certificate (signed by the trusted LAN CA)
-- The CA certificate is installed explicitly on each client
-- Standard mode (SNI passthrough) does not use local TLS, avoiding this vector
-
-**Residual Risk**: Low (mitigated by client trust of CA certificate)
-
----
-
-### Threat 8: Upstream TLS Verification Bypass
-
-**Threat**: If upstream TLS verification is disabled or misconfigured, an attacker who can intercept proxy-to-CDN traffic could impersonate the CDN and poison cached content.
-
-**Likelihood**: Low (requires network-level interception between the proxy and CDN)
-
-**Impact**: High (malicious content could be cached and served to multiple clients)
-
-**Mitigation**:
-- nginx enables `proxy_ssl_verify on` for origin connections
-- nginx uses public upstream DNS resolvers, not the local spoofing DNS, to avoid resolving CDN origins back to the cache
-- The proxy container includes the Debian CA bundle and configures it with `proxy_ssl_trusted_certificate`
-- Monitor proxy logs for upstream certificate validation failures
-
-**Residual Risk**: Medium (certificate validation reduces MitM risk, but CDN compromise or trusted-CA misissuance remains possible)
+**Residual risk**: Low, and entirely operator-controlled: it exists only if the
+operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
+LAN. The quickstart binds the UI to the LAN IP by default and documents
+`UI_BIND_IP=127.0.0.1` to restrict it further.
 
 ---
 
-### Threat 9: Cache Size Exhaustion (DoS)
+### T4: DNS spoofing bypass or misdirection
 
-**Threat**: An attacker requests many unique large files, filling the cache disk and causing a denial of service.
+**Threat**: A client is pointed (or tricked into pointing) at a different
+resolver, bypassing the cache; or an attacker manipulates which hostnames the
+appliance spoofs.
 
-**Likelihood**: Medium (if LAN access is available)
+**Likelihood**: Low · **Impact**: Medium (cache bypass; no local compromise)
 
-**Impact**: Medium (service degradation, cache eviction)
+**Mitigations**:
+- Clients are configured to use the appliance's DNS (statically, or via a DHCP
+  mode — see T12).
+- The spoof set is an explicit allowlist (`cdn-domains.txt`); domains are
+  validated before being written into the RPZ zone. DNS record changes flow only
+  over the authenticated NATS event bus and the PowerDNS API (see T5), not from
+  arbitrary clients.
+- The PowerDNS API is fail-closed: `services/dns/entrypoint.sh` refuses to start
+  if `PDNS_API_KEY` is a known placeholder or shorter than 16 characters.
+- RPZ SOA serials are kept monotonic so secondary nodes converge correctly.
 
-**Mitigation**:
-- nginx `proxy_cache_use_stale` serves stale content if disk is full
-- Configure reasonable cache size limits in production
-- Monitor disk usage and alerts
-
-**Residual Risk**: Medium (no rate limiting by default; user must configure)
-
----
-
-### Threat 10: Client TLS Certificate Validation (SSL Mode)
-
-**Threat**: A client connects to SSL mode without installing the CA certificate.
-
-**Likelihood**: High (user error)
-
-**Impact**: Low (connection fails gracefully)
-
-**Mitigation**:
-- Provide clear documentation on CA certificate installation
-- Offer standard mode as an alternative (no CA cert required)
-- Client error is expected and intentional
-
-**Residual Risk**: Low (expected behavior; user must follow setup docs)
+**Residual risk**: Low — correct client DNS configuration is the operator's
+responsibility. A bypass costs caching, not integrity.
 
 ---
 
-## Out of Scope Threats
+### T5: NATS event bus abuse
 
-The following threats are **not addressed** by lancache-ng:
+**Threat**: An untrusted party connects to NATS (4222) and publishes forged DNS
+record changes, or subscribes to read cache/DNS metadata.
 
-1. **Internet-facing deployment attacks**: lancache-ng is not hardened for exposure to the internet. External DDoS, zero-day exploits, and advanced persistent threats are not addressed.
+**Likelihood**: High *if the port is exposed*; otherwise Low · **Impact**: High
+(forged DNS records reprogram what the appliance spoofs)
 
-2. **Multi-tenant isolation**: lancache-ng does not provide isolation between different users or organizations on the same LAN. A compromised client can see all cached content.
+**Mitigations** (verified in `deploy/quickstart/docker-compose.yml`):
+- NATS is **not published on the host** in the default deployment — it is only
+  reachable on the internal Docker network.
+- Access is **credentialled and role-scoped**, not a single shared account.
+  Three distinct users exist with least-privilege permissions:
+  - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
+  - **DNS writer** (standard node / reconciler) — publish DNS records + the
+    specific JetStream stream/consumer subjects it needs; subscribe to
+    `lancache.dns.>`.
+  - **DNS reader** (SSL node / secondaries) — consume-only JetStream permissions;
+    cannot publish DNS records.
+  All six credentials are required at startup (`:?` guards) so the bus never
+  comes up unauthenticated.
+- Remote/secondary access is opt-in only via
+  `deploy/prod/docker-compose.nats-secondary.yml` with `NATS_BIND_IP` bound to a
+  trusted LAN/VPN interface, and must be firewalled to that scope.
 
-3. **Encrypted client-to-CDN replay attacks**: Encrypted content is cached as-is. If a signature is valid only for the original requestor, the cached response may be used by others (this is a feature, not a bug, but may have privacy implications).
-
-4. **Hardware-level attacks**: Side-channel attacks (Spectre, Meltdown) on the host CPU are not mitigated.
-
-5. **Physical security**: Physical access to the cache host is not protected against. An attacker with physical access can compromise the system.
-
-6. **Supply chain attacks**: Compromised Docker images or dependencies from package repositories are not mitigated (rely on upstream security practices).
-
----
-
-## Deployment Risk Assessment
-
-### Low-Risk Deployment
-- Private LAN (home, office, datacenter)
-- Controlled network access
-- Admin UI behind firewall
-- NATS restricted to LAN
-- Authentication enabled on Admin UI
-
-### Medium-Risk Deployment
-- Same LAN but with many untrusted clients
-- No rate limiting configured
-- Weak firewall rules
-- NATS accessible to some untrusted segments
-
-### High-Risk Deployment
-- Internet-facing Admin UI (without reverse proxy auth)
-- NATS exposed to untrusted networks
-- Docker socket accessible to untrusted containers
-- No authentication on Admin UI
-- No firewall protection
+**Residual risk**: Medium — correct firewalling of the optional secondary
+binding is the operator's responsibility, and the role split limits but does not
+eliminate what a compromised *writer* credential could do (forge DNS records).
 
 ---
 
-## Security Roadmap
+### T6: Docker control-path abuse (host takeover)
 
-Potential future improvements:
+**Threat**: A compromised container or attacker reaches the Docker API and
+creates privileged containers or `exec`s into others, escaping to the host.
 
-1. **NATS authentication hardening**: Stronger token-based auth by default
-2. **Rate limiting and DDoS protection**: Configurable limits per IP
-3. **Audit logging**: Track Admin UI and cache operations for forensics
-4. **Content signature verification**: Optional GPG/HMAC validation of cached files
-5. **Prometheus metrics for security events**: Alert on anomalies
+**Likelihood**: Medium (a control plane with Docker reach is inherently
+sensitive) · **Impact**: Critical (full host compromise)
+
+**Mitigations / actual exposure** (verified in
+`deploy/quickstart/docker-compose.yml`):
+- The **Admin UI and watchdog do not mount the Docker socket directly.** They
+  reach Docker only through `docker-socket-proxy`, a HAProxy instance on an
+  `internal` `docker-api` network with a **deny-by-default allowlist**. It permits
+  only `_ping`/`version`, `inspect`/`logs`/`restart`/`start`/`stop` on a fixed set
+  of named `lancache-*` containers, and **explicitly denies** generic container
+  creation and `exec`. A compromised UI therefore cannot obtain a general Docker
+  API.
+- **However, two other services still hold direct socket access** and remain part
+  of this threat's real surface:
+  - `netdata` mounts `/var/run/docker.sock` **read-only** (for metrics).
+  - `watchtower` (optional, `watchtower` profile only) mounts the socket
+    **read-write** for image updates.
+  A compromise of either bypasses the scoped proxy. Operators who do not need
+  auto-updates should leave the `watchtower` profile disabled.
+
+**Residual risk**: Medium — the primary control-plane path (UI) is well
+contained; residual risk concentrates in netdata (read-only) and opt-in
+watchtower (read-write). This is a real, documented trade-off, not a solved
+problem.
+
+---
+
+### T7: TLS impersonation of the proxy (SSL mode)
+
+**Threat**: An on-path LAN attacker impersonates the cache to a client.
+
+**Likelihood**: Low · **Impact**: High
+
+**Mitigations**:
+- SSL-mode clients validate the proxy certificate against the locally-installed
+  CA; an impostor without the CA key cannot present a trusted cert.
+- Standard mode performs no local TLS termination (SNI passthrough), so this
+  vector does not apply there.
+
+**Residual risk**: Low — bounded by client trust of the CA and by the CA key
+staying secret (see T8/Assets).
+
+---
+
+### T8: Upstream TLS verification failure (proxy→CDN)
+
+**Threat**: If proxy→origin TLS verification were disabled/misconfigured, an
+on-path attacker between proxy and CDN could impersonate the origin and poison
+the cache.
+
+**Likelihood**: Low · **Impact**: High
+
+**Mitigations**:
+- `proxy_ssl_verify on` with the Debian CA bundle for all origin connections.
+- Origin names resolve via real upstream DNS, never the spoof DNS (see T1).
+
+**Residual risk**: Medium — verification reduces MITM risk but cannot stop a real
+CDN compromise or public-CA misissuance.
+
+---
+
+### T9: Cache-exhaustion / request-flood DoS
+
+**Threat**: A client requests many unique large objects, filling the cache disk
+or saturating the proxy.
+
+**Likelihood**: Medium · **Impact**: Medium (degradation / eviction)
+
+**Mitigations**:
+- Configurable cache size limits; `proxy_cache_use_stale` keeps serving under
+  pressure.
+- `PROXY_ALLOWED_CLIENT_CIDRS` can restrict which clients may drive the proxy.
+- Disk-usage warnings/alarms via the watchdog and Netdata.
+
+**Residual risk**: Medium — there is no per-client request rate limiting by
+default; the operator must configure limits and monitor disk.
+
+---
+
+### T10: Client connects to SSL mode without the CA (expected failure)
+
+**Threat**: A client uses SSL mode without installing the CA and downloads fail.
+
+**Likelihood**: High (user error) · **Impact**: Low (fails safe, no compromise)
+
+**Mitigations**:
+- Clear per-OS install docs (`docs/install-ca-cert.md`) and, in future, an
+  easier distribution path (see that doc's distribution section).
+- Standard mode is the CA-free alternative.
+- Devices that *cannot* install a CA (consoles) are intentionally excluded from
+  the spoof list, so they never hit this failure — see T4 and the console note in
+  `docs/install-ca-cert.md`.
+
+**Residual risk**: Low — intended, safe-failing behaviour.
+
+---
+
+### T11: Console breakage from over-broad DNS spoofing
+
+**Threat**: If console CDN domains were added to the spoof list, consoles (which
+cannot trust the local CA) would fail the TLS handshake to the proxy — and
+because the appliance's DNS would keep returning the proxy IP on every retry, the
+console could not fall back to the real CDN. The download would be *broken*, not
+merely uncached.
+
+**Likelihood**: Low (requires the operator to add console domains) · **Impact**:
+Medium (console downloads break with no obvious cause)
+
+**Mitigations**:
+- Console CDN domains (Xbox/PlayStation/Nintendo) are **deliberately omitted**
+  from `cdn-domains.txt`, with an in-file explanation. Consoles keep using the
+  appliance as an ordinary, unrestricted DNS resolver; their CDN names resolve to
+  the real internet and work normally (no caching benefit, no breakage).
+- The file documents how to *opt in* to Xbox-PC (Game Pass) caching only on a LAN
+  known to have no consoles.
+
+**Residual risk**: Low — safe by default; only an explicit operator opt-in
+re-introduces the risk.
+
+---
+
+### T12: DHCP control-plane exposure (Kea mode)
+
+**Threat**: In `kea` mode the appliance runs a full DHCP server with
+`network_mode: host` and `NET_ADMIN`. Its Kea Control Agent API (port 8000) can
+reconfigure DHCP (including the DNS servers handed to every client). Host
+networking would otherwise expose that API on all LAN interfaces.
+
+**Likelihood**: Medium (only when Kea mode is enabled) · **Impact**: High
+(reprogramming DHCP-issued DNS redirects the whole LAN)
+
+**Mitigations** (verified in `services/dhcp/entrypoint.sh`):
+- `KEA_CTRL_TOKEN` is **fail-closed**: the container refuses to start on an empty
+  or known-placeholder token. The Control Agent API requires this token.
+- The entrypoint installs **iptables rules that restrict port 8000 to
+  Docker-internal ranges** (`172.16.0.0/12`, `127.0.0.0/8`) and DROP everything
+  else — specifically because host networking would otherwise publish it LAN-wide.
+  The managed chain is idempotent and self-heals across restarts.
+- `DDNS_TSIG_KEY` is fail-closed, authenticating Kea→PowerDNS dynamic updates.
+
+**Residual risk**: Medium — depends on the host's iptables being effective and on
+the operator running Kea only where it is the sole DHCP server on the LAN.
+
+---
+
+### T13: DHCP DNS-option spoofing / competing servers (dnsmasq-proxy mode)
+
+**Threat**: In `dnsmasq-proxy` mode the appliance answers the proxy-DHCP portion
+alongside an existing DHCP server. A client may accept the wrong DNS option, and
+proxy-DHCP DNS options are not reliably honoured by ordinary clients.
+
+**Likelihood**: Medium · **Impact**: Low–Medium (cache bypass, not compromise)
+
+**Mitigations** (verified in `services/dhcp-proxy/entrypoint.sh`,
+`docs/dhcp-modes.md`):
+- Fail-closed configuration: `DHCP_SUBNET_START`, `DHCP_DNS_PRIMARY`, and
+  `UPSTREAM_DHCP_IP` are all required or the container refuses to start.
+- The mode is documented as a deliberately limited helper for networks whose
+  router DHCP cannot be disabled; the Admin UI's DHCP check probes for competing
+  servers and DNS-option override.
+
+**Residual risk**: Medium — by design the upstream DHCP server's DNS option can
+win, causing cache bypass. Not a security compromise, but a correctness/coverage
+limitation the operator must understand.
+
+---
+
+### T14: Rogue secondary DNS node registration
+
+**Threat**: An attacker registers a forged "secondary" DNS node to receive DNS
+updates or join the NATS mesh.
+
+**Likelihood**: Low · **Impact**: Medium (information disclosure of DNS state; a
+foothold in the sync mesh)
+
+**Mitigations**:
+- `SECONDARY_REGISTRATION_TOKEN` is **fail-closed**: the Admin UI refuses to start
+  if it is empty (an empty token would match any registration attempt).
+- Secondaries connect with the read-only NATS role (T5) and reach NATS only over
+  the operator's trusted LAN/VPN interface (`NATS_BIND_IP`).
+
+**Residual risk**: Low–Medium — bounded by keeping the token secret and the NATS
+secondary interface off untrusted networks.
+
+---
+
+## Out of scope
+
+The following are **not** addressed by lancache-ng:
+
+1. **Internet-facing deployment.** The appliance is not hardened for WAN
+   exposure. External DDoS, zero-days, and APTs are out of scope. Exposing any
+   control-plane port (UI, NATS, Kea API, PowerDNS API) to an untrusted network
+   breaks the core assumption.
+2. **Inter-client isolation / multi-tenancy.** Any LAN client can receive any
+   cached content. There is no per-user separation.
+3. **Operator-side privacy in SSL mode.** SSL mode decrypts client HTTPS by
+   design; the operator can see decrypted download traffic. This is the point of
+   the feature, not a defect.
+4. **Encrypted-response replay across clients.** Content cached under a shared
+   key may be served to clients other than the original requester even if the
+   original URL carried a per-request signature (intended, has privacy nuance).
+5. **Hardware / side-channel attacks** (Spectre, Meltdown, etc.).
+6. **Physical access** to the appliance host.
+7. **Supply-chain attacks** on base images or dependencies (mitigated only by
+   digest-pinning external images per `docs/release-versioning.md` and upstream
+   practices, not by this appliance).
+
+---
+
+## Deployment risk tiers
+
+### Low risk
+- Private, firewalled LAN; control-plane ports unreachable from untrusted
+  segments.
+- Admin UI authenticated (`UI_AUTH_USER`/`UI_AUTH_PASSWORD` set — the default
+  posture) or bound to `127.0.0.1`.
+- NATS unpublished (default) or its optional secondary binding firewalled.
+- Kea Control Agent reachable only on Docker-internal ranges (default).
+- `watchtower` profile left disabled unless auto-update is wanted.
+
+### Medium risk
+- Many untrusted or guest devices on the same flat LAN.
+- Proxy left in `lazy` mode with no `PROXY_ALLOWED_CLIENT_CIDRS`.
+- No cache-size monitoring or request limits.
+- Optional NATS secondary binding reachable by some untrusted segment.
+
+### High risk (breaks the core assumption — avoid)
+- Admin UI exposed beyond the LAN, **especially** with `ALLOW_INSECURE_UI=true`.
+- NATS 4222, Kea API 8000, or the PowerDNS API reachable from untrusted networks.
+- Direct Docker socket exposed to untrusted containers/networks.
+- No firewall between the appliance and an untrusted uplink.
+
+---
+
+## How to re-audit this document (per release)
+
+This is the repeatable process the currency markers depend on. Run it before
+tagging each release, then update the top marker and the
+[component currency inventory](#component-currency-inventory).
+
+1. **Diff the architecture since the last reviewed release.** Read `CLAUDE.md`
+   and diff the sources listed in the inventory table:
+   - `services/dns/entrypoint.sh`, `services/dns/cdn-domains.txt`
+   - `services/proxy/entrypoint.sh`, `services/proxy/conf.d/*.conf`
+   - `services/ui/src/config.rs`, `services/ui/src/main.rs`
+     (`resolve_admin_ui_auth_mode`, `ALLOW_INSECURE_UI`, startup guards)
+   - `services/dhcp/entrypoint.sh`, `services/dhcp-proxy/entrypoint.sh`,
+     `docs/dhcp-modes.md`
+   - `services/dns/nats-subscriber/`, and the `nats` service block +
+     `deploy/prod/docker-compose.nats-secondary.yml`
+   - `deploy/quickstart/docker-compose.yml` and `deploy/prod/docker-compose.yml`
+     — especially every service that mounts `/var/run/docker.sock` and the
+     `docker-socket-proxy` HAProxy ACLs.
+2. **For each component, confirm the mitigations still match the code** —
+   fail-closed guards, allowlists, iptables scoping, credential roles. If a
+   mitigation was narrowed, broadened, renamed, or removed, rewrite the affected
+   threat. Do **not** only reword.
+3. **Check for new components/ports** not yet in this document (a new service, a
+   new exposed port, a new external image with socket access) and add threats for
+   them.
+4. **Re-verify the two things most prone to silent drift:** which services still
+   have direct Docker socket access (T6), and whether Admin UI auth is still
+   fail-closed by default (T3). These have gone stale before.
+5. **Reconcile internal consistency** — the Conclusion and the risk tiers must
+   not contradict the individual threats (e.g. never re-introduce
+   "unauthenticated by default").
+6. **Update** the inventory "Last verified" cells, the top marker, and the review
+   date.
+
+---
+
+## Security roadmap (non-binding)
+
+1. Per-client request rate limiting / flood protection in the proxy.
+2. Stronger, rotate-able NATS auth beyond the shared-credential model.
+3. Audit logging of Admin UI and control-plane operations.
+4. Optional content-signature verification for cached objects.
+5. Security-event metrics/alerts via the existing Netdata integration.
 
 ---
 
 ## Conclusion
 
-lancache-ng is designed for **trusted LAN environments only**. The architecture intentionally trades off some security guarantees (e.g., upstream TLS verification, default unauthenticated Admin UI) in favor of simplicity and performance.
+lancache-ng is designed for **trusted, isolated LAN environments only**. It
+deliberately trades some guarantees (it MITMs client HTTPS in SSL mode; it trusts
+every LAN device) for caching performance, while keeping the *control plane*
+fail-closed: the Admin UI, NATS credentials, the PowerDNS API key, the Kea Control Agent,
+DDNS updates, and secondary registration all refuse to start in an
+insecure/unauthenticated state unless the operator explicitly opts out. The Docker control path for the Admin UI
+is mediated by a deny-by-default socket proxy, though netdata (read-only) and
+optional watchtower (read-write) retain direct socket access.
 
-Users are responsible for:
-1. Deploying on a trusted, isolated LAN
-2. Configuring firewall rules to restrict service access
-3. Enabling authentication before production
-4. Monitoring for suspicious activity
-5. Keeping dependencies up to date
+The operator remains responsible for:
+1. Deploying on a trusted, firewalled LAN and keeping control-plane ports off
+   untrusted segments.
+2. Leaving auth enabled (never `ALLOW_INSECURE_UI=true` on anything reachable).
+3. Choosing `strict` proxy mode and client CIDR limits when the LAN is not fully
+   trusted.
+4. Protecting the local CA private key (`<install>/certs/ca.key`) in SSL mode.
+5. Monitoring disk and activity, and keeping images updated.
 
-For questions or security concerns, use the project's private security reporting channel.
+For security concerns, use the project's private security reporting channel
+(`SECURITY.md`).
