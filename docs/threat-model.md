@@ -376,14 +376,25 @@ default; the operator must configure limits and monitor disk.
 
 ### T11: Console breakage from over-broad DNS spoofing
 
-**Threat**: If console CDN domains were added to the spoof list, consoles (which
-cannot trust the local CA) would fail the TLS handshake to the proxy — and
-because the appliance's DNS would keep returning the proxy IP on every retry, the
-console could not fall back to the real CDN. The download would be *broken*, not
-merely uncached.
+**Threat**: This threat is specific to **ssl-mode DNS** (the mode that performs
+TLS interception). If console CDN domains were added to the spoof list *and* the
+console were pointed at ssl-mode DNS, the console (which cannot trust the local
+CA) would fail the TLS handshake to the proxy — and because the appliance's DNS
+would keep returning the proxy IP on every retry, the console could not fall back
+to the real CDN. The failure is immediate and obvious (the console cannot reach
+that CDN at all), not a silent degradation.
+
+Pointed at **standard-mode DNS** instead, the same spoofed domain is harmless for
+HTTPS: `services/proxy-standard`'s `ssl_preread`-based SNI passthrough forwards
+the TLS connection to the real CDN blind, with no interception and no CA
+involved, so the console's handshake succeeds normally. Only HTTP traffic for
+that domain would be cached — the default, low-impact behavior this appliance is
+built around, with no other restriction on the console.
 
 **Likelihood**: Low (requires the operator to add console domains) · **Impact**:
-Medium (console downloads break with no obvious cause)
+Medium on ssl-mode DNS (console downloads for that CDN break, though the cause is
+immediately obvious); negligible on standard-mode DNS (HTTPS passes through
+unaffected, only HTTP gets cached).
 
 **Mitigations**:
 - Console CDN domains (Xbox/PlayStation/Nintendo) are **deliberately omitted**
@@ -393,7 +404,8 @@ Medium (console downloads break with no obvious cause)
 - The file documents how to *opt in* to Xbox-PC (Game Pass) caching only on a LAN
   known to have no consoles.
 
-**Residual risk**: Low — safe by default; only an explicit operator opt-in
+**Residual risk**: Low — safe by default; only an explicit operator opt-in, and
+even then only ssl-mode DNS carries real breakage risk.
 re-introduces the risk.
 
 ---
