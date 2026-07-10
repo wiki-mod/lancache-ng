@@ -1032,6 +1032,9 @@ jobs:
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
+          grep -F 'allow_args+=(--allow network.host)' .github/workflows/build-push.yml >/dev/null \
+            && grep -F '"${allow_args[@]}" \' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Local docker build scan must pass --allow network.host when host networking is selected."; exit 1; }
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -2415,11 +2418,16 @@ jobs:
           if [ "$scan_build_network" = "bridge" ]; then
             scan_build_network=default
           fi
+          allow_args=()
+          if [ "$scan_build_network" = "host" ]; then
+            allow_args+=(--allow network.host)
+          fi
 
           DOCKER_BUILDKIT=1 docker build \
             --pull \
             --platform ${{ matrix.platform }} \
             --network "$scan_build_network" \
+            "${allow_args[@]}" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
