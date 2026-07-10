@@ -8,90 +8,123 @@ This file contains repository-wide agent rules. It applies to all paths in this 
 
 ## Language
 
-All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**.
+**[AG-GH-001]** All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**.
+
+## Source of Truth and Conflict Resolution
+
+When working across this repository's documentation and governance stack, conflicts and inconsistencies can emerge between the various sources of guidance. This section establishes an explicit precedence order to resolve such conflicts and a requirement that agents must surface real conflicts rather than silently choosing one source over another.
+
+**Precedence order for resolving documentation conflicts:**
+
+When an agent encounters a real inconsistency or conflict between two governance/documentation sources, apply this precedence order to determine which source takes priority:
+
+1. **Executable checks and current code behavior** — What the code actually does today and what the CI checks actually enforce today are the ground truth. If documentation claims behavior that contradicts what the code or CI verifiably does, the documentation is stale.
+2. **`AGENTS.md` (this file)** — Repository-wide hard rules for agent behavior, workflow, validation, and governance apply to all work in this repository.
+3. **Area-specific AGENTS files** (e.g., `.github/AGENTS.md` for GitHub Actions work) — Specialized guidance for specific areas takes precedence over general guidance once you have identified that your work falls into that area.
+4. **`SECURITY.md`** — Security-specific behavior and constraints are documented separately and take precedence for security-relevant work.
+5. **Architecture and release documentation** (e.g., `docs/architecture-ng.md`, `docs/release-versioning.md`, `docs/release-external-images.md`, `docs/threat-model.md`) — System design and release procedures are documented here with rationale.
+6. **`README.md` and user-facing documentation** (e.g., `docs/install-ca-cert.md`) — End-user guides and high-level project descriptions are placed last because they are more likely to lag behind operational or technical changes.
+
+**Surfacing and resolving conflicts:**
+
+When an agent finds a real conflict between two of these sources (not a misreading, but a genuine inconsistency that reflects stale documentation or outdated guidance):
+
+- **Do not silently pick a side and proceed.** This masks the problem and allows drift to accumulate.
+- **Surface the conflict explicitly** — note it in a PR comment, a dedicated issue, or a follow-up task description. Explain which sources disagree and what real-world behavior you observed.
+- **Fix one side of the conflict or ask for guidance** — either update the stale documentation to match reality, or update the code/CI if the documentation is more correct. Only ask for guidance when the correct behavior is genuinely ambiguous or depends on a user decision. Per the user-context rule (see "Agent Autonomy and User-Context Rule" below), agents are expected to make technical decisions independently; guidance is only needed when there is real operational impact (hardware, cost, network topology) or when the correct target behavior is not determinable from code and documentation alone.
+
+This precedence order exists because this project touches DNS, DHCP, TLS interception, Docker startup behavior, cache correctness, and local network availability — all areas where documentation drift is not a stylistic gap but a real operational risk.
+
+## Documentation Drift Is A Defect
+
+**[AG-DOC-001]** A PR that touches architecture, security, setup, DNS, release, Admin UI authentication, or user-facing behavior must verify that the relevant documentation still accurately describes the resulting reality after the change. Documentation includes: `README.md`, `SECURITY.md`, `docs/threat-model.md`, `docs/architecture-ng.md`, `docs/release-versioning.md`, `docs/release-external-images.md`, `CLAUDE.md`, this file (`AGENTS.md`), and `.github/AGENTS.md`.
+
+A PR is not complete if it leaves any of these documents objectively wrong or describing behavior that contradicts the change. Stale documentation is not a follow-up item — it is a blocker. If a code change invalidates a documented behavior, statement, or threat model characterization, the PR must update the documentation or explicitly explain why the documentation statement is still correct despite the code change.
+
+This rule exists because real drift was discovered and fixed in issue #529: `docs/threat-model.md` contained a stale reference to BIND9 (the system now uses PowerDNS), and described Admin UI authentication as "no authentication by default" when the current code actually fails closed and requires either explicit `UI_AUTH_USER`/`UI_AUTH_PASSWORD` configuration or an explicit `ALLOW_INSECURE_UI=true` opt-out. Both of these drifts were operational risks — operators following the threat model would make incorrect security assumptions, and future developers would misunderstand the current authentication behavior.
 
 ## Issue And PR Tracking
 
-- Issue descriptions must include the correct links to related pull requests, issues, or parent tracking threads when those relationships are known.
+- **[AG-GH-002]** Issue descriptions must include the correct links to related pull requests, issues, or parent tracking threads when those relationships are known.
 - Issues should also carry labels, an issue Type, a Milestone when one applies, and Project-board assignment; use GitHub's native parent/sub-issue relationship (not just a title convention) when an issue is genuinely a sub-task of a tracking issue. An issue left as an unclassified note without these fields is not fully triaged.
-- Pull requests must reference their tracking issue in the PR body whenever possible.
+- **[AG-GH-003]** Pull requests must reference their tracking issue in the PR body whenever possible.
 - Every pull request body must include a changelog-style summary: what changed, user-visible impact, how it was validated, known risk, and any follow-up work. A PR without this cannot be called integration-ready regardless of CI status.
-- Use closing keywords such as `Fixes #123` or `Closes #123` only when merging the PR should close the issue.
-- Use non-closing references such as `Refs #123` for parent trackers, design discussions, drafts, or partial follow-up work.
+- **[AG-GH-004]** Use closing keywords such as `Fixes #123` or `Closes #123` only when merging the PR should close the issue.
+- **[AG-GH-005]** Use non-closing references such as `Refs #123` for parent trackers, design discussions, drafts, or partial follow-up work.
 - Scaffold or partial-fix PRs must say they are scaffold or partial in the title/body, must name the remaining open tracker with `Refs #123`, and must not use `Fixes #123` / `Closes #123` for the unresolved remainder.
 - After a PR lands, compare the merge commit or current `github/master` against the original issue before claiming completion; PR-head-only claims are not sufficient.
-- Do not leave known issue/PR relationships only in chat history; capture them in GitHub so review, merge, and cleanup decisions stay traceable.
+- **[AG-GH-006]** Do not leave known issue/PR relationships only in chat history; capture them in GitHub so review, merge, and cleanup decisions stay traceable.
 - **Issues must carry enough detail to be independently actionable, not a one-line note.** A well-formed issue names the exact files/functions it concerns — the specific paths to be edited, not just the general topic area or subsystem — states concrete, checkable acceptance criteria (not "improve X" or "look into Y"), and explains why the problem is real (a reproduction, a real log excerpt, a specific code reference) rather than asserting it abstractly. The bar: someone with no other context should be able to read the issue body alone and say which changes are needed, even before any PR exists. An issue that only a person who already has the full context in their head can act on is under-specified and must be expanded before being handed to an implementer — human or agent — who does not share that context. This matters more, not less, when issues are meant to be picked up by an agent with no memory of the conversation that created them.
 - **A follow-up/successor issue narrowing or continuing an earlier issue's scope must state explicitly, in its own body, whether it fully covers the original's acceptance criteria or only a subset.** Do not create a narrower issue and leave the reader to infer from titles or labels whether it supersedes the original. If the successor only covers part of the original: name exactly what remains uncovered, and update the *original* issue's body (not just a comment) with a "Current Status" note pointing at the successor and stating plainly that closing the original once the successor lands would be premature. This project has repeatedly created a narrow follow-up issue for a large finding and then let the original silently rot as if it were resolved — treat that pattern as a known failure mode to actively guard against, not an acceptable shortcut.
 - **Before closing an issue as resolved, superseded, or duplicate, actually diff its acceptance criteria against the PR/issue you believe covers it — do not match on topic or title similarity alone.** Two issues about "the same area" are not automatically the same issue; one may be a strict subset of the other's scope. Prefer verifying against the real current repository state (run the actual check, read the actual current file) over trusting either issue's prose, since both may have been written before the code moved further.
 
 ## Agent Workflow
 
-- Start every branch from a freshly fetched and rebased current base branch.
+- **[AG-WF-001]** Start every branch from a freshly fetched and rebased current base branch.
 - Before making readiness, mergeability, or integration-order statements, fetch the PR branch and base branch, rebase the local worktree onto the current remote base, and verify the resulting head. If a branch cannot be rebased, state that blocker instead of giving a readiness conclusion.
-- Use a separate worktree for each non-trivial PR or subagent task.
-- Use fanout for bounded independent work when it reduces main-thread cost without reducing quality. Prefer the cheapest suitable model and reasoning level: Spark first while available; if Spark is unavailable, rate-limited, or unsuitable, evaluate `gpt-5.4-mini` next before keeping delegable work in the main thread.
+- **[AG-WF-002]** Use a separate worktree for each non-trivial PR or subagent task.
+- **[AG-WF-003]** Use fanout for bounded independent work when it reduces main-thread cost without reducing quality. Prefer the cheapest suitable model and reasoning level: Spark first while available; if Spark is unavailable, rate-limited, or unsuitable, evaluate `gpt-5.4-mini` next before keeping delegable work in the main thread.
 - Choosing main-thread work while Spark is unavailable requires a concrete reason, such as unsafe delegation, time-critical local context, or higher integration risk from a separate agent.
 - Treat subagent results as stale until verified against the current remote base and current PR head. Before using an agent result for readiness, conflict resolution, review comments, or merge guidance, compare the reported commit/base with GitHub and rerun the relevant checks on the current head.
 - Do not block on subagents when useful non-overlapping work is available. Poll sparingly, and close completed agents after their result has been reviewed or superseded.
-- Do not push directly to `master`. All changes go through pull requests.
-- Do not merge, close, or delete repository work unless the maintainer explicitly asks for that exact action.
-- Keep PRs in draft until the branch has passed local validation and known review findings are addressed.
-- Resolve review threads only after the finding was actually fixed or a clear maintainer-approved explanation was posted.
-- Every review finding that was fixed must receive a factual reply explaining the fix and must then be resolved, even if GitHub already marks the thread as outdated after later code movement.
-- If GitHub does not allow resolving a stale or outdated thread, add a factual PR comment naming the finding, explaining why it is fixed, and stating that GitHub did not allow resolving it.
-- Before changing, reviewing, or resolving an issue or pull request, read the full issue/PR context, including the description, linked issues and PRs, all review comments, replies, and resolved threads, then evaluate the surrounding file and project-wide impact instead of acting only on an isolated line.
-- Treat review findings as failure classes, not isolated line comments. Before marking a finding fixed, check matching install, update, secondary, release, CI, documentation, and test paths for the same class of issue.
+- **[AG-WF-004]** Do not push directly to `master`. All changes go through pull requests.
+- **[AG-WF-005]** Do not merge, close, or delete repository work unless the maintainer explicitly asks for that exact action.
+- **[AG-WF-006]** Keep PRs in draft until the branch has passed local validation and known review findings are addressed.
+- **[AG-WF-007]** Resolve review threads only after the finding was actually fixed or a clear maintainer-approved explanation was posted.
+- **[AG-WF-008]** Every review finding that was fixed must receive a factual reply explaining the fix and must then be resolved, even if GitHub already marks the thread as outdated after later code movement.
+- **[AG-WF-009]** If GitHub does not allow resolving a stale or outdated thread, add a factual PR comment naming the finding, explaining why it is fixed, and stating that GitHub did not allow resolving it.
+- **[AG-WF-010]** Before changing, reviewing, or resolving an issue or pull request, read the full issue/PR context, including the description, linked issues and PRs, all review comments, replies, and resolved threads, then evaluate the surrounding file and project-wide impact instead of acting only on an isolated line.
+- **[AG-WF-011]** Treat review findings as failure classes, not isolated line comments. Before marking a finding fixed, check matching install, update, secondary, release, CI, documentation, and test paths for the same class of issue.
 - README and other documentation can lag behind current code and governance decisions; do not treat existing docs as automatically authoritative when they conflict with current architecture or an agreed rule. When a conflict is found, either correct the documentation or ask before changing behavior to match stale docs.
 - Prefer GraphQL (`gh api graphql`) over plain `gh issue`/`gh pr` comment and body-update commands for GitHub writes, since the plain CLI commands have repeatedly failed or behaved inconsistently in this project. Whichever method is used, read the result back immediately per the rules below.
-- When writing GitHub issue or pull-request bodies/comments from local files, verify the API call uploads file content and not the literal file path. Read the GitHub object back immediately and treat bodies such as `@/tmp/...` as malformed failed writes that must be corrected before continuing.
+- **[AG-WF-012]** When writing GitHub issue or pull-request bodies/comments from local files, verify the API call uploads file content and not the literal file path. Read the GitHub object back immediately and treat bodies such as `@/tmp/...` as malformed failed writes that must be corrected before continuing.
 - When sending Markdown through GraphQL string variables, pass the raw file content with the CLI's file-upload mode instead of pre-encoding it as JSON. Read the object back and treat leading JSON quotes, escaped newlines, or literal file paths as malformed failed writes.
-- Treat warnings as errors for repository work. Do not list a check as successful when it emitted warnings, failed setup, or used a broken fallback.
+- **[AG-VAL-001]** Treat warnings as errors for repository work. Do not list a check as successful when it emitted warnings, failed setup, or used a broken fallback.
 - **Known conflict with the warnings-as-errors rule, tracked in issue #394**: GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation of its `rust-analyzer`-based extraction, not because of a defect in this repository's code. A strict, unscoped reading of "warnings are errors" would block CodeQL runs on essentially every Rust PR. Until upstream resolves this, treat these specific, named CodeQL extraction warnings as a carved-out, explicitly tracked exception: they do not block a PR by themselves, but every instance must stay referenced in #394, and #394 must be periodically reevaluated rather than left as a permanent blanket excuse. This exception is scoped to CodeQL Rust macro-expansion extraction warnings only — it does not extend to `cargo check`/`cargo clippy` warnings, which remain hard failures under the rule above.
-- Treat standard failures such as `command not found`, missing files, missing environment variables, permission denied, malformed commands, empty required outputs, and failed tool setup as hard failures.
-- Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
-- Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
-- Use local Bash tools such as `rg` for text searches; do not rely on vague manual inspection when a deterministic search is possible.
-- Do not add Python scripts, Python dependencies, or another runtime language to the project without explicit maintainer approval. Local, one-off `python3` commands for inspection or validation (e.g. checking JSON/YAML, a quick text transform) are fine as long as nothing Python-related is committed to the repository.
-- Project-facing text must be in English.
+- **[AG-VAL-002]** Treat standard failures such as `command not found`, missing files, missing environment variables, permission denied, malformed commands, empty required outputs, and failed tool setup as hard failures.
+- **[AG-VAL-003]** Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
+- **[AG-VAL-004]** Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
+- **[AG-VAL-005]** Use local Bash tools such as `rg` for text searches; do not rely on vague manual inspection when a deterministic search is possible.
+- **[AG-REL-001]** Do not add Python scripts, Python dependencies, or another runtime language to the project without explicit maintainer approval. Local, one-off `python3` commands for inspection or validation (e.g. checking JSON/YAML, a quick text transform) are fine as long as nothing Python-related is committed to the repository.
+- **[AG-GH-007]** Project-facing text must be in English.
 - Take the big picture
 - Think big.
-  - Always look at the bigger picture. Do not only consider the change itself. Consider its dependencies, its impact, and what may happen as a result.
+  - **[AG-WF-013]** Always look at the bigger picture. Do not only consider the change itself. Consider its dependencies, its impact, and what may happen as a result.
 
 ## Required Validation
 
-- Run the narrowest relevant checks for the files changed, and report any check that could not be run.
-- Shell changes require at least `bash -n`, `shellcheck --severity=warning`, and `git diff --check` for the changed shell files.
-- Rust changes require `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`, and `cargo test` for the affected crate or workspace path, unless the PR documents a real blocker.
-- Dockerfile or Compose changes require `docker compose config` for the affected deployment files and a relevant image build when practical.
-- **Dev-stack `.env` resolution**: `deploy/dev/docker-compose.yml` (and the other `deploy/*/docker-compose.yml` files) resolve `.env` relative to the compose file's own directory, not the directory `docker compose` is invoked from — e.g. `docker compose -f deploy/dev/docker-compose.yml up` from the repo root reads `deploy/dev/.env`, not a root-level `.env`. A repo-root `.env` is silently ignored for these stacks. `deploy/dev/.env` already ships with working dev defaults; edit it directly for live dev-stack verification instead of creating a new `.env` elsewhere. After changing a value, confirm it actually took effect with `docker compose -f deploy/dev/docker-compose.yml config | grep <VAR>` before concluding a change had no effect or that source code is broken.
-- **Admin-UI auth gate is intentional, not a bug**: the `ui` service fails closed and restart-loops if neither `UI_AUTH_USER`/`UI_AUTH_PASSWORD` nor `ALLOW_INSECURE_UI=true` is set. During live verification, a restarting `ui` container logging `Admin-UI authentication is required` is expected security behavior, not evidence of a broken build — check the log message before assuming a startup crash. `ALLOW_INSECURE_UI=true` is a legitimate, explicit operator choice documented in `deploy/prod/.env` for an intentionally unauthenticated UI (e.g. a trusted LAN), not merely a throwaway test-only flag — do not describe it as forbidden or as if setting it always requires special justification.
-- Workflow changes require syntax validation and a careful review of runner labels, secrets, variables, matrix behavior, and cache behavior.
+- **[AG-VAL-006]** Run the narrowest relevant checks for the files changed, and report any check that could not be run.
+- **[AG-VAL-007]** Shell changes require at least `bash -n`, `shellcheck --severity=warning`, and `git diff --check` for the changed shell files.
+- **[AG-VAL-008]** Rust changes require `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`, and `cargo test` for the affected crate or workspace path, unless the PR documents a real blocker.
+- **[AG-VAL-009]** Dockerfile or Compose changes require `docker compose config` for the affected deployment files and a relevant image build when practical.
+- **[AG-VAL-010]** **Dev-stack `.env` resolution**: `deploy/dev/docker-compose.yml` (and the other `deploy/*/docker-compose.yml` files) resolve `.env` relative to the compose file's own directory, not the directory `docker compose` is invoked from — e.g. `docker compose -f deploy/dev/docker-compose.yml up` from the repo root reads `deploy/dev/.env`, not a root-level `.env`. A repo-root `.env` is silently ignored for these stacks. `deploy/dev/.env` already ships with working dev defaults; edit it directly for live dev-stack verification instead of creating a new `.env` elsewhere. After changing a value, confirm it actually took effect with `docker compose -f deploy/dev/docker-compose.yml config | grep <VAR>` before concluding a change had no effect or that source code is broken.
+- **[AG-SEC-001]** **Admin-UI auth gate is intentional, not a bug**: the `ui` service fails closed and restart-loops if neither `UI_AUTH_USER`/`UI_AUTH_PASSWORD` nor `ALLOW_INSECURE_UI=true` is set. During live verification, a restarting `ui` container logging `Admin-UI authentication is required` is expected security behavior, not evidence of a broken build — check the log message before assuming a startup crash. `ALLOW_INSECURE_UI=true` is a legitimate, explicit operator choice documented in `deploy/prod/.env` for an intentionally unauthenticated UI (e.g. a trusted LAN), not merely a throwaway test-only flag — do not describe it as forbidden or as if setting it always requires special justification.
+- **[AG-VAL-011]** Workflow changes require syntax validation and a careful review of runner labels, secrets, variables, matrix behavior, and cache behavior.
 - Local Docker build checks for Rust service builders must mirror CI acceleration wiring when they are used to prove build performance or cache behavior. That means passing the same `BUILD_TOOLS_IMAGE`, `CARGO_BUILD_JOBS`, and BuildKit secret mounts for sccache, sccache-dist, and distcc. A local build without those secrets may validate Dockerfile syntax only; it must not be cited as proof that the compile farm is used.
-- Setup, update, or migration changes require fixture or dry-run coverage that proves fresh install, repeated update, missing-key migration, existing-value preservation, and placeholder rejection.
-- DNS behavior changes require a real DNS response check, not only process or port reachability.
-- Proxy/cache behavior changes require a response or cache-behavior check that proves the proxy still serves the intended path.
-- Do not weaken checks to make a branch green. If a check is wrong, replace it with an equally strong or stronger check that validates the real behavior.
+- **[AG-VAL-012]** Setup, update, or migration changes require fixture or dry-run coverage that proves fresh install, repeated update, missing-key migration, existing-value preservation, and placeholder rejection.
+- **[AG-VAL-013]** DNS behavior changes require a real DNS response check, not only process or port reachability.
+- **[AG-VAL-014]** Proxy/cache behavior changes require a response or cache-behavior check that proves the proxy still serves the intended path.
+- **[AG-VAL-015]** Do not weaken checks to make a branch green. If a check is wrong, replace it with an equally strong or stronger check that validates the real behavior.
 - **Build-tools container verification**: All Rust, build, and tooling checks must run inside the project's build-tools container at the matching immutable version. Host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `sccache`, `cargo-audit`, `shellcheck`, `actionlint`) are not sufficient verification proof. Treat host tools as potentially missing, wrongly configured, stale, or unavailable — they prove only host provisioning, not project requirements. Falling back from the build-tools container to host tools invalidates the verification attempt. The build-tools image must be selected via the matching immutable digest or pinned version tag, never via an accidental mutable local image such as `lancache-ng-build-tools-validation:latest`. See the build-tools section under Coding Patterns for container selection and image pinning rules.
 
 ## Setup, Update, And Migration Semantics
 
-- Setup, update, and migration logic must be idempotent: running the same operation repeatedly must not rotate existing secrets, overwrite local configuration, or create new side effects unless the user explicitly requested that change.
-- Setup, update, and migration logic must converge old or incomplete installations toward the current expected state.
-- Missing required configuration values should be generated when safe or rejected with a clear fail-closed error when they require user input.
-- Existing non-empty local values must be preserved by default.
+- **[AG-OP-006]** Setup, update, and migration logic must be idempotent: running the same operation repeatedly must not rotate existing secrets, overwrite local configuration, or create new side effects unless the user explicitly requested that change.
+- **[AG-OP-007]** Setup, update, and migration logic must converge old or incomplete installations toward the current expected state.
+- **[AG-OP-008]** Missing required configuration values should be generated when safe or rejected with a clear fail-closed error when they require user input.
+- **[AG-OP-009]** Existing non-empty local values must be preserved by default.
 - DHCP NTP settings are a project-wide policy decision, not a per-PR cleanup target. Preserve the currently established DHCP NTP defaults and semantics exactly as they are defined in the repo unless a maintainer explicitly opens a separate issue/PR to change that policy. Do not silently remove, narrow, or "simplify" NTP values, and do not replace them with a different representation just because a validation path would be easier to satisfy.
-- Known placeholders such as `CHANGE_ME_*` are not valid runtime values and must be replaced or rejected before dependent services start.
-- Validation must happen before container restart, image pull, or runtime mutation when a failed validation would leave the installation in a worse state.
-- Re-running `setup.sh update` after a successful update should report no destructive changes and should not rewrite stable local files unnecessarily.
+- **[AG-SEC-002]** Known placeholders such as `CHANGE_ME_*` are not valid runtime values and must be replaced or rejected before dependent services start.
+- **[AG-OP-010]** Validation must happen before container restart, image pull, or runtime mutation when a failed validation would leave the installation in a worse state.
+- **[AG-OP-011]** Re-running `setup.sh update` after a successful update should report no destructive changes and should not rewrite stable local files unnecessarily.
 
 ## Project Language
 
-This project is written in **Rust**. Shell scripts are permitted for entrypoints and automation.
+**[AG-REL-004]** This project is written in **Rust**. Shell scripts are permitted for entrypoints and automation.
 
-No other runtime language (Go, Python, Node.js, etc.) may be introduced without explicit approval from @djdomi.
+**[AG-REL-005]** No other runtime language (Go, Python, Node.js, etc.) may be introduced without explicit approval from @djdomi.
 
-Shell automation should use Bash by default when it relies on project fail-closed behavior such as `set -euo pipefail`, arrays, `[[ ... ]]`, process substitution, or other Bash-specific syntax. POSIX `sh` is acceptable only for intentionally small portable scripts that are validated with ShellCheck in `sh` mode.
+**[AG-REL-006]** Shell automation should use Bash by default when it relies on project fail-closed behavior such as `set -euo pipefail`, arrays, `[[ ... ]]`, process substitution, or other Bash-specific syntax. POSIX `sh` is acceptable only for intentionally small portable scripts that are validated with ShellCheck in `sh` mode.
 
 ## Feature Completeness
 
@@ -113,24 +146,24 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 ## Coding Patterns
 
-- **Docker builds**: production/runtime Dockerfiles still use multi-stage builds with pinned base images, but the Rust service builders for `services/dns` and `services/ui` consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` contract through a `BUILD_TOOLS_IMAGE` argument. Do not add ad-hoc `rust:latest` or Debian-based bootstrap layers back into those service builders. Local developer helper scripts and the repository build-tools image intentionally use `rust:latest` by default when the image is explicitly overrideable; this keeps developer validation tooling current while remaining separate from production service image pinning.
-- **Runner baseline**: assume self-hosted runners do not provide project validation tools. Workflows must use pinned GitHub Actions, the repository build-tools image, or explicit fail-closed capability checks instead of relying on host-installed utilities. Pin GitHub Actions to full commit SHAs with a version comment, not mutable tags such as `@v4`, branch names, or `@main`. Do not install project validation tools with ad-hoc `sudo apt-get` in workflows.
-- **Runner tiers**: route lightweight static checks to `[self-hosted, linux, lancache, lancache-light]` and memory-heavy Rust, CodeQL, container scan, Docker build, and release jobs to `[self-hosted, linux, lancache, lancache-heavy]`. Do not rely on the broad `lancache` label alone for jobs with meaningful CPU or memory pressure.
+- **[AG-REL-002]** **Docker builds**: production/runtime Dockerfiles still use multi-stage builds with pinned base images, but the Rust service builders for `services/dns` and `services/ui` consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` contract through a `BUILD_TOOLS_IMAGE` argument. Do not add ad-hoc `rust:latest` or Debian-based bootstrap layers back into those service builders. Local developer helper scripts and the repository build-tools image intentionally use `rust:latest` by default when the image is explicitly overrideable; this keeps developer validation tooling current while remaining separate from production service image pinning.
+- **[AG-CI-001]** **Runner baseline**: assume self-hosted runners do not provide project validation tools. Workflows must use pinned GitHub Actions, the repository build-tools image, or explicit fail-closed capability checks instead of relying on host-installed utilities. Pin GitHub Actions to full commit SHAs with a version comment, not mutable tags such as `@v4`, branch names, or `@main`. Do not install project validation tools with ad-hoc `sudo apt-get` in workflows.
+- **[AG-CI-002]** **Runner tiers**: route lightweight static checks to `[self-hosted, linux, lancache, lancache-light]` and memory-heavy Rust, CodeQL, container scan, Docker build, and release jobs to `[self-hosted, linux, lancache, lancache-heavy]`. Do not rely on the broad `lancache` label alone for jobs with meaningful CPU or memory pressure.
 - **Build acceleration scope**: `sccache`, `sccache-dist`, `distcc`, `distcc-pump`, and local Buildx cache paths are allowed only as Dev/CI optimizations. Production, runtime, setup, and update flows must stay pull-only against prebuilt images and must not depend on those accelerators.
-- **Runner portability**: LAN-only acceleration such as Redis-backed sccache, sccache-dist, distcc, local Buildx cache paths, and self-hosted runner labels must stay explicitly configurable. Treat the current self-hosted runner farm as an optimization layer, not as the only valid CI environment. GitHub-hosted fallback jobs must validate without inheriting LAN-only assumptions about Redis URLs, distcc schedulers, cache paths, or runner labels; use documented modes, variables, and fail-closed capability checks instead of hidden host assumptions.
-- **Build-tools image**: `tools/build-tools/Dockerfile` intentionally uses `rust:latest`, then installs and smoke-tests required tools such as `rustfmt`, `clippy`, `sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `bats`, `shellspec`, `distcc`, `distcc-pump`, Docker CLI, Docker Compose, and DNS/setup/template fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and `envsubst`. It must explicitly set and verify `PATH`, especially `/usr/local/cargo/bin`, to avoid false `command not found` failures. CI jobs that only need bundled validation tools must use the prebuilt image instead of compiling those tools per job; for example, do not install `cargo-audit` in workflow jobs. CodeQL and Trivy image scanning remain GitHub workflow and runner capabilities, not tools bundled into this image.
+- **[AG-CI-003]** **Runner portability**: LAN-only acceleration such as Redis-backed sccache, sccache-dist, distcc, local Buildx cache paths, and self-hosted runner labels must stay explicitly configurable. Treat the current self-hosted runner farm as an optimization layer, not as the only valid CI environment. GitHub-hosted fallback jobs must validate without inheriting LAN-only assumptions about Redis URLs, distcc schedulers, cache paths, or runner labels; use documented modes, variables, and fail-closed capability checks instead of hidden host assumptions.
+- **[AG-VAL-017]** **Build-tools image**: `tools/build-tools/Dockerfile` intentionally uses `rust:latest`, then installs and smoke-tests required tools such as `rustfmt`, `clippy`, `sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `bats`, `shellspec`, `distcc`, `distcc-pump`, Docker CLI, Docker Compose, and DNS/setup/template fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and `envsubst`. It must explicitly set and verify `PATH`, especially `/usr/local/cargo/bin`, to avoid false `command not found` failures. CI jobs that only need bundled validation tools must use the prebuilt image instead of compiling those tools per job; for example, do not install `cargo-audit` in workflow jobs. CodeQL and Trivy image scanning remain GitHub workflow and runner capabilities, not tools bundled into this image.
 
-  **Build-tools verification contract**: Project verification (build, Rust checks, linting, tooling validation) must run inside the build-tools container at the matching version — this is the _only_ valid verification path. The build-tools image is maintained as a single published version, selected through an immutable digest when possible (e.g. `ghcr.io/wiki-mod/lancache-ng/build-tools:latest`, pulled by `scripts/select-build-tools-image.sh`). A locally-built fallback image is permitted only when the script determines it is safe — that is, for branches within this repository. Host-local tools must be treated as absent, misconfigured, or stale unless the verification task explicitly targets host provisioning setup. Falling back from the build-tools container to host tools (e.g., running `cargo check` directly instead of `docker run ... build-tools cargo check`) invalidates the verification attempt. CI jobs, local developer checks, and pull request validation must all use the same build-tools version resolved by `scripts/select-build-tools-image.sh` or pulled at the matching digest. Use the pattern `docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" <command>` for consistency with CI. Product-runtime verification (testing that docker-compose deploys correctly, that DNS responds, that the cache proxy serves files) proves product behavior; host-provisioning tests (verifying that a developer's local Rust installation works, that a CI runner has Docker installed) are separate concerns and do not substitute for build-tools verification.
+  **[AG-VAL-016]** **Build-tools verification contract**: Project verification (build, Rust checks, linting, tooling validation) must run inside the build-tools container at the matching version — this is the _only_ valid verification path. The build-tools image is maintained as a single published version, selected through an immutable digest when possible (e.g. `ghcr.io/wiki-mod/lancache-ng/build-tools:latest`, pulled by `scripts/select-build-tools-image.sh`). A locally-built fallback image is permitted only when the script determines it is safe — that is, for branches within this repository. Host-local tools must be treated as absent, misconfigured, or stale unless the verification task explicitly targets host provisioning setup. Falling back from the build-tools container to host tools (e.g., running `cargo check` directly instead of `docker run ... build-tools cargo check`) invalidates the verification attempt. CI jobs, local developer checks, and pull request validation must all use the same build-tools version resolved by `scripts/select-build-tools-image.sh` or pulled at the matching digest. Use the pattern `docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" <command>` for consistency with CI. Product-runtime verification (testing that docker-compose deploys correctly, that DNS responds, that the cache proxy serves files) proves product behavior; host-provisioning tests (verifying that a developer's local Rust installation works, that a CI runner has Docker installed) are separate concerns and do not substitute for build-tools verification.
 - **Tool image rebuilds**: routine pull requests must not rebuild the build-tools image unless `tools/build-tools` or the build workflow changed. The dedicated build-tools workflow must support manual and scheduled refreshes and publish `linux/amd64` plus `linux/arm64` images after smoke tests and scans. Release tags must always build the tag-scoped build-tools image so release jobs never run with a mutable `latest` tool image.
 - **Release job acceleration contract**: any release or release-adjacent job that uses build acceleration must document whether the accelerator is optional, preferred, or a hard gate. Do not leave the fallback behavior implicit.
-- **TLS in Rust**: use `reqwest` with `default-features = false, features = ["rustls-tls"]`. Never add `openssl-sys` as a dependency — `rust:slim` has no OpenSSL headers.
-- **sccache**: controlled by `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`) and the `SCCACHE_REDIS_URL` GitHub Actions secret. Never hardcode a Redis URL. If `SCCACHE_DIST_SCHEDULER_URL` is configured, the matching `SCCACHE_DIST_AUTH_TOKEN` secret must also be configured and wired into `SCCACHE_CONF`; setting only a scheduler URL environment variable is not a valid sccache-dist setup. When installing sccache from source, keep the sccache version pinned, avoid locked installs while the pinned upstream lockfile emits yanked-crate warnings, and enable only the Redis plus `dist-client` features unless a PR explicitly justifies another backend.
-- **distcc/pump**: Rust service builders that install `distcc` must receive host lists through BuildKit secrets or trusted CI variables, never hardcoded Dockerfile values. When enabled, they must set `CC=distcc`, `GCC=distcc`, `CXX=distcc`, and discover either `/usr/local/lib/distcc` or `/usr/lib/distcc` before putting the discovered wrapper directory at the front of `PATH`, so direct `cc`, `gcc`, `c++`, and `g++` calls are intercepted across Debian and distcc-ng layouts. `distcc-pump` host lists must include at least one `,cpp` host entry. `distcc-pump` remains the default, preferred acceleration path — the bypass below is selective, not a reason to disable pump for a whole builder: specific compile inputs known to break pump's include-server assumptions (e.g. generated C headers such as `aws-lc-sys`'s, since pump assumes sources and includes do not change during the include-server lifetime) must route through normal (non-pump) distcc hosts or local compiler fallback for those inputs only, while the rest of that builder's compilation still uses pump normally. Distcc must log `[INFO] trying distcc path.` when it is actually attempted, must use `DISTCC_FALLBACK=0`, and may retry once with the normal local compiler if the distcc path is unavailable. Any image that installs Debian `distcc-pump` must patch the known invalid Python regex escapes before package configuration and verify the result with `python3 -Werror::SyntaxWarning`.
-- **Build parallelism**: Cargo and Docker Rust builds must use one project-wide job rule unless a PR justifies an override: the optional `CARGO_BUILD_JOBS` repository variable wins when set and must be validated as a positive integer; otherwise use detected CPU cores minus two, with a minimum of four jobs. Do not hardcode service-local values such as `CARGO_BUILD_JOBS=6`.
-- **Build acceleration wiring**: Installing `sccache`, `distcc`, or `distcc-pump` is not sufficient. Every PR that changes Rust builders or build workflows must verify the full chain: repository variable or secret, workflow input, BuildKit secret or Cargo environment, Dockerfile consumption, and a fail-closed smoke/status check.
+- **[AG-REL-003]** **TLS in Rust**: use `reqwest` with `default-features = false, features = ["rustls-tls"]`. Never add `openssl-sys` as a dependency — `rust:slim` has no OpenSSL headers.
+- **[AG-CI-004]** **sccache**: controlled by `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`) and the `SCCACHE_REDIS_URL` GitHub Actions secret. Never hardcode a Redis URL. If `SCCACHE_DIST_SCHEDULER_URL` is configured, the matching `SCCACHE_DIST_AUTH_TOKEN` secret must also be configured and wired into `SCCACHE_CONF`; setting only a scheduler URL environment variable is not a valid sccache-dist setup. When installing sccache from source, keep the sccache version pinned, avoid locked installs while the pinned upstream lockfile emits yanked-crate warnings, and enable only the Redis plus `dist-client` features unless a PR explicitly justifies another backend.
+- **[AG-CI-005]** **distcc/pump**: Rust service builders that install `distcc` must receive host lists through BuildKit secrets or trusted CI variables, never hardcoded Dockerfile values. When enabled, they must set `CC=distcc`, `GCC=distcc`, `CXX=distcc`, and discover either `/usr/local/lib/distcc` or `/usr/lib/distcc` before putting the discovered wrapper directory at the front of `PATH`, so direct `cc`, `gcc`, `c++`, and `g++` calls are intercepted across Debian and distcc-ng layouts. `distcc-pump` host lists must include at least one `,cpp` host entry. `distcc-pump` remains the default, preferred acceleration path — the bypass below is selective, not a reason to disable pump for a whole builder: specific compile inputs known to break pump's include-server assumptions (e.g. generated C headers such as `aws-lc-sys`'s, since pump assumes sources and includes do not change during the include-server lifetime) must route through normal (non-pump) distcc hosts or local compiler fallback for those inputs only, while the rest of that builder's compilation still uses pump normally. Distcc must log `[INFO] trying distcc path.` when it is actually attempted, must use `DISTCC_FALLBACK=0`, and may retry once with the normal local compiler if the distcc path is unavailable. Any image that installs Debian `distcc-pump` must patch the known invalid Python regex escapes before package configuration and verify the result with `python3 -Werror::SyntaxWarning`.
+- **[AG-CI-006]** **Build parallelism**: Cargo and Docker Rust builds must use one project-wide job rule unless a PR justifies an override: the optional `CARGO_BUILD_JOBS` repository variable wins when set and must be validated as a positive integer; otherwise use detected CPU cores minus two, with a minimum of four jobs. Do not hardcode service-local values such as `CARGO_BUILD_JOBS=6`.
+- **[AG-CI-007]** **Build acceleration wiring**: Installing `sccache`, `distcc`, or `distcc-pump` is not sufficient. Every PR that changes Rust builders or build workflows must verify the full chain: repository variable or secret, workflow input, BuildKit secret or Cargo environment, Dockerfile consumption, and a fail-closed smoke/status check.
 - **Prebuilt build-tools contract**: Rust service builders should consume a prebuilt `build-tools` image by immutable release, SHA, or the selected CI image contract instead of rebuilding toolchains in each service image. Reintroducing ad-hoc local toolchain compilation in `services/dns` or `services/ui` requires a documented reason and a separate review of first-user-experience impact.
-- **Cache key**: nginx uses `$host$uri` (not `$request_uri`) — CDN query-string signatures must not bust the cache.
-- **DNS resolver in nginx**: must point to `8.8.8.8`, never to the local PowerDNS recursor — that would cause an infinite loop.
+- **[AG-OP-001]** **Cache key**: nginx uses `$host$uri` (not `$request_uri`) — CDN query-string signatures must not bust the cache.
+- **[AG-OP-002]** **DNS resolver in nginx**: must point to `8.8.8.8`, never to the local PowerDNS recursor — that would cause an infinite loop.
 - **Domain scope semantics**: a leading-dot domain entry such as `.example.com` is an explicit wildcard/subdomain scope and is not equivalent to the root domain `example.com`. Do not normalize away the leading dot or treat root and wildcard scope as interchangeable in any validation, matching, or migration logic that touches domain entries.
 
 ## Release And Package Consistency
@@ -140,14 +173,14 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 ## Comment Style
 
-- Comment only when the code would not otherwise be quickly understandable. Well-named identifiers already say what trivial code does (setting a variable, calling a function, reading a file) — do not restate that in a comment.
-- Comment concrete cases where the WHY is non-obvious: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious/standard approach. Also comment when omitting the note would let someone later reintroduce the same mistake. If removing the comment would not confuse a future reader, remove it.
+- **[AG-CODE-001]** Comment only when the code would not otherwise be quickly understandable. Well-named identifiers already say what trivial code does (setting a variable, calling a function, reading a file) — do not restate that in a comment.
+- **[AG-CODE-002]** Comment concrete cases where the WHY is non-obvious: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious/standard approach. Also comment when omitting the note would let someone later reintroduce the same mistake. If removing the comment would not confuse a future reader, remove it.
 - Code must stay human-readable. Silent or hard-to-follow changes are not acceptable — if a change needs explanation to be trusted, write the comment; don't ship it silently.
 - Short structural/orientation comments that label the steps of a longer sequential procedure (e.g. `// Step 1: Fetch current config`, `// Step 2: Validate and normalize`) are also acceptable and encouraged, even when they don't explain a hidden WHY — they help a reader scan a long function without re-deriving its structure. Reviewers (including automated ones) must not flag this style as "unnecessary" or "restates the code" just because `Comment Style` otherwise favors minimal comments; readability-oriented step labels are a distinct, allowed category from WHY-comments, not a violation of this section.
 - A missing comment is a defect too, not just a neutral default. When touching code in an area that should already have a WHY-comment under the categories above (complex logic, a guard, a fallback, a security decision, a non-obvious side effect) but doesn't — whether it was missed originally or never added — add it as part of the change. Do not leave the gap just because it predates your edit; "there wasn't one before" is not a reason to skip adding one now.
-- Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123", "added by the CR-9 pass"). That belongs in the PR/commit description, not in code that outlives the change.
-- When documenting a known limitation or deliberately deferred fix (not a bug you're fixing now), prefer a structured note over a one-liner: state the problem, the mitigation/fix direction if one exists, and a dated status line describing the current real-world state (e.g. "STATUS: as of 2026-07-02, X still uses the old path; once Y migrates, this fallback becomes dead code"). This lets a future reader tell a documented tradeoff apart from an accidental gap.
-- Placeholder/scaffold markers (e.g. `TODO(#123): ...`) must be removed the moment the referenced work is actually implemented in that same change. A stale TODO claiming work is still needed, sitting next to code that already does it, is worse than no comment — it actively misleads the next reader/reviewer. Before finishing a fix that started from a TODO/scaffold marker, grep for and delete the marker it replaces.
+- **[AG-CODE-003]** Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123", "added by the CR-9 pass"). That belongs in the PR/commit description, not in code that outlives the change.
+- **[AG-CODE-004]** When documenting a known limitation or deliberately deferred fix (not a bug you're fixing now), prefer a structured note over a one-liner: state the problem, the mitigation/fix direction if one exists, and a dated status line describing the current real-world state (e.g. "STATUS: as of 2026-07-02, X still uses the old path; once Y migrates, this fallback becomes dead code"). This lets a future reader tell a documented tradeoff apart from an accidental gap.
+- **[AG-CODE-005]** Placeholder/scaffold markers (e.g. `TODO(#123): ...`) must be removed the moment the referenced work is actually implemented in that same change. A stale TODO claiming work is still needed, sitting next to code that already does it, is worse than no comment — it actively misleads the next reader/reviewer. Before finishing a fix that started from a TODO/scaffold marker, grep for and delete the marker it replaces.
 
 ## File Headers
 
@@ -169,23 +202,175 @@ Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
 ## Runtime Behavior
 
-- Lazy proxy/cache behavior is the intended default.
-- Strict proxy/cache behavior is explicit opt-in for users who want tighter allowlisting and accept the maintenance burden.
-- Do not silently invert the lazy default.
-- DNS health checks must use a real query/response probe such as `dig` or an equivalent strong check.
-- `ping` is not an acceptable DNS health check because it only proves network reachability.
-- `ss` is not an acceptable DNS health check by itself because it only proves that a socket is listening.
+- **[AG-OP-003]** Lazy proxy/cache behavior is the intended default.
+- **[AG-OP-004]** Strict proxy/cache behavior is explicit opt-in for users who want tighter allowlisting and accept the maintenance burden.
+- **[AG-OP-005]** Do not silently invert the lazy default.
+- **[AG-VAL-018]** DNS health checks must use a real query/response probe such as `dig` or an equivalent strong check.
+- **[AG-VAL-019]** `ping` is not an acceptable DNS health check because it only proves network reachability.
+- **[AG-VAL-020]** `ss` is not an acceptable DNS health check by itself because it only proves that a socket is listening.
 
 ## Secrets And Sensitive Data
 
-- Never commit private credentials, tokens, personal contact data, or internal LAN-only secrets.
-- Use GitHub Secrets for secret values and GitHub Variables for non-secret configuration values.
-- Do not hardcode local Redis, scheduler, distcc, or runner endpoints in source files, Dockerfiles, or workflows.
-- If sensitive data appears in a branch, stop normal work and remove it from the active branch before continuing.
+- **[AG-SEC-003]** Never commit private credentials, tokens, personal contact data, or internal LAN-only secrets.
+- **[AG-SEC-004]** Use GitHub Secrets for secret values and GitHub Variables for non-secret configuration values.
+- **[AG-SEC-005]** Do not hardcode local Redis, scheduler, distcc, or runner endpoints in source files, Dockerfiles, or workflows.
+- **[AG-SEC-006]** If sensitive data appears in a branch, stop normal work and remove it from the active branch before continuing.
 
 ## What Not To Do
 
-- Do not push directly to `master`. All changes go through pull requests.
-- Do not hardcode LAN IP addresses in Dockerfiles or source files.
-- Do not introduce a new programming language without explicit approval.
-- Do not use `proxy_cache_key $request_uri` — query strings contain per-request CDN signatures.
+- **[AG-WF-014]** Do not push directly to `master`. All changes go through pull requests.
+- **[AG-SEC-007]** Do not hardcode LAN IP addresses in Dockerfiles or source files.
+- **[AG-REL-007]** Do not introduce a new programming language without explicit approval.
+- **[AG-OP-012]** Do not use `proxy_cache_key $request_uri` — query strings contain per-request CDN signatures.
+
+## Documented Exceptions to Hard Rules
+
+Hard rules in this governance exist to prevent real failures — runtime crashes, security exposures, documentation drift, stale CI gates, and cascading operational risk. A rule must be clearly broken only when there is a documented reason, and exceptions must state that reason explicitly, name what still must be validated despite the exception, and be narrowly scoped.
+
+Every documented exception must follow this format:
+
+- **Scope**: What the exception narrows (e.g., "Rust builder images for service X" or "CodeQL analysis for auto-generated code in path Y").
+- **Reason**: Why the normal rule does not apply in this case (e.g., "generator output is deterministic and pre-audited," or "this image must use rust:latest because...").
+- **Tracking**: Issue and/or PR reference where this exception was discussed and approved.
+- **Validation**: What validation is still required despite the exception. Omitting validation because "the exception lets us skip it" misses the point — the exception narrows the rule, but safety verification must land somewhere else.
+- **Non-Expansion**: What the exception explicitly does NOT cover (e.g., "this exception applies only to service X, not to other services" or "only to CodeQL analysis, not to other security checks").
+
+### Example: Rust Macro Expansion and CodeQL Analysis (issue #394)
+
+- **Scope**: CodeQL analysis of Rust code generated by macros that expand to large intermediate representations.
+- **Reason**: Rust procedural macros can generate code that CodeQL reports as overly complex or unreachable, even though the actual compiled binary and test behavior are correct. The generated code is not human-readable and is not part of the reviewable source surface. Blocking on CodeQL false positives in generated code delays legitimate security fixes.
+- **Tracking**: issue #394. This exception was approved as part of the v0.2.0 security hardening pass.
+- **Validation**: CodeQL analysis must still run on human-written code. The exception narrows which CodeQL findings are treated as blocking. A CodeQL exception pull request must demonstrate that the finding occurs in generated code (not human-authored code), that the finding is a known false positive for macro expansions, and that the relevant code path has test coverage that proves the behavior is correct despite the CodeQL report.
+- **Non-Expansion**: This exception applies only to CodeQL Rust analysis. It does not cover other languages, other security checks (e.g., cargo-audit, SAST linters), or changes to non-generated Rust code.
+
+## Agent Closing-Report Contract
+
+Finishing a nontrivial task (any PR, any issue fix, any multi-step verification) requires a closing report that proves you understood the work, not just executed instructions. The report must be part of the PR body, closing issue/PR comment, or final-task output (the form varies by context; the content does not).
+
+A closing report must document:
+
+1. **Context read** — Which issue(s), PR(s), design doc(s), existing code, or threat models did you actually read to understand the task scope? Name them explicitly. (This is not "I read the issue" — it's "I read #529 (full text), .github/AGENTS.md (lines 1-50 and the build-tools section), and CLAUDE.md (the Key Constraints section)" or similar specificity.) Omitting what you read is a red flag that you may have missed related constraints or design decisions.
+
+2. **Areas changed** — List the file paths or subsystems you modified. Be exact (e.g., "edited AGENTS.md lines 1-200 to add rule IDs and enforcement matrix" or "modified services/dns/entrypoint.sh to add console-domain exclusion check").
+
+3. **Related areas deliberately NOT changed (with reason)** — If the task description or issue context mentions work that you chose not to do, or related areas that appear to need similar changes but you left them untouched, state that explicitly and say why (e.g., "did not update .github/AGENTS.md because the issue scope is root AGENTS.md only" or "did not change README.md console section because issue #529 Track A is handling that separately"). This proves you recognized the boundary and did not accidentally miss work.
+
+4. **Exact validation commands run and real results** — Not "ran tests" but "`bash scripts/check-file-headers.sh` — exit 0, no findings" or "`cargo clippy --locked --manifest-path services/ui/Cargo.toml -- -D warnings` — 12 warnings fixed, exit 0". Include the exact command so a reviewer can re-run it. If a check could not be run, state that too (e.g., "could not run docker compose config because Docker is unavailable on this host").
+
+5. **Checks that could not be run (with reason)** — If the task normally requires a validation check but you could not run it (no Docker, no Rust toolchain, CI-only gate), state that explicitly. Do not claim success when a check is skipped. The report must distinguish between "check passed," "check skipped with reason," and "check failed."
+
+6. **Known open risks** — Anything that feels incomplete, partially implemented, or dependent on follow-up work must be stated (e.g., "admin UI does not yet expose the new feature" or "the exception needs re-evaluation once upstream macro behavior changes"). Acknowledge what's outstanding rather than implying the task is fully shipped.
+
+7. **Documentation checked/updated for drift** — Did you read the relevant documentation (README.md, threat-model.md, architecture docs) to verify it still describes the code behavior correctly? If you found drift, did you fix it? If not, why not? (Reference rule **[AG-DOC-001]** — documentation drift is a defect.) State explicitly whether documentation was checked or skipped, and if skipped, why (e.g., "documentation changes are out of scope for this PR and tracked in issue #XXX").
+
+8. **Follow-up issue reference or explicit "none"** — If this work creates or depends on a follow-up task, cite it (e.g., "depends on #500 being merged first" or "follow-up: #502 will add Admin UI support for this feature"). If there is no follow-up work, state "no follow-up required" explicitly, rather than omitting it. An omission looks like incomplete thought; an explicit statement closes the loop.
+
+This contract overlaps with the `.github/pull_request_template.md` sections but is stricter: satisfying the template's headings with vague content (e.g., "Validation: tests pass") does not satisfy this rule. The content must be real, specific, and honest — including about gaps.
+
+## Agent Autonomy and User-Context Rule
+
+**[AG-WF-015]** The user of this repository is not a software programmer. This is a deliberate operational constraint, not a gap to work around.
+
+Agents and tools working on this repository must make technical decisions independently and must only ask for guidance when a choice has real operational impact such as hardware selection, network topology, cost implications, or time-to-value tradeoffs — not when the correct technical decision is determinable from code, documentation, and governance alone.
+
+An example of a decision that agents should make independently: "The code changed from BIND9 to PowerDNS; should I update the threat model?" Answer: yes, update it. The code change determines the answer, not user preference.
+
+An example of a decision that requires guidance: "The proposed optimization would increase cache RAM from 10GB to 50GB; is that acceptable for this operator's network?" Answer: ask. The hardware impact depends on the operator's deployment context, not the code alone.
+
+When in doubt, prefer making the decision. The governance and code provide strong signals. This rule exists to keep workflows efficient and prevent decision-delegation bottlenecks on matters that are technically determinable.
+
+## Rule Enforcement Matrix
+
+This matrix maps the hard rules defined above to how they are currently enforced. An entry marked "Known gap, not currently enforced" is not a failure of this governance — it is more informative than claiming coverage that does not exist. Over time, gaps may close as CI infrastructure or validation tooling matures.
+
+| Rule ID | Rule Name | Current Enforcement |
+|---------|-----------|-------------------|
+| AG-GH-001 | All GitHub content in English | Manual review (PR description language scan, commit message review) |
+| AG-GH-002 | Issue descriptions include links | Manual review |
+| AG-GH-003 | PRs reference tracking issue | Manual review |
+| AG-GH-004 | Closes vs Refs keywords | Manual review |
+| AG-GH-005 | Non-closing Refs for drafts | Manual review |
+| AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
+| AG-GH-007 | Project-facing text is English | Manual review |
+| AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
+| AG-WF-002 | Separate worktree per PR | Manual review |
+| AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
+| AG-WF-004 | No direct master push | GitHub branch protection (`master` branch requires PR) |
+| AG-WF-005 | Do not merge without explicit ask | Manual review |
+| AG-WF-006 | Keep PRs in draft until ready | Manual review (PR draft status + CI sign-off) |
+| AG-WF-007 | Review findings must be fixed before resolve | Manual review |
+| AG-WF-008 | Fixed findings need factual reply | Manual review |
+| AG-WF-009 | Reply on unresolvable threads | Manual review |
+| AG-WF-010 | Read full context before acting | Manual review (finding quality inspection) |
+| AG-WF-011 | Treat findings as failure classes | Manual review |
+| AG-WF-012 | Verify GitHub API calls upload content | Manual review (GitHub object inspection) |
+| AG-WF-013 | Consider bigger picture | Manual review (scope and impact assessment) |
+| AG-WF-014 | No direct master push (redundant) | GitHub branch protection |
+| AG-WF-015 | User is not a programmer; agents decide independently | Manual review (decision log in PR) |
+| AG-VAL-001 | Warnings are errors | CI (all build jobs fail on warnings) + manual review |
+| AG-VAL-002 | Standard failures are hard failures | CI (non-zero exit codes block merge) + manual review |
+| AG-VAL-003 | Quote search patterns | Manual review (shell command inspection) |
+| AG-VAL-004 | Do not hide failures with `\|\| true` | Manual review (fallback inspection) |
+| AG-VAL-005 | Use deterministic search (rg/grep) | Manual review |
+| AG-VAL-006 | Run narrowest relevant checks | Manual review (PR validation coverage) |
+| AG-VAL-007 | Shell validation (bash -n, shellcheck) | CI (shell workflow files: actionlint; shell scripts: shellcheck in build-tools) |
+| AG-VAL-008 | Rust validation (fmt, check, clippy, test) | CI (`build-tools` container runs cargo checks; PR checklist guidance) |
+| AG-VAL-009 | Docker/Compose validation | CI (`docker compose config` for Compose changes) + manual review |
+| AG-VAL-010 | Dev-stack `.env` resolution behavior | Manual review (docs and test guidance) |
+| AG-VAL-011 | Workflow syntax and runner labels | CI (actionlint) + manual review |
+| AG-VAL-012 | Setup/update migration coverage | Manual review (fixture/dry-run documentation) |
+| AG-VAL-013 | DNS real response check | Manual review (`dig` commands required in test/verification guidance) |
+| AG-VAL-014 | Proxy/cache behavior check | Manual review (integration test guidance) |
+| AG-VAL-015 | Do not weaken checks for green | Manual review |
+| AG-VAL-016 | Build-tools container (only valid path) | Manual review (CI inspection, PR guidelines) |
+| AG-VAL-017 | Build-tools image tools/PATH | CI (`build-tools` image build and smoke-test) |
+| AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
+| AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
+| AG-REL-001 | No new languages without approval | Manual review (new file type / import detection) |
+| AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
+| AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
+| AG-REL-004 | Project language is Rust | Manual review |
+| AG-REL-005 | No new languages without approval (redundant) | Manual review |
+| AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
+| AG-REL-007 | No new languages without approval (triplicative) | Manual review |
+| AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
+| AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
+| AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
+| AG-SEC-004 | Use GitHub Secrets/Variables | Manual review |
+| AG-SEC-005 | Do not hardcode Redis/distcc/runner IPs | Manual review (grep for hardcoded IPs) |
+| AG-SEC-006 | Remove sensitive data from branch | Manual review + process discipline |
+| AG-SEC-007 | Do not hardcode LAN IPs | Manual review (grep for hardcoded IPs) |
+| AG-CI-001 | Runner baseline: assume no tools | Manual review (workflow inspection) |
+| AG-CI-002 | Runner tier routing | Manual review (runner labels inspection) |
+| AG-CI-003 | Runner portability (don't depend only on self-hosted) | Manual review (CI job inspection, documentation) |
+| AG-CI-004 | sccache configuration | Manual review (environment variable and secrets wiring) |
+| AG-CI-005 | distcc/pump configuration | Manual review (Dockerfile and PATH wiring) |
+| AG-CI-006 | Build parallelism (CARGO_BUILD_JOBS rule) | Manual review (hardcoded value detection) |
+| AG-CI-007 | Build acceleration wiring chain | Manual review (full chain inspection) |
+| AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
+| AG-OP-002 | DNS resolver points to 8.8.8.8 | Code review (nginx resolver inspection) |
+| AG-OP-003 | Lazy proxy default | Manual review + documentation |
+| AG-OP-004 | Strict behavior is opt-in | Manual review + documentation |
+| AG-OP-005 | Do not silently invert defaults | Manual review |
+| AG-OP-006 | Setup/update idempotence | Manual review (code inspection and test guidance) |
+| AG-OP-007 | Setup/update convergence | Manual review (code inspection and test guidance) |
+| AG-OP-008 | Missing values rejected or generated | Manual review (code inspection) |
+| AG-OP-009 | Preserve existing local values | Manual review (code inspection) |
+| AG-OP-010 | Validate before restart/pull | Manual review (code inspection and test guidance) |
+| AG-OP-011 | Re-running update safe | Manual review (code inspection) |
+| AG-OP-012 | Do not use `proxy_cache_key $request_uri` | Code review (nginx config inspection) |
+| AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
+| AG-CODE-001 | Default: no comments | Manual review |
+| AG-CODE-002 | Comments document WHY | Manual review |
+| AG-CODE-003 | No task/PR refs in comments | Manual review |
+| AG-CODE-004 | Structured notes for deferred work | Manual review |
+| AG-CODE-005 | Remove TODO markers once implemented | Manual review + grep before finishing PR |
+
+**Known Gaps and Planned Improvements:**
+
+- **AG-DOC-001** (Documentation drift): No automated script yet checks whether docs match code. This is a manual review burden. A future CI job could parse documentation headers, extract key terms (e.g., "PowerDNS," "Admin UI authentication required," "console domains excluded from DNS"), and compare them against corresponding code values. Until then, the rule exists as guidance; enforcement is manual.
+
+- **AG-GH-001 and related language rules**: Enforced by human reviewers reading PRs, not by an automated language detector. An automated spell-checker or language-detection tool could help, but none is currently integrated.
+
+- Several operational rules (AG-OP-*) and comment style rules (AG-CODE-*) rely entirely on manual code review. No linting tools currently enforce these at CI time.
