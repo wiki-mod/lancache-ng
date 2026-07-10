@@ -1851,7 +1851,7 @@ resolve_lancache_image_tag() {
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
     local install_dir="$1" env_file dhcp_enabled dhcp_mode
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_password ui_user
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
@@ -2052,7 +2052,8 @@ migrate_env_for_update() {
     ui_user=$(get_env_var UI_AUTH_USER "$env_file")
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file")
     if [[ -n "$ui_user" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
-        set_env_key UI_AUTH_PASSWORD "$(generate_secret_value UI_AUTH_PASSWORD alnum20)" "$env_file"
+        ui_generated_password=$(generate_secret_value UI_AUTH_PASSWORD alnum20)
+        set_env_key UI_AUTH_PASSWORD "$ui_generated_password" "$env_file"
         print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
     fi
 
