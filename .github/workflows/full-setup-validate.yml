@@ -227,3 +227,51 @@ jobs:
         if: always()
         run: |
           docker rmi lancache-ng-full-setup:validation || true
+
+  ssl-mitm-cache-simulation:
+    # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
+    # (issue #597, part of #557 scenario 1) -- game CDN domains need signed
+    # URLs and won't serve a plain curl request, so this builds throwaway
+    # dns/proxy images with a Debian mirror hostname added to a test-only
+    # cdn-domains.txt copy (that file is baked in at image build time, no
+    # runtime override exists) and reuses deploy/full-setup/docker-
+    # compose.yml for everything else via an image-only override.
+    # Independent of full-setup-validate above (this job builds its own
+    # throwaway images and starts only proxy/dns-standard/dns-ssl/nats, not
+    # the full compose profile), but shares the same compose project name
+    # and fixed validation-network IPs, so it must not run concurrently
+    # with that job -- confirmed directly during #403/#594 that two jobs
+    # binding the same fixed addresses on this shared runner tier collide.
+    name: SSL MITM cache simulation
+    needs: full-setup-validate
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run SSL MITM cache simulation
+        # Mounted at the same absolute path ($PWD) on both sides of the
+        # socket, not an arbitrary path like /work: this script builds
+        # images and starts containers against the host Docker daemon, and
+        # a path that only looks valid from inside this container resolves
+        # to nothing real on the host. Confirmed the hard way in #403/#594
+        # (scripts/setup-cli-simulation.sh's own comments have the long-form
+        # story) -- applying the same fix here from the start.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            -e BUILD_TOOLS_IMAGE \
+            "$BUILD_TOOLS_IMAGE" \
+            bash scripts/ssl-mitm-cache-simulation.sh
