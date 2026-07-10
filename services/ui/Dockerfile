@@ -478,7 +478,6 @@ EXPOSE 8080
 
 ENV TEMPLATE_DIR=/templates \
     CDN_DOMAINS_FILE=/data/cdn-domains.txt \
-    SSL_DOMAINS_FILE=/data/cdn-ssl-domains.txt \
     STANDARD_LOG=/var/log/nginx/access.log \
     SSL_LOG=/var/log/nginx/access.log \
     CACHE_DIR=/var/cache/proxy \

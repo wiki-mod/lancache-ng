@@ -60,6 +60,11 @@ const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 
+// Persists the CSRF/session-signing secret across restarts so existing
+// sessions don't get invalidated on every container recreate. `create_new`
+// makes the write atomic and exclusive (no lost-update race if two processes
+// start concurrently), and 0o600 keeps the raw key readable only by the
+// container's own user.
 fn load_or_create_session_secret() -> Result<[u8; 32]> {
     const SESSION_SECRET_FILE: &str = "/data/lancache-ui-session.secret";
 
@@ -114,6 +119,11 @@ const TEMPLATE_NAMES: &[&str] = &[
     "setup.html",
 ];
 
+// 'unsafe-inline' on script-src/style-src is a deliberate, narrower exception
+// to an otherwise strict CSP: the Tera templates use inline `onclick=`
+// handlers and inline `<style>` blocks rather than a nonce/hash scheme. Every
+// other directive stays locked down (no external hosts, no object/frame
+// embedding), so this does not open the page to third-party script injection.
 const ADMIN_UI_CSP: &str = "default-src 'self'; \
              base-uri 'self'; \
              object-src 'none'; \
@@ -358,6 +368,10 @@ async fn basic_auth(
     }
 }
 
+// Panics on any missing/malformed template rather than returning a Result:
+// a broken template is a deploy-time defect, not a runtime condition to
+// recover from, and failing at startup (before the listener binds) is far
+// preferable to a page-specific 500 the first time a user visits that route.
 fn load_templates(dir: &str) -> Tera {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
@@ -371,6 +385,12 @@ fn load_templates(dir: &str) -> Tera {
     t
 }
 
+// NOTE: `main()` awaits this before binding the HTTP listener, so the Admin UI
+// serves nothing at all — not even the login page — until NATS is reachable.
+// A NATS outage therefore takes down the whole UI, not just NATS-backed
+// features; this retry loop with exponential backoff (capped at 30s) is what
+// keeps the process alive while waiting, rather than exiting and needing an
+// external restart policy to retry the connection.
 async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
     let mut delay = std::time::Duration::from_secs(1);
     let max_delay = std::time::Duration::from_secs(30);
@@ -565,8 +585,6 @@ async fn main() -> Result<()> {
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
-        .route("/domains/ssl/add", post(routes::domains::add_ssl))
-        .route("/domains/ssl/remove", post(routes::domains::remove_ssl))
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
         .route(
             "/domains/lan/remove",

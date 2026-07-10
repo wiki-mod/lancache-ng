@@ -409,8 +409,7 @@ jobs:
             || { echo "::error::deploy/prod backups must snapshot repo-root runtime inputs reached via ../../ paths."; exit 1; }
           grep -F 'config/prod' setup.sh >/dev/null \
             && grep -F 'services/dns/cdn-domains.txt' setup.sh >/dev/null \
-            && grep -F 'services/proxy/cdn-ssl-domains.txt' setup.sh >/dev/null \
-            || { echo "::error::deploy/prod backups must include repo-root config/prod env files and domain lists."; exit 1; }
+            || { echo "::error::deploy/prod backups must include repo-root config/prod env files and the domain list."; exit 1; }
           grep -F 'deploy_prod_repo_root "$archived_install"' setup.sh >/dev/null \
             && grep -F 'deploy_prod_repo_root "$install_dir"' setup.sh >/dev/null \
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
@@ -2157,38 +2156,48 @@ jobs:
         include:
           - service: proxy
             context: services/proxy
+            # cdn-domains.txt lives in services/dns/, outside this image's own
+            # build context — see services/proxy/Dockerfile's COPY --from
+            # comment for why a named additional context is needed here.
+            build_contexts: dns-domains=services/dns
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
             platform: linux/amd64
             platform_tag: amd64
           - service: dns
             context: services/dns
+            build_contexts: ""
             description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
             rust: true
             platform: linux/amd64
             platform_tag: amd64
           - service: watchdog
             context: services/watchdog
+            build_contexts: ""
             description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
             platform: linux/amd64
             platform_tag: amd64
           - service: dhcp
             context: services/dhcp
+            build_contexts: ""
             description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
             platform: linux/amd64
             platform_tag: amd64
           - service: dhcp-proxy
             context: services/dhcp-proxy
+            build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
             platform: linux/amd64
             platform_tag: amd64
           - service: ui
             context: services/ui
+            build_contexts: ""
             description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
             rust: true
             platform: linux/amd64
             platform_tag: amd64
           - service: build-tools
             context: tools/build-tools
+            build_contexts: ""
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
             platform: linux/amd64
             platform_tag: amd64
@@ -2382,6 +2391,7 @@ jobs:
           SCCACHE_REDIS_FILE: ${{ steps.sccache-secret.outputs.redis-file }}
           SCCACHE_DIST_CONFIG_FILE: ${{ steps.sccache-secret.outputs.dist-config-file }}
           DISTCC_HOSTS_FILE: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          MATRIX_BUILD_CONTEXTS: ${{ matrix.build_contexts }}
         run: |
           set -euo pipefail
 
@@ -2396,6 +2406,11 @@ jobs:
             secret_args+=(--secret "id=distcc_potential_hosts,src=$DISTCC_HOSTS_FILE")
           fi
 
+          build_context_args=()
+          if [ -n "${MATRIX_BUILD_CONTEXTS:-}" ]; then
+            build_context_args+=(--build-context "$MATRIX_BUILD_CONTEXTS")
+          fi
+
           scan_build_network="${RUST_BUILDX_NETWORK:-default}"
           if [ "$scan_build_network" = "bridge" ]; then
             scan_build_network=default
@@ -2408,6 +2423,7 @@ jobs:
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
             "${secret_args[@]}" \
+            "${build_context_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
             ${{ matrix.context }}
       - name: Prepare local Trivy cache
@@ -2480,26 +2496,36 @@ jobs:
         include:
           - service: proxy
             context: services/proxy
+            # cdn-domains.txt lives in services/dns/, outside this image's own
+            # build context — see services/proxy/Dockerfile's COPY --from
+            # comment for why a named additional context is needed here.
+            build_contexts: dns-domains=services/dns
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
           - service: dns
             context: services/dns
+            build_contexts: ""
             description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
             rust: true
           - service: watchdog
             context: services/watchdog
+            build_contexts: ""
             description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
           - service: dhcp
             context: services/dhcp
+            build_contexts: ""
             description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
           - service: dhcp-proxy
             context: services/dhcp-proxy
+            build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
           - service: ui
             context: services/ui
+            build_contexts: ""
             description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
             rust: true
           - service: build-tools
             context: tools/build-tools
+            build_contexts: ""
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
 
     steps:
@@ -2824,6 +2850,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
           secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
@@ -2898,6 +2925,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
           secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}

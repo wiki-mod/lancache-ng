@@ -53,7 +53,6 @@ impl HstsMode {
 pub struct Config {
     pub template_dir: String,
     pub cdn_domains_file: String,
-    pub ssl_domains_file: String,
     pub standard_log: String,
     pub ssl_log: String,
     pub cache_dir: String,
@@ -104,12 +103,13 @@ pub struct Config {
     pub dev_mode: bool,
 }
 
+// Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
+// `{:?}` in a log line or panic message can never leak a credential.
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("template_dir", &self.template_dir)
             .field("cdn_domains_file", &self.cdn_domains_file)
-            .field("ssl_domains_file", &self.ssl_domains_file)
             .field("standard_log", &self.standard_log)
             .field("ssl_log", &self.ssl_log)
             .field("cache_dir", &self.cache_dir)
@@ -184,6 +184,10 @@ impl fmt::Display for Config {
 // `effective_*` getter checks that persisted override file first and only
 // falls back to the startup env value if no override line exists.
 impl Config {
+    // The `effective_*` getters let a value the operator changed live in the
+    // Admin UI (persisted to `ui_settings_file`, see `read_ui_override`) win over
+    // the value `from_env()` captured at process start, without requiring a
+    // container restart to pick up new env vars.
     pub fn effective_dhcp_mode(&self) -> DhcpMode {
         read_dhcp_mode_override(&self.ui_settings_file).unwrap_or(self.dhcp_mode)
     }
@@ -273,7 +277,6 @@ impl Config {
         Ok(Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
             cdn_domains_file: env_str("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
-            ssl_domains_file: env_str("SSL_DOMAINS_FILE", "/data/cdn-ssl-domains.txt"),
             standard_log,
             ssl_log,
             cache_dir,
@@ -351,6 +354,10 @@ fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+// Unlike `env_str`, treats an explicitly-set-but-empty env var the same as an
+// unset one. Used for values that legitimately fall back to another field
+// (e.g. PROXY_SSL_URL defaulting to PROXY_STANDARD_URL) when left blank in
+// deployment .env files rather than omitted outright.
 fn env_or(key: &str, default: String) -> String {
     env::var(key)
         .ok()
@@ -358,6 +365,9 @@ fn env_or(key: &str, default: String) -> String {
         .unwrap_or(default)
 }
 
+// Same empty-string-means-unset treatment as `env_or`, for optional values with
+// no sensible string default (e.g. UI_AUTH_USER, where "unset" must stay
+// distinguishable from "set to an empty string").
 fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }

@@ -28,13 +28,9 @@
   </div>
 
   <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
-    <button type="button" data-dns-tab="http"
+    <button type="button" data-dns-tab="cdn"
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
-      HTTP
-    </button>
-    <button type="button" data-dns-tab="https"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
-      HTTPS
+      CDN-Domains
     </button>
     <button type="button" data-dns-tab="lan"
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
@@ -47,10 +43,10 @@
   </div>
 
   <div class="space-y-6">
-    <section data-dns-panel="http" class="card flex flex-col gap-4">
+    <section data-dns-panel="cdn" class="card flex flex-col gap-4">
       <div>
-        <h2 class="font-semibold text-slate-200">HTTP / DNS-Liste</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen</p>
+        <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
+        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. SSL-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
       </div>
 
       <form action="/domains/dns/add" method="post" class="flex gap-2">
@@ -73,7 +69,7 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="domain" value="{{ domain }}">
             <button type="submit"
-                    onclick="return confirm('{{ domain }} aus der DNS-Liste entfernen?')"
+                    onclick="return confirm('{{ domain }} aus der Domain-Liste entfernen?\nDer SSL-Proxy wird ggf. neu gestartet, falls SSL-Modus aktiv ist.')"
                     class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
               Entfernen
             </button>
@@ -86,47 +82,6 @@
       </div>
 
       <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
-    </section>
-
-    <section data-dns-panel="https" class="card flex flex-col gap-4 hidden">
-      <div>
-        <h2 class="font-semibold text-slate-200">HTTPS / SSL-Zertifikat-Liste</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-ssl-domains.txt · Root-Domains für Wildcard-Certs</p>
-      </div>
-
-      <form action="/domains/ssl/add" method="post" class="flex gap-2">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="text" name="domain" placeholder="z.B. steampowered.com"
-               required
-               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500">
-        <button type="submit"
-                class="bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-          Hinzufügen
-        </button>
-      </form>
-
-      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
-        {% if ssl_domains %}
-        {% for domain in ssl_domains %}
-        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
-          <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
-          <form action="/domains/ssl/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="domain" value="{{ domain }}">
-            <button type="submit"
-                    onclick="return confirm('{{ domain }} aus der SSL-Liste entfernen?\nDer SSL-Proxy wird neu gestartet.')"
-                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
-              Entfernen
-            </button>
-          </form>
-        </div>
-        {% endfor %}
-        {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Liste ist leer.</p>
-        {% endif %}
-      </div>
-
-      <p class="text-xs text-slate-500">{{ ssl_domains | length }} Einträge · Wildcard-Cert pro Root-Domain</p>
     </section>
 
     <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
@@ -271,6 +226,6 @@
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
 
-  setActiveDnsTab('http');
+  setActiveDnsTab('cdn');
 </script>
 {% endblock %}

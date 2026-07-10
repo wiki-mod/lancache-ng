@@ -73,6 +73,13 @@ services:
     container_name: lancache-proxy
     build:
       context: ../../services/proxy
+      # Bakes in a build-time snapshot of the DNS domain list as a fallback
+      # default for deployments that never mount a live cdn-domains.txt (see
+      # deploy/quickstart, which pulls a pre-built image with no local repo
+      # checkout to bind-mount from). dev/prod always shadow this baked
+      # default with the live bind-mount below at container start.
+      additional_contexts:
+        - dns-domains=../../services/dns
     env_file:
       - ../../config/dev/proxy.env
     environment:
@@ -81,7 +88,7 @@ services:
       - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
-      - ../../services/proxy/cdn-ssl-domains.txt:/etc/nginx/cdn-ssl-domains.txt
+      - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
     ports:
@@ -401,7 +408,6 @@ services:
     volumes:
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
-      - ../../services/proxy/cdn-ssl-domains.txt:/data/cdn-ssl-domains.txt
       - proxy-logs:/var/log/nginx:ro
       - proxy-cache:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state
