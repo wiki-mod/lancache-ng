@@ -320,10 +320,10 @@ jobs:
               ;;
           esac
 
-          # validation_build_tools_image may be a branch-local fallback for this
-          # job only. The output exported to downstream jobs stays the published
-          # digest-qualified image resolved above.
-          validation_build_tools_image="$(bash scripts/select-build-tools-image.sh)"
+          # validate-compose runs on the light tier, so it must not trigger the
+          # selector's trusted-ref fallback Docker build. Reuse the already
+          # smoke-tested published digest for this job and for downstream jobs.
+          validation_build_tools_image="$downstream_build_tools_image"
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
@@ -1049,6 +1049,14 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
+          # Positive check (not a "must NOT contain the old pattern" negative
+          # check): the old negative form quoted the forbidden pattern as its
+          # own grep -F argument using single quotes, so the check's own
+          # source line was a byte-for-byte match of the thing it was
+          # supposed to detect as absent -- it would have failed
+          # unconditionally, forever, regardless of the real code below.
+          grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
           grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
             && grep -F 'docker buildx imagetools inspect "$image"' scripts/select-build-tools-image.sh >/dev/null \
             && grep -F 'published_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
