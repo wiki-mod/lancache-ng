@@ -801,9 +801,54 @@ pub async fn release_lease(
     )
     .await
     .map_err(|e| DhcpError::config_error(e.to_string()))?;
-    kea_result(&resp).map_err(|e| DhcpError::config_error(e.to_string()))?;
 
-    Ok(Redirect::to("/dhcp"))
+    match kea_lease_del_result(&resp) {
+        LeaseDelOutcome::Released => Ok(Redirect::to("/dhcp")),
+        // Kea's CONTROL_RESULT_EMPTY (3) for lease4-del means no lease matched
+        // the given address -- an ordinary race (the lease expired or was
+        // already released between page render and this request), not a
+        // server-side failure. Surface it as 404, not 500.
+        LeaseDelOutcome::NotFound => Err(DhcpError::new(
+            StatusCode::NOT_FOUND,
+            format!(
+                "No active lease found for {}; it may have already expired or been released.",
+                form.ip
+            ),
+        )),
+        LeaseDelOutcome::Error(msg) => Err(DhcpError::config_error(msg)),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LeaseDelOutcome {
+    Released,
+    NotFound,
+    Error(String),
+}
+
+// lease4-del uses Kea's generic control-channel result codes: 0 = success,
+// 3 = CONTROL_RESULT_EMPTY (no matching lease), anything else = error. This
+// is distinct from kea_result() below, which treats any nonzero as failure --
+// that's correct for config-modify commands, where "empty" has no special
+// meaning, but wrong for lease4-del's "already gone" case.
+fn kea_lease_del_result(resp: &Value) -> LeaseDelOutcome {
+    let rc = resp
+        .get(0)
+        .and_then(|r| r.get("result"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    match rc {
+        0 => LeaseDelOutcome::Released,
+        3 => LeaseDelOutcome::NotFound,
+        _ => {
+            let msg = resp
+                .get(0)
+                .and_then(|r| r.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Kea error");
+            LeaseDelOutcome::Error(msg.to_string())
+        }
+    }
 }
 
 pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -3015,6 +3060,21 @@ mod tests {
             .iter()
             .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1"));
         assert!(!raw_options.iter().any(|option| option["code"] == 67));
+    }
+
+    #[test]
+    fn kea_lease_del_result_reports_success_not_found_and_error_distinctly() {
+        let success = json!([{"result": 0, "text": "Lease deleted."}]);
+        assert_eq!(kea_lease_del_result(&success), LeaseDelOutcome::Released);
+
+        let empty = json!([{"result": 3, "text": "No lease found."}]);
+        assert_eq!(kea_lease_del_result(&empty), LeaseDelOutcome::NotFound);
+
+        let error = json!([{"result": 1, "text": "unable to communicate with the daemon"}]);
+        assert_eq!(
+            kea_lease_del_result(&error),
+            LeaseDelOutcome::Error("unable to communicate with the daemon".to_string())
+        );
     }
 
     #[test]
