@@ -26,6 +26,13 @@ cd "$repo_root"
 
 test_domain="deb.debian.org"
 test_path="/debian/README"
+# A second, distinct real path on the same host for the SSL-mode leg: the
+# cache key is $host$uri (see CLAUDE.md), shared between HTTP and HTTPS on
+# the same proxy container, so reusing test_path here found it already
+# cached by the standard-mode test above and reported HIT on its supposedly
+# fresh first request -- confirmed directly. A different path guarantees an
+# independent, genuinely fresh cache entry for this leg.
+ssl_test_path="/debian/dists/stable/Release"
 work_dir="$repo_root/.ssl-mitm-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
@@ -131,20 +138,20 @@ cmp -s "$work_dir/shared/body1" "$work_dir/shared/body2" \
     || { echo "::error::Standard-mode response body was empty." >&2; exit 1; }
 echo "Standard mode: MISS then HIT confirmed, with identical real file content on both requests."
 
-echo "== SSL mode: HTTPS MITM MISS then HIT for the same real file =="
+echo "== SSL mode: HTTPS MITM MISS then HIT for a real file =="
 
-https_status_1="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$test_path'")"
+https_status_1="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$ssl_test_path'")"
 grep -qi '^X-Cache-Status: MISS' <<<"$https_status_1" \
     || { echo "::error::First SSL-mode HTTPS request was not a MISS." >&2; echo "$https_status_1" >&2; exit 1; }
 
-https_status_2="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$test_path'")"
+https_status_2="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$ssl_test_path'")"
 grep -qi '^X-Cache-Status: HIT' <<<"$https_status_2" \
     || { echo "::error::Second SSL-mode HTTPS request was not a HIT." >&2; echo "$https_status_2" >&2; exit 1; }
 
 cmp -s "$work_dir/shared/sbody1" "$work_dir/shared/sbody2" \
     || { echo "::error::SSL-mode MISS and HIT responses had different bodies." >&2; exit 1; }
-cmp -s "$work_dir/shared/body1" "$work_dir/shared/sbody1" \
-    || { echo "::error::Standard-mode and SSL-mode responses had different content for the same file." >&2; exit 1; }
-echo "SSL mode: MITM MISS then HIT confirmed -- the proxy decrypted, cached, and re-served the real file over HTTPS using our own CA."
+[[ -s "$work_dir/shared/sbody1" ]] \
+    || { echo "::error::SSL-mode response body was empty." >&2; exit 1; }
+echo "SSL mode: MITM MISS then HIT confirmed -- the proxy decrypted, cached, and re-served a real file over HTTPS using our own CA."
 
 echo "ssl-mitm-cache-simulation passed: DNS redirect, standard-mode HTTP caching, and SSL-mode MITM caching all verified against a real, fetchable file."
