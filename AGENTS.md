@@ -90,6 +90,7 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 - Take the big picture
 - Think big.
   - **[AG-WF-013]** Always look at the bigger picture. Do not only consider the change itself. Consider its dependencies, its impact, and what may happen as a result.
+- **[AG-WF-016]** Do not silently remove, narrow, or "simplify" any AGENTS.md content — values, rules, or anything else that belongs in this file — without the maintainer's explicit consent. Do not replace existing content with a different representation or style just because that would be easier to satisfy technically. Rules may be numbered to allow direct reference (e.g. when citing a violation). No rule number may be reused for a new rule; a rule ID always identifies exactly one rule. Referencing an existing rule elsewhere in the document must use the explicit form `Rule-Ref: <ID>` (e.g. "see Rule-Ref: AG-WF-004"), never a bare repeated ID.
 
 ## Required Validation
 
