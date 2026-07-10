@@ -40,6 +40,7 @@ use tera::Context;
 
 const MIN_LEASE_TIME: u32 = 60;
 const MAX_LEASE_TIME: u32 = 604_800; // 7 days
+const CUSTOM_DHCP_OPTION_DATA_MAX_LEN: usize = 1024;
 
 // ─── Error Handling ───
 
@@ -157,6 +158,13 @@ pub struct Subnet {
     pub ntp_servers: String,
     pub lease_time: u32,
     pub domain: String,
+    pub custom_options: Vec<DhcpOption>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DhcpOption {
+    pub code: u16,
+    pub data: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -214,6 +222,22 @@ pub struct RemoveSubnetForm {
 }
 
 #[derive(Deserialize)]
+pub struct AddSubnetOptionForm {
+    pub csrf_token: String,
+    pub subnet_id: u32,
+    pub code: String,
+    pub data: String,
+}
+
+#[derive(Deserialize)]
+pub struct RemoveSubnetOptionForm {
+    pub csrf_token: String,
+    pub subnet_id: u32,
+    pub code: String,
+    pub data: String,
+}
+
+#[derive(Deserialize)]
 pub struct AddReservationForm {
     pub csrf_token: String,
     pub subnet_id: u32,
@@ -227,6 +251,12 @@ pub struct RemoveReservationForm {
     pub csrf_token: String,
     pub subnet_id: u32,
     pub mac: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseLeaseForm {
+    pub csrf_token: String,
+    pub ip: String,
 }
 
 #[derive(Deserialize)]
@@ -622,6 +652,70 @@ pub async fn remove_subnet(
     Ok(Redirect::to("/dhcp"))
 }
 
+pub async fn add_subnet_option(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<AddSubnetOptionForm>,
+) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    let code = parse_custom_dhcp_option_code(&form.code).map_err(|message| {
+        DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid DHCP option: {message}"),
+        )
+    })?;
+    let data = validate_custom_dhcp_option_data(&form.data).map_err(|message| {
+        DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid DHCP option: {message}"),
+        )
+    })?;
+    let subnet_id = form.subnet_id;
+
+    kea_config_modify(&state, move |config| {
+        let subnet = find_subnet_mut(config, subnet_id)?;
+        add_custom_subnet_option(subnet, code, &data)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+
+    Ok(Redirect::to("/dhcp"))
+}
+
+pub async fn remove_subnet_option(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<RemoveSubnetOptionForm>,
+) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    let code = parse_custom_dhcp_option_code(&form.code).map_err(|message| {
+        DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid DHCP option: {message}"),
+        )
+    })?;
+    let data = validate_custom_dhcp_option_data(&form.data).map_err(|message| {
+        DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid DHCP option: {message}"),
+        )
+    })?;
+    let subnet_id = form.subnet_id;
+
+    kea_config_modify(&state, move |config| {
+        let subnet = find_subnet_mut(config, subnet_id)?;
+        remove_custom_subnet_option(subnet, code, &data)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+
+    Ok(Redirect::to("/dhcp"))
+}
+
 pub async fn add_reservation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -678,6 +772,37 @@ pub async fn remove_reservation(
     })
     .await
     .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    Ok(Redirect::to("/dhcp"))
+}
+
+pub async fn release_lease(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<ReleaseLeaseForm>,
+) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    if !is_valid_ip(&form.ip) {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Lease release requires a valid IPv4 address",
+        ));
+    }
+
+    let resp = kea_post(
+        &state,
+        json!({
+            "command": "lease4-del",
+            "service": ["dhcp4"],
+            "arguments": {
+                "ip-address": form.ip
+            }
+        }),
+    )
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    kea_result(&resp).map_err(|e| DhcpError::config_error(e.to_string()))?;
+
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -1336,6 +1461,13 @@ fn dhcp4_subnets_mut(config: &mut Value) -> Result<&mut Vec<Value>, &'static str
         .ok_or("subnet4 not an array")
 }
 
+fn find_subnet_mut(config: &mut Value, subnet_id: u32) -> Result<&mut Value, &'static str> {
+    dhcp4_subnets_mut(config)?
+        .iter_mut()
+        .find(|subnet| subnet["id"].as_u64() == Some(subnet_id as u64))
+        .ok_or("subnet not found")
+}
+
 struct SubnetValue {
     id: u32,
     subnet: String,
@@ -1467,12 +1599,120 @@ fn is_ui_managed_subnet_option(option: &Value) -> bool {
     managed_by_name || managed_by_code
 }
 
+fn is_ui_managed_subnet_option_code(code: u16) -> bool {
+    matches!(code, 3 | 6 | 15 | 42 | 119)
+}
+
 fn is_dhcp4_option_space(option: &Value) -> bool {
     option
         .get("space")
         .and_then(|value| value.as_str())
         .map(|space| space == "dhcp4")
         .unwrap_or(true)
+}
+
+fn parse_custom_dhcp_option_code(raw: &str) -> Result<u16, &'static str> {
+    let code = raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "option code must be a number")?;
+    if code == 0 || code > 254 {
+        return Err("option code must be between 1 and 254");
+    }
+    if is_ui_managed_subnet_option_code(code) {
+        return Err("option code is managed by dedicated subnet fields");
+    }
+    Ok(code)
+}
+
+fn validate_custom_dhcp_option_data(raw: &str) -> Result<String, &'static str> {
+    let data = raw.trim();
+    if data.is_empty() {
+        return Err("option data must not be empty");
+    }
+    if data.len() > CUSTOM_DHCP_OPTION_DATA_MAX_LEN {
+        return Err("option data is too long");
+    }
+    if data.chars().any(|ch| ch == '\n' || ch == '\r') {
+        return Err("option data must fit on one line");
+    }
+    Ok(data.to_string())
+}
+
+fn is_custom_dhcp4_option(option: &Value) -> bool {
+    is_dhcp4_option_space(option)
+        && !is_ui_managed_subnet_option(option)
+        && option
+            .get("code")
+            .and_then(|value| value.as_u64())
+            .map(|code| (1..=254).contains(&code))
+            .unwrap_or(false)
+        && option
+            .get("data")
+            .and_then(|value| value.as_str())
+            .is_some()
+}
+
+fn custom_subnet_options(subnet: &Value) -> Vec<DhcpOption> {
+    subnet
+        .get("option-data")
+        .and_then(|value| value.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter(|option| is_custom_dhcp4_option(option))
+                .filter_map(|option| {
+                    let code = option.get("code")?.as_u64()?;
+                    Some(DhcpOption {
+                        code: u16::try_from(code).ok()?,
+                        data: option.get("data")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn subnet_options_mut(subnet: &mut Value) -> Result<&mut Vec<Value>, &'static str> {
+    let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
+    if !subnet.contains_key("option-data") {
+        subnet.insert("option-data".to_string(), Value::Array(Vec::new()));
+    }
+    subnet
+        .get_mut("option-data")
+        .and_then(|value| value.as_array_mut())
+        .ok_or("option-data not an array")
+}
+
+fn add_custom_subnet_option(subnet: &mut Value, code: u16, data: &str) -> Result<(), &'static str> {
+    let options = subnet_options_mut(subnet)?;
+    if options.iter().any(|option| {
+        is_custom_dhcp4_option(option)
+            && option.get("code").and_then(|value| value.as_u64()) == Some(code as u64)
+            && option.get("data").and_then(|value| value.as_str()) == Some(data)
+    }) {
+        return Err("custom option already exists");
+    }
+    options.push(json!({"space": "dhcp4", "code": code, "data": data}));
+    Ok(())
+}
+
+fn remove_custom_subnet_option(
+    subnet: &mut Value,
+    code: u16,
+    data: &str,
+) -> Result<(), &'static str> {
+    let options = subnet_options_mut(subnet)?;
+    let before = options.len();
+    options.retain(|option| {
+        !(is_custom_dhcp4_option(option)
+            && option.get("code").and_then(|value| value.as_u64()) == Some(code as u64)
+            && option.get("data").and_then(|value| value.as_str()) == Some(data))
+    });
+    if options.len() == before {
+        return Err("custom option not found");
+    }
+    Ok(())
 }
 
 fn split_option_list(raw: &str) -> Vec<String> {
@@ -1556,6 +1796,7 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
             .and_then(|v| v.as_u64())
             .unwrap_or(86400) as u32,
         domain: opt("domain-name", 15),
+        custom_options: custom_subnet_options(subnet),
     }
 }
 
@@ -2714,6 +2955,66 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4"));
+    }
+
+    #[test]
+    fn custom_dhcp_option_validation_rejects_managed_codes() {
+        for code in ["3", "6", "15", "42", "119"] {
+            assert!(parse_custom_dhcp_option_code(code).is_err());
+        }
+
+        assert_eq!(
+            parse_custom_dhcp_option_code("66").expect("custom code"),
+            66
+        );
+        assert!(validate_custom_dhcp_option_data("pxelinux.0").is_ok());
+        assert!(validate_custom_dhcp_option_data("").is_err());
+        assert!(validate_custom_dhcp_option_data("line\nbreak").is_err());
+    }
+
+    #[test]
+    fn custom_subnet_options_only_expose_free_dhcp4_code_options() {
+        let subnet = json!({
+            "option-data": [
+                {"name": "routers", "data": "10.0.0.1"},
+                {"code": 6, "data": "10.0.0.2"},
+                {"space": "dhcp4", "code": 66, "data": "10.0.0.20"},
+                {"space": "vendor-foo", "code": 67, "data": "vendor-value"},
+                {"name": "boot-file-name", "data": "legacy-name-only"}
+            ]
+        });
+
+        let options = custom_subnet_options(&subnet);
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].code, 66);
+        assert_eq!(options[0].data, "10.0.0.20");
+    }
+
+    #[test]
+    fn custom_subnet_option_add_and_remove_preserve_managed_options() {
+        let mut subnet = json!({
+            "option-data": [
+                {"name": "routers", "data": "10.0.0.1"},
+                {"space": "dhcp4", "code": 67, "data": "bootx64.efi"}
+            ]
+        });
+
+        add_custom_subnet_option(&mut subnet, 66, "10.0.0.20").expect("add option");
+        assert!(add_custom_subnet_option(&mut subnet, 66, "10.0.0.20").is_err());
+
+        let options = custom_subnet_options(&subnet);
+        assert_eq!(options.len(), 2);
+        assert!(options
+            .iter()
+            .any(|option| option.code == 66 && option.data == "10.0.0.20"));
+
+        remove_custom_subnet_option(&mut subnet, 67, "bootx64.efi").expect("remove option");
+        let raw_options = subnet["option-data"].as_array().expect("option-data array");
+        assert!(raw_options
+            .iter()
+            .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1"));
+        assert!(!raw_options.iter().any(|option| option["code"] == 67));
     }
 
     #[test]
