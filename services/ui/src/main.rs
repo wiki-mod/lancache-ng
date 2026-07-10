@@ -394,20 +394,56 @@ async fn basic_auth(
     }
 }
 
+struct StaticTemplateValue {
+    value: String,
+}
+
+impl StaticTemplateValue {
+    fn new(value: String) -> Self {
+        Self { value }
+    }
+}
+
+impl tera::Function<String> for StaticTemplateValue {
+    fn call(&self, _kwargs: tera::Kwargs, _state: &tera::State<'_>) -> String {
+        self.value.clone()
+    }
+}
+
+fn register_lancache_image_template_functions(templates: &mut Tera, cfg: &config::Config) {
+    templates.register_function(
+        "lancache_image_registry",
+        StaticTemplateValue::new(cfg.lancache_image_registry.clone()),
+    );
+    templates.register_function(
+        "lancache_image_prefix",
+        StaticTemplateValue::new(cfg.lancache_image_prefix.clone()),
+    );
+    templates.register_function(
+        "lancache_image_channel",
+        StaticTemplateValue::new(cfg.lancache_image_channel.clone()),
+    );
+    templates.register_function(
+        "lancache_image_tag",
+        StaticTemplateValue::new(cfg.lancache_image_tag.clone()),
+    );
+}
+
 // Panics on any missing/malformed template rather than returning a Result:
 // a broken template is a deploy-time defect, not a runtime condition to
 // recover from, and failing at startup (before the listener binds) is far
 // preferable to a page-specific 500 the first time a user visits that route.
-fn load_templates(dir: &str) -> Tera {
+fn load_templates(cfg: &config::Config) -> Tera {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
     for name in TEMPLATE_NAMES {
-        let path = format!("{}/{}", dir, name);
+        let path = format!("{}/{}", cfg.template_dir, name);
         let content = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Cannot read template {}: {}", path, e));
         t.add_raw_template(name, &content)
             .unwrap_or_else(|e| panic!("Cannot parse template {}: {}", name, e));
     }
+    register_lancache_image_template_functions(&mut t, cfg);
     t
 }
 
@@ -542,7 +578,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let templates = load_templates(&cfg.template_dir);
+    let templates = load_templates(&cfg);
     let docker = docker_client::connect_from_env()?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -778,6 +814,39 @@ mod tests {
             preflight_startup_config(&cfg),
             Err("UI_SESSION_TTL_SECONDS must be greater than zero".to_string())
         );
+    }
+
+    #[test]
+    fn lancache_image_template_functions_render_runtime_config() {
+        let _guard = config::env_test_lock().lock().unwrap();
+
+        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+
+        let cfg = config::Config::from_env().unwrap();
+        let mut templates = Tera::default();
+        register_lancache_image_template_functions(&mut templates, &cfg);
+        templates
+            .add_raw_template(
+                "runtime.html",
+                "{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }} [{{ lancache_image_channel() }}]",
+            )
+            .unwrap();
+
+        let rendered = templates
+            .render("runtime.html", &tera::Context::new())
+            .unwrap();
+        assert_eq!(
+            rendered,
+            "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [edge]"
+        );
+
+        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        std::env::remove_var("LANCACHE_IMAGE_TAG");
     }
 
     #[test]

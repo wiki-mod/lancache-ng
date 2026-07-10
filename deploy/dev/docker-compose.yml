@@ -437,6 +437,10 @@ services:
       - SSL_IP=${IP_SSL}
       - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
       - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
+      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
+      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
+      - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-dev}
+      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-dev}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
