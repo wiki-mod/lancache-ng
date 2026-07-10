@@ -215,6 +215,32 @@ async fn chart_js() -> impl IntoResponse {
     )
 }
 
+async fn favicon_ico() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/x-icon"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_bytes!("static/favicon.ico").as_slice(),
+    )
+}
+
+async fn logo_icon() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_bytes!("static/logo-icon.png").as_slice(),
+    )
+}
+
 fn basic_auth_is_valid(headers: &HeaderMap, user: &str, pass: &str) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -561,10 +587,22 @@ async fn main() -> Result<()> {
     }
 
     // Routes that are always public (protected by their own token).
-    let public_routes = Router::new().route("/health", get(health)).route(
-        "/api/secondary/register",
-        post(routes::secondaries::register_secondary),
-    );
+    let public_routes = Router::new()
+        .route("/health", get(health))
+        .route(
+            "/api/secondary/register",
+            post(routes::secondaries::register_secondary),
+        )
+        // Not behind basic_auth on purpose: these are non-sensitive brand
+        // assets, not gated content. Serving them through the protected
+        // router would attach a session-issuing Set-Cookie to a response
+        // already marked publicly cacheable, letting a shared cache in
+        // front of the Admin UI replay one client's session cookie to
+        // another (see PR #553 review). The browser's own Basic Auth
+        // prompt still blocks every request to this origin regardless, so
+        // this doesn't change when a client can actually fetch them.
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/static/logo-icon.png", get(logo_icon));
 
     // Routes that are protected by Basic Auth when auth is enabled. The
     // middleware also issues per-session CSRF state for every request.

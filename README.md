@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="gfx/logo-readme.png" alt="LanCache-NG logo" width="220">
+</p>
+
 # lancache-ng
 
 [![Build & Push](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml/badge.svg)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml)
