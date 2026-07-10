@@ -41,6 +41,10 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
 REPLY=""
+# Reads from /dev/tty explicitly, not stdin: this script is commonly run via
+# `curl ... | bash`, which occupies stdin with the script body itself. Without
+# this, every prompt would silently read leftover script text instead of
+# waiting for the user.
 ask() {
     local prompt="$1" default="${2:-}"
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
@@ -48,6 +52,9 @@ ask() {
     REPLY="${REPLY:-$default}"
 }
 
+# CLI argument-parsing guard: dies if a flag's value is missing or looks like
+# another flag (e.g. `--token --name`), which would otherwise silently consume
+# the next option as this one's value.
 require_value() {
     local option="$1" value="${2:-}"
     if [[ -z "$value" || "$value" == --* ]]; then
@@ -66,20 +73,31 @@ is_valid_ipv4() {
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+# True for unsigned decimal integers greater than zero. The 10# base prefix
+# forces base-10 arithmetic so a leading-zero value like "010" is read as ten,
+# not misinterpreted as octal by bash arithmetic.
 is_positive_integer() {
     [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
 }
 
+# True if the value is non-empty and starts with /, i.e. a filesystem absolute path.
 is_absolute_path() {
     [[ -n "${1:-}" && "$1" == /* ]]
 }
 
+# Proxy-DHCP (dnsmasq) needs a subnet *base* address, not an arbitrary host IP,
+# so it must be a valid IPv4 address ending in ".0".
 is_dnsmasq_subnet_start() {
     local ip="$1"
 
     is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
 }
 
+# Two-tier detection for a secondary node's own LAN IP: prefer the source
+# address the kernel would actually use to reach the internet (most accurate
+# on multi-homed hosts), then fall back to the first non-loopback,
+# non-Docker-bridge (172.x) address if the route lookup fails or returns
+# nothing usable.
 detect_secondary_listen_ip() {
     local ip
 
@@ -102,6 +120,9 @@ detect_secondary_listen_ip() {
     return 1
 }
 
+# Cluster: detects and works around another process (e.g. systemd-resolved)
+# already bound to port 53 on the chosen Secondary listen IP, since that would
+# otherwise fail silently at container start rather than during setup.
 secondary_listen_ip_conflicts() {
     local listen_ip="$1"
 
@@ -118,6 +139,10 @@ secondary_listen_ip_conflicts() {
     '
 }
 
+# Finds a free bind IP for the secondary node when the requested one already
+# has something listening on port 53. Tries the host's other real (non-loopback,
+# non-Docker-bridge) addresses first, then falls back to the 127.0.0.2-.10
+# loopback-alias range, since those can be bound independently on Linux.
 secondary_suggest_alternate_listen_ip() {
     local current="$1" candidate
 
@@ -142,6 +167,10 @@ secondary_suggest_alternate_listen_ip() {
     return 1
 }
 
+# Interactive gate before starting the secondary node: reports what else is
+# bound to port 53 on the chosen IP (via ss/fuser/lsof) and offers a suggested
+# alternate. Requires an actual terminal to prompt, so it fails closed instead
+# of looping forever when run non-interactively (e.g. from another script).
 secondary_choose_listen_ip() {
     local listen_ip="$1" conflicts suggestion
 
@@ -175,6 +204,8 @@ secondary_choose_listen_ip() {
     done
 }
 
+# Validates a full IPv4 CIDR (address + /prefix), octet-by-octet and with the
+# prefix length bounded to 1-32, before it is written into DHCP subnet config.
 is_valid_cidr() {
     local cidr="$1" ip mask octets
 
@@ -197,6 +228,8 @@ is_valid_cidr() {
     return 0
 }
 
+# Enumerates the only three DHCP_MODE values setup.sh understands: DHCP off,
+# our own Kea server, or dnsmasq acting as a proxy-DHCP helper for PXE.
 is_valid_dhcp_mode() {
     case "$1" in
         disabled|kea|dnsmasq-proxy) return 0 ;;
@@ -204,12 +237,18 @@ is_valid_dhcp_mode() {
     esac
 }
 
+# Validates UI_SESSION_TTL_SECONDS is a positive integer no greater than
+# MAX_UI_SESSION_TTL_SECONDS (1 year), so a malformed or absurd .env value
+# cannot produce a session cookie that never expires.
 validate_ui_session_ttl_seconds() {
     local value="$1" source="${2:-UI_SESSION_TTL_SECONDS}" numeric max
 
     if [[ ! "$value" =~ ^[0-9]+$ ]]; then
         die "UI_SESSION_TTL_SECONDS in ${source} must be an unsigned integer number of seconds."
     fi
+    # Strip leading zeros before the numeric comparisons below: bash arithmetic
+    # treats a leading-zero literal (e.g. "010") as octal, which would silently
+    # misparse or reject an otherwise valid decimal value.
     numeric="${value#"${value%%[!0]*}"}"
     numeric="${numeric:-0}"
     if [[ "$numeric" = "0" ]]; then
@@ -262,12 +301,17 @@ compose_profiles_for_runtime() {
     printf '%s\n' "$result"
 }
 
+# Wraps ask() into a yes/no boolean prompt (accepts "y" or "yes", case-insensitive).
 confirm() {
     local prompt="$1" default="${2:-N}"
     ask "$prompt" "$default"
     [[ "${REPLY,,}" = "y" || "${REPLY,,}" = "yes" ]]
 }
 
+# Installs the given packages via whichever supported package manager is
+# present (apt/dnf/yum/pacman), after an explicit operator confirmation since
+# this mutates the host outside setup.sh's own config. Fails closed if no
+# supported package manager is found rather than guessing a command.
 install_packages() {
     local reason="$1"
     shift
@@ -307,6 +351,8 @@ install_required_command() {
         || die "$command_name is still missing after installing package(s): $*"
 }
 
+# Thin named wrappers around install_required_command so call sites read as
+# "install_curl" / "install_git" rather than a repeated three-argument call.
 install_curl() {
     install_required_command curl "curl is missing." curl
 }
@@ -315,15 +361,22 @@ install_git() {
     install_required_command git "git is missing." git
 }
 
+# True if apt's package index has any candidate version for the named package
+# (does not check whether it is already installed).
 apt_package_available() {
     apt-cache show "$1" >/dev/null 2>&1
 }
 
+# Reads the version apt would install for a package right now, without
+# installing anything, so callers can branch on version before committing.
 apt_package_candidate_version() {
     apt-cache policy "$1" 2>/dev/null \
         | awk '/^[[:space:]]*Candidate:/ {print $2; exit}'
 }
 
+# Some distro apt indexes reuse the legacy "docker-compose" package name for
+# Compose v2 (see apt_compose_package below); this checks the candidate
+# version's leading digit to tell v2 apart from the old Python-based v1.
 apt_docker_compose_is_v2() {
     local version=""
 
@@ -331,6 +384,8 @@ apt_docker_compose_is_v2() {
     [[ "$version" =~ ^2[.:-] ]]
 }
 
+# Picks the best available Compose v2 package name for this apt index, in
+# preference order, since its name varies across Debian/Ubuntu releases.
 apt_compose_package() {
     if apt_package_available docker-compose-plugin; then
         printf '%s\n' docker-compose-plugin
@@ -356,6 +411,10 @@ verify_docker_installation() {
         || die "Docker Compose v2 is missing after installation."
 }
 
+# Debian Trixie's docker.io package no longer ships /usr/bin/docker itself;
+# the client lives in the separate docker-cli package. Install it only when
+# docker is still missing after docker.io, to stay a no-op on older distros
+# where docker.io already provides the client.
 ensure_apt_docker_client() {
     if command -v docker >/dev/null 2>&1; then
         return 0
@@ -370,6 +429,9 @@ ensure_apt_docker_client() {
         || die "Docker client binary is missing after installation. Install docker-cli or docker-ce-cli manually, then rerun setup.sh."
 }
 
+# Fallback for when the distro's own apt index has no Compose v2 package at
+# all: adds Docker's official apt repository (GPG key + sources list) so a
+# supported package becomes available, then refreshes the index.
 install_docker_apt_repo() {
     local os_id="" codename="" repo_file=""
 
@@ -405,6 +467,10 @@ install_docker_apt_repo() {
     apt-get update -y
 }
 
+# Installs Docker + Compose v2 on Debian/Ubuntu. Prefers the distro's own
+# packages; only adds Docker's apt repo (install_docker_apt_repo) if the distro
+# index has no Compose v2 package. Uses the lighter docker.io + ensure_apt_docker_client
+# path when possible instead of always pulling in Docker's own docker-ce group.
 install_docker_apt() {
     local compose_package=""
 
@@ -428,6 +494,8 @@ install_docker_apt() {
     verify_docker_installation
 }
 
+# Same fallback logic as install_docker_apt, but for the case where Docker
+# itself is already installed and only the Compose v2 plugin is missing.
 install_docker_compose_apt() {
     local compose_package=""
 
@@ -443,6 +511,8 @@ install_docker_compose_apt() {
     verify_docker_installation
 }
 
+# Filters an arbitrary package name list down to just the ones actually
+# installed, via rpm -q, for use as a generic conflict-detection building block.
 rpm_installed_package_list() {
     local package
 
@@ -451,6 +521,9 @@ rpm_installed_package_list() {
     done
 }
 
+# Lists the historical Docker Inc./distro-provided package names that conflict
+# with Docker CE's own RPM packages, so they can be surfaced before installing
+# and the operator is told what to remove instead of hitting an opaque rpm error.
 rpm_legacy_docker_package_list() {
     rpm_installed_package_list \
         docker \
@@ -465,6 +538,9 @@ rpm_legacy_docker_package_list() {
         docker-engine
 }
 
+# Returns every installed package that would block a clean Docker CE RPM
+# install, using OS-specific rules (see the branch comments below) since
+# Fedora and RHEL-family hosts have different podman/runc conflict policies.
 rpm_conflicting_docker_packages() {
     local os_id=""
 
@@ -489,6 +565,8 @@ rpm_conflicting_docker_packages() {
     fi
 }
 
+# Fails closed with a concrete remediation command (dnf remove ...) instead of
+# letting rpm/dnf hit the conflict mid-install and leave the host half-configured.
 guard_rpm_docker_conflicts() {
     local package
     local -a conflicts=()
@@ -502,6 +580,9 @@ guard_rpm_docker_conflicts() {
     die "Docker's RPM packages conflict with these installed packages: ${conflicts[*]}. Remove them first (for example: dnf remove ${conflicts[*]}), then rerun setup.sh."
 }
 
+# Docker publishes separate yum/dnf repo files per RHEL-family distro; picks
+# the matching one by /etc/os-release ID, defaulting to the CentOS repo for
+# other RHEL derivatives that aren't Fedora or RHEL itself.
 docker_rpm_repo_url() {
     local os_id=""
 
@@ -520,6 +601,11 @@ docker_rpm_repo_url() {
     fi
 }
 
+# Installs Docker (or just its Compose plugin) on dnf/yum systems by adding
+# Docker's own repo and installing the given packages (defaulting to the full
+# docker-ce set). Only runs the podman/runc conflict guard when an actual
+# Docker engine package is being installed, so a compose-plugin-only install
+# is not blocked by an unrelated podman conflict rule.
 install_docker_rpm() {
     local manager="$1"
     shift
@@ -557,6 +643,9 @@ install_docker_rpm() {
     verify_docker_installation
 }
 
+# Interactive installer for the Compose v2 plugin only (Docker engine already
+# present). Dispatches to the right package manager, each with its own
+# operator confirmation before mutating the host.
 install_docker_compose() {
     local packages=()
 
@@ -594,6 +683,8 @@ install_docker_compose() {
     fi
 }
 
+# Interactive installer for Docker engine + Compose v2 together, dispatching to
+# the right package manager with its own confirmation prompt and package set.
 install_docker() {
     local packages=()
 
@@ -662,12 +753,18 @@ _compose_parse_env_value() {
     printf '%s' "$value"
 }
 
+# Reads the FIRST assignment of a key from a .env file and returns its parsed
+# (unquoted, comment-stripped) value, regardless of whether it is empty.
 get_env_var() {
     local raw
     raw=$(awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null) || true
     _compose_parse_env_value "$raw"
 }
 
+# Unlike get_env_var, scans ALL assignments of a key top-to-bottom and returns
+# the parsed value of the first NON-EMPTY one. This matters for migrated .env
+# files that can end up with an earlier empty placeholder line followed by a
+# later real value for the same key.
 get_env_var_nonempty() {
     local key="$1" env_file="$2" raw value
     while IFS= read -r raw; do
@@ -679,10 +776,16 @@ get_env_var_nonempty() {
     done < <(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print}' "$env_file" 2>/dev/null)
 }
 
+# Like get_env_var, but returns the RAW (unparsed) assignment text of the first
+# match instead of the parsed value, so callers that need to preserve quoting
+# or ${VAR} interpolation verbatim can copy it unchanged.
 get_env_assignment_value_raw() {
     awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true
 }
 
+# Combines the two behaviors above: scans for the first assignment whose
+# parsed value is non-empty, but returns that match's RAW text so migration
+# helpers can carry over interpolation/quoting intact.
 get_env_assignment_value_raw_nonempty() {
     local key="$1" env_file="$2" raw value
     while IFS= read -r raw; do
@@ -701,12 +804,18 @@ env_key_exists() {
     grep -q "^${key}=" "$env_file" 2>/dev/null
 }
 
+# True if the key exists in the .env file with a non-empty parsed value.
 env_key_has_value() {
     local key="$1" env_file="$2" value
     value=$(get_env_var "$key" "$env_file")
     [[ -n "$value" ]]
 }
 
+# Recognizes placeholder-style secret values (empty, CHANGE_ME_*, YOUR_*_HERE,
+# changeme*, or the old lancache-*-secret template default) so setup.sh can
+# tell "operator has not configured a real secret yet" apart from "operator
+# configured this on purpose" and knows when it must generate a real value
+# instead of trusting the placeholder as configured.
 secret_value_is_placeholder() {
     local value="$1"
     case "$value" in
@@ -717,6 +826,10 @@ secret_value_is_placeholder() {
     return 1
 }
 
+# True only if the key holds a real, usable secret — i.e. it has a value and
+# that value is not one of the known placeholder patterns above. Used to gate
+# secret generation so setup.sh never overwrites an operator's real secret but
+# always replaces a placeholder.
 env_key_has_usable_secret() {
     local key="$1" env_file="$2" value
     value=$(get_env_var "$key" "$env_file")
@@ -800,6 +913,9 @@ validate_env_value() {
     return 0
 }
 
+# Runs validate_env_value over every KEY=VALUE pair before the first-install
+# .env heredoc is written (see comment inside for why that heredoc specifically
+# needs this pre-check).
 validate_env_values_for_initial_write() {
     local key value pair
 
@@ -813,6 +929,10 @@ validate_env_values_for_initial_write() {
     done
 }
 
+# Sets KEY=VALUE in the .env file, validating the value's characters first.
+# If the key already has one or more assignments, the awk pass rewrites only
+# the first occurrence and drops any later duplicate lines for the same key,
+# so the file always converges on a single canonical assignment per key.
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
@@ -832,6 +952,11 @@ set_env_key() {
     fi
 }
 
+# Like set_env_key, but writes a raw assignment value verbatim (only rejecting
+# embedded newlines) instead of running it through validate_env_value's strict
+# character check. Used to carry over an existing raw .env assignment — which
+# may legitimately contain ${VAR} interpolation — without re-validating
+# characters that Compose itself already parses safely.
 set_env_assignment() {
     local key="$1" assignment_value="$2" env_file="$3"
     case "$key" in
@@ -861,6 +986,8 @@ set_env_assignment() {
     fi
 }
 
+# Adds KEY=VALUE only if the key is completely absent; never touches an
+# existing assignment, even if it is empty (see comment inside).
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
@@ -868,6 +995,8 @@ append_env_key_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
 }
 
+# Fills in a default only when the key is missing or its current value is
+# empty; a non-empty existing assignment (even raw/interpolated) is kept as-is.
 set_env_key_if_empty_or_missing() {
     local key="$1" value="$2" env_file="$3" existing_assignment
     validate_env_value "$key" "$value"
@@ -885,6 +1014,7 @@ set_env_key_if_empty_or_missing() {
     fi
 }
 
+# Like append_env_key_if_missing, but for a raw assignment (see set_env_assignment).
 append_env_assignment_if_missing() {
     local key="$1" assignment_value="$2" env_file="$3"
     case "$key" in
@@ -902,6 +1032,10 @@ append_env_assignment_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
+# Migrates an optional key from an old name (source_key) to a new one
+# (target_key), or seeds fallback_value if there is nothing to migrate. Used
+# for renamed .env keys where an empty target value is a valid, intentional
+# state (see comment inside).
 append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local source_assignment
@@ -922,6 +1056,9 @@ append_env_migrated_assignment_if_missing() {
     fi
 }
 
+# Same migration idea as append_env_migrated_assignment_if_missing, but for
+# keys that must never end up empty (e.g. bind-mount paths); repairs an empty
+# target instead of leaving it alone (see comment inside for why).
 append_required_env_migrated_assignment_if_empty_or_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local target_assignment source_assignment
@@ -961,6 +1098,9 @@ legacy_state_path() {
     fi
 }
 
+# True if any of the known pre-v0.1 state subdirectories actually exist under
+# LEGACY_STATE_ROOT, i.e. this host has real legacy state to migrate rather
+# than just an unrelated /srv/lancache directory.
 legacy_state_root_has_known_children() {
     local child
 
@@ -970,6 +1110,8 @@ legacy_state_root_has_known_children() {
     return 1
 }
 
+# Picks the legacy state root only when it actually has legacy children on
+# disk; otherwise falls back to the given (new-style) default directory.
 legacy_state_root_or_default() {
     local default_dir="$1"
 
@@ -980,6 +1122,8 @@ legacy_state_root_or_default() {
     fi
 }
 
+# Generic version of legacy_state_root_or_default for a single directory:
+# use it if it exists on disk, otherwise use the new-style default.
 legacy_dir_or_default() {
     local legacy_dir="$1" default_dir="$2"
 
@@ -990,6 +1134,11 @@ legacy_dir_or_default() {
     fi
 }
 
+# Reconciles a per-service directory override (e.g. CACHE_DIR_STANDARD) against
+# the one-root state-dir contract: drops the key entirely when it already
+# matches the derived default (see comment inside for why), keeps templated or
+# absolute-path overrides verbatim, and repairs anything else that is clearly
+# broken (a stray number, a single letter, etc.).
 set_optional_env_path_override_if_needed() {
     local key="$1" desired_path="$2" derived_path="$3" env_file="$4"
     local existing_assignment
@@ -1017,6 +1166,8 @@ set_optional_env_path_override_if_needed() {
     set_env_key "$key" "$desired_path" "$env_file"
 }
 
+# Deletes every line assigning the given key, if any exist; a no-op if the key
+# is already absent.
 remove_env_key() {
     local key="$1" env_file="$2"
 
@@ -1024,6 +1175,8 @@ remove_env_key() {
     awk -F= -v key="$key" '$1 != key' "$env_file" | write_env_file "$env_file"
 }
 
+# Default LANCACHE_STATE_DIR for a given install_dir (see comment inside for
+# the deploy/prod special case).
 production_state_root_default() {
     local install_dir="$1"
 
@@ -1037,11 +1190,17 @@ production_state_root_default() {
     fi
 }
 
+# True if install_dir is the manual production checkout path (.../deploy/prod),
+# as opposed to a quickstart-installed directory like /opt/lancache-ng.
 is_deploy_prod_install_dir() {
     local install_dir="$1"
     [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]
 }
 
+# Picks which .env file actually drives Compose for this install: manual
+# deploy/prod checkouts use .env.local (an untracked override) when present,
+# so a git pull during update never clobbers the operator's real production
+# values that live in the tracked .env template.
 runtime_env_file_for_install_dir() {
     local install_dir="$1"
 
@@ -1052,6 +1211,11 @@ runtime_env_file_for_install_dir() {
     fi
 }
 
+# Copies the quickstart compose file and helper scripts into install_dir (used
+# on both first install and every update, so copied installs always run the
+# current container wiring). See the inline comment for the #538 workaround
+# that force-removes a stale auto-vivified directory before reinstalling
+# dhcp-probe.sh/docker-socket-proxy.sh.
 install_quickstart_compose_assets() {
     local install_dir="$1" socket_proxy_target dhcp_probe_target
 
@@ -1082,6 +1246,10 @@ install_quickstart_compose_assets() {
     fi
 }
 
+# Determines origin's default branch (e.g. master) via the cheap local
+# refs/remotes/origin/HEAD symref first, falling back to a network call
+# (`git remote show origin`) only if that symref hasn't been set locally.
+# Falls back to the literal name "master" if both lookups fail.
 git_default_branch_name() {
     local repo_dir="$1" default_branch=""
 
@@ -1094,12 +1262,16 @@ git_default_branch_name() {
     printf '%s\n' "${default_branch:-master}"
 }
 
+# True if the working tree has no uncommitted changes (`git status --porcelain` is empty).
 git_repo_is_clean() {
     local repo_dir="$1"
 
     [[ -z "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]]
 }
 
+# Hard-resets a repo checkout to origin's current default branch. Refuses to
+# run on a dirty tree so an update can never silently discard local edits;
+# the operator must clean or remove the checkout first.
 sync_repo_to_default_branch() {
     local repo_dir="$1" default_branch
 
@@ -1115,11 +1287,18 @@ sync_repo_to_default_branch() {
         || die "Failed to reset $repo_dir to origin/$default_branch."
 }
 
+# Resolves the git repo root two levels above a deploy/prod install_dir
+# (deploy/prod -> repo root), used to locate the manual production repo's
+# other runtime inputs (certs/, config/prod/, cdn-domains.txt).
 deploy_prod_repo_root() {
     local install_dir="$1"
     realpath -m "$install_dir/../.."
 }
 
+# Lists the repo-root paths that a deploy/prod stack pulls in via ../../
+# relative references, so backup/restore can capture the full manual
+# production configuration and not just install_dir itself. A no-op for
+# non-deploy/prod installs, which have no such external repo-root inputs.
 deploy_prod_repo_input_paths() {
     local install_dir="$1" repo_root
     is_deploy_prod_install_dir "$install_dir" || return 0
@@ -1161,6 +1340,10 @@ write_env_file() {
         || { rm -f "$tmp"; die "Failed to replace $env_file."; }
 }
 
+# Generic version of write_env_file for non-.env generated files (no
+# owner/permission preservation, since these are newly generated content, not
+# an existing operator-owned file): writes via a same-directory temp file and
+# atomically renames into place so a failed write never leaves a half-written target.
 write_generated_runtime_file() {
     local target="$1" target_dir target_name tmp
     target_dir=$(dirname "$target")
@@ -1177,12 +1360,19 @@ write_generated_runtime_file() {
         || { rm -f "$tmp"; die "Failed to replace $target."; }
 }
 
+# Update-time guard: dies with a clear remediation message if a required key
+# is missing or empty, instead of letting `setup.sh update` silently proceed
+# with an unusable runtime configuration.
 require_env_value_for_update() {
     local key="$1" env_file="$2"
     env_key_has_value "$key" "$env_file" \
         || die "$key is missing or empty in $env_file. Set it before running setup.sh update."
 }
 
+# Generates and stores a secret for key only if it doesn't already hold a
+# usable (non-placeholder) value — a thin wrapper combining
+# env_key_has_usable_secret + generate_secret_value for the common
+# "fill in this secret if needed" call sites in migrate_env_for_update.
 ensure_secret_env_key() {
     local key="$1" env_file="$2" kind="$3" value
     if env_key_has_usable_secret "$key" "$env_file"; then
@@ -1194,6 +1384,9 @@ ensure_secret_env_key() {
     print_ok "Generated missing or placeholder secret: $key"
 }
 
+# Normalizes a CACHE_MAX_SIZE value like "50g" or "50G" down to a bare GB
+# integer for internal comparisons; falls back to "50" if it can't be parsed
+# as a plain gigabyte count.
 cache_size_gb_from_env() {
     local cache_max_size="$1"
     cache_max_size="${cache_max_size,,}"
@@ -1217,6 +1410,9 @@ assert_prebuilt_image_platform_supported() {
     esac
 }
 
+# True if systemctl is present AND the given unit file is known to it. Used to
+# make all convergence-timer handling a no-op on hosts without systemd or
+# without the lancache-converge units installed, instead of erroring out.
 systemd_unit_exists() {
     local unit="$1"
     command -v systemctl >/dev/null 2>&1 \
@@ -1296,6 +1492,14 @@ resume_lancache_convergence_after_update() {
     fi
 }
 
+# EXIT trap installed by cmd_update for the whole update run. This is the
+# failure-path counterpart to resume_lancache_convergence_after_update: it
+# fires on ANY exit (success or error) via the trap, but only actually acts
+# if convergence was paused and the update never reached its completed
+# marker — so a successful update (which clears the trap itself) never
+# double-resumes, while a die() partway through still restores the timer
+# instead of leaving it stopped forever. Preserves and re-exits with the
+# original exit code so the process's final status is unchanged.
 resume_lancache_convergence_after_failed_update() {
     local exit_code=$?
 
@@ -1327,6 +1531,7 @@ validate_lancache_image_tag() {
         || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
 }
 
+# Enumerates the only four supported LANCACHE_IMAGE_CHANNEL values.
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
@@ -1337,6 +1542,13 @@ validate_lancache_image_channel() {
     die "LANCACHE_IMAGE_CHANNEL must be latest, dev, edge, or pinned."
 }
 
+# Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
+# explicit LANCACHE_IMAGE_TAG/CHANNEL configured: prefers an exact git tag on
+# HEAD when run from a git checkout, otherwise falls back to the VERSION file
+# shipped in release archives/tarballs. Returns 1 (no tag available, caller
+# should fall back further) vs. 2 (a tag/version WAS found but is malformed,
+# caller should die) so callers can tell "nothing to derive from" apart from
+# "found something invalid."
 derive_release_archive_image_tag() {
     local version tag
 
@@ -1371,18 +1583,23 @@ derive_release_archive_image_tag() {
     printf '%s\n' "$tag"
 }
 
+# Rejects anything that isn't a plausible registry hostname[:port].
 validate_lancache_image_registry() {
     local registry="$1"
     [[ "$registry" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$ ]] \
         || die "LANCACHE_IMAGE_REGISTRY must be a registry hostname with an optional port."
 }
 
+# Rejects anything that isn't a plausible slash-separated image namespace.
 validate_lancache_image_prefix() {
     local prefix="$1"
     [[ "$prefix" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] \
         || die "LANCACHE_IMAGE_PREFIX must be a slash-separated image namespace."
 }
 
+# Resolves the registry host to use for pulling images: explicit shell env var
+# wins, then the value already in .env, then the ghcr.io default. Always
+# validated so a typo'd override fails fast instead of producing a broken pull.
 resolve_lancache_image_registry() {
     local env_file="${1:-}" registry="${LANCACHE_IMAGE_REGISTRY:-}"
 
@@ -1395,6 +1612,8 @@ resolve_lancache_image_registry() {
     printf '%s\n' "$registry"
 }
 
+# Same precedence as resolve_lancache_image_registry (shell env > .env >
+# default), but for the image namespace/prefix.
 resolve_lancache_image_prefix() {
     local env_file="${1:-}" prefix="${LANCACHE_IMAGE_PREFIX:-}"
 
@@ -1407,6 +1626,18 @@ resolve_lancache_image_prefix() {
     printf '%s\n' "$prefix"
 }
 
+# Resolves which release channel (latest/dev/edge/pinned) this install should
+# track, in this precedence order:
+#   1. An explicit LANCACHE_IMAGE_CHANNEL (shell env, then .env).
+#   2. If no channel was set but LANCACHE_IMAGE_TAG names a moving channel
+#      word (latest/dev/edge), infer that as the channel; if it names an
+#      immutable tag (sha-*/vX.Y.Z), infer channel=pinned.
+#   3. If still unresolved and this is a git checkout/release archive with a
+#      derivable release tag, infer channel=pinned so that exact release is used.
+#   4. Otherwise default to "latest" — deliberately the stable channel, never
+#      silently "edge" or "master", so a plain install never opts a production
+#      host into a moving pre-release channel without saying so explicitly.
+# The result is always validated before being returned.
 resolve_lancache_image_channel() {
     local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag=""
 
@@ -1444,6 +1675,17 @@ resolve_lancache_image_channel() {
     printf '%s\n' "$channel"
 }
 
+# Turns a mutable channel name (latest/dev/edge) into one immutable sha-* tag.
+# Channels are published as a tiny "stack:<channel>" pointer image whose only
+# content is a stack.env file naming the current immutable LANCACHE_IMAGE_TAG
+# for that channel; this pulls that pointer image, reads stack.env out of it
+# via `docker cp` + tar (no local container run needed), and validates the
+# extracted tag really is a sha-* value before trusting it. This indirection
+# is what lets `LANCACHE_IMAGE_CHANNEL=edge` resolve to one fixed, reproducible
+# stack version instead of "whatever :edge happens to mean when you docker pull".
+# A pull failure on the "latest" channel gets a dedicated explanation (this
+# project is pre-1.0 and has not cut a stable release yet) instead of a raw
+# Docker error.
 resolve_lancache_stack_channel_tag() {
     local env_file="$1" channel="$2"
     local registry prefix stack_image container_id="" resolved_tag=""
@@ -1503,6 +1745,21 @@ EOF
     printf '%s\n' "$resolved_tag"
 }
 
+# Resolves the actual immutable image tag docker compose should pull, in this
+# precedence order (mirrors, and is deliberately more specific than, the
+# channel precedence in resolve_lancache_image_channel):
+#   1. An explicit LANCACHE_IMAGE_TAG (shell env) that already names a channel
+#      word or an immutable tag is used/resolved directly.
+#   2. Otherwise an explicit LANCACHE_IMAGE_CHANNEL (shell env or .env) is
+#      resolved to its immutable tag via resolve_lancache_stack_channel_tag.
+#      LANCACHE_IMAGE_CHANNEL=pinned specifically requires LANCACHE_IMAGE_TAG
+#      to already be set — "pinned" has no channel pointer image of its own.
+#   3. Otherwise LANCACHE_IMAGE_TAG from .env, same channel-word-vs-immutable-tag check.
+#   4. Otherwise, for a git checkout/release archive, derive the release tag
+#      straight from the tag/VERSION file.
+#   5. Otherwise fall back to resolving the default channel (see
+#      resolve_lancache_image_channel — "latest", never silently "edge").
+# Every path validates the final value before returning it.
 resolve_lancache_image_tag() {
     local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel=""
 
@@ -1802,6 +2059,14 @@ install_missing_tools() {
         || die "Failed to install required tool(s): ${missing[*]}"
 }
 
+# Prints the newline-separated list of absolute host paths that a backup
+# (config or full) should include: .env(s), compose file, certs/scripts,
+# deploy/prod's external repo-root inputs, and every per-service state
+# directory that actually exists on disk — falling back through
+# get_env_var -> state_dir default the same way migrate_env_for_update does,
+# so a backup captures the real paths in use even on an install that has
+# never been through migrate_env_for_update. "full" mode additionally
+# includes the (potentially huge) cache directories.
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
@@ -1867,6 +2132,10 @@ compose_stack_available() {
     [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1
 }
 
+# Stops the stack before a backup/restore so files on disk are consistent
+# (no service writing to cache/state mid-copy). A stop failure only warns,
+# not dies, since backup/restore should still be attempted even if the stack
+# was already in a bad state.
 compose_stack_stop() {
     local install_dir="$1"
     local env_file
@@ -1876,6 +2145,9 @@ compose_stack_stop() {
     (cd "$install_dir" && docker compose --env-file "$env_file" stop) || print_warn "docker compose stop failed — continuing"
 }
 
+# Counterpart to compose_stack_stop, used by backup/restore cleanup traps to
+# bring the stack back up. Also only warns on failure so the trap always
+# finishes cleanup instead of getting stuck mid-exit.
 compose_stack_start() {
     local install_dir="$1"
     local env_file
@@ -1885,6 +2157,9 @@ compose_stack_start() {
     (cd "$install_dir" && docker compose --env-file "$env_file" up -d) || print_warn "docker compose up failed — start the stack manually"
 }
 
+# Runs `docker compose config` as a dry-run check. Called both before and
+# after pulling images during update, so a migration or pull that produced an
+# invalid compose config is caught before containers are actually restarted.
 validate_compose_config() {
     local install_dir="$1"
     local env_file
@@ -1895,6 +2170,11 @@ validate_compose_config() {
     print_ok "Docker Compose configuration is valid"
 }
 
+# Lists the distinct Docker named-volume names currently mounted by any
+# container in this compose project (including stopped ones, via `ps --all`),
+# by inspecting each container's mounts rather than relying on compose's own
+# volume list — this also picks up volumes attached to containers that predate
+# the current compose file.
 compose_volume_names() {
     local install_dir="$1" container env_file
     compose_stack_available "$install_dir" || return 0
@@ -1905,6 +2185,10 @@ compose_volume_names() {
     done < <(cd "$install_dir" && docker compose --env-file "$env_file" ps --all -q 2>/dev/null) | sort -u
 }
 
+# Archives every Docker named volume used by this stack into its own tar file
+# under volume_root, using a throwaway alpine container to read the volume
+# read-only — avoids needing tar/permissions to reach the volume's real
+# on-disk location directly, which varies by Docker storage driver.
 backup_compose_volumes() {
     local install_dir="$1" volume_root="$2" volume
     compose_stack_available "$install_dir" || return 0
@@ -1919,6 +2203,12 @@ backup_compose_volumes() {
     done < <(compose_volume_names "$install_dir")
 }
 
+# Counterpart to backup_compose_volumes: recreates each volume (if missing)
+# and replaces its full contents from the matching archive, wiping existing
+# volume content first (including dotfiles) so a restore is a clean
+# replacement rather than a merge with whatever was already in the volume.
+# Dies (rather than skipping) if the backup has volume payloads but Docker
+# is unavailable, since silently skipping would restore an incomplete stack.
 restore_compose_volumes() {
     local install_dir="$1" volume_root="$2" volume archive
     [[ -d "$volume_root" ]] || return 0
@@ -1936,6 +2226,10 @@ restore_compose_volumes() {
     done < <(find "$volume_root" -maxdepth 1 -type f -name '*.tar' | sort)
 }
 
+# Snapshots the exact image references/digests in use at backup time (JSON
+# preferred, falling back to plain `docker compose images` text on older
+# Compose versions that lack --format json), purely as rollback/debugging
+# reference — never restored automatically, only warns on failure.
 record_image_revisions() {
     local install_dir="$1" output="$2" env_file
     compose_stack_available "$install_dir" || return 0
@@ -2023,6 +2317,13 @@ EOF
     backup_cleanup
 }
 
+# Restores a setup.sh backup archive into install_dir, remapping paths when
+# install_dir differs from the directory the archive was originally taken
+# from (both the install tree itself and, for deploy/prod archives, the
+# separate repo-root inputs from deploy_prod_repo_input_paths). Manifest paths
+# under the archived install directory are skipped in the generic copy loop
+# and handled separately first, since they need the path-remap/sed rewrite
+# rather than a literal restore to their original absolute path.
 cmd_restore() {
     local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
     install_dir=$(realpath -m "$install_dir")
@@ -2123,6 +2424,9 @@ Tip:
 EOF
 }
 
+# Prints the detailed usage block for one subcommand (invoked via
+# `./setup.sh <command> --help`), keeping the verbose per-command docs out of
+# the compact top-level print_usage output above.
 print_command_help() {
     local command="$1"
 

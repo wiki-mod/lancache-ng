@@ -105,6 +105,8 @@ pub struct Config {
     pub dev_mode: bool,
 }
 
+// Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
+// `{:?}` in a log line or panic message can never leak a credential.
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
@@ -179,6 +181,10 @@ impl fmt::Display for Config {
 }
 
 impl Config {
+    // The `effective_*` getters let a value the operator changed live in the
+    // Admin UI (persisted to `ui_settings_file`, see `read_ui_override`) win over
+    // the value `from_env()` captured at process start, without requiring a
+    // container restart to pick up new env vars.
     pub fn effective_dhcp_mode(&self) -> DhcpMode {
         read_dhcp_mode_override(&self.ui_settings_file).unwrap_or(self.dhcp_mode)
     }
@@ -243,6 +249,10 @@ impl Config {
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
         let ssl_enabled = env_bool("SSL_ENABLED", true);
+        // CACHE_MAX_GB is the current, single shared cache limit. If it is set, it
+        // wins outright over the legacy per-mode STANDARD_CACHE_MAX_GB/SSL_CACHE_MAX_GB
+        // pair below, so installs upgrading from the old split-cache model don't end
+        // up silently averaging or ignoring the new shared value.
         let cache_max_gb_set = env_present("CACHE_MAX_GB");
         let shared_cache_max_gb = if cache_max_gb_set {
             env_f64("CACHE_MAX_GB", 50.0)
@@ -333,6 +343,10 @@ impl Config {
     }
 }
 
+// Classifies an image tag into the channel shown in the UI: the three
+// mutable-by-design channel names pass through unchanged; `sha-*`/`v*` tags are
+// immutable release/commit references and are labelled "pinned"; anything else
+// is an unrecognized tag format, which defaults to "latest" rather than failing.
 fn derive_lancache_image_channel(tag: &str) -> String {
     if tag == "dev" || tag == "edge" || tag == "latest" {
         tag.to_string()
@@ -347,6 +361,10 @@ fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+// Unlike `env_str`, treats an explicitly-set-but-empty env var the same as an
+// unset one. Used for values that legitimately fall back to another field
+// (e.g. PROXY_SSL_URL defaulting to PROXY_STANDARD_URL) when left blank in
+// deployment .env files rather than omitted outright.
 fn env_or(key: &str, default: String) -> String {
     env::var(key)
         .ok()
@@ -354,6 +372,9 @@ fn env_or(key: &str, default: String) -> String {
         .unwrap_or(default)
 }
 
+// Same empty-string-means-unset treatment as `env_or`, for optional values with
+// no sensible string default (e.g. UI_AUTH_USER, where "unset" must stay
+// distinguishable from "set to an empty string").
 fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }
@@ -395,6 +416,10 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+// The `"" if legacy_enabled` arm exists purely for backward compatibility: installs
+// that predate DHCP_MODE only had the boolean DHCP_ENABLED flag, which meant "run
+// Kea" and nothing else. An unset DHCP_MODE with the legacy flag still true must
+// keep resolving to Kea, not silently fall back to Disabled.
 fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
@@ -414,6 +439,9 @@ fn read_dhcp_mode_override(path: &str) -> Option<DhcpMode> {
     read_ui_override(path, "DHCP_MODE").map(|value| parse_dhcp_mode(&value, false))
 }
 
+// `ui_settings_file` is a small, UI-managed `KEY=value` file (same shape as a
+// .env file) used to persist operator changes made through the Admin UI, so
+// they survive independently of whatever the container's env vars say.
 fn read_ui_override(path: &str, key: &str) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let prefix = format!("{key}=");
