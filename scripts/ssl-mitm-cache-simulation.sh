@@ -81,9 +81,19 @@ echo "proxy, dns-standard, and dns-ssl are healthy."
 proxy_cid="$("${compose[@]}" ps -q proxy)"
 docker cp "$proxy_cid:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca.crt"
 
+# Each call is a brand new --rm container, so /tmp inside it never survives
+# past that one call -- confirmed directly: comparing files written by two
+# separate run_client calls always "failed" because neither file existed in
+# either of the (also separate) containers doing the comparing. /shared is
+# bind-mounted from work_dir (a real, persistent host directory) so files
+# written by one call are actually still there for a later call, and so
+# cmp/test below can run directly on the host instead of needing yet
+# another container.
+mkdir -p "$work_dir/shared"
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/ca.crt:/ca.crt:ro" \
+        -v "$work_dir/shared:/shared" \
         "$build_tools_image" bash -c "$1"
 }
 
@@ -107,33 +117,33 @@ done
 
 echo "== Standard mode: HTTP MISS then HIT for a real file =="
 
-http_status_1="$(run_client "curl -sS -o /tmp/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
+http_status_1="$(run_client "curl -sS -o /shared/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
 grep -qi '^X-Cache-Status: MISS' <<<"$http_status_1" \
     || { echo "::error::First standard-mode HTTP request was not a MISS." >&2; echo "$http_status_1" >&2; exit 1; }
 
-http_status_2="$(run_client "curl -sS -o /tmp/body2 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
+http_status_2="$(run_client "curl -sS -o /shared/body2 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
 grep -qi '^X-Cache-Status: HIT' <<<"$http_status_2" \
     || { echo "::error::Second standard-mode HTTP request was not a HIT." >&2; echo "$http_status_2" >&2; exit 1; }
 
-run_client "cmp -s /tmp/body1 /tmp/body2" \
+cmp -s "$work_dir/shared/body1" "$work_dir/shared/body2" \
     || { echo "::error::Standard-mode MISS and HIT responses had different bodies." >&2; exit 1; }
-run_client "[ -s /tmp/body1 ]" \
+[[ -s "$work_dir/shared/body1" ]] \
     || { echo "::error::Standard-mode response body was empty." >&2; exit 1; }
 echo "Standard mode: MISS then HIT confirmed, with identical real file content on both requests."
 
 echo "== SSL mode: HTTPS MITM MISS then HIT for the same real file =="
 
-https_status_1="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /tmp/sbody1 -D - 'https://$test_domain$test_path'")"
+https_status_1="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$test_path'")"
 grep -qi '^X-Cache-Status: MISS' <<<"$https_status_1" \
     || { echo "::error::First SSL-mode HTTPS request was not a MISS." >&2; echo "$https_status_1" >&2; exit 1; }
 
-https_status_2="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /tmp/sbody2 -D - 'https://$test_domain$test_path'")"
+https_status_2="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$test_path'")"
 grep -qi '^X-Cache-Status: HIT' <<<"$https_status_2" \
     || { echo "::error::Second SSL-mode HTTPS request was not a HIT." >&2; echo "$https_status_2" >&2; exit 1; }
 
-run_client "cmp -s /tmp/sbody1 /tmp/sbody2" \
+cmp -s "$work_dir/shared/sbody1" "$work_dir/shared/sbody2" \
     || { echo "::error::SSL-mode MISS and HIT responses had different bodies." >&2; exit 1; }
-run_client "cmp -s /tmp/body1 /tmp/sbody1" \
+cmp -s "$work_dir/shared/body1" "$work_dir/shared/sbody1" \
     || { echo "::error::Standard-mode and SSL-mode responses had different content for the same file." >&2; exit 1; }
 echo "SSL mode: MITM MISS then HIT confirmed -- the proxy decrypted, cached, and re-served the real file over HTTPS using our own CA."
 
