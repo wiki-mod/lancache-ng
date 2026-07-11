@@ -15,6 +15,7 @@
 mod config;
 mod docker_client;
 mod kea_snapshots;
+mod nats_auth_callout;
 mod nats_config;
 mod nginx_client;
 mod routes;
@@ -54,6 +55,11 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub ui_session_secret: [u8; 32],
     pub ui_session_ttl: Duration,
+    // The auth-callout issuer account's public NKey, rendered into nats.conf's
+    // `auth_callout { issuer: ... }` field (see nats_auth_callout.rs). The
+    // matching private seed never leaves the loaded `KeyPair` the callout
+    // responder task holds.
+    pub nats_issuer_public_key: String,
 }
 
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
@@ -96,6 +102,34 @@ fn load_or_create_session_secret() -> Result<[u8; 32]> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+// Additive-only migration for the `secondaries` table (issue #583): adds
+// `nats_user`/`nats_password_hash`, the per-secondary auth-callout identity
+// columns, without touching the legacy `nats_token` column (kept as an
+// unused, harmless leftover rather than dropped -- SQLite's DROP COLUMN
+// requires a table rebuild, and there is nothing to gain from that risk on a
+// column register_secondary simply stops reading). A secondary registered
+// under the pre-#583 shared-token model has NULL nats_password_hash until it
+// is re-registered or rotated, at which point `authorize_secondary` (see
+// nats_auth_callout.rs) naturally denies it -- documented in CHANGELOG.md as
+// a required manual step after upgrading.
+fn migrate_secondaries_table_for_auth_callout(conn: &Connection) -> rusqlite::Result<()> {
+    let existing_columns: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(secondaries)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    if !existing_columns.iter().any(|c| c == "nats_user") {
+        conn.execute("ALTER TABLE secondaries ADD COLUMN nats_user TEXT", [])?;
+    }
+    if !existing_columns.iter().any(|c| c == "nats_password_hash") {
+        conn.execute(
+            "ALTER TABLE secondaries ADD COLUMN nats_password_hash TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn is_mutating_method(method: &Method) -> bool {
@@ -591,6 +625,32 @@ async fn main() -> Result<()> {
     let nats = connect_nats_with_retry(&cfg).await;
     let ui_session_secret = load_or_create_session_secret()?;
 
+    // Loaded before the DB/state so its public key can be baked into the
+    // initial nats.conf write below, and its private seed handed to the
+    // auth-callout responder task once state exists (see nats_auth_callout.rs).
+    // NATS_ISSUER_SEED (a literal seed value) takes precedence over the
+    // file-based path when set -- see config.rs's nats_issuer_seed docs for
+    // why (deterministic validation harnesses with no persistent /data).
+    let issuer_keypair = match &cfg.nats_issuer_seed {
+        Some(seed) => match nkeys::KeyPair::from_seed(seed) {
+            Ok(kp) => kp,
+            Err(e) => {
+                tracing::error!("NATS_ISSUER_SEED is not a valid NKey seed: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            match nats_auth_callout::load_or_create_issuer_keypair(&cfg.nats_issuer_seed_path) {
+                Ok(kp) => kp,
+                Err(message) => {
+                    tracing::error!("{message}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let nats_issuer_public_key = issuer_keypair.public_key();
+
     let db = {
         // This SQLite DB stores Admin-UI-local secondary registration metadata.
         // Runtime DNS/DHCP/proxy state stays in PowerDNS, Kea, NATS, and Docker.
@@ -605,6 +665,8 @@ async fn main() -> Result<()> {
             );",
         )
         .expect("Cannot init database schema");
+        migrate_secondaries_table_for_auth_callout(&conn)
+            .expect("Cannot migrate secondaries table for auth-callout columns");
         Mutex::new(conn)
     };
 
@@ -620,6 +682,7 @@ async fn main() -> Result<()> {
         db,
         ui_session_secret,
         ui_session_ttl,
+        nats_issuer_public_key,
     });
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up
@@ -627,6 +690,17 @@ async fn main() -> Result<()> {
     if let Err(e) = routes::secondaries::reload_nats_conf(&state).await {
         tracing::warn!("Could not reload initial nats.conf: {}", e);
     }
+
+    // Runs for the lifetime of the process: answers every NATS auth-callout
+    // request for secondaries (see nats_auth_callout.rs). Registering,
+    // removing, or rotating a secondary only ever touches the `secondaries`
+    // table now -- no nats.conf rewrite or NATS restart needed for any of
+    // those, since this task re-checks the DB on every single connection
+    // attempt.
+    tokio::spawn(nats_auth_callout::run_auth_callout(
+        Arc::clone(&state),
+        Arc::new(issuer_keypair),
+    ));
 
     // Routes that are always public (protected by their own token).
     let public_routes = Router::new()
@@ -726,6 +800,75 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_adds_auth_callout_columns_to_a_fresh_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );",
+        )
+        .unwrap();
+
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+
+        // Must be able to write and read the new columns now.
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at, nats_user, nats_password_hash)
+             VALUES ('sec-a', 'sec-a', '', 0, 'sec-a', 'somehash')",
+            [],
+        )
+        .unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT nats_password_hash FROM secondaries WHERE name = 'sec-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "somehash");
+    }
+
+    #[test]
+    fn migration_preserves_existing_rows_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at)
+             VALUES ('pre-existing', 'pre-existing', 'old-shared-token', 42)",
+            [],
+        )
+        .unwrap();
+
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+        // Running it again (e.g. a second container start after the first
+        // already migrated) must not error on "duplicate column name".
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+
+        let (nats_token, registered_at): (String, i64) = conn
+            .query_row(
+                "SELECT nats_token, registered_at FROM secondaries WHERE name = 'pre-existing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(nats_token, "old-shared-token");
+        assert_eq!(registered_at, 42);
+    }
 
     #[test]
     fn forwarded_proto_https_detection_uses_first_proxy_value() {

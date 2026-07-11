@@ -126,10 +126,12 @@ pub fn validate_runtime_nats_credentials(config: &Config) -> Result<(), String> 
     )
     .map_err(|e| format!("Invalid NATS DNS writer credentials: {e}"))?;
     validate_nats_credentials(
-        &config.nats_dns_reader_user,
-        &config.nats_dns_reader_password,
+        &config.nats_dns_replica_user,
+        &config.nats_dns_replica_password,
     )
-    .map_err(|e| format!("Invalid NATS DNS reader credentials: {e}"))?;
+    .map_err(|e| format!("Invalid NATS DNS replica credentials: {e}"))?;
+    validate_nats_credentials(&config.nats_callout_user, &config.nats_callout_password)
+        .map_err(|e| format!("Invalid NATS auth-callout credentials: {e}"))?;
 
     Ok(())
 }

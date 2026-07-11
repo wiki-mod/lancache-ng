@@ -113,8 +113,34 @@ pub struct Config {
     pub nats_ui_password: String,
     pub nats_dns_writer_user: String,
     pub nats_dns_writer_password: String,
-    pub nats_dns_reader_user: String,
-    pub nats_dns_reader_password: String,
+    // Static role for the primary's own co-located dns-ssl container (issue
+    // #583 renamed this from nats_dns_reader_*: unlike external secondaries,
+    // there is always exactly one dns-ssl instance on the primary host, so a
+    // fixed static credential never hits the #52 scaling problem -- only the
+    // *external, dynamically-registered* secondaries needed to move off a
+    // shared credential). Subscribe-only, same permission scope the old
+    // reader role had.
+    pub nats_dns_replica_user: String,
+    pub nats_dns_replica_password: String,
+    // Static bypass identity the auth-callout responder (issue #583) itself
+    // connects as, to subscribe to $SYS.REQ.USER.AUTH. Distinct from
+    // nats_ui_user: that one publishes DNS records, this one only answers
+    // authorization requests for secondaries and needs no other permissions.
+    pub nats_callout_user: String,
+    pub nats_callout_password: String,
+    // Where the auth-callout issuer NKey seed is persisted (generated on
+    // first run, mirrors ui_session_secret's file-based persistence). This
+    // keypair signs every per-secondary user JWT the callout responder
+    // issues; see nats_auth_callout.rs's module docs for the full mechanism.
+    // Ignored if nats_issuer_seed is set.
+    pub nats_issuer_seed_path: String,
+    // Optional literal seed value, taking precedence over
+    // nats_issuer_seed_path when set. Exists for ephemeral/deterministic
+    // deployments (e.g. deploy/full-setup's validation harness) that need a
+    // fixed, pre-known issuer keypair baked into nats.conf ahead of time and
+    // have no persistent /data volume to read a generated one back from --
+    // not intended for dev/prod, which use the file-based path instead.
+    pub nats_issuer_seed: Option<String>,
     pub secondary_registration_token: String,
     pub lancache_image_registry: String,
     pub lancache_image_prefix: String,
@@ -185,8 +211,15 @@ impl fmt::Debug for Config {
             .field("nats_ui_password", &"***REDACTED***")
             .field("nats_dns_writer_user", &self.nats_dns_writer_user)
             .field("nats_dns_writer_password", &"***REDACTED***")
-            .field("nats_dns_reader_user", &self.nats_dns_reader_user)
-            .field("nats_dns_reader_password", &"***REDACTED***")
+            .field("nats_dns_replica_user", &self.nats_dns_replica_user)
+            .field("nats_dns_replica_password", &"***REDACTED***")
+            .field("nats_callout_user", &self.nats_callout_user)
+            .field("nats_callout_password", &"***REDACTED***")
+            .field("nats_issuer_seed_path", &self.nats_issuer_seed_path)
+            .field(
+                "nats_issuer_seed",
+                &self.nats_issuer_seed.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("secondary_registration_token", &"***REDACTED***")
             .field("lancache_image_registry", &self.lancache_image_registry)
             .field("lancache_image_prefix", &self.lancache_image_prefix)
@@ -440,8 +473,15 @@ impl Config {
             nats_ui_password: env_str("NATS_UI_PASSWORD", ""),
             nats_dns_writer_user: env_str("NATS_DNS_WRITER_USER", ""),
             nats_dns_writer_password: env_str("NATS_DNS_WRITER_PASSWORD", ""),
-            nats_dns_reader_user: env_str("NATS_DNS_READER_USER", ""),
-            nats_dns_reader_password: env_str("NATS_DNS_READER_PASSWORD", ""),
+            nats_dns_replica_user: env_str("NATS_DNS_REPLICA_USER", ""),
+            nats_dns_replica_password: env_str("NATS_DNS_REPLICA_PASSWORD", ""),
+            nats_callout_user: env_str("NATS_CALLOUT_USER", ""),
+            nats_callout_password: env_str("NATS_CALLOUT_PASSWORD", ""),
+            nats_issuer_seed_path: env_str(
+                "NATS_ISSUER_SEED_PATH",
+                "/data/lancache-nats-issuer.seed",
+            ),
+            nats_issuer_seed: env_opt("NATS_ISSUER_SEED"),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             // Kept as separate fields so the UI can display the running
             // release/channel without reconstructing image references from

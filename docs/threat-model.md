@@ -253,15 +253,31 @@ record changes, or subscribes to read cache/DNS metadata.
 - NATS is **not published on the host** in the default deployment — it is only
   reachable on the internal Docker network.
 - Access is **credentialled and role-scoped**, not a single shared account.
-  Three distinct users exist with least-privilege permissions:
+  Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
   - **DNS writer** (standard node / reconciler) — publish DNS records + the
     specific JetStream stream/consumer subjects it needs; subscribe to
     `lancache.dns.>`.
-  - **DNS reader** (SSL node / secondaries) — consume-only JetStream permissions;
+  - **DNS replica** (the primary's own co-located dns-ssl container only —
+    there is always exactly one) — consume-only JetStream permissions;
     cannot publish DNS records.
-  All six credentials are required at startup (`:?` guards) so the bus never
-  comes up unauthenticated.
+  - **Auth-callout responder** (the Admin UI itself) — no subject permissions
+    of its own; only recognized by name so its own connection to answer
+    `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to
+    answer.
+  All eight of these role credentials are required at startup (`:?` guards) so
+  the bus never comes up unauthenticated.
+- **Registered secondaries no longer share a credential (issue #583).** Each
+  gets its own unique NATS username/password at registration time, issued via
+  NATS's auth-callout mechanism (see `services/ui/src/nats_auth_callout.rs`):
+  the Admin UI signs a per-connection JWT after checking the presented
+  credential's hash against that one secondary's row in its `secondaries`
+  table, live, on every single connection attempt. Removing a secondary
+  (`DELETE /api/secondary/{name}`) or rotating its credential
+  (`POST /api/secondary/{name}/rotate-token`) takes effect on that
+  secondary's very next reconnect, with zero effect on any other secondary —
+  there is no shared token whose compromise or rotation affects the whole
+  fleet, and no static config file to rewrite per secondary.
 - Remote/secondary access is opt-in only via
   `deploy/prod/docker-compose.nats-secondary.yml` with `NATS_BIND_IP` bound to a
   trusted LAN/VPN interface, and must be firewalled to that scope.
@@ -269,6 +285,9 @@ record changes, or subscribes to read cache/DNS metadata.
 **Residual risk**: Medium — correct firewalling of the optional secondary
 binding is the operator's responsibility, and the role split limits but does not
 eliminate what a compromised *writer* credential could do (forge DNS records).
+A compromised *secondary* credential is scoped to exactly that one secondary's
+consume-only JetStream permissions (same scope the old shared reader role
+had) and can be individually revoked without touching any other secondary.
 
 ---
 
@@ -475,8 +494,14 @@ foothold in the sync mesh)
 **Mitigations**:
 - `SECONDARY_REGISTRATION_TOKEN` is **fail-closed**: the Admin UI refuses to start
   if it is empty (an empty token would match any registration attempt).
-- Secondaries connect with the read-only NATS role (T5) and reach NATS only over
-  the operator's trusted LAN/VPN interface (`NATS_BIND_IP`).
+- Since issue #583, each secondary receives its own individually-revocable
+  NATS credential at registration time (T5) instead of a role shared across
+  every registered secondary, and reaches NATS only over the operator's
+  trusted LAN/VPN interface (`NATS_BIND_IP`).
+- A forged registration only grants the consume-only DNS-sync permission
+  scope (T5); it cannot publish DNS records, and can be revoked on its own
+  (`DELETE /api/secondary/{name}`) without affecting any legitimately
+  registered secondary.
 
 **Residual risk**: Low–Medium — bounded by keeping the token secret and the NATS
 secondary interface off untrusted networks.

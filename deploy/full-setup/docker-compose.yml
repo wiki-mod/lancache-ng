@@ -74,7 +74,7 @@ services:
       - PDNS_API_KEY=validation-pdns-key
       - DDNS_TSIG_KEY=validation-ddns-key
       - NATS_URL=nats://nats:4222
-      - NATS_USER=validation-dns-reader
+      - NATS_USER=validation-dns-replica
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-ssl
     volumes:
@@ -125,6 +125,21 @@ services:
       start_period: 10s
 
   # NATS message bus for DNS record sync
+  #
+  # No `container_name` here on purpose (unlike dev/prod): this validation
+  # harness is designed to run as multiple concurrently-isolated `-p
+  # <project>` instances on a shared CI runner, and a fixed name would
+  # collide across them. That means the Admin UI's own `reload_nats_conf()`
+  # restart-by-fixed-name call (docker_client.rs's "nats" -> "lancache-nats"
+  # mapping) silently fails here -- already true before issue #583, just
+  # harmless until now because every credential was static and already
+  # baked into this bootstrap config identically. Issue #583's auth_callout
+  # stanza needs the Admin UI's runtime-generated issuer public key, which
+  # this bootstrap script can't know -- so instead of depending on the
+  # restart working, the ui service is given a fixed literal seed via
+  # NATS_ISSUER_SEED (see its comment there), and this config is baked with
+  # that seed's matching public key ahead of time, so nats-server is
+  # auth_callout-ready from its very first start, with no restart required.
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     entrypoint: ["/bin/sh", "-c"]
@@ -153,13 +168,29 @@ services:
               }
             }
             {
-              user: validation-dns-reader
+              user: validation-dns-replica
               password: validation-nats-password
               permissions = {
                 subscribe = ["lancache.dns.>", "_INBOX.>"]
               }
             }
+            {
+              user: validation-nats-callout
+              password: validation-nats-callout-password
+            }
           ]
+          auth_callout {
+            # Public half of the ui service's NATS_ISSUER_SEED (see its
+            # comment there). Fixed on purpose for this validation harness --
+            # see the service-level comment above for why the Admin UI can't
+            # establish this dynamically here the way it does in dev/prod.
+            issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
+            # Every static user above must be listed here (see
+            # nats_auth_callout.rs's module docs for why) -- only real
+            # secondaries, registered at runtime and absent from both lists,
+            # go through the callout.
+            auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout"]
+          }
         }
         EOF
         exec nats-server -c /etc/nats/nats.conf
@@ -215,8 +246,18 @@ services:
       - NATS_UI_PASSWORD=validation-ui-password
       - NATS_DNS_WRITER_USER=validation-dns-writer
       - NATS_DNS_WRITER_PASSWORD=validation-nats-password
-      - NATS_DNS_READER_USER=validation-dns-reader
-      - NATS_DNS_READER_PASSWORD=validation-nats-password
+      - NATS_DNS_REPLICA_USER=validation-dns-replica
+      - NATS_DNS_REPLICA_PASSWORD=validation-nats-password
+      - NATS_CALLOUT_USER=validation-nats-callout
+      - NATS_CALLOUT_PASSWORD=validation-nats-callout-password
+      # Fixed literal seed (not the file-based NATS_ISSUER_SEED_PATH default)
+      # so its public half can be baked into the nats service's static
+      # bootstrap config below ahead of time -- this validation harness has
+      # no persistent /data volume for the Admin UI to generate-and-persist
+      # one into, and no fixed nats container name to safely restart-by-name
+      # across concurrently-isolated `-p <project>` runs. Never use a literal
+      # seed like this outside a throwaway validation context.
+      - NATS_ISSUER_SEED=SAAIHYJ2XBQO3QSKX3V5MS4JH25WGTXEFOOXEZ5EXSGDGWOGCMCVWHWTYY
       - SECONDARY_REGISTRATION_TOKEN=validation-secondary-registration-token
     networks:
       validation:
