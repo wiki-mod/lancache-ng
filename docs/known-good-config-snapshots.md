@@ -198,43 +198,50 @@ validate-then-snapshot-or-rollback shape as
 `_dhcp_proxy_validate_snapshot_or_rollback()`, just with
 `pdns_recursor --config=check` as the validator command.
 
-**pdns.conf: no check-only flag exists — start-then-verify instead.**
-Debian Trixie's `pdns-server` package (4.9.x) has no equivalent: its
-`--help` output lists no config-check option, only `--config` (dump the
-effective config to stdout) and `--no-config` (skip parsing entirely),
-neither of which validates a candidate file. `_dns_auth_probe()` in
-`services/dns/entrypoint.sh` instead does the start-then-verify pattern the
-issue anticipated for exactly this case: start `pdns_server` in the
-foreground against the candidate config, poll the control socket with
-`pdns_control rping` for up to ~5s, then stop the probe process either way
-regardless of outcome. This is safe and reliable because, verified
-empirically against the real binary: a config that fails to parse (bad
-syntax) or whose backend fails to initialize (unknown `launch=` backend, or
-a `gsqlite3-database=` path that does not exist) makes `pdns_server` exit
-within well under a second, before it ever creates the control socket — so
-`pdns_control rping` reliably distinguishes a valid candidate (process stays
-up, control socket responds) from an invalid one (process exits, socket
-never appears) without needing any deeper semantic check. The probe instance
-is always torn down after the check (success or failure); the real,
-long-running server is started separately, afterward, by the existing
-`run_auth()` restart loop once a valid config is confirmed in place — so a
-successful probe briefly starts and stops `pdns_server` an extra time at
-every container start, which is an accepted, minor startup-time cost for
-correctness (there is no way to check validity without actually starting the
-daemon, since no check-only flag exists).
-`_dns_auth_validate_snapshot_or_rollback()` wraps `_dns_auth_probe()` in the
-same validate-then-snapshot-or-rollback shape as the other adapters, using
-`_dns_auth_probe` as the validator instead of a pure pre-start check
-command.
+**pdns.conf: also a pure pre-start check, once verified live.** An earlier
+draft of this adapter assumed `pdns_server` had no check-only flag, because
+its `--help` output doesn't spell out "check" as a value the way
+`pdns_recursor`'s `--help` explicitly does ("You can use --config=check to
+test the config file...") — `pdns_server --help` only documents `--config`
+as "Provide configuration file on standard output" and `--no-config` as
+"Don't parse configuration file", with no mention of a check mode. That
+draft built a start-then-verify probe instead: start `pdns_server` in the
+foreground, poll the control socket with `pdns_control rping`, then tear
+the probe down either way. Before merging, `--config=check` was tried
+directly against the real Debian Trixie `pdns-server` package (4.9.x) on a
+self-hosted runner anyway (rather than trusting the absence of documentation)
+and turned out to work exactly like `pdns_recursor --config=check`: it
+parses the config, attempts to load the configured `launch=` backend
+module, and exits non-zero on error — confirmed against an unloadable
+backend module and an unknown/malformed setting (the realistic failure mode
+here, since a broken `PDNS_API_KEY`/`DDNS_ALLOW_FROM` template substitution
+produces exactly that) — all without ever binding a port or leaving a
+process running. `_dns_auth_validate_snapshot_or_rollback()` in
+`services/dns/entrypoint.sh` therefore uses
+`pdns_server --config=check --config-dir=<dir>` directly, the same
+validate-then-snapshot-or-rollback shape as every other adapter here,
+instead of the more complex probe — no `_dns_auth_probe()` function exists
+in the merged version of this adapter.
+
+One real limitation carries over either way: neither `--config=check` nor
+a full running daemon validates semantic values such as CIDR syntax in
+`allow-dnsupdate-from` — confirmed empirically (starting a real
+`pdns_server` with a garbage `allow-dnsupdate-from` value still binds its
+port and answers `pdns_control rping` normally). This is a pre-existing
+PowerDNS behavior, not a gap introduced by preferring the simpler
+check-only flag over a full start.
 
 Ordering matters here in a way it does not for nginx/dnsmasq: pdns.conf
 validation/rollback runs *before* any `pdnsutil` call in the entrypoint
 (zone creation, TSIG import), because those calls also read `pdns.conf` via
 `--config-dir` — if pdns.conf is rolled back to a known-good snapshot,
 every subsequent `pdnsutil` call in that same startup must see the rolled-
-back config, not the rejected candidate. It runs *after* the SQLite database
-file exists (so the `gsqlite3` backend can actually open it during the
-probe), but before zone creation and `configure_ddns_tsig`.
+back config, not the rejected candidate. It's kept positioned after the
+SQLite database file exists and before zone creation / `configure_ddns_tsig`
+for that reason, even though `--config=check` itself doesn't actually
+require the database file to exist (confirmed empirically — it still exits
+0 with a nonexistent `gsqlite3-database=` path, since it does not open the
+backend the way a full start does).
 
 **Operational risk to know about:** same shape as nginx/dnsmasq — if the
 fallback path is taken, PowerDNS keeps running on a stale known-good config

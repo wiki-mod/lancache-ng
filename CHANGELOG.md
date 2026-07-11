@@ -21,15 +21,15 @@ Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
   follow-up issues; see `docs/known-good-config-snapshots.md` (#415).
 - Extended the known-good configuration snapshot mechanism to PowerDNS's
   static `pdns.conf`/`recursor.conf`, rendered by `services/dns/entrypoint.sh`:
-  `recursor.conf` is validated with the real, side-effect-free
-  `pdns_recursor --config=check` flag before being snapshotted; `pdns.conf`
-  has no equivalent check-only flag in the packaged `pdns-server`, so it uses
-  a short-lived start-then-verify probe instead (start `pdns_server`, poll
-  `pdns_control rping`, tear the probe down either way). Both configs are
-  validated and rolled back independently per `dns-standard`/`dns-ssl`
-  container. Zone/record/database rollback (`pdns.sqlite3`) remains
-  explicitly out of scope, per #415's own guidance; see
-  `docs/known-good-config-snapshots.md` (#615).
+  both files are validated with their real, side-effect-free `--config=check`
+  flag before being snapshotted (`pdns_recursor --config=check` and
+  `pdns_server --config=check` respectively — confirmed live against the real
+  packaged binaries that `pdns_server` supports this too, even though its
+  `--help` output doesn't document it the way `pdns_recursor`'s does). Both
+  configs are validated and rolled back independently per
+  `dns-standard`/`dns-ssl` container. Zone/record/database rollback
+  (`pdns.sqlite3`) remains explicitly out of scope, per #415's own guidance;
+  see `docs/known-good-config-snapshots.md` (#615).
 - Completed the `dnsmasq-proxy` DHCP mode: documentation guide, DHCP
   mode-selection tests, the Kea/dnsmasq mutual-exclusion invariant test,
   dnsmasq template rendering coverage, and Compose validation for both DHCP

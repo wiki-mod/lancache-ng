@@ -3,18 +3,19 @@
 #
 # Adapter-level tests for the DNS (PowerDNS) known-good-snapshot integration
 # in services/dns/entrypoint.sh (#615). Loads the real
-# _dns_recursor_validate_snapshot_or_rollback / _dns_auth_probe /
-# _dns_auth_validate_snapshot_or_rollback functions (not a
-# reimplementation) and exercises them against stub `pdns_recursor` /
-# `pdns_server` / `pdns_control` binaries on PATH, so these tests don't
-# require a real PowerDNS install and stay deterministic regardless of the
-# bats runner's available packages. The stub behavior was validated against
-# the real Debian Trixie pdns-server (4.9.x) / pdns-recursor (5.2.x)
-# packages on a self-hosted runner before this PR (see PR description):
-# `pdns_recursor --config=check` is a genuine pure pre-start validator, and
-# an invalid pdns_server config makes the real binary exit well under a
-# second without ever creating the control socket -- the stubs below
-# reproduce exactly that shape.
+# _dns_recursor_validate_snapshot_or_rollback /
+# _dns_auth_validate_snapshot_or_rollback functions (not a reimplementation)
+# and exercises them against stub `pdns_recursor` / `pdns_server` binaries
+# on PATH, so these tests don't require a real PowerDNS install and stay
+# deterministic regardless of the bats runner's available packages. The
+# stub behavior was validated against the real Debian Trixie pdns-server
+# (4.9.x) / pdns-recursor (5.2.x) packages on a self-hosted runner before
+# this PR (see PR description): both `pdns_recursor --config=check` and
+# `pdns_server --config=check` are genuine pure pre-start validators that
+# parse the candidate config and exit non-zero on error (unknown/malformed
+# setting, unloadable `launch=` backend) without binding any port or
+# leaving a process running -- the stubs below reproduce exactly that
+# shape.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -56,50 +57,29 @@ exit 0
 STUB
     chmod +x "$stub_bin/pdns_recursor"
 
-    # Stub pdns_server + pdns_control emulate the real start-then-verify
-    # shape: pdns_server, given a config directory whose pdns.conf contains
-    # "BROKEN", exits immediately without creating a "ready" marker; a valid
-    # config makes it create the marker and then sleep (simulating a
-    # listening daemon) until killed. Stub pdns_control's "rping" reports
-    # PONG only if the marker exists, matching real rping's role as a
-    # liveness check on the control socket.
-    ready_marker_dir="$BATS_TEST_TMPDIR/ready-markers"
-    mkdir -p "$ready_marker_dir"
-    cat > "$stub_bin/pdns_server" <<STUB
+    # Stub pdns_server: "--config=check --config-dir=<dir>" fails the same
+    # way, mirroring the real --config=check flag confirmed on the real
+    # pdns-server 4.9.x package (its --help doesn't spell out "check" as a
+    # value the way pdns_recursor's --help does, but it is a genuine,
+    # working, side-effect-free check-only invocation -- verified live
+    # against valid and invalid configs on a self-hosted runner before this
+    # PR).
+    cat > "$stub_bin/pdns_server" <<'STUB'
 #!/bin/bash
 config_dir=""
-for arg in "\$@"; do
-    case "\$arg" in
-        --config-dir=*) config_dir="\${arg#--config-dir=}" ;;
+for arg in "$@"; do
+    case "$arg" in
+        --config-dir=*) config_dir="${arg#--config-dir=}" ;;
     esac
 done
-if grep -q "BROKEN" "\${config_dir}/pdns.conf" 2>/dev/null; then
-    echo "pdns_server: Fatal error: invalid configuration" >&2
+if grep -q "BROKEN" "${config_dir}/pdns.conf" 2>/dev/null; then
+    echo "pdns_server: Fatal error: Trying to set unknown setting 'BROKEN'" >&2
     exit 1
 fi
-touch "$ready_marker_dir/ready"
-# Trapping EXIT only (not TERM/INT) is deliberate: trapping TERM/INT
-# overrides bash's default signal action (immediate termination) with
-# "run this handler, then keep executing the script" -- so the
-# still-running "while true" loop below would survive _dns_auth_probe's
-# kill entirely and hang the test forever. Trapping only EXIT lets the
-# default SIGTERM action actually terminate the process, and the EXIT
-# trap still fires during that termination to clean up the marker file.
-trap 'rm -f "$ready_marker_dir/ready"' EXIT
-while true; do sleep 0.1; done
+echo "pdns_server: config check successful"
+exit 0
 STUB
     chmod +x "$stub_bin/pdns_server"
-
-    cat > "$stub_bin/pdns_control" <<STUB
-#!/bin/bash
-if [ -f "$ready_marker_dir/ready" ]; then
-    echo "PONG"
-    exit 0
-fi
-echo "pdns_control: Unable to connect to remote" >&2
-exit 1
-STUB
-    chmod +x "$stub_bin/pdns_control"
 
     PATH="$stub_bin:$PATH"
     export PATH
@@ -155,9 +135,9 @@ STUB
     [ "$(echo "$output" | wc -l)" -eq 2 ]
 }
 
-# ── pdns.conf (start-then-verify probe) ──────────────────────────────────────
+# ── pdns.conf (pure pre-start check) ─────────────────────────────────────────
 
-@test "auth: valid candidate config passes the probe and is snapshotted" {
+@test "auth: valid candidate config passes the check and is snapshotted" {
     printf 'OK pdns config\n' > "$pdns_conf"
 
     run _dns_auth_validate_snapshot_or_rollback "$pdns_conf"
@@ -177,7 +157,7 @@ STUB
     printf 'BROKEN pdns config v2\n' > "$pdns_conf"
     run _dns_auth_validate_snapshot_or_rollback "$pdns_conf"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"failed the start-then-verify probe"* ]]
+    [[ "$output" == *"generated pdns.conf failed validation"* ]]
     [[ "$output" == *"[known-good-snapshot][dns-auth][SELECT]"* ]]
     [[ "$output" == *"NOT the newly generated config"* ]]
 
@@ -203,16 +183,6 @@ STUB
     run kgs_list_snapshots "${DNS_CONFIG_SNAPSHOT_DIR}/auth"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | wc -l)" -eq 2 ]
-}
-
-@test "auth: the probe process is torn down after a valid check (no leaked ready marker)" {
-    # Regression guard for _dns_auth_probe leaking its background pdns_server
-    # stand-in: after a successful probe, the "ready" marker the stub uses to
-    # answer rping must be gone, proving the probe process was actually
-    # killed rather than left running in the background.
-    printf 'OK pdns config\n' > "$pdns_conf"
-    _dns_auth_validate_snapshot_or_rollback "$pdns_conf" >/dev/null
-    [ ! -f "$ready_marker_dir/ready" ]
 }
 
 # ── recursor.conf independence from auth ─────────────────────────────────────

@@ -361,72 +361,45 @@ _dns_recursor_validate_snapshot_or_rollback() {
     return 1
 }
 
-# _dns_auth_probe <config_dir>
-# PowerDNS's authoritative server (pdns_server) has no side-effect-free
-# "check config, don't start" flag equivalent to `nginx -t`/`dnsmasq --test`
-# -- verified against the real Debian Trixie pdns-server package (4.9.x):
-# its --help lists no config-check option, only --config (dump effective
-# config) and --no-config. This function instead does a short-lived
-# start-then-verify probe, per the pattern the issue anticipated for exactly
-# this case: start pdns_server in the foreground with the candidate config,
-# poll the control socket with `pdns_control rping` for up to ~5s, then stop
-# the probe process either way. Empirically (verified against the real
-# binary), a config that fails to parse or whose backend fails to open (bad
-# `launch=`, unreadable sqlite database, garbage setting) makes pdns_server
-# exit within well under a second without ever creating the control socket,
-# so rping reliably distinguishes valid from invalid candidates. This probe
-# instance is torn down regardless of outcome; the real long-running server
-# is started separately by run_auth() later, once a valid config is
-# confirmed in place. Factored into its own function so
-# tests/bats/dns_known_good_snapshot.bats can drive it against a stub
-# `pdns_server`/`pdns_control` pair.
-_dns_auth_probe() {
-    local config_dir="$1"
-    local socket_dir="/var/run/pdns"
-    mkdir -p "$socket_dir"
-    rm -f "${socket_dir}/pdns.controlsocket"
-
-    pdns_server --config-dir="$config_dir" --guardian=no --daemon=no >/dev/null 2>&1 &
-    local probe_pid=$!
-
-    local ready=1
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        if pdns_control --socket-dir="$socket_dir" rping >/dev/null 2>&1; then
-            ready=0
-            break
-        fi
-        # Stop polling early if the probe already died (invalid config) --
-        # no point waiting out the full timeout.
-        kill -0 "$probe_pid" 2>/dev/null || break
-        sleep 0.5
-    done
-
-    kill "$probe_pid" 2>/dev/null || true
-    wait "$probe_pid" 2>/dev/null || true
-    rm -f "${socket_dir}/pdns.controlsocket"
-    return "$ready"
-}
-
 # _dns_auth_validate_snapshot_or_rollback <pdns_conf_file>
-# Same validate-then-snapshot-or-rollback contract as the nginx/dnsmasq
-# adapters, using _dns_auth_probe (see above) as the validator instead of a
-# pure pre-start check command, because pdns_server has none.
+# pdns.conf's validator: `pdns_server --config=check --config-dir=<dir>` is
+# a genuine side-effect-free check-only invocation, exactly like
+# `pdns_recursor --config=check` above and `nginx -t`/`dnsmasq --test`.
+# `--help` on the packaged pdns-server (4.9.x) doesn't spell out "check" as
+# a value the way pdns_recursor's --help does, which earlier led this
+# adapter to a more complex start-then-verify probe (start the daemon, poll
+# `pdns_control rping`, tear down) instead. Live-verified against the real
+# binary on a self-hosted runner (not assumed) that the flag genuinely
+# exists and works: `--config=check` exits 0 on a valid config; exits 1 and
+# prints a "Fatal error: Trying to set unknown setting '<name>'" on an
+# unknown/malformed setting (the realistic failure mode here -- a broken
+# `PDNS_API_KEY`/`DDNS_ALLOW_FROM` substitution corrupting the file); exits
+# 1 on a `launch=` backend that fails to load; and in every case exits
+# within well under a second, binds no port, and leaves no process running
+# -- equivalent detection coverage to the start-then-verify probe for this
+# adapter's actual failure surface, without ever having to start a real
+# `pdns_server` instance. (Neither this check nor a full daemon start
+# validates semantic values such as CIDR syntax in `allow-dnsupdate-from`
+# -- confirmed empirically that PowerDNS does not parse that eagerly at
+# startup either way, so this is a pre-existing PowerDNS limitation, not a
+# gap introduced by preferring the simpler check-only flag.) Factored into
+# its own function so tests/bats/dns_known_good_snapshot.bats can drive it
+# against a stub `pdns_server` binary.
 _dns_auth_validate_snapshot_or_rollback() {
     local pdns_conf="$1"
     local config_dir
     config_dir="$(dirname "$pdns_conf")"
 
-    echo "[lancache-dns] Validating pdns.conf (start-then-verify probe)..."
-    if _dns_auth_probe "$config_dir"; then
+    echo "[lancache-dns] Validating pdns.conf (pdns_server --config=check)..."
+    if pdns_server --config=check --config-dir="$config_dir" >/dev/null 2>&1; then
         kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-auth" "$pdns_conf"
         return 0
     fi
 
-    echo "[lancache-dns] ERROR: generated pdns.conf failed the start-then-verify probe (pdns_server did not respond to pdns_control rping)." >&2
+    echo "[lancache-dns] ERROR: generated pdns.conf failed validation (pdns_server --config=check)." >&2
     echo "[lancache-dns] ERROR: attempting rollback to the newest known-good snapshot instead of starting with an invalid config." >&2
     local selected_id
-    if selected_id="$(kgs_snapshot_apply "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "dns-auth" "_dns_auth_probe '${config_dir}'" "$pdns_conf")"; then
+    if selected_id="$(kgs_snapshot_apply "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "dns-auth" "pdns_server --config=check --config-dir='${config_dir}'" "$pdns_conf")"; then
         echo "[lancache-dns] WARNING: pdns_server is starting from known-good snapshot ${selected_id}, NOT the newly generated config." >&2
         echo "[lancache-dns] WARNING: check PDNS_API_KEY/DDNS_ALLOW_FROM and restart to pick up the intended change." >&2
         return 0
@@ -466,12 +439,16 @@ if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     chown pdns:pdns /var/lib/powerdns/pdns.sqlite3
 fi
 
-# ── 4. Validate Authoritative Config (start-then-verify probe, #615) ────────
-# Placed after the SQLite database exists (the gsqlite3 backend needs it to
-# open successfully) but before any pdnsutil call below, since those also
-# depend on pdns.conf being parseable -- if this rolls back to a known-good
-# snapshot, every subsequent pdnsutil/zone-creation call must see that
-# rolled-back config, not the rejected candidate.
+# ── 4. Validate Authoritative Config (pdns_server --config=check, #615) ─────
+# `--config=check` doesn't require the SQLite database to exist (verified
+# empirically -- it still exits 0 with a nonexistent gsqlite3-database=
+# path), so this could in principle run before step 3. It's kept here,
+# after the database exists and before any pdnsutil call below, purely so
+# the validated config is confirmed in place before anything else in this
+# script (zone creation, TSIG import) depends on pdns.conf being parseable
+# -- if this rolls back to a known-good snapshot, every subsequent
+# pdnsutil/zone-creation call must see that rolled-back config, not the
+# rejected candidate.
 _dns_auth_validate_snapshot_or_rollback "$PDNS_AUTH_CONF_FILE" || exit 1
 
 # ── 5. Migrate Legacy AAAA Filter Marker ─────────────────────────────────────
