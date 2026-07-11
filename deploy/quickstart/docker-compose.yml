@@ -247,6 +247,7 @@ services:
       - NATS_RECONCILER=1
       - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data-standard:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
@@ -281,6 +282,7 @@ services:
       - NATS_CONSUMER=dns-ssl
       - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data-ssl:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
