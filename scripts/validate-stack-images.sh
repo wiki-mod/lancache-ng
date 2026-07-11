@@ -81,7 +81,7 @@ require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
 require_manifest_platform stack linux/arm64
-for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
+for image in docker-socket-proxy nats fluent-bit syslog-ng netdata watchtower busybox; do
   require_name "$external_names" "$image" external
 done
 

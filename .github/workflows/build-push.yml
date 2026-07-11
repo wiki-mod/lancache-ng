@@ -649,6 +649,10 @@ jobs:
             deploy/quickstart/docker-compose.yml; do
             validate_compose -f "$compose_file" --profile dhcp-kea
             validate_compose -f "$compose_file" --profile dhcp-proxy
+            # Same reasoning as above, for the syslog-ng/fluent-bit logging
+            # profile (#453): it must be activated explicitly or its service
+            # blocks are silently skipped by this validation.
+            validate_compose -f "$compose_file" --profile logging
           done
 
           validate_nats_config_ownership() {
