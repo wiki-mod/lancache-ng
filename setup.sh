@@ -1576,19 +1576,96 @@ validate_lancache_image_channel() {
 # caller should die) so callers can tell "nothing to derive from" apart from
 # "found something invalid."
 derive_release_archive_image_tag() {
-    local version tag
+    local version tag git_stderr git_status
+    local -a safe_dir_opt=()
 
-    if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        tag=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null || true)
-        if [[ -n "$tag" ]]; then
-            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-                printf 'Invalid release tag from git checkout: %s\n' "$tag" >&2
-                return 2
-            fi
-            printf '%s\n' "$tag"
-            return 0
+    # A .git entry (dir, or a file for worktrees) means this is a genuine git
+    # checkout, not a release archive -- even if git itself goes on to refuse
+    # to touch it below. Checking this directly (rather than relying solely on
+    # `git rev-parse --is-inside-work-tree`'s exit code as a proxy for "is
+    # this a git checkout") is what lets the branches below tell "no .git at
+    # all" apart from "git rejected a .git that does exist".
+    if [[ -e "$SCRIPT_DIR/.git" ]]; then
+        if git_stderr=$(git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree 2>&1 1>/dev/null); then
+            git_status=0
+        else
+            git_status=$?
         fi
-        return 1
+
+        if [[ "$git_status" -ne 0 ]]; then
+            if [[ "$git_stderr" == *"detected dubious ownership"* ]]; then
+                # Since Git 2.35.2 (the CVE-2022-24765 fix), git refuses to
+                # operate on a repository whose directory is owned by a
+                # different user/UID than the process invoking git. That is a
+                # normal, non-malicious situation for this project's own
+                # supported use cases -- a bind-mounted checkout run inside a
+                # container under a different UID, or `sudo ./setup.sh` after
+                # a plain-user `git clone` -- so it must not be silently
+                # conflated with "there is no .git directory" (the genuine
+                # release-archive case the VERSION-file fallback below exists
+                # for) and must not silently resolve a possibly-stale
+                # VERSION tag instead.
+                #
+                # Trust the path this run's dubious-ownership check actually
+                # rejected -- not necessarily $SCRIPT_DIR verbatim. Git checks
+                # safe.directory against the repository's real (symlink-
+                # resolved) path, so if $SCRIPT_DIR is itself a symlink,
+                # scoping trust to the symlink path would not match and this
+                # retry would still fail, falling through to the possibly-
+                # stale VERSION file -- exactly the bug this is meant to
+                # avoid. Git's own error message already names the exact path
+                # it checked ("... in repository at '<path>' ..."), so parse
+                # that out instead of assuming $SCRIPT_DIR is already the
+                # physical path; fall back to $SCRIPT_DIR only if the message
+                # format is ever unrecognized.
+                #
+                # Either way, this is scoped for this ONE git invocation only,
+                # via `-c` on the command line. This is deliberately narrower
+                # than `git config --global --add safe.directory`: it is
+                # never written to any git config file, never persists beyond
+                # this single process, never affects any other git invocation
+                # on the system, and never uses a wildcard ("*") that would
+                # trust every repository regardless of path -- so it does not
+                # weaken the dubious-ownership protection for anything other
+                # than this script resolving its own, already-trusted path.
+                # Match against only git's first stderr line: the full
+                # message also repeats the path later (in its own
+                # single-quoted "git config --global --add safe.directory
+                # '<path>'" suggestion), and a greedy (.+) spanning the
+                # whole multi-line string would capture through to that
+                # later quote instead of stopping at the first line's own
+                # closing quote -- confirmed live (a path containing a
+                # space reproduced this: the over-captured value never
+                # matched what git actually checked, so the retry below
+                # still failed and fell through to the stale VERSION file).
+                local dubious_path="$SCRIPT_DIR"
+                local dubious_first_line="${git_stderr%%$'\n'*}"
+                if [[ "$dubious_first_line" =~ dubious\ ownership\ in\ repository\ at\ \'(.+)\' ]]; then
+                    dubious_path="${BASH_REMATCH[1]}"
+                fi
+                safe_dir_opt=(-c "safe.directory=$dubious_path")
+                printf 'Note: %s has different file ownership than the current user; trusting it for this run only (see: git help safe.directory).\n' "$dubious_path" >&2
+            else
+                printf 'Warning: %s contains a .git directory but git rejected it:\n%s\nFalling back to the VERSION file, which may be stale or unpublished. Set LANCACHE_IMAGE_TAG or LANCACHE_IMAGE_CHANNEL to override.\n' "$SCRIPT_DIR" "$git_stderr" >&2
+            fi
+        fi
+
+        if git "${safe_dir_opt[@]}" -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            tag=$(git "${safe_dir_opt[@]}" -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null || true)
+            if [[ -n "$tag" ]]; then
+                if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+                    printf 'Invalid release tag from git checkout: %s\n' "$tag" >&2
+                    return 2
+                fi
+                printf '%s\n' "$tag"
+                return 0
+            fi
+            return 1
+        fi
+        # .git exists but git still refuses it even with dubious-ownership
+        # trust scoped to this one call (some other problem, already warned
+        # about above) -- fall through to the VERSION-file branch as a last
+        # resort.
     fi
 
     [[ -f "$SCRIPT_DIR/VERSION" ]] || return 1
