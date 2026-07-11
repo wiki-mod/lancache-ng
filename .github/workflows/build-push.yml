@@ -497,6 +497,8 @@ jobs:
           grep -F 'config/prod' setup.sh >/dev/null \
             && grep -F 'services/dns/cdn-domains.txt' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must include repo-root config/prod env files and the domain list."; exit 1; }
+          grep -F 'scripts/docker-socket-proxy.sh' setup.sh >/dev/null \
+            || { echo "::error::deploy/prod backups must include the repo-root scripts/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
           grep -F 'deploy_prod_repo_root "$archived_install"' setup.sh >/dev/null \
             && grep -F 'deploy_prod_repo_root "$install_dir"' setup.sh >/dev/null \
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
@@ -535,7 +537,12 @@ jobs:
 
       - name: Validate compose files
         env:
-          CACHE_DIR_STANDARD: /tmp/lancache-standard
+          # CACHE_DIR_STANDARD/CACHE_DIR_SSL are intentionally absent here: no
+          # compose file reads either key anymore (issue #445), so injecting
+          # one would validate a var no service consumes. SSL_CACHE_MAX_GB and
+          # STANDARD_CACHE_MAX_GB stay below because deploy/prod/docker-compose.yml
+          # still falls back to them when CACHE_MAX_GB is unset, for installs
+          # that haven't gone through setup.sh update yet.
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
           CACHE_MEM_MB: "256"
@@ -574,7 +581,6 @@ jobs:
             -w /work \
             --env HOME=/tmp \
             --env DOCKER_CONFIG=/tmp/.docker \
-            --env CACHE_DIR_STANDARD \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
             --env CACHE_MEM_MB \
@@ -643,6 +649,10 @@ jobs:
             deploy/quickstart/docker-compose.yml; do
             validate_compose -f "$compose_file" --profile dhcp-kea
             validate_compose -f "$compose_file" --profile dhcp-proxy
+            # Same reasoning as above, for the syslog-ng/fluent-bit logging
+            # profile (#453): it must be activated explicitly or its service
+            # blocks are silently skipped by this validation.
+            validate_compose -f "$compose_file" --profile logging
           done
 
           validate_nats_config_ownership() {
@@ -703,25 +713,52 @@ jobs:
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
+          # The HAProxy allowlist itself lives in exactly one place,
+          # scripts/docker-socket-proxy.sh (see docs/naming-conventions.md's
+          # "Docker socket proxy allowlist" section) -- it used to also be
+          # duplicated into an unreferenced x-docker-socket-proxy-command
+          # anchor in each of the three Compose files, which this check used
+          # to validate instead of the real script. Those anchors were dead
+          # (never aliased) and have been removed; validate the one real
+          # copy directly instead of three unreachable shadow copies.
+          socket_proxy_script="scripts/docker-socket-proxy.sh"
+          grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
+            && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
+            && grep -Fq 'acl safe_probe_action' "$socket_proxy_script" \
+            && grep -Fq 'acl lancache_container' "$socket_proxy_script" \
+            && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$socket_proxy_script" \
+            && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$socket_proxy_script" \
+            && grep -Fq 'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)' "$socket_proxy_script" \
+            && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$socket_proxy_script" \
+            && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$socket_proxy_script" \
+            && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$socket_proxy_script" \
+            && grep -Fq 'http-request deny' "$socket_proxy_script" \
+            && ! grep -Fq '/containers/create' "$socket_proxy_script" \
+            && ! grep -Fq '/containers/json' "$socket_proxy_script" \
+            && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$socket_proxy_script" \
+            || {
+              echo "::error file=${socket_proxy_script}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
+              exit 1
+            }
+
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'acl safe_service_restart' "$compose_file" \
-              && grep -Fq 'acl safe_dhcp_action' "$compose_file" \
-              && grep -Fq 'acl safe_probe_action' "$compose_file" \
-              && grep -Fq 'acl lancache_container' "$compose_file" \
-              && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
-              && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$compose_file" \
-              && grep -Fq 'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)' "$compose_file" \
-              && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$compose_file" \
-              && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$compose_file" \
-              && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
-              && grep -Fq 'http-request deny' "$compose_file" \
-              && ! grep -Fq '/containers/create' "$compose_file" \
-              && ! grep -Fq '/containers/json' "$compose_file" \
-              && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$compose_file" \
+            grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
+                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
                 exit 1
               }
+            # Match only the real top-level YAML key/anchor syntax here, not
+            # any occurrence of the string -- the explanatory comment above
+            # (and in docs/naming-conventions.md) legitimately mentions
+            # "x-docker-socket-proxy-command" as prose describing what was
+            # removed, and a substring match would flag that prose as a
+            # reintroduction on every run.
+            grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
+              && {
+                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/docker-socket-proxy.sh without ever being referenced."
+                exit 1
+              }
+            true
           done
 
           missing_required=0
@@ -840,6 +877,21 @@ jobs:
             grep -F "$key" setup.sh >/dev/null \
               || { echo "::error::setup.sh must generate or migrate required runtime key ${key}."; exit 1; }
           done
+
+          grep -F 'run_kea_dhcp_activation_preflight()' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must define a DHCP discovery preflight before Kea activation."; exit 1; }
+          grep -F 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must call the Kea discovery preflight before starting the stack."; exit 1; }
+          grep -F 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' setup.sh >/dev/null \
+            || { echo "::error::setup.sh must probe DHCP discovery with the Kea image before activation."; exit 1; }
+          if grep -F 'nmap --script broadcast-dhcp-discover -e any' setup.sh >/dev/null; then
+            echo "::error::setup.sh must not pass -e any to nmap; that is not a valid nmap interface and makes the preflight fail its own execution on every run."
+            exit 1
+          fi
+          grep -F 'nmap' services/dhcp/Dockerfile >/dev/null \
+            || { echo "::error::services/dhcp/Dockerfile must install nmap for the Kea discovery preflight."; exit 1; }
+          grep -F 'nmap|/usr/bin/nmap|/bin/nmap)' services/dhcp/entrypoint.sh >/dev/null \
+            || { echo "::error::services/dhcp/entrypoint.sh must pass through the nmap preflight command without starting Kea."; exit 1; }
 
           setup_update_required_repairs=(
             CACHE_INACTIVE
@@ -1395,6 +1447,17 @@ jobs:
           bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
 
+      - name: Check naming consistency (docs/naming-conventions.md)
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-naming-consistency.sh
+
       - name: Remove fallback compose validation image
         if: always()
         run: |
@@ -1446,22 +1509,31 @@ jobs:
   full-setup-validate:
     name: validate full-setup image
     # On a pull_request event, `promote` never runs at all (see its own `if:`
-    # condition) -- there is no channel image for THIS PR to wait for, so this
-    # job validates whatever channel image is already live, same as before.
-    # On push events (master/vX.Y.Z), this job used to run in parallel with
-    # build/promote instead of after them, so it tried to pull the channel
-    # image THIS PUSH was about to publish before promote had actually
-    # published it -- pulling a tag that doesn't exist yet on the very push
-    # that would have created it, rather than "the house isn't inspected
-    # before the roof tiles are on." Depending on `promote` here makes this
-    # job validate the freshly-promoted state of the commit it's actually
-    # running for, instead of racing ahead of it or checking a stale channel
-    # tag left over from a previous push.
-    needs: [detect-changes, promote, compute-validation-network]
+    # condition) -- there is no channel image for THIS PR to wait for.
+    # Instead this job now waits directly for `merge-manifests`, because (see
+    # #626) that job is where a same-repo PR's per-arch staging legs
+    # (pr-<N>-sha-<short>-{amd64,arm64}, pushed by build/build-arm64) get
+    # combined into the real pr-<N>-sha-<short> multi-platform tag this job
+    # actually pulls. This job MUST NOT start before merge-manifests
+    # finishes: build/build-arm64 wait on shellcheck, validate-compose,
+    # ci_scope_policy, file-headers, pr-template-check, line-endings, and
+    # then compile Rust, so they (and merge-manifests after them) are much
+    # slower than the lightweight `detect-changes` job this used to depend on
+    # alone -- depending on only `detect-changes` let this job race ahead and
+    # find no staging tags yet, silently falling back to stale base-channel
+    # content for every service and reproducing the exact bug #626 fixes. On
+    # push events (master/vX.Y.Z), this job still waits for `promote` so it
+    # validates the freshly-promoted channel state of the commit it's
+    # actually running for, instead of racing ahead of it or checking a
+    # stale channel tag left over from a previous push.
+    needs: [detect-changes, merge-manifests, promote, compute-validation-network]
     if: >-
       ${{
         always() &&
-        (github.event_name == 'pull_request' || needs.promote.result == 'success') &&
+        (
+          (github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success') ||
+          (github.event_name != 'pull_request' && needs.promote.result == 'success')
+        ) &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
@@ -1469,6 +1541,9 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: read
+      packages: write
     env:
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
@@ -1491,21 +1566,192 @@ jobs:
       # and fails for reasons unrelated to the branch under test. Mirror the
       # same ref-to-channel mapping the `promote` job uses so this job
       # validates the channel this branch actually publishes to.
+      #
+      # On a pull_request event this now resolves to the PR's OWN staging tag
+      # (see #626) instead of the base-ref channel, so this job actually
+      # tests the PR's own commits rather than whatever the base branch last
+      # published -- UNLESS this is a Dependabot PR or (should that ever
+      # start existing) a fork PR: those get a read-only GITHUB_TOKEN from
+      # GitHub (same restriction, confirmed for Dependabot in GitHub's own
+      # docs), so build/build-arm64 never push anything for them (see their
+      # own "Log in to GHCR" steps) and there is no PR staging tag to
+      # validate against at all. pr-staging-available captures that so every
+      # later step can gate off one flag instead of re-deriving it.
+      # base_channel_tag is always computed: it's the resolved tag itself
+      # when staging isn't available, and the fallback source for any
+      # full-setup service an eligible PR did not touch either way.
       - name: Determine validation image channel
         id: channel
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # github.sha, NOT github.event.pull_request.head.sha: for a
+          # pull_request event this is the synthetic merge commit actually
+          # checked out and built (head merged into the base branch's tip
+          # AT THE TIME OF THIS EVENT), and -- critically -- it changes
+          # whenever that merge result changes even if the PR's own head
+          # commit does not (e.g. a "reopened" event after the base branch
+          # moved while the PR was closed). Keying the tag on the PR head
+          # SHA alone let two events for the identical head, merged against
+          # two different base states, collide on one tag and let whichever
+          # push landed last silently overwrite the other's image content.
+          BUILD_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTOR: ${{ github.actor }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+
           if [[ "$BASE_REF" == "master" ]]; then
-            tag=edge
+            base_channel_tag=edge
           elif [[ "$BASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            tag=dev
+            base_channel_tag=dev
           else
-            tag=latest
+            base_channel_tag=latest
           fi
-          echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
+          echo "base-channel-tag=$base_channel_tag" >> "$GITHUB_OUTPUT"
+
+          pr_staging_available=false
+          if [[ "$EVENT_NAME" == "pull_request" && "$ACTOR" != "dependabot[bot]" && "$HEAD_REPO" == "$REPOSITORY" ]]; then
+            pr_staging_available=true
+          fi
+          echo "pr-staging-available=$pr_staging_available" >> "$GITHUB_OUTPUT"
+
+          if [[ "$pr_staging_available" == "true" ]]; then
+            short_sha="${BUILD_SHA::7}"
+            tag="pr-${PR_NUMBER}-sha-${short_sha}"
+            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; base-channel fallback for untouched services: '$base_channel_tag')."
+          else
+            tag="$base_channel_tag"
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              echo "::notice::$ACTOR's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
+            fi
+            echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for
+      # every service, and the "Run client simulation" step below pulls
+      # build-tools at that same tag -- but build/build-arm64 only push the
+      # PR staging tag for services detect-changes says this PR actually
+      # touched (real, deliberate additional push cost -- see #626 -- not
+      # "rebuild everything per PR for free"). Any of those services this PR
+      # did NOT touch has no image at the staging tag yet, so back-fill it
+      # with a cheap registry-side copy from the base-ref channel image (the
+      # correct thing to validate for an untouched service anyway). This
+      # mirrors the `promote`/`merge-manifests` jobs' own
+      # `docker buildx imagetools create` pattern for moving/combining tags
+      # without re-pulling image layers.
+      #
+      # Gated on pr-staging-available, not a bare `github.event_name ==
+      # 'pull_request'`: a Dependabot/fork PR has no PR staging tag for ANY
+      # service (build/build-arm64 skip pushing entirely for them), so
+      # steps.channel.outputs.tag already equals base_channel_tag above --
+      # there is nothing to back-fill, and attempting to log in/push here
+      # with that PR's read-only GITHUB_TOKEN would just fail instead of
+      # skipping cleanly.
+      - name: Set up Docker Buildx
+        if: steps.channel.outputs.pr-staging-available == 'true'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: steps.channel.outputs.pr-staging-available == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A service detect-changes says THIS PR touched (or any service other
+      # than build-tools, if the PR changed a workflow/CI-contract file --
+      # mirrors build/build-arm64's own should-build override exactly) must
+      # already have a staging image by the time this runs: full-setup-
+      # validate now waits for merge-manifests (see this job's own `needs:`
+      # comment above) specifically so that's true. If it's missing anyway --
+      # build/build-arm64 actually failed to push it, or imagetools inspect
+      # hit a transient registry error -- silently copying base-channel
+      # content into that service's pr-<N>-sha-<short> tag would make this
+      # job green while testing exactly the stale image #626 exists to stop
+      # testing, just now hidden behind a tag name that LOOKS PR-specific.
+      # Fail loudly instead; only a genuinely untouched service gets the
+      # base-channel back-fill.
+      - name: Ensure PR staging tags exist for full-setup services
+        if: steps.channel.outputs.pr-staging-available == 'true'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_TAG: ${{ steps.channel.outputs.tag }}
+          BASE_CHANNEL_TAG: ${{ steps.channel.outputs.base-channel-tag }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
+          PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
+          DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
+          WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
+          UI_TOUCHED: ${{ needs['detect-changes'].outputs.ui }}
+          BUILD_TOOLS_TOUCHED: ${{ needs['detect-changes'].outputs.build_tools }}
+        run: |
+          set -euo pipefail
+
+          # Mirrors build/build-arm64's "Determine whether this service
+          # needs building" should-build override exactly: a workflow/CI-
+          # contract change forces every service except build-tools to be
+          # treated as touched, because build-tools' own detect-changes
+          # scoping (tools/build-tools/** only) is intentionally narrower.
+          service_should_have_staging_tag() {
+            local service="$1" touched="$2"
+            if [[ "$WORKFLOW_CHANGED" == "true" && "$service" != "build-tools" ]]; then
+              echo true
+            else
+              echo "$touched"
+            fi
+          }
+
+          declare -A touched_map=(
+            [proxy]="$PROXY_TOUCHED"
+            [dns]="$DNS_TOUCHED"
+            [watchdog]="$WATCHDOG_TOUCHED"
+            [ui]="$UI_TOUCHED"
+            [build-tools]="$BUILD_TOOLS_TOUCHED"
+          )
+
+          # The services deploy/full-setup/docker-compose.yml references,
+          # plus build-tools (used by the client-simulation step further
+          # down, not by the compose file itself). dhcp and dhcp-proxy are
+          # part of neither and are intentionally excluded.
+          #
+          # Decide touched-or-not FIRST, before looking at whether a pr_image
+          # already exists. A prior run of this exact PR head (a manual
+          # re-run, or this job simply running twice for the same commit) may
+          # already have back-filled an untouched service's pr-<N>-sha-<short>
+          # tag from whatever the base channel pointed at THEN. If the base
+          # channel (edge/dev) has since moved -- another PR merged in the
+          # meantime -- an existence check alone would see the stale alias,
+          # assume it's still correct, and `continue` without refreshing it:
+          # this job would then validate a deploy/workflow-only PR that
+          # doesn't touch that service against an old, no-longer-current
+          # base image, silently. So an untouched service is unconditionally
+          # (re)pointed at whatever the base channel resolves to RIGHT NOW --
+          # `imagetools create` is a cheap registry-side manifest write, not
+          # a rebuild, so refreshing it even when nothing actually changed
+          # costs nothing worth optimizing away.
+          full_setup_services=(proxy dns watchdog ui build-tools)
+          for service in "${full_setup_services[@]}"; do
+            pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
+            should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
+
+            if [[ "$should_exist" == "true" ]]; then
+              if docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
+                echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
+                continue
+              fi
+              echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to base-channel content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
+              exit 1
+            fi
+
+            base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
+            echo "::notice::$service is untouched by this PR; (re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
+            docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
+          done
 
       - name: Build full-setup validation image
         env:
@@ -1691,6 +1937,20 @@ jobs:
           fi
 
           echo "Full-setup stack is stable: all services running and healthy."
+
+      # Unlike the failure-only log dump above, this always runs -- #626's
+      # whole point is that a *green* run here must be verifiable as having
+      # actually tested this commit's own code (not stale base-branch
+      # content), and that's only checkable if the logs are visible
+      # regardless of outcome.
+      - name: Show full-setup service logs
+        if: always()
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          echo "::group::Logs from all services"
+          docker compose logs --no-color || true
+          echo "::endgroup::"
 
       - name: Run client simulation against the full-setup stack
         env:
@@ -2887,11 +3147,26 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
+        # Pull requests now also log in: this same-repo-only project (no fork
+        # PRs, confirmed in #626) pushes a PR-scoped staging tag below so
+        # "validate full-setup image" can test the PR's own commits instead
+        # of stale base-branch state. The fork check is a fail-safe in case
+        # that assumption ever stops holding -- a fork PR's GITHUB_TOKEN is
+        # read-only anyway, so login would fail loudly rather than silently.
+        # Dependabot PRs get the same read-only-token treatment as fork PRs
+        # (GitHub docs: Dependabot Actions runs never get a write-scoped
+        # GITHUB_TOKEN, even for a same-repo PR) -- excluded explicitly so
+        # this step (and the push below) is skipped cleanly instead of
+        # attempting a login/push that GitHub would reject with a 403.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
             (
-              steps.should-build.outputs.should-build == 'true'
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             )
           }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2913,6 +3188,52 @@ jobs:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-amd64
+
+      # Uses github.sha (the actual checked-out/built commit), NOT
+      # docker/metadata-action's `type=sha` output above and NOT the PR
+      # branch's own head commit. For a pull_request event, github.sha is
+      # the synthetic merge commit -- head merged into the base branch's
+      # tip AT THE TIME OF THIS EVENT -- and that's exactly the property
+      # needed here: it changes whenever the actual built content changes,
+      # even if the PR's own head commit doesn't (e.g. a "reopened" event
+      # after the base branch moved while the PR was closed), and it stays
+      # the same across a re-run of the identical event (GitHub reuses the
+      # original event's github.sha for re-runs, not a freshly re-resolved
+      # one). Tagging by the PR head SHA alone let two different events for
+      # the same head, merged against two different base states, collide on
+      # one tag -- and since this workflow's concurrency group does not
+      # cancel in-progress PR runs, a slower/older run could overwrite a
+      # newer run's tag with different image content after the fact. The
+      # `pr-<N>-` prefix lets the GC workflow
+      # (.github/workflows/gc-pr-staging-images.yml) find and reap this
+      # once the PR closes. The `-amd64` suffix matches this job's own
+      # per-arch tag convention (see "Extract metadata" above);
+      # merge-manifests combines it with build-arm64's `-arm64` PR staging
+      # tag into the real pr-<N>-sha-<short> multi-platform tag that
+      # full-setup-validate actually consumes.
+      - name: Compute PR staging tag
+        id: pr-tag
+        if: >-
+          ${{
+            github.event_name == 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
+            github.actor != 'dependabot[bot]' &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUILD_SHA: ${{ github.sha }}
+          MATRIX_SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${BUILD_SHA::7}"
+          tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
+          echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -3158,15 +3479,30 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          annotations: |
-            org.opencontainers.image.description=${{ matrix.description }}
+          # No `annotations:` input here (issue #620). A genuinely
+          # single-platform push with provenance disabled has no index for
+          # buildx to attach an index-level description annotation to --
+          # `docker buildx build --annotation index:...` on a real
+          # single-platform push errors outright ("index annotations not
+          # supported for single platform export"), confirmed live against
+          # this project's own images. Forcing OCI mediatypes here (instead
+          # of the legacy Docker manifest v2 schema) is still required
+          # groundwork: `docker buildx imagetools create` downstream (in
+          # merge-manifests) silently drops --annotation with no error at all
+          # when combining Docker-format sources, because Docker's manifest
+          # list schema has no annotations field -- also confirmed live.
+          # merge-manifests is the first point where a genuine multi-platform
+          # index exists, so that's where the description annotation is
+          # actually attached; channel/stack promotions downstream of it
+          # carbon-copy that annotation forward untouched.
+          outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -3183,7 +3519,13 @@ jobs:
         # retry, instead of retrying instantly against whatever just failed.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3197,7 +3539,13 @@ jobs:
         # image build) was what the first attempt's auth failure was tied to.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3233,15 +3581,30 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          annotations: |
-            org.opencontainers.image.description=${{ matrix.description }}
+          # No `annotations:` input here (issue #620). A genuinely
+          # single-platform push with provenance disabled has no index for
+          # buildx to attach an index-level description annotation to --
+          # `docker buildx build --annotation index:...` on a real
+          # single-platform push errors outright ("index annotations not
+          # supported for single platform export"), confirmed live against
+          # this project's own images. Forcing OCI mediatypes here (instead
+          # of the legacy Docker manifest v2 schema) is still required
+          # groundwork: `docker buildx imagetools create` downstream (in
+          # merge-manifests) silently drops --annotation with no error at all
+          # when combining Docker-format sources, because Docker's manifest
+          # list schema has no annotations field -- also confirmed live.
+          # merge-manifests is the first point where a genuine multi-platform
+          # index exists, so that's where the description annotation is
+          # actually attached; channel/stack promotions downstream of it
+          # carbon-copy that annotation forward untouched.
+          outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
@@ -3483,11 +3846,17 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
+        # Same fork-safety and Dependabot-safety reasoning as build's own
+        # "Log in to GHCR" step.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
             (
-              steps.should-build.outputs.should-build == 'true'
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             )
           }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -3506,6 +3875,32 @@ jobs:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-arm64
+
+      # Mirrors build's own "Compute PR staging tag" step, just for the
+      # arm64 leg -- see that step's comment for the full rationale.
+      - name: Compute PR staging tag
+        id: pr-tag
+        if: >-
+          ${{
+            github.event_name == 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
+            github.actor != 'dependabot[bot]' &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUILD_SHA: ${{ github.sha }}
+          MATRIX_SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${BUILD_SHA::7}"
+          tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
+          echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -3579,15 +3974,17 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          annotations: |
-            org.opencontainers.image.description=${{ matrix.description }}
+          # See build's equivalent step for why there is no `annotations:`
+          # input here and why `outputs: type=image,oci-mediatypes=true` is
+          # still required groundwork for issue #620.
+          outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
           cache-from: type=gha,scope=${{ matrix.service }}-arm64
@@ -3598,7 +3995,13 @@ jobs:
         # equivalent step.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3609,7 +4012,13 @@ jobs:
       - name: Re-authenticate to GHCR before retry
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3639,15 +4048,17 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          annotations: |
-            org.opencontainers.image.description=${{ matrix.description }}
+          # See build's equivalent step for why there is no `annotations:`
+          # input here and why `outputs: type=image,oci-mediatypes=true` is
+          # still required groundwork for issue #620.
+          outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
           cache-from: type=gha,scope=${{ matrix.service }}-arm64
@@ -3714,9 +4125,19 @@ jobs:
     # the same tool promote already uses to move channel tags -- so no image
     # is rebuilt here, only a manifest list assembled from two already-pushed
     # digests.
+    #
+    # Also runs on pull_request events now (see #626): a same-repo PR pushes
+    # its own pr-<N>-sha-<short>-{amd64,arm64} legs in build/build-arm64, and
+    # this job merges those into the real pr-<N>-sha-<short> tag that
+    # full-setup-validate consumes to test the PR's own commits. The
+    # existing sha-<short> merge below stays gated to non-PR events only --
+    # that tag's *inputs* are never pushed on a PR (push: stays false there
+    # for the plain, unprefixed sha-* tag), so running it on a PR would just
+    # loop through seven harmless "no linux/amd64 image" skips for no
+    # reason.
     name: merge multi-platform manifests
     needs: [build, build-arm64]
-    if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success' && github.event_name != 'pull_request'"
+    if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read
@@ -3736,6 +4157,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-platform manifests
+        if: github.event_name != 'pull_request'
         env:
           REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
@@ -3746,6 +4168,27 @@ jobs:
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
+
+          # Same wording as this same file's build/build-arm64 matrix.description
+          # entries -- kept in sync manually, not sourced from one shared place,
+          # because merge-manifests has no matrix of its own to read
+          # matrix.description from directly. This is where the OCI
+          # org.opencontainers.image.description annotation is actually set
+          # (issue #620): per-platform images upstream stay unannotated on
+          # purpose (see build's "Build and push" step comment), and every
+          # `imagetools create` downstream of this one (promote's channel and
+          # stack-pointer moves) carbon-copies this index annotation forward
+          # untouched rather than re-declaring it, confirmed live to preserve
+          # both the annotation and the exact source digest unchanged.
+          declare -A service_descriptions=(
+            [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
+            [dns]="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
+            [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
+            [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
+            [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+            [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
+          )
 
           for service in "${services[@]}"; do
             amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
@@ -3758,6 +4201,50 @@ jobs:
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
               echo "::error::$service has a linux/amd64 image but no linux/arm64 image ($arm64_image); refusing to publish a single-platform tag under the multi-platform contract."
+              exit 1
+            fi
+
+            docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image" \
+              --annotation "index:org.opencontainers.image.description=${service_descriptions[$service]}"
+            bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+          done
+
+      # Same merge, for the PR-scoped staging tag instead of the trusted-ref
+      # sha-<short> tag. Only same-repo PRs ever push the two per-arch inputs
+      # (build/build-arm64's own fork check), so this naturally no-ops for a
+      # fork PR: neither leg exists, every service is skipped, nothing is
+      # published. A service this PR did not touch also has no inputs here
+      # (detect-changes scoped build/build-arm64 to skip it) -- that is
+      # expected and not an error; full-setup-validate's own backfill step
+      # fills the gap for full-setup services from the base-ref channel.
+      - name: Create PR staging multi-platform manifest
+        if: github.event_name == 'pull_request'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Must match build/build-arm64's "Compute PR staging tag" exactly
+          # -- see that step's comment for why this is github.sha (the
+          # actual built merge commit), not the PR head SHA.
+          BUILD_SHA: ${{ github.sha }}
+          REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+        run: |
+          set -euo pipefail
+
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          short_sha="${BUILD_SHA::7}"
+          source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
+
+          for service in "${services[@]}"; do
+            amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
+            arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
+            target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+
+            if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
+              echo "::notice::Skipping $service: no linux/amd64 PR staging image (not touched by this PR, or a fork PR)."
+              continue
+            fi
+            if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
+              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building."
               exit 1
             fi
 
@@ -3935,17 +4422,29 @@ jobs:
             printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
             printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
           } > "$pointer_context/stack.env"
-          cat > "$pointer_context/Dockerfile" <<'DOCKERFILE'
+          # One variable feeds both the per-platform config LABEL below (an
+          # unquoted heredoc so it can expand) and the index-level OCI
+          # annotation on the buildx build call right after, so the two never
+          # drift out of sync with each other.
+          stack_pointer_description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
+          cat > "$pointer_context/Dockerfile" <<DOCKERFILE
           FROM busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
           LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
-          LABEL org.opencontainers.image.description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
+          LABEL org.opencontainers.image.description="${stack_pointer_description}"
           COPY stack.env /stack.env
           CMD ["true"]
           DOCKERFILE
+          # This build is always genuinely multi-platform ($RELEASE_PLATFORMS
+          # is always 2+ platforms), so unlike the per-platform service
+          # builds above, an index already exists here for --annotation to
+          # attach to -- confirmed live while fixing issue #620. This step
+          # does not disable provenance, so it already defaults to OCI
+          # mediatypes without needing an explicit `outputs:` override.
           docker buildx build \
             --platform "$RELEASE_PLATFORMS" \
             --push \
             -t "$stack_pointer_image" \
+            --annotation "index:org.opencontainers.image.description=${stack_pointer_description}" \
             "$pointer_context"
           docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
           bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
@@ -3955,6 +4454,17 @@ jobs:
             printf 'stack-pointer-digest=%s\n' "$stack_pointer_digest"
           } >> "$GITHUB_OUTPUT"
 
+          # Neither loop below passes --annotation. $source_image already
+          # carries the org.opencontainers.image.description index annotation
+          # from merge-manifests above (and $stack_pointer_image from its own
+          # build a few lines up), and a plain --prefer-index=false carbon
+          # copy of an already-annotated OCI index preserves that annotation
+          # AND produces a byte-identical digest to the source -- confirmed
+          # live while fixing issue #620. Adding --annotation again here would
+          # only risk re-serializing the manifest with a different digest,
+          # which would break the release job's invariant that a channel/
+          # release tag resolves to the exact same digest as its source
+          # sha-* tag.
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
             for channel_tag in "${channel_tags[@]}"; do

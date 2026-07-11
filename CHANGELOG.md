@@ -5,9 +5,12 @@ All notable changes to lancache-ng are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## Pending stable release (live on dev)
 
-Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
+Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06). Not yet
+a stable, tagged release, but already published and pullable via the `dev`
+channel (see `docs/release-versioning.md`) -- "Unreleased" undersold that this
+is real, live, running code, not just work sitting in source control.
 
 ### Added
 
@@ -17,8 +20,20 @@ Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
   volume, retaining the last `KEEP_KNOWN_GOOD_CONFIGS` (default 3) validated
   configs, and a candidate that fails validation at startup automatically
   rolls back to the newest snapshot that re-validates instead of crash-looping
-  or running with an invalid config. The Kea adapter is deferred to a
-  follow-up issue; see `docs/known-good-config-snapshots.md` (#415).
+  or running with an invalid config; see `docs/known-good-config-snapshots.md`
+  (#415).
+- Extended the known-good configuration snapshot mechanism to Kea DHCP
+  (#614, follow-up to #415): every DHCP config mutation from the Admin UI
+  that already passes Kea's own `config-test` → `config-set` → `config-write`
+  chain (PR #380) now also snapshots the applied config into the persistent
+  `kea-data` volume, retaining `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same
+  variable as the other adapters). The `/dhcp` page lists snapshots and lets
+  an operator roll back to one explicitly; the selected snapshot is
+  re-validated with `config-test` before being applied. Unlike the nginx/
+  dnsmasq/PowerDNS adapters, this is a Rust reimplementation of the shared
+  contract (`services/ui/src/kea_snapshots.rs`), not an embedded shell
+  library copy, since Kea's config is mutated live through the Admin UI's
+  HTTP API rather than regenerated from a template at container startup.
 - Extended the known-good configuration snapshot mechanism to PowerDNS's
   static `pdns.conf`/`recursor.conf`, rendered by `services/dns/entrypoint.sh`:
   both files are validated with their real, side-effect-free `--config=check`

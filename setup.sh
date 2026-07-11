@@ -308,6 +308,50 @@ confirm() {
     [[ "${REPLY,,}" = "y" || "${REPLY,,}" = "yes" ]]
 }
 
+# The Kea path must stay discovery-first: run a non-invasive broadcast probe
+# before the stack is activated so we can stop or warn before becoming a
+# second active DHCP server on the LAN.
+run_kea_dhcp_activation_preflight() {
+    local env_file="$1" output server_identifier=""
+
+    [[ "$DHCP_MODE" = "kea" ]] || return 0
+
+    print_step "DHCP activation preflight"
+    printf "  Discovery-only check: the Kea image will run nmap and exit without starting Kea.\n"
+
+    # No -e/--interface flag: nmap has no "any" pseudo-interface (confirmed
+    # directly -- "I cannot figure out what source address to use for
+    # device any, does it even exist?"), so passing one made this probe
+    # fail its own execution on every single run, unconditionally forcing
+    # the "could not be executed" confirmation path below regardless of
+    # whether a real conflict existed. Letting nmap auto-select the
+    # interface (no -e at all) matches the already-proven working
+    # invocation in services/ui/dhcp-probe.sh.
+    if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
+        nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
+        print_warn "DHCP discovery preflight could not be executed inside the Kea image."
+        print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
+        confirm "Continue with Kea activation anyway? [y/N]" "N" \
+            || die "Cancelled DHCP activation."
+        return 0
+    fi
+
+    # Matches services/ui/dhcp-probe.sh's already-proven parsing: anchor at
+    # the start of the line (after stripping nmap's leading |/_ prefixes and
+    # whitespace) instead of a bare substring match, and take the first
+    # match rather than assuming there is exactly one.
+    server_identifier="$(printf '%s\n' "$output" | sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' | sed -n '1p')"
+
+    if [[ -n "$server_identifier" ]]; then
+        print_warn "An existing DHCP server answered before Kea activation: $server_identifier"
+        print_warn "Kea would become a second active DHCP server if you continue."
+        confirm "Continue with Kea activation anyway? [y/N]" "N" \
+            || die "Cancelled DHCP activation."
+    else
+        print_ok "No DHCP server answer was detected before Kea activation."
+    fi
+}
+
 # Installs the given packages via whichever supported package manager is
 # present (apt/dnf/yum/pacman), after an explicit operator confirmation since
 # this mutates the host outside setup.sh's own config. Fails closed if no
@@ -1032,16 +1076,6 @@ append_env_assignment_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
-# Remove a given KEY= line from an env file (used to clean up deprecated
-# split-cache keys CACHE_DIR_STANDARD and CACHE_DIR_SSL during migration).
-remove_env_key() {
-    local key="$1" env_file="$2"
-
-    env_key_exists "$key" "$env_file" || return 0
-
-    awk -F= -v key="$key" '$1 != key { print }' "$env_file" | write_env_file "$env_file"
-}
-
 # Migrates an optional key from an old name (source_key) to a new one
 # (target_key), or seeds fallback_value if there is nothing to migrate. Used
 # for renamed .env keys where an empty target value is a valid, intentional
@@ -1337,6 +1371,12 @@ deploy_prod_repo_input_paths() {
     [[ -d "$repo_root/certs" ]] && printf '%s\n' "$repo_root/certs"
     [[ -d "$repo_root/config/prod" ]] && printf '%s\n' "$repo_root/config/prod"
     [[ -f "$repo_root/services/dns/cdn-domains.txt" ]] && printf '%s\n' "$repo_root/services/dns/cdn-domains.txt"
+    # docker-socket-proxy is also mounted via ../../scripts/docker-socket-proxy.sh
+    # (see docs/naming-conventions.md's "Docker socket proxy allowlist"
+    # section) -- without this, a manual deploy/prod config backup would
+    # silently omit the one file that defines which container names the
+    # socket proxy allows the Admin UI/watchdog to act on.
+    [[ -f "$repo_root/scripts/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/docker-socket-proxy.sh"
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -3412,6 +3452,7 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     done
 
     print_ok "DHCP enabled in Kea mode — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
+    print_warn "Before Kea is activated, setup will run a non-invasive DHCP discovery preflight."
     print_warn "Kea Control Agent port 8000 should be restricted by firewall"
     printf "  iptables (legacy):  iptables -I INPUT -p tcp --dport 8000 ! -s 172.28.0.0/16 -j DROP\n"
     printf "  nftables:           nft add rule inet filter input tcp dport 8000 ip saddr != 172.28.0.0/16 drop\n"
@@ -3792,6 +3833,8 @@ cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
 docker compose --env-file "$INSTALL_DIR/.env" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
+
+run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"
 
 print_step "Starting stack"
 if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then

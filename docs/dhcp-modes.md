@@ -43,6 +43,45 @@ same LAN. Two competing DHCP servers on one network cause unpredictable client
 configuration. If your router already provides DHCP, either keep using the
 router (and set DNS another way) or switch DHCP fully to LanCache NG.
 
+### Kea activation preflight (safety gate before Kea ever serves clients)
+
+Selecting `kea` in `setup.sh` prepares Kea's configuration, secrets, and
+volumes, but `setup.sh` does not let Kea become an active DHCP server without
+one more safety step. Immediately before the stack starts — after images are
+pulled, right before `docker compose up` — `setup.sh` runs a non-invasive
+DHCP discovery probe (`nmap --script broadcast-dhcp-discover`) using the Kea
+image itself. This only runs `nmap` inside that image and exits; it does not
+start Kea and does not touch the network beyond the broadcast probe.
+
+- If no other DHCP server answers, setup proceeds automatically and Kea
+  starts as normal.
+- If another DHCP server answers (Server Identifier detected), `setup.sh`
+  prints the responding server and requires an explicit `y`/`yes`
+  confirmation before continuing. Answering no cancels activation entirely —
+  Kea is never started.
+- If the probe itself could not run for any other reason (e.g. Docker/network
+  issues), `setup.sh` fails closed the same way: it requires an explicit
+  confirmation rather than silently proceeding as if no conflict exists.
+
+This closes the gap that existed before: previously, selecting `kea` started
+Kea immediately, and the only way to learn about a conflicting DHCP server was
+to open the Admin UI's DHCP page *after* Kea might already have been
+answering DHCP requests on the LAN.
+
+**This preflight is a one-time activation gate, not the same thing as the
+Admin UI's DHCP check.** The Admin UI's DHCP page (see "Verifying" below) runs
+the same kind of non-invasive discovery, but on demand, after the stack is
+already running — it is a diagnostic you can re-check at any time, and by
+itself it does not prevent Kea from serving. The `setup.sh` preflight
+documented here is what actually blocks Kea's first activation when a
+conflict is detected or the check could not run.
+
+Neither check validates Kea's own configuration or replays a real DHCP lease
+negotiation (`DHCPDISCOVER`/`DHCPOFFER`/`DHCPREQUEST`/`DHCPACK`) end to end —
+both are discovery-only broadcast probes for a second DHCP server on the
+segment. A behavioral test of Kea's actual lease/option responses is tracked
+separately (Refs #448).
+
 ## When to use dnsmasq-proxy mode
 
 Choose `dnsmasq-proxy` when the network already has a DHCP server you cannot
@@ -127,9 +166,45 @@ DNS servers:
    other DHCP servers on the LAN and reports whether a client dry-run received
    the expected options. In `dnsmasq-proxy` mode this is especially useful for
    spotting an upstream DHCP server whose own DNS option overrides the proxy
-   one.
+   one. This check is a **diagnostic** you can re-run at any time after the
+   stack is already up — it does not by itself gate whether Kea is currently
+   serving DHCP. The one-time safety gate that runs before Kea's first
+   activation is the `setup.sh` preflight described under "Kea activation
+   preflight" above.
 
 If a client does not pick up the LanCache NG DNS servers in `dnsmasq-proxy`
 mode, that is the expected limitation described above: the upstream DHCP
 server's DNS option can take precedence. Switch to `kea` mode, or set DNS on the
 router/clients directly, to guarantee cache routing.
+
+## Automated DHCP behavior testing (CI)
+
+This project has two separate, non-overlapping automated DHCP checks. Neither
+runs on the host's real network interface by default:
+
+| Check | What it answers | Where it runs | Invasive? |
+|---|---|---|---|
+| **Conflict discovery** (`services/ui/dhcp-probe.sh`) | Does *any* DHCP server answer on this LAN segment (broadcast discover via `nmap`), and does a client dry-run on the host's own detected default interface also succeed? | Admin UI DHCP page, on demand | The client dry-run leg uses `dhclient -sf /bin/true` so it never applies the negotiated lease to the host interface, but it does run against the host's real detected interface. |
+| **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container and a throwaway client container, both on a dedicated Docker bridge network the script creates and destroys itself. Neither container's interface, nor any host interface, is ever configured with the negotiated lease. |
+
+The second check exists because the first only tells you a DHCP server
+answered -- it does not prove ours behaves correctly, and it does not report
+individual option values. `scripts/dhcp-kea-lease-flow-simulation.sh` is the
+authoritative check for "did Kea hand out what I configured," and its output
+(printed to the job log and, in CI, `$GITHUB_STEP_SUMMARY`) lists every
+offered value explicitly so a wrong option is easy to spot.
+
+**What the Kea lease-flow simulation does NOT verify** (documented here per
+its own design -- see the script's header comment for the full rationale):
+
+- Static host reservations (a known MAC address receiving its reserved,
+  out-of-pool address) -- tracked separately in issue #557.
+- DHCP-DDNS lease-event follow-through (a granted lease producing a real
+  PowerDNS record via TSIG-authenticated DDNS) -- also issue #557.
+- The `dnsmasq-proxy` DHCP mode -- entirely different code path
+  (`services/dhcp-proxy`), not exercised by this script at all.
+
+It has no invasive/host-interface mode: both the Kea server and the DHCP
+client involved always run inside their own throwaway, isolated Docker
+network, so there was nothing that needed gating behind an explicit opt-in
+flag beyond the job itself only running on manual dispatch.

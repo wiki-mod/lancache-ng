@@ -91,6 +91,8 @@ pub struct Config {
     pub dhcp_api_url: String,
     pub ui_settings_file: String,
     pub dhcp_api_token: String,
+    pub kea_config_snapshot_dir: String,
+    pub kea_keep_known_good_configs: u32,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
     pub allow_insecure_ui: bool,
@@ -148,6 +150,11 @@ impl fmt::Debug for Config {
             .field("dhcp_api_url", &self.dhcp_api_url)
             .field("ui_settings_file", &self.ui_settings_file)
             .field("dhcp_api_token", &"***REDACTED***")
+            .field("kea_config_snapshot_dir", &self.kea_config_snapshot_dir)
+            .field(
+                "kea_keep_known_good_configs",
+                &self.kea_keep_known_good_configs,
+            )
             .field(
                 "auth_user",
                 &self.auth_user.as_ref().map(|_| "***REDACTED***"),
@@ -315,6 +322,11 @@ impl Config {
             dhcp_api_url,
             ui_settings_file: env_str("UI_SETTINGS_FILE", DEFAULT_UI_SETTINGS_FILE),
             dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
+            kea_config_snapshot_dir: env_str(
+                "KEA_CONFIG_SNAPSHOT_DIR",
+                "/var/lib/kea/config-snapshots",
+            ),
+            kea_keep_known_good_configs: env_u32_clamped("KEEP_KNOWN_GOOD_CONFIGS", 3),
             auth_user: env_opt("UI_AUTH_USER"),
             auth_password: env_opt("UI_AUTH_PASSWORD"),
             allow_insecure_ui: env_bool("ALLOW_INSECURE_UI", false),
@@ -441,6 +453,21 @@ fn env_u64(key: &str, default: u64) -> Result<u64, String> {
             Err(format!("{key} must be a valid UTF-8 integer value"))
         }
     }
+}
+
+// Mirrors scripts/lib/known-good-snapshots.sh's `kgs_snapshot_prune` clamping
+// of KEEP_KNOWN_GOOD_CONFIGS: a missing, non-numeric, or non-positive value
+// (e.g. "0", empty, "abc") silently falls back to `default` rather than
+// failing startup (like `env_u64` would) or disabling retention outright.
+// This is deliberately lenient because the shell adapters treat a
+// misconfigured retention count the same way; the Kea Rust adapter follows
+// the same documented contract (docs/known-good-config-snapshots.md).
+fn env_u32_clamped(key: &str, default: u32) -> u32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(default)
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -857,6 +884,49 @@ mod tests {
         env::remove_var("DHCP_API_URL");
         env::remove_var("UI_SETTINGS_FILE");
         let _ = fs::remove_file(settings_path);
+    }
+
+    #[test]
+    fn kea_config_snapshot_settings_load_from_env_with_documented_defaults() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
+        env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.kea_config_snapshot_dir, "/var/lib/kea/config-snapshots");
+        assert_eq!(cfg.kea_keep_known_good_configs, 3);
+
+        env::set_var("KEA_CONFIG_SNAPSHOT_DIR", "/custom/kea-snapshots");
+        env::set_var("KEEP_KNOWN_GOOD_CONFIGS", "5");
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.kea_config_snapshot_dir, "/custom/kea-snapshots");
+        assert_eq!(cfg.kea_keep_known_good_configs, 5);
+
+        env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
+        env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+    }
+
+    #[test]
+    fn env_u32_clamped_falls_back_to_default_for_invalid_or_non_positive_values() {
+        let _guard = env_test_lock().lock().unwrap();
+        let key = "LANCACHE_TEST_UI_KEEP_KNOWN_GOOD_CONFIGS_CLAMP";
+
+        env::remove_var(key);
+        assert_eq!(env_u32_clamped(key, 3), 3);
+
+        for invalid in ["0", "", "abc", "-1"] {
+            env::set_var(key, invalid);
+            assert_eq!(
+                env_u32_clamped(key, 3),
+                3,
+                "expected default for invalid value {invalid:?}"
+            );
+        }
+
+        env::set_var(key, "7");
+        assert_eq!(env_u32_clamped(key, 3), 7);
+
+        env::remove_var(key);
     }
 
     #[test]

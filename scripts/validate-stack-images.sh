@@ -81,7 +81,7 @@ require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
 require_manifest_platform stack linux/arm64
-for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
+for image in docker-socket-proxy nats fluent-bit syslog-ng netdata watchtower busybox; do
   require_name "$external_names" "$image" external
 done
 
@@ -153,9 +153,24 @@ require_grep 'description: .+' \
 require_grep 'org\.opencontainers\.image\.description=\$\{\{ matrix\.description \}\}' \
   .github/workflows/build-push.yml \
   'build workflow must publish OCI image description labels'
-require_grep 'annotations:' \
+require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-push.yml \
-  'build workflow must publish OCI image description annotations'
+  'build workflow must publish OCI image description index annotations'
+require_grep 'outputs: type=image,oci-mediatypes=true' \
+  .github/workflows/build-push.yml \
+  'per-platform service builds must force OCI mediatypes so downstream imagetools create can actually attach index annotations'
+# build-tools.yml is a second, independent publisher of the build-tools
+# image (weekly cron/push/dispatch, moving build-tools:latest and mutable
+# branch tags) -- most CI/dev paths actually consume its tags, not
+# build-push.yml's own build-tools matrix row's sha-<commit>-only output.
+# It needs the identical OCI-mediatype/annotation fix, not just
+# build-push.yml (issue #620).
+require_grep 'outputs: type=image,oci-mediatypes=true' \
+  .github/workflows/build-tools.yml \
+  'build-tools.yml per-platform builds must force OCI mediatypes so its own merge step can actually attach index annotations'
+require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
+  .github/workflows/build-tools.yml \
+  'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
 require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'

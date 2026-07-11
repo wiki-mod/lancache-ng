@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     kea-ctrl-agent \
     kea-dhcp-ddns-server \
     kea-admin \
+    nmap \
     gettext \
     openssl \
     curl \

@@ -214,7 +214,7 @@ maybe_purge() {
     mkdir -p "$(dirname "$PURGE_STAMP")"
     echo "$now" > "$PURGE_STAMP"
 }
-log "Starting. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
+log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 

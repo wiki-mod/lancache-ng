@@ -328,6 +328,13 @@ jobs:
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
+          # No index-level annotation set here on purpose (issue #620): a
+          # genuinely single-platform push with provenance disabled has no
+          # index to attach one to. Forcing OCI mediatypes is still required
+          # groundwork so merge-build-tools-manifests below has a real index
+          # to actually attach org.opencontainers.image.description to --
+          # same reasoning as build-push.yml's build/build-arm64 jobs.
+          outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
           pull: true
@@ -534,6 +541,10 @@ jobs:
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
+          # See build-tools's equivalent step for why there is no index-level
+          # annotation here and why outputs: oci-mediatypes=true is still
+          # required groundwork for issue #620.
+          outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
           pull: true
@@ -616,7 +627,21 @@ jobs:
           arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-arm64"
           source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"
 
-          docker buildx imagetools create -t "$source_tag" "$amd64_image" "$arm64_image"
+          # Same description text as build-push.yml's own build-tools
+          # matrix.description entry -- kept in sync manually, not sourced
+          # from one shared place, same reasoning as that file's
+          # merge-manifests job. This is where the index-level
+          # org.opencontainers.image.description annotation actually gets
+          # attached (issue #620): the per-platform build-tools/
+          # build-tools-arm64 jobs above stay unannotated on purpose (see
+          # their "Build and push" step comments), and "Promote mutable
+          # tags" below carbon-copies this index annotation forward
+          # untouched rather than re-declaring it, same pattern as
+          # build-push.yml's promote job.
+          build_tools_description="Prebuilt lancache-ng CI and developer validation toolchain image."
+
+          docker buildx imagetools create -t "$source_tag" "$amd64_image" "$arm64_image" \
+            --annotation "index:org.opencontainers.image.description=${build_tools_description}"
 
           printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
 
@@ -657,6 +682,13 @@ jobs:
           push-to-registry: true
 
       - name: Promote mutable tags
+        # Neither imagetools create below passes --annotation. $SOURCE_TAG
+        # already carries the org.opencontainers.image.description index
+        # annotation from the merge step above, and a plain
+        # --prefer-index=false carbon copy of an already-annotated OCI index
+        # preserves that annotation and produces a byte-identical digest to
+        # the source -- confirmed live while fixing issue #620 (same
+        # reasoning as build-push.yml's promote job).
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
