@@ -117,21 +117,44 @@ pub fn validate_nats_credentials(username: &str, password: &str) -> Result<(), S
     validate_nats_password(password)
 }
 
+// Takes password as Option<&str>, not &str with an empty-string fallback at
+// the call site: materializing "" as a literal default right before this
+// function call would put a hard-coded string literal directly into a
+// password-shaped dataflow again, defeating the whole point of config.rs
+// storing these fields as Option in the first place (see its own comment).
+// None is rejected here, before any string ever reaches validate_nats_credentials.
+fn validate_optional_nats_credentials(
+    label: &str,
+    username: &str,
+    password: Option<&str>,
+) -> Result<(), String> {
+    let password = password
+        .ok_or_else(|| format!("Invalid {label} credentials: NATS password cannot be empty"))?;
+    validate_nats_credentials(username, password)
+        .map_err(|e| format!("Invalid {label} credentials: {e}"))
+}
+
 pub fn validate_runtime_nats_credentials(config: &Config) -> Result<(), String> {
-    validate_nats_credentials(&config.nats_ui_user, &config.nats_ui_password)
-        .map_err(|e| format!("Invalid NATS UI credentials: {e}"))?;
-    validate_nats_credentials(
+    validate_optional_nats_credentials(
+        "NATS UI",
+        &config.nats_ui_user,
+        config.nats_ui_password.as_deref(),
+    )?;
+    validate_optional_nats_credentials(
+        "NATS DNS writer",
         &config.nats_dns_writer_user,
-        &config.nats_dns_writer_password,
-    )
-    .map_err(|e| format!("Invalid NATS DNS writer credentials: {e}"))?;
-    validate_nats_credentials(
+        config.nats_dns_writer_password.as_deref(),
+    )?;
+    validate_optional_nats_credentials(
+        "NATS DNS replica",
         &config.nats_dns_replica_user,
-        &config.nats_dns_replica_password,
-    )
-    .map_err(|e| format!("Invalid NATS DNS replica credentials: {e}"))?;
-    validate_nats_credentials(&config.nats_callout_user, &config.nats_callout_password)
-        .map_err(|e| format!("Invalid NATS auth-callout credentials: {e}"))?;
+        config.nats_dns_replica_password.as_deref(),
+    )?;
+    validate_optional_nats_credentials(
+        "NATS auth-callout",
+        &config.nats_callout_user,
+        config.nats_callout_password.as_deref(),
+    )?;
 
     Ok(())
 }

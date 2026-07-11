@@ -496,15 +496,21 @@ async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
     let max_delay = std::time::Duration::from_secs(30);
 
     loop {
-        let result = if cfg.nats_ui_user.is_empty() || cfg.nats_ui_password.is_empty() {
-            async_nats::connect(&cfg.nats_url).await
-        } else {
-            async_nats::ConnectOptions::with_user_and_password(
-                cfg.nats_ui_user.clone(),
-                cfg.nats_ui_password.clone(),
-            )
-            .connect(&cfg.nats_url)
-            .await
+        // preflight_startup_config (called before this fn, see main()) has
+        // already rejected a missing/empty nats_ui_password via
+        // validate_runtime_nats_credentials, so by this point it's always
+        // Some -- the None arm only exists because the field's type doesn't
+        // encode that invariant.
+        let result = match (cfg.nats_ui_user.is_empty(), cfg.nats_ui_password.as_deref()) {
+            (false, Some(password)) if !password.is_empty() => {
+                async_nats::ConnectOptions::with_user_and_password(
+                    cfg.nats_ui_user.clone(),
+                    password.to_string(),
+                )
+                .connect(&cfg.nats_url)
+                .await
+            }
+            _ => async_nats::connect(&cfg.nats_url).await,
         };
 
         match result {
@@ -968,7 +974,7 @@ mod tests {
         let mut cfg = config::Config::from_env().unwrap();
         cfg.ui_session_ttl_seconds = 0;
         cfg.nats_ui_user = "invalid user".to_string();
-        cfg.nats_ui_password = "still-invalid".to_string();
+        cfg.nats_ui_password = Some("still-invalid".to_string());
 
         assert_eq!(
             preflight_startup_config(&cfg),

@@ -349,14 +349,29 @@ authorization {{
   }}
 }}
 "#,
+        // .as_deref().unwrap_or_default() below is defensive only: the
+        // validate_runtime_nats_credentials call above already guarantees
+        // every one of these is Some by the time this format! runs.
         ui_user = state.config.nats_ui_user,
-        ui_password = state.config.nats_ui_password,
+        ui_password = state.config.nats_ui_password.as_deref().unwrap_or_default(),
         writer_user = state.config.nats_dns_writer_user,
-        writer_password = state.config.nats_dns_writer_password,
+        writer_password = state
+            .config
+            .nats_dns_writer_password
+            .as_deref()
+            .unwrap_or_default(),
         replica_user = state.config.nats_dns_replica_user,
-        replica_password = state.config.nats_dns_replica_password,
+        replica_password = state
+            .config
+            .nats_dns_replica_password
+            .as_deref()
+            .unwrap_or_default(),
         callout_user = state.config.nats_callout_user,
-        callout_password = state.config.nats_callout_password,
+        callout_password = state
+            .config
+            .nats_callout_password
+            .as_deref()
+            .unwrap_or_default(),
         issuer_public_key = state.nats_issuer_public_key,
     );
 

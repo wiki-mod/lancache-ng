@@ -334,10 +334,17 @@ pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>) {
     let max_delay = std::time::Duration::from_secs(30);
 
     loop {
+        // .unwrap_or_default() is defensive only: main.rs's startup preflight
+        // (validate_runtime_nats_credentials) already guarantees this is
+        // Some before run_auth_callout is ever spawned.
         let connect_result = async_nats::ConnectOptions::new()
             .user_and_password(
                 state.config.nats_callout_user.clone(),
-                state.config.nats_callout_password.clone(),
+                state
+                    .config
+                    .nats_callout_password
+                    .clone()
+                    .unwrap_or_default(),
             )
             .connect(&state.config.nats_url)
             .await;
