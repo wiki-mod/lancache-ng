@@ -1032,16 +1032,6 @@ append_env_assignment_if_missing() {
     env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
 }
 
-# Remove a given KEY= line from an env file (used to clean up deprecated
-# split-cache keys CACHE_DIR_STANDARD and CACHE_DIR_SSL during migration).
-remove_env_key() {
-    local key="$1" env_file="$2"
-
-    env_key_exists "$key" "$env_file" || return 0
-
-    awk -F= -v key="$key" '$1 != key { print }' "$env_file" | write_env_file "$env_file"
-}
-
 # Migrates an optional key from an old name (source_key) to a new one
 # (target_key), or seeds fallback_value if there is nothing to migrate. Used
 # for renamed .env keys where an empty target value is a valid, intentional

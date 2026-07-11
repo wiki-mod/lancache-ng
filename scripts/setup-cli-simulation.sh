@@ -240,6 +240,43 @@ grep -qF 'PROXY_SECURITY_MODE=lazy' "$install_dir/.env" \
 wait_for_stack_healthy
 echo "setup.sh update migrated the legacy .env value and left a healthy running stack."
 
+echo "== Phase 2b: repeat-run idempotence (setup.sh update run twice in a row, same input) =="
+
+# tests/bats/setup_update_idempotence.bats already proves migrate_env_for_update()
+# itself is a stable fixed point on repeat calls, but only at the function
+# boundary -- it deliberately pins the image tag so resolve_lancache_image_tag()
+# never needs a real `docker pull`, and it never runs the surrounding
+# cmd_update wrapper (install_quickstart_compose_assets, cmd_backup, the
+# actual image pull/restart). This phase closes that gap: it runs the real
+# `setup.sh update` CLI a second consecutive time against the exact .env
+# Phase 2 just produced, with no input change in between, and asserts the
+# real CLI -- not just the extracted function -- lands on the same fixed
+# point instead of drifting or rotating secrets.
+cp "$install_dir/.env" "$install_dir/.env.after-first-update"
+secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_READER_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
+grep -E "$secret_keys" "$install_dir/.env.after-first-update" | sort > "$install_dir/.secrets-after-first-update"
+
+bash setup.sh update "$install_dir"
+wait_for_stack_healthy
+
+# LANCACHE_IMAGE_TAG/CHANNEL are excluded from the byte-diff for the same
+# reason Phase 3 already excludes them below: this fixture stays on the
+# "edge" channel from Phase 1's fresh install, so resolve_lancache_image_tag()
+# re-resolves it through a real `docker pull` of the channel pointer image on
+# every update call. That is expected, not drift -- only a real regression
+# would flip it to a *different* digest between two calls made seconds apart
+# with no new edge image published in between.
+diff -q \
+    <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.after-first-update") \
+    <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
+    || { echo "::error::A second consecutive setup.sh update changed .env with no input change -- convergence/idempotence regression (AG-OP-011)." >&2; diff <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.after-first-update") <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >&2; exit 1; }
+
+grep -E "$secret_keys" "$install_dir/.env" | sort > "$install_dir/.secrets-after-second-update"
+diff -q "$install_dir/.secrets-after-first-update" "$install_dir/.secrets-after-second-update" >/dev/null \
+    || { echo "::error::A second consecutive setup.sh update rotated one or more stable secrets (AG-OP-006)." >&2; exit 1; }
+
+echo "A second consecutive setup.sh update with no input change left .env and all stable secrets byte-identical."
+
 echo "== Phase 3: rollback safety (forced pull failure during update) =="
 
 cp "$install_dir/.env" "$install_dir/.env.before-forced-failure"
