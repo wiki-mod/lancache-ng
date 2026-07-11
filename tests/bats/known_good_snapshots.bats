@@ -25,7 +25,14 @@ setup() {
     dest_dir="$BATS_TEST_TMPDIR/live"
     mkdir -p "$dest_dir"
     config_file="$dest_dir/service.conf"
-    valid_validator="grep -q '^OK$' '$config_file'"
+    # Prefix match, not exact ('^OK$'): several tests below write descriptive
+    # marker content like "OK oldest"/"OK newest"/"OK $i" so assertions can
+    # tell snapshots apart by content. An exact-match validator would reject
+    # all of those as invalid and was never exercised by the tests that only
+    # call kgs_snapshot_create/kgs_snapshot_prune (which don't invoke the
+    # validator at all) -- only surfaced once a test actually exercised
+    # kgs_snapshot_apply against multi-word "OK ..." content.
+    valid_validator="grep -q '^OK' '$config_file'"
 }
 
 write_config() {
