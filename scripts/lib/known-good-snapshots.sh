@@ -52,10 +52,15 @@ kgs_new_snapshot_id() {
 # kgs_list_snapshots <snapshot_root>
 # Prints existing snapshot ids, oldest first, one per line. Empty output
 # (no error) when <snapshot_root> does not exist yet or holds no snapshots.
+# Excludes .staging.* entries: kgs_snapshot_create assembles a new snapshot
+# in such a directory before the final atomic `mv` into its real <id> name,
+# so a container killed mid-copy can leave one behind. Without this
+# exclusion, a leftover .staging.* directory would be listed and treated as
+# a real (but only partially-written) snapshot by callers of this function.
 kgs_list_snapshots() {
     local snapshot_root="$1"
     [ -d "$snapshot_root" ] || return 0
-    find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+    find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -not -name '.staging.*' -printf '%f\n' 2>/dev/null | sort
 }
 
 # kgs_snapshot_create <snapshot_root> <keep_n> <label> <file...>

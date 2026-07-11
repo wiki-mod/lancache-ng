@@ -66,6 +66,25 @@ write_config() {
     [ -z "$output" ]
 }
 
+@test "kgs_list_snapshots excludes an unfinished .staging.* directory" {
+    # Regression test for a Codex review finding on #616: kgs_snapshot_create
+    # assembles a new snapshot in a ".staging.XXXXXX" sibling directory before
+    # the final atomic `mv` into its real <id> name. A container killed
+    # mid-copy (before that mv) leaves the staging directory behind under
+    # snapshot_root -- it must never be listed as if it were a real snapshot,
+    # since it can hold a partially-written, never-validated file set.
+    write_config "OK 1"
+    kgs_snapshot_create "$snapshot_root" 3 "test" "$config_file" >/dev/null
+
+    mkdir -p "$snapshot_root/.staging.leftover123"
+    printf 'PARTIAL\n' > "$snapshot_root/.staging.leftover123/service.conf"
+
+    run kgs_list_snapshots "$snapshot_root"
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | wc -l)" -eq 1 ]
+    [[ "$output" != *".staging."* ]]
+}
+
 @test "retention prunes the oldest snapshots beyond the configured limit" {
     for i in 1 2 3 4 5; do
         write_config "OK $i"
