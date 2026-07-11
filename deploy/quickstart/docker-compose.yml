@@ -568,6 +568,10 @@ services:
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/proxy:ro
       - pdns-filter-state:/var/lib/powerdns-state
       - nats-conf:/etc/nats
+      # Shared with the dhcp (Kea) service: UI writes known-good Kea config
+      # snapshots into config-snapshots/ here (#614), never touching Kea's
+      # own kea-dhcp4.conf/kea-leases4.csv/etc. in the same directory.
+      - ${KEA_DATA_DIR:-./kea}:/var/lib/kea
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
@@ -610,6 +614,7 @@ services:
       - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

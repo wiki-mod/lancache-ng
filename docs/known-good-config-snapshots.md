@@ -14,8 +14,9 @@ disaster-recovery mechanism covering the whole install. Known-good snapshots
 are small, automatic, config-only, and scoped to one service's own generated
 runtime config.
 
-Related: issue #415. Related but distinct: the Kea DHCP mutation path's
-single-level, in-request rollback added in PR #380 (see "Kea" below).
+Related: issue #415 (parent), #614 (Kea adapter). Related but distinct: the
+Kea DHCP mutation path's single-level, in-request rollback added in PR #380
+(see "Kea" below).
 
 ## Contract
 
@@ -38,7 +39,7 @@ adapter) is:
    |---|---|---|
    | proxy (nginx) | `/var/lib/lancache-proxy/config-snapshots` | `proxy-config-snapshots` |
    | dhcp-proxy (dnsmasq) | `/var/lib/lancache-dhcp-proxy/config-snapshots` | `dhcp-proxy-config-snapshots` |
-   | dhcp (Kea) | not yet implemented — see "Kea" below | n/a |
+   | dhcp (Kea) | `/var/lib/kea/config-snapshots` — see "Kea" below | `kea-data` (shared with the `dhcp` service) |
 
 4. **Rollback refuses invalid snapshots.** When a candidate config fails
    validation, the adapter tries every stored snapshot from newest to
@@ -131,7 +132,7 @@ Same operational risk as nginx applies: a persistently broken input
 (`UPSTREAM_DHCP_IP` typo, etc.) falls back to the same stale snapshot on
 every restart until the input is fixed.
 
-## Kea (deferred to a follow-up issue)
+## Kea
 
 Kea already has a real, working, single-level safety net from PR #380:
 `kea_config_modify()` in `services/ui/src/routes/dhcp.rs` retains the config
@@ -139,22 +140,63 @@ from `config-get`, applies the candidate via `config-test` → `config-set`,
 and — if the follow-up `config-write` (persist to disk) fails in a confirmed
 way — rolls back to the retained old config via another `config-set`. That
 protects one request's mutation from leaving the running and persisted
-config diverged, but it is in-memory and scoped to a single request: it does
-not keep a multi-generation history on disk, and there is no
+config diverged, but on its own it is in-memory and scoped to a single
+request: it kept no multi-generation history on disk, and had no
 `KEEP_KNOWN_GOOD_CONFIGS`-style retention or rollback-to-an-older-snapshot
-capability for Kea today.
+capability for Kea.
 
-This PR does **not** implement persisted, multi-generation Kea snapshots.
-Meeting issue #415's Kea acceptance criteria for real — "validate the
-selected snapshot before applying," "verify runtime and persisted state
-after rollback," preserving the existing `config-test → config-set →
-config-write` model while adding a rollback-history UI — needs a new Admin
-UI route, template, and Rust-side snapshot/prune/apply logic operating
-against the same documented contract as the shell adapters above (same
-retention semantics, same `KEEP_KNOWN_GOOD_CONFIGS` variable, same log
-vocabulary), persisted into the already-persistent `kea-data` volume
-(`/var/lib/kea`). That is a second PR's worth of work on its own and is
-intentionally out of scope here; tracked in #614.
+#614 adds that persisted layer on top, without replacing PR #380's
+single-request safety net. Unlike the nginx/dnsmasq/PowerDNS adapters, Kea's
+config is mutated live through this Admin UI's own Rust HTTP client against
+the Kea Control Agent, not regenerated from a shell template at container
+startup — so this adapter is not a byte-identical embedded shell library
+copy like the other three. It is a Rust reimplementation of the same
+documented contract, in `services/ui/src/kea_snapshots.rs`:
+
+- **Snapshot creation is a side effect of `kea_config_modify()`'s existing
+  chain**, not a separate step: every one of the DHCP mutation routes
+  (subnet/reservation add/update/remove, DHCP option add/remove) already
+  goes through `config-get` → modify → `config-test` → `config-set` →
+  `config-write`. On a confirmed `config-write` success, the exact validated
+  and applied config is snapshotted into `/var/lib/kea/config-snapshots`
+  (the persistent `kea-data` volume, shared with the `dhcp` service), then
+  pruned to `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same variable and default
+  as the other adapters). This satisfies "validate before snapshotting"
+  without a redundant second `config-test`: the existing chain already
+  gates it.
+- Snapshot creation is best-effort and non-fatal, matching the nginx
+  adapter's own treatment of a failed `kgs_snapshot_create`: if writing the
+  snapshot fails (e.g. the shared volume is unexpectedly unwritable), the
+  mutation itself still succeeds (it was already applied and persisted by
+  Kea), and a `WARNING` is logged that rollback protection is degraded until
+  it succeeds again.
+- **Rollback is operator-selected, not automatic.** The nginx/dnsmasq/
+  PowerDNS adapters search their stored snapshots newest-to-oldest
+  automatically, because "the config this container is about to start with
+  is invalid" is their only rollback trigger, at a single well-defined
+  moment (container startup). Kea has no equivalent moment — its config
+  only ever changes through this Admin UI, live. So the `/dhcp` page lists
+  known-good snapshots (newest first) and an operator picks one explicitly;
+  only that snapshot is validated (via `config-test`, logging `REJECT` and
+  refusing the rollback if it fails) and applied (via the same
+  `kea_config_modify()` chain, which also verifies persisted state through
+  its existing `config-write` confirmation and records a fresh snapshot of
+  the restored config).
+- `KEA_CONFIG_SNAPSHOT_DIR` (default `/var/lib/kea/config-snapshots`) and
+  `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same variable name as the shell
+  adapters) configure this adapter; both are read by the Admin UI process,
+  not a shell entrypoint.
+- The `dhcp` (Kea) container's `services/dhcp/entrypoint.sh` chowns
+  `config-snapshots/` to the Admin UI's fixed UID/GID (10001) on every
+  start, since that container runs as root and the Admin UI runs as a fixed
+  non-root user — the same pattern already used to keep the shared
+  `nats.conf` writable by the Admin UI after a NATS restart (see
+  `deploy/*/docker-compose.yml`'s `nats` service).
+- `tests/bats/known_good_snapshots_sync.bats` does not (and should not)
+  cover this adapter: there is no embedded shell copy to drift, since none
+  of this lives in a shell entrypoint. Coverage lives in
+  `services/ui/src/kea_snapshots.rs`'s and `services/ui/src/routes/dhcp.rs`'s
+  own `cargo test` suites instead.
 
 ## PowerDNS (design only, not implemented)
 
@@ -211,8 +253,20 @@ prior successful start, or every snapshot also fails validation — e.g. after
 a `dnsmasq`/`nginx` version upgrade that rejects previously-valid syntax),
 the container refuses to start and logs `FATAL` known-good-snapshot lines.
 Fix the underlying input (`cdn-domains.txt`, template, env var) and restart;
-there is no separate CLI to inspect or hand-pick a snapshot in this PR. The
-snapshot directories are plain files under the volumes listed above and can
-be inspected directly with `docker compose exec` /
+there is no separate CLI to inspect or hand-pick a snapshot for the
+nginx/dnsmasq/PowerDNS adapters. The snapshot directories are plain files
+under the volumes listed above and can be inspected directly with
+`docker compose exec` /
 `docker run --rm -v <volume>:/data busybox ls -la /data` for manual triage if
 needed.
+
+Kea has no equivalent exhaustion state, since it never rolls back
+automatically: an operator picks a snapshot from the `/dhcp` page's list, and
+if none there look right, `kea-dhcp4.conf` on disk is untouched by a failed
+rollback attempt (`kea_config_modify()`'s existing PR #380 behavior). If the
+Admin UI itself is unreachable, the snapshot JSON files under
+`kea-data`'s `config-snapshots/` (mounted at `/var/lib/kea/config-snapshots`
+in both the `ui` and `dhcp` containers) can be inspected the same way, and a
+chosen one applied manually against the Kea Control Agent API
+(`config-test` → `config-set` → `config-write`, the same three-call
+sequence the Admin UI itself uses).

@@ -22,6 +22,18 @@ is real, live, running code, not just work sitting in source control.
   rolls back to the newest snapshot that re-validates instead of crash-looping
   or running with an invalid config. Kea and PowerDNS adapters are deferred to
   follow-up issues; see `docs/known-good-config-snapshots.md` (#415).
+- Extended the known-good configuration snapshot mechanism to Kea DHCP
+  (#614, follow-up to #415): every DHCP config mutation from the Admin UI
+  that already passes Kea's own `config-test` → `config-set` → `config-write`
+  chain (PR #380) now also snapshots the applied config into the persistent
+  `kea-data` volume, retaining `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same
+  variable as the other adapters). The `/dhcp` page lists snapshots and lets
+  an operator roll back to one explicitly; the selected snapshot is
+  re-validated with `config-test` before being applied. Unlike the nginx/
+  dnsmasq/PowerDNS adapters, this is a Rust reimplementation of the shared
+  contract (`services/ui/src/kea_snapshots.rs`), not an embedded shell
+  library copy, since Kea's config is mutated live through the Admin UI's
+  HTTP API rather than regenerated from a template at container startup.
 - Completed the `dnsmasq-proxy` DHCP mode: documentation guide, DHCP
   mode-selection tests, the Kea/dnsmasq mutual-exclusion invariant test,
   dnsmasq template rendering coverage, and Compose validation for both DHCP

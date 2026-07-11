@@ -8,7 +8,7 @@
 //! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
 //! one-shot helper container that can only be started, waited on, and logged.
 
-use crate::{docker_client, AppState};
+use crate::{docker_client, kea_snapshots, AppState};
 use anyhow::Context as AnyhowContext;
 use axum::extract::{Form, State};
 use axum::http::HeaderMap;
@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -274,6 +274,23 @@ pub struct UpdateDhcpProxyForm {
     pub upstream_dhcp_ip: String,
 }
 
+#[derive(Deserialize)]
+pub struct RollbackKeaSnapshotForm {
+    pub csrf_token: String,
+    pub snapshot_id: String,
+}
+
+// A known-good Kea config snapshot as rendered in the Admin UI (#614). Only
+// the id (for the rollback form) and a Unix-epoch-seconds timestamp (for
+// client-side display via the same `Intl.DateTimeFormat`/`.dhcp-expiry`
+// pattern `formatDhcpExpiries()` already uses for lease expiries) are
+// exposed -- never the config payload itself, which can be arbitrarily large.
+#[derive(Debug, Serialize)]
+struct KeaSnapshotSummary {
+    id: String,
+    created_unix: u64,
+}
+
 // ─── Handlers ───
 
 pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
@@ -312,6 +329,12 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         ctx.insert("leases", &Vec::<Lease>::new());
         ctx.insert("reservations", &Vec::<Reservation>::new());
     }
+
+    ctx.insert("kea_snapshots", &fetch_kea_snapshot_summaries(&state));
+    ctx.insert(
+        "kea_snapshot_retention",
+        &state.config.kea_keep_known_good_configs,
+    );
 
     crate::routes::render(&state.templates, "dhcp.html", &ctx, state.config.dev_mode)
 }
@@ -860,6 +883,99 @@ pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Val
     }))
 }
 
+// Rolls the live DHCPv4 config back to an operator-selected known-good
+// snapshot (#614, follow-up to #415). Unlike the nginx/dnsmasq/PowerDNS
+// shell adapters -- which automatically search their stored snapshots
+// newest-to-oldest at container startup, because "the config this container
+// is about to start with is invalid" is their only rollback trigger -- Kea
+// has no equivalent startup moment: its config only ever changes through
+// this Admin UI, live, one operator-driven mutation at a time. So this
+// route is a single, explicit, operator-selected rollback rather than an
+// automatic search: the operator picks one snapshot from the list rendered
+// on `/dhcp`, and only that snapshot is validated and applied.
+//
+// The `known_ids` membership check below is this handler's path-traversal
+// guard (see `kea_snapshots::read_snapshot`'s doc comment): `form.snapshot_id`
+// is untrusted request input, but it is never used to build a filesystem
+// path unless it exactly matches an id `list_snapshot_ids` already found on
+// disk.
+//
+// Reusing `kea_config_modify` for the apply step gives this rollback the
+// same `config-test` (validate the selected snapshot) -> `config-set` ->
+// `config-write` chain, and the same confirmed/ambiguous-failure handling
+// from PR #380, that every other DHCP mutation route already gets --
+// including a fresh known-good snapshot of the restored config on success,
+// so `docs/known-good-config-snapshots.md`'s "every successful config-write
+// is snapshotted" rule has no special case for rollbacks. "Verify runtime
+// and persisted state after rollback" (the issue's acceptance criterion) is
+// satisfied by that same chain: `config-set` returning success is Kea's own
+// confirmation the runtime accepted the restored config, and
+// `config-write`'s confirmed/ambiguous handling is exactly the persisted-
+// state verification PR #380 already established -- deliberately not
+// re-implemented here as a second, fuzzy `config-get` diff, since Kea can
+// reorder/normalize JSON on read in ways that would make such a diff noisy
+// rather than trustworthy.
+pub async fn rollback_kea_snapshot(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<RollbackKeaSnapshotForm>,
+) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+
+    let snapshot_root = PathBuf::from(&state.config.kea_config_snapshot_dir);
+    let known_ids = kea_snapshots::list_snapshot_ids(&snapshot_root).map_err(|e| {
+        DhcpError::config_error(format!(
+            "Failed to list known-good Kea config snapshots: {e}"
+        ))
+    })?;
+    if !known_ids.iter().any(|id| id == &form.snapshot_id) {
+        return Err(DhcpError::conflict(
+            "Unknown or no-longer-available config snapshot.",
+        ));
+    }
+
+    let snapshot_config =
+        kea_snapshots::read_snapshot(&snapshot_root, &form.snapshot_id).map_err(|e| {
+            kea_snapshots::kgs_log(
+                "REJECT",
+                &format!(
+                    "rejected known-good snapshot {}: unreadable ({e})",
+                    form.snapshot_id
+                ),
+            );
+            DhcpError::config_error(format!("Stored config snapshot could not be read: {e}"))
+        })?;
+
+    kea_config_modify(&state, move |config| {
+        *config = snapshot_config;
+        Ok(())
+    })
+    .await
+    .map_err(|e| {
+        kea_snapshots::kgs_log(
+            "REJECT",
+            &format!(
+                "rejected known-good snapshot {}: failed validation/apply ({e})",
+                form.snapshot_id
+            ),
+        );
+        DhcpError::config_error(format!(
+            "Rollback to snapshot {} failed: {e}",
+            form.snapshot_id
+        ))
+    })?;
+
+    kea_snapshots::kgs_log(
+        "SELECT",
+        &format!(
+            "selected known-good snapshot {} for rollback",
+            form.snapshot_id
+        ),
+    );
+    Ok(Redirect::to("/dhcp"))
+}
+
 // ─── Kea API Core ───
 
 type KeaResponse = Result<Value, Box<dyn std::error::Error + Send + Sync>>;
@@ -900,22 +1016,50 @@ fn kea_result(resp: &Value) -> Result<(), Box<dyn std::error::Error + Send + Syn
 // config-get → modify → config-test → config-set → config-write (persists to /var/lib/kea/kea-dhcp4.conf)
 // This function implements config rollback logic: if config-write fails after config-set succeeds,
 // it attempts to restore the previous config to maintain consistency between runtime and persisted state.
+//
+// On a confirmed config-write success, it also records a persisted,
+// multi-generation known-good snapshot of the applied config (#614, follow-up
+// to #415) via `kea_snapshots::create_snapshot`. That snapshot step is
+// best-effort: a failure there is logged as a WARNING (rollback protection
+// degraded until it succeeds again) rather than turned into an error for
+// this call, mirroring the nginx/dnsmasq shell adapters' own non-fatal
+// treatment of a failed `kgs_snapshot_create` -- the config mutation itself
+// already succeeded and persisted; the only thing at risk is a future
+// rollback's baseline, not this request.
 async fn kea_config_modify<F>(state: &AppState, modify: F) -> KeaResult
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
 {
-    kea_config_modify_with_post(&state.kea_config_lock, |cmd| kea_post(state, cmd), modify).await
+    let snapshot_root = PathBuf::from(&state.config.kea_config_snapshot_dir);
+    let keep_n = state.config.kea_keep_known_good_configs;
+    kea_config_modify_with_post(
+        &state.kea_config_lock,
+        |cmd| kea_post(state, cmd),
+        modify,
+        move |applied_config: &Value| {
+            if let Err(e) = kea_snapshots::create_snapshot(&snapshot_root, keep_n, applied_config)
+            {
+                tracing::warn!(
+                    error = %e,
+                    "failed to record this valid DHCP config as a known-good snapshot; rollback protection is degraded until this succeeds"
+                );
+            }
+        },
+    )
+    .await
 }
 
-async fn kea_config_modify_with_post<F, P, Fut>(
+async fn kea_config_modify_with_post<F, P, Fut, S>(
     lock: &tokio::sync::Mutex<()>,
     mut post: P,
     modify: F,
+    on_write_success: S,
 ) -> KeaResult
 where
     F: FnOnce(&mut Value) -> Result<(), &'static str> + Send,
     P: FnMut(Value) -> Fut + Send,
     Fut: Future<Output = KeaResponse> + Send,
+    S: FnOnce(&Value) + Send,
 {
     let _guard = lock.lock().await;
 
@@ -929,6 +1073,23 @@ where
         .cloned()
         .ok_or("config-get: missing arguments")?;
 
+    // config-get's response is `{"Dhcp4": {...}, "hash": "<config hash>"}` on
+    // the real Kea Control Agent (observed live against Kea 2.6.3, the
+    // version this project's `services/dhcp` image ships) -- `hash` is a
+    // server-computed digest of the loaded config, not an accepted input.
+    // Feeding it straight back as `arguments` to config-test/config-set (as
+    // this function previously did) makes Kea reject the request with
+    // "Unsupported 'hash' parameter." on every single call, even when the
+    // config is otherwise byte-identical to what config-get just returned.
+    // Stripped once, immediately after the fetch, so every downstream user
+    // of `config` (the `modify` closure, `old_config`'s own rollback
+    // config-set, config-test/config-set's request bodies, and the
+    // known-good snapshot payload captured further down) works with the
+    // clean `{"Dhcp4": {...}}` shape Kea actually accepts back.
+    if let Some(map) = config.as_object_mut() {
+        map.remove("hash");
+    }
+
     // Step 2: Save old config for potential rollback
     let old_config = config.clone();
 
@@ -941,6 +1102,11 @@ where
             .await?;
     kea_result(&test_resp)?;
 
+    // Captured before Step 5 moves `config` into the config-set request body,
+    // so the exact validated-and-applied config is available for the
+    // known-good snapshot on a confirmed config-write success below.
+    let snapshot_candidate = config.clone();
+
     // Step 5: Apply new config at runtime
     let set_resp =
         post(json!({"command": "config-set", "service": ["dhcp4"], "arguments": config})).await?;
@@ -948,7 +1114,10 @@ where
 
     // Step 6: Persist config to disk.
     match kea_write_config(&mut post).await {
-        KeaWriteOutcome::Success => Ok(()),
+        KeaWriteOutcome::Success => {
+            on_write_success(&snapshot_candidate);
+            Ok(())
+        }
         KeaWriteOutcome::ConfirmedFailure(write_err) => {
             tracing::warn!(error = %write_err, "DHCP config-write failed; attempting rollback to previous config");
             rollback_kea_config(&mut post, old_config, &write_err).await
@@ -959,7 +1128,10 @@ where
                 "DHCP config-write outcome could not be confirmed; retrying before rollback"
             );
             match kea_write_config(&mut post).await {
-                KeaWriteOutcome::Success => Ok(()),
+                KeaWriteOutcome::Success => {
+                    on_write_success(&snapshot_candidate);
+                    Ok(())
+                }
                 KeaWriteOutcome::ConfirmedFailure(retry_err) => {
                     let msg = format!(
                         "Config applied at runtime but the first config-write result was ambiguous, \
@@ -1094,6 +1266,24 @@ async fn fetch_subnets(
     state: &AppState,
 ) -> Result<Vec<Subnet>, Box<dyn std::error::Error + Send + Sync>> {
     Ok(fetch_subnets_from_config(&fetch_dhcp_config(state).await?))
+}
+
+// Lists known-good Kea config snapshots (#614) for the DHCP settings page,
+// newest first (the order an operator picking a rollback target cares
+// about). Missing/unreadable snapshot storage renders as "no snapshots yet"
+// rather than failing the whole page -- the same fail-open treatment
+// `dhcp_page` already gives `fetch_subnets`/`fetch_leases`/
+// `fetch_all_reservations` when the Kea API itself is unavailable.
+fn fetch_kea_snapshot_summaries(state: &AppState) -> Vec<KeaSnapshotSummary> {
+    let snapshot_root = PathBuf::from(&state.config.kea_config_snapshot_dir);
+    let mut ids = kea_snapshots::list_snapshot_ids(&snapshot_root).unwrap_or_default();
+    ids.reverse(); // newest first for display
+    ids.into_iter()
+        .map(|id| KeaSnapshotSummary {
+            created_unix: kea_snapshots::snapshot_created_unix(&id).unwrap_or(0),
+            id,
+        })
+        .collect()
 }
 
 async fn fetch_leases(
@@ -2064,6 +2254,21 @@ mod tests {
         steps: Vec<MockStep>,
         modify: impl FnOnce(&mut Value) -> Result<(), &'static str> + Send,
     ) -> (Result<(), Box<dyn Error + Send + Sync>>, Vec<Value>) {
+        run_kea_config_modify_with_steps_and_sink(steps, modify, |_applied: &Value| {}).await
+    }
+
+    // Same mock `post` plumbing as `run_kea_config_modify_with_steps`, but
+    // also exposes the `on_write_success` snapshot-sink hook so tests can
+    // assert exactly when (#614's) known-good snapshot creation is invoked
+    // relative to the confirmed/ambiguous/rollback write outcomes.
+    async fn run_kea_config_modify_with_steps_and_sink<S>(
+        steps: Vec<MockStep>,
+        modify: impl FnOnce(&mut Value) -> Result<(), &'static str> + Send,
+        on_write_success: S,
+    ) -> (Result<(), Box<dyn Error + Send + Sync>>, Vec<Value>)
+    where
+        S: FnOnce(&Value) + Send,
+    {
         let calls = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
         let steps = Arc::new(tokio::sync::Mutex::new(VecDeque::from(steps)));
         let lock = tokio::sync::Mutex::new(());
@@ -2087,7 +2292,7 @@ mod tests {
             }
         };
 
-        let result = kea_config_modify_with_post(&lock, post, modify).await;
+        let result = kea_config_modify_with_post(&lock, post, modify, on_write_success).await;
         let calls = calls.lock().await.clone();
         (result, calls)
     }
@@ -2434,6 +2639,147 @@ mod tests {
         assert_eq!(calls[3]["command"], "config-write");
         assert_eq!(calls[1]["arguments"], expected_modified);
         assert_eq!(calls[2]["arguments"], expected_modified);
+    }
+
+    // #614's snapshot creation is wired in as a single choke-point hook
+    // (`on_write_success`) rather than duplicated into every mutation route,
+    // so this locks in both that the hook actually fires on a confirmed
+    // config-write success, and that it receives the real applied config
+    // (post-modify, post-config-test) -- not the stale pre-modify config --
+    // since a snapshot of the wrong generation would make rollback silently
+    // restore an older, unintended state.
+    #[tokio::test]
+    async fn kea_config_modify_invokes_snapshot_sink_with_applied_config_on_success() {
+        let initial_config = json!({"Dhcp4": {"subnet4": [{"id": 1}]}});
+        let sink_calls: Arc<std::sync::Mutex<Vec<Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_calls_for_closure = Arc::clone(&sink_calls);
+
+        let (result, _calls) = run_kea_config_modify_with_steps_and_sink(
+            vec![
+                MockStep::Response(kea_config_get_response(initial_config)),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                config["Dhcp4"]["subnet4"]
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?
+                    .push(json!({"id": 2}));
+                Ok(())
+            },
+            move |applied: &Value| {
+                sink_calls_for_closure.lock().unwrap().push(applied.clone());
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let sink_calls = sink_calls.lock().unwrap();
+        assert_eq!(
+            sink_calls.len(),
+            1,
+            "the snapshot sink must run exactly once on a confirmed config-write success"
+        );
+        assert_eq!(
+            sink_calls[0]["Dhcp4"]["subnet4"][1]["id"],
+            json!(2),
+            "the sink must see the same applied config that was validated and set, not the pre-modify config"
+        );
+    }
+
+    // A config-write that gets rolled back was, by definition, just proven
+    // to fail persisting -- if the snapshot sink fired anyway, a rejected
+    // config would get recorded as "known-good" and poison every future
+    // rollback target with something that was never actually good.
+    #[tokio::test]
+    async fn kea_config_modify_does_not_invoke_snapshot_sink_on_rollback() {
+        let initial_config = json!({"Dhcp4": {"subnet4": [{"id": 1}]}});
+        let sink_calls: Arc<std::sync::Mutex<Vec<Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_calls_for_closure = Arc::clone(&sink_calls);
+
+        let (result, _calls) = run_kea_config_modify_with_steps_and_sink(
+            vec![
+                MockStep::Response(kea_config_get_response(initial_config)),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(json!([{ "result": 1, "text": "write failed" }])),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                config["Dhcp4"]["subnet4"]
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?
+                    .push(json!({"id": 2}));
+                Ok(())
+            },
+            move |applied: &Value| {
+                sink_calls_for_closure.lock().unwrap().push(applied.clone());
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            sink_calls.lock().unwrap().is_empty(),
+            "a rolled-back config-write must never be recorded as a known-good snapshot"
+        );
+    }
+
+    // Regression test for a bug found via live verification against a real
+    // Kea 2.6.3 Control Agent (not caught by any prior test, since all of
+    // them mock config-get without a `hash` field): the real Control Agent's
+    // config-get response is `{"Dhcp4": {...}, "hash": "<digest>"}`, and
+    // feeding that whole object straight back as config-test/config-set's
+    // `arguments` makes Kea reject the request with
+    // "Unsupported 'hash' parameter." on every call. This asserts `hash` is
+    // stripped before it reaches either request body (and is absent from the
+    // config the `modify` closure receives).
+    #[tokio::test]
+    async fn kea_config_modify_strips_hash_from_config_get_before_reuse() {
+        let config_get_with_hash = json!([{
+            "result": 0,
+            "arguments": {
+                "Dhcp4": {"subnet4": [{"id": 1}]},
+                "hash": "0123456789abcdef0123456789abcdef01234567"
+            }
+        }]);
+
+        let (result, calls) = run_kea_config_modify_with_steps(
+            vec![
+                MockStep::Response(config_get_with_hash),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                assert!(
+                    config.get("hash").is_none(),
+                    "the modify closure must never see a leftover hash field"
+                );
+                config["Dhcp4"]["subnet4"]
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?
+                    .push(json!({"id": 2}));
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(calls[0]["command"], "config-get");
+        assert_eq!(calls[1]["command"], "config-test");
+        assert_eq!(calls[2]["command"], "config-set");
+        assert!(
+            calls[1]["arguments"].get("hash").is_none(),
+            "config-test's arguments must not carry the config-get hash field"
+        );
+        assert!(
+            calls[2]["arguments"].get("hash").is_none(),
+            "config-set's arguments must not carry the config-get hash field"
+        );
     }
 
     #[tokio::test]

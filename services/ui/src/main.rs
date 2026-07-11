@@ -14,6 +14,7 @@
 
 mod config;
 mod docker_client;
+mod kea_snapshots;
 mod nats_config;
 mod nginx_client;
 mod routes;
@@ -669,6 +670,10 @@ async fn main() -> Result<()> {
             post(routes::dhcp::remove_reservation),
         )
         .route("/dhcp/lease/release", post(routes::dhcp::release_lease))
+        .route(
+            "/dhcp/snapshot/rollback",
+            post(routes::dhcp::rollback_kea_snapshot),
+        )
         .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
