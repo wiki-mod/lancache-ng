@@ -365,7 +365,15 @@ _dns_recursor_validate_snapshot_or_rollback() {
 
     echo "[lancache-dns] Validating recursor.conf (pdns_recursor --config=check)..."
     if pdns_recursor --config=check --config-dir="$config_dir" >/dev/null; then
-        kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/recursor" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-recursor" "$recursor_conf"
+        # Checked explicitly (not left to `set -e`): this function is called
+        # at its call site as `... || exit 1`, and bash suppresses errexit
+        # for every command run inside a function invoked on the left side
+        # of `||` -- so a non-zero kgs_snapshot_create here would otherwise
+        # fall through to `return 0` silently, leaving no rollback baseline
+        # for a future bad config. Matches the proxy adapter's handling.
+        if ! kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/recursor" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-recursor" "$recursor_conf"; then
+            echo "[lancache-dns] WARNING: failed to record this valid recursor.conf as a known-good snapshot (see FATAL line above); rollback protection is degraded until this succeeds." >&2
+        fi
         return 0
     fi
 
@@ -413,7 +421,11 @@ _dns_auth_validate_snapshot_or_rollback() {
 
     echo "[lancache-dns] Validating pdns.conf (pdns_server --config=check)..."
     if pdns_server --config=check --config-dir="$config_dir" >/dev/null; then
-        kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-auth" "$pdns_conf"
+        # Checked explicitly -- same `set -e`-suppressed-by-`||`-at-the-call-site
+        # reasoning as the recursor function above.
+        if ! kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-auth" "$pdns_conf"; then
+            echo "[lancache-dns] WARNING: failed to record this valid pdns.conf as a known-good snapshot (see FATAL line above); rollback protection is degraded until this succeeds." >&2
+        fi
         return 0
     fi
 

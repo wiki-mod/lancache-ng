@@ -3112,6 +3112,10 @@ services:
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
+      # Known-good pdns.conf/recursor.conf snapshots (#615): without this,
+      # a secondary node keeps its rollback baseline only in the container
+      # layer, and loses it on every image update/recreate.
+      - pdns-config-snapshots:/var/lib/lancache-dns
     ports:
       - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
       - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
@@ -3125,6 +3129,7 @@ services:
 volumes:
   pdns-data:
   pdns-filter-state:
+  pdns-config-snapshots:
 EOF
 
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
