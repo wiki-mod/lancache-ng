@@ -159,6 +159,18 @@ require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
 require_grep 'outputs: type=image,oci-mediatypes=true' \
   .github/workflows/build-push.yml \
   'per-platform service builds must force OCI mediatypes so downstream imagetools create can actually attach index annotations'
+# build-tools.yml is a second, independent publisher of the build-tools
+# image (weekly cron/push/dispatch, moving build-tools:latest and mutable
+# branch tags) -- most CI/dev paths actually consume its tags, not
+# build-push.yml's own build-tools matrix row's sha-<commit>-only output.
+# It needs the identical OCI-mediatype/annotation fix, not just
+# build-push.yml (issue #620).
+require_grep 'outputs: type=image,oci-mediatypes=true' \
+  .github/workflows/build-tools.yml \
+  'build-tools.yml per-platform builds must force OCI mediatypes so its own merge step can actually attach index annotations'
+require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
+  .github/workflows/build-tools.yml \
+  'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
 require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
