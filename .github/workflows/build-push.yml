@@ -1246,8 +1246,10 @@ jobs:
             if [ "$dockerfile" = "services/ui/Dockerfile" ]; then
               grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must fall back to stripped distcc hosts when no plain hosts are configured."; exit 1; }
-              grep -F 'DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}";' "$dockerfile" >/dev/null \
-                || { echo "::error::$dockerfile must reuse the lsdistcc-filtered pump host list for no-pump compiler probes."; exit 1; }
+              if grep -F 'DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}";' "$dockerfile" >/dev/null; then
+                echo "::error::$dockerfile must not reassign DISTCC_HOSTS_NO_PUMP from the pump-published host list -- that list's ,cpp/,lzo suffix is only meaningful to a running include server, and lancache-distcc-wrapper's whole reason for using DISTCC_HOSTS_NO_PUMP is compiling WITHOUT one (confirmed live: this exact reassignment leaked the pump suffix into non-pump compiles, see #613)."
+                exit 1
+              fi
               grep -F 'export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts";' "$dockerfile" >/dev/null \
                 && grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must start distcc-pump with pump-capable hosts only."; exit 1; }
