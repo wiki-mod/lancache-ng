@@ -159,8 +159,8 @@ These are **not** renamed by this change: Docker named volumes carry real
 persisted state, and renaming a volume means either data loss or a
 migration step in `setup.sh`, which is a deliberate, human-approved
 decision outside the scope of a naming-documentation pass. This exception
-is permanent unless a future, explicitly scoped change adds the volume
-migration logic; it is not a TODO.
+is permanent rather than a placeholder awaiting a fix, unless a future,
+explicitly scoped change adds the volume migration logic.
 
 ### Host bind-mount directories
 
