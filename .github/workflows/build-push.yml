@@ -1140,14 +1140,31 @@ jobs:
           grep -F 'needs: validate-compose' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
           grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
-            || { echo "::error::The build-tools workflow must run on the heavy runner tier."; exit 1; }
+            || { echo "::error::The build-tools workflow's amd64 leg must run on the heavy runner tier."; exit 1; }
+          # arm64 builds natively on a GitHub-hosted runner (same rationale as
+          # build-push.yml's build-arm64, #592) instead of QEMU on the
+          # self-hosted pool -- confirmed on #606 that emulating the
+          # docker-compose source build added for CVE-2026-39822 fails
+          # reproducibly under QEMU with a Go compiler "bufio: buffer full"
+          # error. This must not regress back to an emulated arm64 leg.
+          grep -F 'runs-on: ubuntu-24.04-arm' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow's arm64 leg must run natively on ubuntu-24.04-arm, not QEMU."; exit 1; }
+          grep -F 'setup-qemu-action' .github/workflows/build-tools.yml >/dev/null \
+            && { echo "::error::The build-tools workflow must not reintroduce QEMU emulation for its arm64 leg."; exit 1; }
           awk '
-            /name: Build and push multi-architecture build-tools image/ { in_publish = 1; found = 0; next }
+            /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
             in_publish && /name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
           ' .github/workflows/build-tools.yml \
-            || { echo "::error::The build-tools multi-arch publish step must pull fresh mutable bases before publishing."; exit 1; }
+            || { echo "::error::The build-tools amd64 publish step must pull fresh mutable bases before publishing."; exit 1; }
+          awk '
+            /name: Build and push arm64 build-tools image/ { in_publish = 1; found = 0; next }
+            in_publish && /name: / { exit found ? 0 : 1 }
+            in_publish && /pull: true/ { found = 1 }
+            END { if (in_publish) exit found ? 0 : 1; exit 1 }
+          ' .github/workflows/build-tools.yml \
+            || { echo "::error::The build-tools arm64 publish step must pull fresh mutable bases before publishing."; exit 1; }
           grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
             && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'retry-build.outputs.digest' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
@@ -1155,9 +1172,12 @@ jobs:
             && { echo "::error::The build-tools workflow must not keep the stale arm64 scan deferral notice."; exit 1; }
           grep -F 'Build local arm64 scan image' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'BUILD_TOOLS_SCAN_IMAGE_ARM64' .github/workflows/build-tools.yml >/dev/null \
-            && grep -F 'smoke_test_image "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}" linux/arm64' .github/workflows/build-tools.yml >/dev/null \
+            && grep -F 'docker run --rm --platform linux/arm64 "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}"' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'Scan local build-tools arm64 image with Trivy' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must build, smoke-test, and Trivy-scan the local arm64 scan image before publishing."; exit 1; }
+          grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
+            && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
               && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \

@@ -4,6 +4,18 @@
 # weekly schedule, on relevant pushes to master, and on manual dispatch. This
 # image is CI infrastructure for acceleration checks, not a product runtime
 # dependency.
+#
+# arm64 builds natively on a GitHub-hosted ubuntu-24.04-arm runner (same
+# pattern as build-push.yml's build-arm64/merge-manifests, added by #592)
+# instead of QEMU emulation on the self-hosted amd64 pool. Confirmed directly
+# on #606: emulating tools/build-tools/Dockerfile's docker-compose source
+# build (a large dependency tree pulling in github.com/moby/moby/client) under
+# QEMU fails reproducibly with a Go compiler "bufio: buffer full" error while
+# reading export data -- not a transient flake, a genuine emulation resource
+# limit that the small pre-#606 actionlint-only arm64 build never hit. The
+# same Dockerfile change built cleanly in ~6m37s on ubuntu-24.04-arm in the
+# same PR's build-push.yml run, confirming native arm64 is the fix, not a
+# tuning knob on the emulated build.
 name: Build Tools Image
 
 on:
@@ -38,7 +50,6 @@ permissions:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
-  BUILD_TOOLS_PLATFORMS: linux/amd64,linux/arm64
   BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
   BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
 
@@ -48,14 +59,11 @@ defaults:
 
 jobs:
   build-tools:
+    name: build amd64 build-tools image
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Raised from 120: the new arm64 scan build (QEMU-emulated) now writes to
-    # the shared local cache too, so subsequent runs are fast, but the first
-    # run after this changes -- and any run after a cache-losing runner
-    # change -- still does a cold emulated build. The per-step budgets below
-    # (60 amd64 + 90 arm64 + 90 multi-arch publish) can exceed 120 minutes
-    # even though they rarely all run at their worst case together.
-    timeout-minutes: 180
+    timeout-minutes: 90
+    outputs:
+      should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -109,9 +117,6 @@ jobs:
             echo "should-publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -130,8 +135,8 @@ jobs:
             exit 1
           fi
 
-          cache_dir="$BUILDX_CACHE_ROOT/build-tools"
-          lock_file="$BUILDX_CACHE_ROOT/build-tools.lock"
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools-amd64"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools-amd64.lock"
 
           mkdir -p "$BUILDX_CACHE_ROOT"
           rm -rf "$BUILDX_CACHE_READ" "$BUILDX_CACHE_DEST"
@@ -157,12 +162,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
+        # Suffixed like build-push.yml's per-platform legs: this job never
+        # writes the real sha-<commit> tag directly -- merge-build-tools-manifests
+        # combines this with build-tools-arm64's linux/arm64 tag into that tag.
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
           tags: |
-            type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=short,suffix=-amd64
 
       - name: Compute immutable pushed source tag
         id: source-tag
@@ -171,10 +179,10 @@ jobs:
           set -euo pipefail
 
           short_sha="${GITHUB_SHA::7}"
-          printf 'image=%s:sha-%s\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'image=%s:sha-%s-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
-      # Pull requests cannot push to GHCR, so they build local per-architecture
-      # scan images and run the smoke/Trivy checks before the workflow can pass.
+      # Pull requests cannot push to GHCR, so they build a local scan image
+      # and run the smoke/Trivy checks before the workflow can pass.
       - name: Build local amd64 scan image
         id: local-build-amd64
         timeout-minutes: 60
@@ -190,76 +198,53 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
-      - name: Build local arm64 scan image
-        id: local-build-arm64
-        timeout-minutes: 90
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: tools/build-tools
-          load: true
-          pull: true
-          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
-          platforms: linux/arm64
-          provenance: false
-          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
-          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
-
       - name: Smoke-test acceleration-infrastructure tools
         run: |
           set -euo pipefail
 
-          smoke_test_image() {
-            local image="$1"
-            local platform="$2"
+          docker run --rm --platform linux/amd64 "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" bash -c '
+          set -euo pipefail
 
-            docker run --rm --platform "$platform" "$image" bash -c '
-            set -euo pipefail
+          required_tools=(
+            actionlint
+            bash
+            bats
+            cargo
+            cargo-audit
+            cargo-tarpaulin
+            clippy-driver
+            dig
+            distcc
+            distcc-pump
+            docker
+            envsubst
+            jq
+            rustc
+            rustfmt
+            sccache
+            shellspec
+            shellcheck
+          )
 
-            required_tools=(
-              actionlint
-              bash
-              bats
-              cargo
-              cargo-audit
-              cargo-tarpaulin
-              clippy-driver
-              dig
-              distcc
-              distcc-pump
-              docker
-              envsubst
-              jq
-              rustc
-              rustfmt
-              sccache
-              shellspec
-              shellcheck
-            )
+          for tool in "${required_tools[@]}"; do
+            command -v "$tool" >/dev/null
+          done
 
-            for tool in "${required_tools[@]}"; do
-              command -v "$tool" >/dev/null
-            done
-
-            cargo --version
-            cargo audit --version
-            cargo-audit --version
-            cargo tarpaulin --version
-            cargo-tarpaulin --version
-            sccache --version
-            actionlint --version
-            bats --version
-            shellspec --version
-            shellcheck --version
-            distcc --version
-            distcc-pump --help >/dev/null
-            docker --version
-            docker compose version
+          cargo --version
+          cargo audit --version
+          cargo-audit --version
+          cargo tarpaulin --version
+          cargo-tarpaulin --version
+          sccache --version
+          actionlint --version
+          bats --version
+          shellspec --version
+          shellcheck --version
+          distcc --version
+          distcc-pump --help >/dev/null
+          docker --version
+          docker compose version
           '
-          }
-
-          smoke_test_image "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" linux/amd64
-          smoke_test_image "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}" linux/arm64
 
       - name: Run Bats setup fixtures
         run: |
@@ -287,7 +272,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools
-          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-arm64
 
       - name: Scan local build-tools amd64 image with Trivy
         timeout-minutes: 20
@@ -305,29 +289,14 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Scan local build-tools arm64 image with Trivy
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
-          hide-progress: true
-          cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-arm64
-          timeout: 10m
-          exit-code: "1"
-
-      # Trusted refs publish only an immutable sha-* source tag first. Mutable
-      # branch/latest tags are promoted after the exact pushed digest has passed
-      # Trivy and provenance attestation.
-      - name: Build and push multi-architecture build-tools image
+      # Trusted refs publish only an immutable sha-*-amd64 source tag first.
+      # merge-build-tools-manifests combines this with build-tools-arm64's tag
+      # into the real sha-<commit> tag; mutable branch/latest tags are
+      # promoted only after that combined tag exists.
+      - name: Build and push amd64 build-tools image
         id: build
         if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
-        timeout-minutes: 90
+        timeout-minutes: 60
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -335,7 +304,7 @@ jobs:
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
+          platforms: linux/amd64
           provenance: false
           pull: true
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
@@ -346,7 +315,7 @@ jobs:
           set -euo pipefail
           mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
 
-      - name: Scan pushed build-tools digest with Trivy
+      - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -363,7 +332,7 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Attest build-tools image provenance
+      - name: Attest amd64 build-tools image provenance
         if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
@@ -371,33 +340,11 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      - name: Promote build-tools mutable tags
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          PUSHED_DIGEST: ${{ steps.build.outputs.digest }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          source_image="${BUILD_TOOLS_IMAGE}@${PUSHED_DIGEST}"
-          branch_tag="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
-          if [ -z "$branch_tag" ]; then
-            echo "::error::Could not derive a safe mutable build-tools branch tag from '$REF_NAME'."
-            exit 1
-          fi
-
-          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_image"
-          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_image"
-          fi
-
       - name: Rotate local Buildx cache
         if: >-
           ${{
             always() &&
             steps.local-build-amd64.outcome == 'success' &&
-            steps.local-build-arm64.outcome == 'success' &&
             (
               github.event_name == 'pull_request' ||
               steps.build.outcome == 'success'
@@ -413,8 +360,8 @@ jobs:
             exit 0
           fi
 
-          cache_dir="$BUILDX_CACHE_ROOT/build-tools"
-          lock_file="$BUILDX_CACHE_ROOT/build-tools.lock"
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools-amd64"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools-amd64.lock"
 
           mkdir -p "$BUILDX_CACHE_ROOT"
           (
@@ -427,4 +374,267 @@ jobs:
         if: always()
         run: |
           docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
+
+  build-tools-arm64:
+    # Native linux/arm64 leg, same rationale as build-push.yml's build-arm64
+    # (added by #592): a GitHub-hosted arm64 runner instead of QEMU on the
+    # self-hosted amd64 pool. Runs independently of build-tools above (no
+    # `needs:` between them, mirroring build/build-arm64's parallel
+    # structure) -- only merge-build-tools-manifests below needs both.
+    # This runner is outside the self-hosted LAN and cannot reach the local
+    # Buildx cache volume, so it uses the GitHub Actions cache backend
+    # (type=gha) instead, same as build-push.yml's build-arm64.
+    name: build arm64 build-tools image (native)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    outputs:
+      should-publish: ${{ steps.should-publish.outputs.should-publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Determine whether build-tools inputs actually changed
+        id: should-publish
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before_sha="${{ github.event.before }}"
+          if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            git fetch --quiet --depth=1 origin "$before_sha" 2>/dev/null || true
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            echo "::notice::Could not fetch base commit $before_sha to diff against; publishing to be safe."
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Only test-only paths (tests/bats/**, tests/shellspec/**, setup.sh) changed; skipping build-tools image rebuild/publish."
+            echo "should-publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.BUILD_TOOLS_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short,suffix=-arm64
+
+      - name: Compute immutable pushed source tag
+        id: source-tag
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          printf 'image=%s:sha-%s-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build local arm64 scan image
+        id: local-build-arm64
+        timeout-minutes: 60
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          load: true
+          pull: true
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          platforms: linux/arm64
+          provenance: false
+          cache-from: type=gha,scope=build-tools-arm64
+          cache-to: type=gha,scope=build-tools-arm64,mode=max
+
+      - name: Smoke-test acceleration-infrastructure tools
+        run: |
+          set -euo pipefail
+
+          docker run --rm --platform linux/arm64 "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}" bash -c '
+          set -euo pipefail
+
+          required_tools=(
+            actionlint
+            bash
+            bats
+            cargo
+            cargo-audit
+            cargo-tarpaulin
+            clippy-driver
+            dig
+            distcc
+            distcc-pump
+            docker
+            envsubst
+            jq
+            rustc
+            rustfmt
+            sccache
+            shellspec
+            shellcheck
+          )
+
+          for tool in "${required_tools[@]}"; do
+            command -v "$tool" >/dev/null
+          done
+
+          cargo --version
+          cargo audit --version
+          cargo-audit --version
+          cargo tarpaulin --version
+          cargo-tarpaulin --version
+          sccache --version
+          actionlint --version
+          bats --version
+          shellspec --version
+          shellcheck --version
+          distcc --version
+          distcc-pump --help >/dev/null
+          docker --version
+          docker compose version
+          '
+
+      - name: Scan local build-tools arm64 image with Trivy
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Build and push arm64 build-tools image
+        id: build
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        timeout-minutes: 60
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          push: true
+          tags: ${{ steps.source-tag.outputs.image }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/arm64
+          provenance: false
+          pull: true
+          cache-from: type=gha,scope=build-tools-arm64
+          cache-to: type=gha,scope=build-tools-arm64,mode=max
+
+      - name: Scan pushed arm64 build-tools digest with Trivy
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Attest arm64 build-tools image provenance
+        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Remove local scan image
+        if: always()
+        run: |
           docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
+
+  merge-build-tools-manifests:
+    # Combines build-tools's linux/amd64 tag with build-tools-arm64's
+    # linux/arm64 tag into the real sha-<commit> multi-platform tag that
+    # scripts/select-build-tools-image.sh and setup.sh consume -- same
+    # imagetools create pattern as build-push.yml's merge-manifests, no image
+    # is rebuilt here, only a manifest list assembled from two already-pushed
+    # digests.
+    name: merge build-tools multi-platform manifest
+    needs: [build-tools, build-tools-arm64]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs['build-tools'].result == 'success' &&
+        needs['build-tools-arm64'].result == 'success' &&
+        github.event_name != 'pull_request' &&
+        needs['build-tools'].outputs.should-publish == 'true'
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-platform manifest and promote mutable tags
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-amd64"
+          arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-arm64"
+          source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"
+
+          docker buildx imagetools create -t "$source_tag" "$amd64_image" "$arm64_image"
+
+          branch_tag="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$branch_tag" ]; then
+            echo "::error::Could not derive a safe mutable build-tools branch tag from '$REF_NAME'."
+            exit 1
+          fi
+
+          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_tag"
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_tag"
+          fi
