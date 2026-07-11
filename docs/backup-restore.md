@@ -43,6 +43,8 @@ The automated manifest includes these paths when they exist:
 - NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
 - in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus legacy split cache directories (`CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`) and `/srv/lancache/cache` when present
 
+The optional central logging path (`SYSLOG_NG_LOG_DIR`, or the production state root `LANCACHE_STATE_DIR/syslog-ng`; see #453) is **not** part of the automated backup manifest yet. Like cache content, it is rotated/compressed application output rather than configuration or operational state, so losing it does not affect the running stack. Back it up manually if you need log retention across a host migration.
+
 The backup command stops the compose stack before copying mutable databases and restarts it afterward. Staging directories are created with restrictive permissions and cleaned up automatically if a copy or archive operation fails. The command rejects backup destinations that sit inside a path being backed up, which prevents recursive copies when using cache disks as backup storage.
 
 ## Example rollback after a failed update

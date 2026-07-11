@@ -416,6 +416,179 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  # ── Log collector (#453; optional, start with: docker compose --profile logging up -d) ──
+  # Tails the proxy access log into two independent pipelines: a local
+  # plain-text file and a forward to the central syslog-ng receiver below.
+  # Config is passed as CLI flags because this image ships no shell at all
+  # (distroless-style), and because quickstart has no local repo checkout to
+  # bind-mount a config file from -- CLI flags are the one delivery mechanism
+  # that works identically across dev/prod/quickstart.
+  syslog:
+    image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
+    profiles: [logging]
+    command:
+      - -f
+      - "5"
+      - -b
+      - /data/flb-storage
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/access.log
+      - -p
+      - tag=nginx.file
+      - -p
+      - db=/data/flb-proxy-file.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/access.log
+      - -p
+      - tag=nginx.syslog
+      - -p
+      - db=/data/flb-proxy-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -F
+      - record_modifier
+      - -m
+      - nginx.syslog
+      - -p
+      - record=host lancache-proxy
+      - -p
+      - record=ident nginx-access
+      - -o
+      - file
+      - -m
+      - nginx.file
+      - -p
+      - path=/var/log/lancache
+      - -p
+      - file=nginx-proxy.log
+      - -p
+      - format=template
+      - -p
+      - template={log}
+      - -o
+      - syslog
+      - -m
+      - nginx.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+    volumes:
+      - proxy-logs:/var/log/nginx:ro
+      - logs:/var/log/lancache
+      - syslog-data:/data
+    depends_on:
+      - syslog-ng
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Central log receiver (#453; optional, start with: docker compose --profile logging up -d) ──
+  # Receives forwarded logs from the `syslog` (fluent-bit) service above over
+  # TCP/601 (RFC 5424, plain LF framing -- what fluent-bit's syslog output
+  # sends by default) and writes them per-source, per-day under
+  # logs-syslog-ng. Config and the rotation/compression loop are generated
+  # inline for the same reason as fluent-bit above.
+  syslog-ng:
+    image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
+    profiles: [logging]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /etc/syslog-ng
+        cat > /etc/syslog-ng/syslog-ng.conf <<'EOF'
+        @version: 4.8
+
+        options {
+            time-reap(30);
+            mark-freq(10);
+            keep-hostname(yes);
+            create-dirs(yes);
+            dir-perm(0750);
+            perm(0640);
+        };
+
+        source s_forwarders {
+            network(transport(tcp) port(601) flags(syslog-protocol));
+        };
+
+        destination d_lancache {
+            file(
+                "/var/log/lancache-syslog-ng/$${HOST}/$${YEAR}$${MONTH}$${DAY}.log"
+                template("$$ISODATE $$HOST $$PROGRAM: $$MSGONLY\n")
+                create-dirs(yes)
+            );
+        };
+
+        log { source(s_forwarders); destination(d_lancache); };
+        EOF
+        # Size-bounded rotation + zstd high-compression (#453): every
+        # SYSLOG_NG_ROTATE_INTERVAL_SECONDS, rotate any active log file once it
+        # exceeds SYSLOG_MAX_FILE_MB, signal syslog-ng to reopen the (now
+        # recreated) destination file, then compress the rotated file with
+        # zstd -T0 (all cores) at SYSLOG_COMPRESSION_LEVEL. Falls back to gzip
+        # if zstd cannot be installed (e.g. no network egress at startup), so
+        # rotation/compression degrades gracefully instead of failing hard.
+        # This is a fixed-threshold baseline, not the full SYSLOG_MAX_GB /
+        # SYSLOG_RETENTION_DAYS size-priority budget engine -- see follow-up #633.
+        (
+          if ! command -v zstd >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y --no-install-recommends zstd >/dev/null 2>&1 || true
+          fi
+          while true; do
+            sleep "$${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}"
+            find /var/log/lancache-syslog-ng -type f -name '*.log' -size +"$${SYSLOG_MAX_FILE_MB:-100}"M 2>/dev/null | while read -r f; do
+              ts="$$(date -u +%Y%m%dT%H%M%SZ)"
+              mv "$$f" "$${f}.$${ts}"
+              kill -HUP 1 2>/dev/null || true
+              if command -v zstd >/dev/null 2>&1; then
+                zstd -q -T0 "-$${SYSLOG_COMPRESSION_LEVEL:-19}" --rm "$${f}.$${ts}" 2>/dev/null || true
+              else
+                gzip "$${f}.$${ts}" 2>/dev/null || true
+              fi
+            done
+          done
+        ) &
+        exec /usr/local/bin/entrypoint.sh
+    environment:
+      - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
+      - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
+      - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
+    volumes:
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
+    healthcheck:
+      test: ["CMD-SHELL", "syslog-ng-ctl healthcheck --timeout 5"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
@@ -534,3 +707,9 @@ volumes:
   netdatalib:
   netdatacache:
   ui-data:
+  # fluent-bit's local file-output target (#453) and its own storage buffer.
+  # Deliberately plain Docker-managed volumes, not bind-mounted under
+  # LANCACHE_STATE_DIR: rotated/compressed log output, not operational state
+  # (see docs/backup-restore.md).
+  logs:
+  syslog-data:
