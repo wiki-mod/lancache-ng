@@ -76,6 +76,197 @@ setup() {
     [ "$output" = "v0.2.0" ]
 }
 
+@test "git dubious-ownership rejection does not silently fall back to a stale VERSION tag" {
+    # Regression test for #595: a directory owned by a different user/UID
+    # than the current process makes git's CVE-2022-24765 "dubious
+    # ownership" check reject `rev-parse --is-inside-work-tree` with a
+    # non-zero exit -- exactly the same exit code as "there is no .git here
+    # at all". derive_release_archive_image_tag must not conflate the two:
+    # a real .git checkout that git merely refuses (for ownership reasons)
+    # must still resolve its real tag, not silently fall back to whatever
+    # stale/unpublished version happens to be in the VERSION file.
+    repo_dir="$BATS_TEST_TMPDIR/dubious-ownership-repo"
+    mkdir -p "$repo_dir"
+    : > "$repo_dir/.git"
+    # A VERSION file deliberately present and deliberately wrong: if the fix
+    # regresses back to the old behavior, this is the value it would wrongly
+    # resolve to instead of the real "v2.0.0" tag below.
+    printf '%s\n' '1.0.1' > "$repo_dir/VERSION"
+
+    SCRIPT_DIR="$repo_dir"
+    export SCRIPT_DIR
+
+    # Stub out `git` to reproduce real git's behavior under dubious
+    # ownership: reject a plain invocation, but succeed once the caller
+    # scopes trust to this exact path via a per-invocation
+    # `-c safe.directory=...` (never a global/persistent config change).
+    git() {
+        local arg saw_safe_dir=0
+        for arg in "$@"; do
+            [[ "$arg" == "safe.directory=$repo_dir" ]] && saw_safe_dir=1
+        done
+        if [[ "$saw_safe_dir" -eq 0 ]]; then
+            printf "fatal: detected dubious ownership in repository at '%s'\n" "$repo_dir" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            *"describe --tags --exact-match"*) printf 'v2.0.0\n'; return 0 ;;
+        esac
+        return 1
+    }
+
+    tag=$(derive_release_archive_image_tag)
+    status=$?
+
+    [ "$status" -eq 0 ]
+    [ "$tag" = "v2.0.0" ]
+}
+
+@test "git dubious-ownership rejection on a branch with no exact tag still does not fall back to VERSION" {
+    # This is the precise scenario from the #595 bug report: a checkout on a
+    # branch (not sitting exactly on a release tag) whose directory has
+    # dubious ownership. Before the fix, the dubious-ownership rejection of
+    # `rev-parse --is-inside-work-tree` was indistinguishable from "no .git
+    # at all", so this fell through to the VERSION file and produced a
+    # confusing `v1.0.1` tag/404 instead of the caller correctly seeing "no
+    # tag available" and defaulting to the latest/edge channel. Once trusted
+    # via the scoped override, git itself has a real, correct answer here
+    # ("no tag matches HEAD exactly") -- the function must surface that
+    # (return 1, no output) rather than reach for the unrelated VERSION file.
+    repo_dir="$BATS_TEST_TMPDIR/dubious-ownership-branch-repo"
+    mkdir -p "$repo_dir"
+    : > "$repo_dir/.git"
+    printf '%s\n' '1.0.1' > "$repo_dir/VERSION"
+
+    SCRIPT_DIR="$repo_dir"
+    export SCRIPT_DIR
+
+    git() {
+        local arg saw_safe_dir=0
+        for arg in "$@"; do
+            [[ "$arg" == "safe.directory=$repo_dir" ]] && saw_safe_dir=1
+        done
+        if [[ "$saw_safe_dir" -eq 0 ]]; then
+            printf "fatal: detected dubious ownership in repository at '%s'\n" "$repo_dir" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            # Real git's behavior on a branch with no tag exactly on HEAD:
+            # non-zero exit, nothing on stdout.
+            *"describe --tags --exact-match"*) return 128 ;;
+        esac
+        return 1
+    }
+
+    # A non-zero return here is the expected, correct outcome (see comment
+    # above) -- guard the assignment as an `if` condition so bats' own
+    # `set -e` doesn't abort the test on that expected failure.
+    if tag=$(derive_release_archive_image_tag); then
+        status=0
+    else
+        status=$?
+    fi
+
+    [ "$status" -eq 1 ]
+    [ -z "$tag" ]
+    [ "$tag" != "v1.0.1" ]
+}
+
+@test "git dubious-ownership rejection scopes trust to the physical path, not a symlinked SCRIPT_DIR" {
+    # Regression test for a Codex review finding on #609: git checks
+    # safe.directory against the repository's real (symlink-resolved) path,
+    # not necessarily the path it was invoked through. If SCRIPT_DIR is a
+    # symlink to the real checkout, scoping safe.directory to the symlink
+    # path would not match what git actually checked -- the retry would
+    # still be rejected and fall through to the stale VERSION file, the
+    # exact bug #595/#609 exist to fix. The function must parse the physical
+    # path git itself names in its dubious-ownership error message
+    # ("... in repository at '<path>' ...") and scope trust to THAT path.
+    real_dir="$BATS_TEST_TMPDIR/physical-repo"
+    link_dir="$BATS_TEST_TMPDIR/symlinked-checkout"
+    mkdir -p "$real_dir"
+    ln -s "$real_dir" "$link_dir"
+    : > "$link_dir/.git"
+    printf '%s\n' '1.0.1' > "$link_dir/VERSION"
+
+    SCRIPT_DIR="$link_dir"
+    export SCRIPT_DIR
+
+    git() {
+        local arg saw_safe_dir=0
+        for arg in "$@"; do
+            # Only the PHYSICAL path must satisfy the safe.directory check --
+            # a value matching the symlink path ($link_dir) must NOT count,
+            # since that's exactly the bug being guarded against here.
+            [[ "$arg" == "safe.directory=$real_dir" ]] && saw_safe_dir=1
+        done
+        if [[ "$saw_safe_dir" -eq 0 ]]; then
+            # Real git reports the resolved physical path here, not the
+            # symlink path it was invoked through.
+            printf "fatal: detected dubious ownership in repository at '%s'\n" "$real_dir" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            *"describe --tags --exact-match"*) printf 'v2.0.0\n'; return 0 ;;
+        esac
+        return 1
+    }
+
+    tag=$(derive_release_archive_image_tag)
+    status=$?
+
+    [ "$status" -eq 0 ]
+    [ "$tag" = "v2.0.0" ]
+}
+
+@test "git dubious-ownership rejection extracts only the first line's path, not the later config-suggestion quote" {
+    # Regression test for a Codex review finding on #609: real git's
+    # dubious-ownership message repeats the path a second time, quoted, in
+    # its "git config --global --add safe.directory '<path>'" suggestion a
+    # few lines later. A path containing a space forces git to quote it (and
+    # is realistic -- e.g. "Program Files"-style install locations). A
+    # greedy regex applied to the WHOLE multi-line stderr blob would match
+    # from the first line's opening quote all the way through to the LAST
+    # closing quote in the message (the config-suggestion line), producing a
+    # garbage path that never matches what git actually checked -- so the
+    # retry below would still fail and fall through to the stale VERSION
+    # file. The fix restricts extraction to stderr's first line only.
+    repo_dir="$BATS_TEST_TMPDIR/repo with space"
+    mkdir -p "$repo_dir"
+    : > "$repo_dir/.git"
+    printf '%s\n' '1.0.1' > "$repo_dir/VERSION"
+
+    SCRIPT_DIR="$repo_dir"
+    export SCRIPT_DIR
+
+    git() {
+        local arg saw_safe_dir=0
+        for arg in "$@"; do
+            [[ "$arg" == "safe.directory=$repo_dir" ]] && saw_safe_dir=1
+        done
+        if [[ "$saw_safe_dir" -eq 0 ]]; then
+            # Real git's actual multi-line message shape: the path appears
+            # quoted on the first line AND again in the later suggestion.
+            printf "fatal: detected dubious ownership in repository at '%s'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory '%s'\n" "$repo_dir" "$repo_dir" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            *"describe --tags --exact-match"*) printf 'v3.2.1\n'; return 0 ;;
+        esac
+        return 1
+    }
+
+    tag=$(derive_release_archive_image_tag)
+    status=$?
+
+    [ "$status" -eq 0 ]
+    [ "$tag" = "v3.2.1" ]
+}
+
 @test "proxy security migration restores lazy default for legacy strict without allowlist" {
     printf '%s\n' \
         'PROXY_SECURITY_MODE=strict' \

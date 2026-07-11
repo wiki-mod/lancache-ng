@@ -224,6 +224,43 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  line-endings:
+    # Cheap repository hygiene gate (issue #601). .gitattributes already
+    # normalizes line endings for files git touches going forward, but does
+    # not catch files where that normalization was bypassed.
+    #
+    # Runs inside the same build-tools image selected by validate-compose,
+    # same as shellcheck -- per AGENTS.md's Build-tools Verification
+    # Contract, verification must run in that container, not against
+    # whatever bash/grep happen to be installed on the runner host.
+    name: line endings
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check tracked files use Unix (LF) line endings
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
+
+  line-endings-hosted:
+    name: line endings (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check tracked files use Unix (LF) line endings
+        run: bash scripts/check-line-endings.sh
+
   # GitHub-hosted fallback is deliberately limited to cheap lint jobs (this
   # one, shellcheck-hosted, ci_scope_policy-hosted). Rust builds, image scans,
   # and publish paths stay on self-hosted runners because they still depend
@@ -1070,7 +1107,7 @@ jobs:
             && grep -F 'unset DISTCC_HOSTS' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
-            && grep -F 'distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'final_distcc_hosts="$distcc_hosts_without_pump"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::Acceleration preflight must validate sccache read/write, sccache-dist, and distcc paths."; exit 1; }
           grep -F 'docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -1246,8 +1283,10 @@ jobs:
             if [ "$dockerfile" = "services/ui/Dockerfile" ]; then
               grep -F 'distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must fall back to stripped distcc hosts when no plain hosts are configured."; exit 1; }
-              grep -F 'DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}";' "$dockerfile" >/dev/null \
-                || { echo "::error::$dockerfile must reuse the lsdistcc-filtered pump host list for no-pump compiler probes."; exit 1; }
+              if grep -F 'DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}";' "$dockerfile" >/dev/null; then
+                echo "::error::$dockerfile must not reassign DISTCC_HOSTS_NO_PUMP from the pump-published host list -- that list's ,cpp/,lzo suffix is only meaningful to a running include server, and lancache-distcc-wrapper's whole reason for using DISTCC_HOSTS_NO_PUMP is compiling WITHOUT one (confirmed live: this exact reassignment leaked the pump suffix into non-pump compiles, see #613)."
+                exit 1
+              fi
               grep -F 'export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts";' "$dockerfile" >/dev/null \
                 && grep -F 'distcc-pump --startup' "$dockerfile" >/dev/null \
                 || { echo "::error::$dockerfile must start distcc-pump with pump-capable hosts only."; exit 1; }
@@ -1367,6 +1406,43 @@ jobs:
               ;;
           esac
 
+  # A fixed validation subnet collided repeatedly across different,
+  # concurrent workflow runs sharing one of the 3 physical self-hosted
+  # runner hosts (#623) -- `needs:` only serializes jobs *within* one run.
+  # Deriving the subnet from this run's own id/attempt gives every run its
+  # own subnet, so two runs on the same host (almost) never collide.
+  #
+  # Deliberately unconditional (no `needs`/`if` gating on detect-changes):
+  # `detect-changes` itself only runs `if: github.event_name ==
+  # 'pull_request'`, so on a push event it's skipped -- and a job that
+  # `needs` a skipped job is itself skipped by default (no `always()`
+  # here). full-setup-validate below *does* use `always()` to tolerate its
+  # own skipped/failed `needs`, which means gating this job the same way
+  # would make it skip on every push while full-setup-validate still ran,
+  # silently falling back to the old fixed subnet on every master merge --
+  # exactly the bug this fixes. Running unconditionally costs a few
+  # seconds on the rare PR that doesn't touch deploy/ or the CI contract,
+  # which is far cheaper than that.
+  compute-validation-network:
+    name: derive per-run validation subnet
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+      gateway: ${{ steps.derive.outputs.gateway }}
+      proxy_ip: ${{ steps.derive.outputs.proxy_ip }}
+      proxy_ssl_ip: ${{ steps.derive.outputs.proxy_ssl_ip }}
+      dns_standard_ip: ${{ steps.derive.outputs.dns_standard_ip }}
+      dns_ssl_ip: ${{ steps.derive.outputs.dns_ssl_ip }}
+      watchdog_ip: ${{ steps.derive.outputs.watchdog_ip }}
+      netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
+      nats_ip: ${{ steps.derive.outputs.nats_ip }}
+      ui_ip: ${{ steps.derive.outputs.ui_ip }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Derive validation network
+        id: derive
+        uses: ./.github/actions/derive-validation-network
+
   full-setup-validate:
     name: validate full-setup image
     # On a pull_request event, `promote` never runs at all (see its own `if:`
@@ -1381,7 +1457,7 @@ jobs:
     # job validate the freshly-promoted state of the commit it's actually
     # running for, instead of racing ahead of it or checking a stale channel
     # tag left over from a previous push.
-    needs: [detect-changes, promote]
+    needs: [detect-changes, promote, compute-validation-network]
     if: >-
       ${{
         always() &&
@@ -1393,6 +1469,17 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
+      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
+      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
+      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
+      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
+      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
+      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
+      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
+      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -1450,15 +1537,16 @@ jobs:
             docker:latest \
             docker compose -f docker-compose.yml config >/dev/null
 
-      # The validation network's subnet is a fixed default (see
-      # docker-compose.yml) so services can reference each other's IPs
-      # deterministically. That default can collide with an unrelated
-      # network already on the host -- override it via VALIDATION_SUBNET
-      # (and the matching VALIDATION_*_IP / VALIDATION_GATEWAY vars) if it
-      # does. Check for that collision explicitly before starting: a raw
-      # `docker compose up` failure here is a cryptic
-      # "failed to set up container networking: Address already in use"
-      # with no indication of which network is actually at fault.
+      # VALIDATION_SUBNET (and the matching VALIDATION_*_IP /
+      # VALIDATION_GATEWAY vars, see docker-compose.yml) is now derived
+      # per-run by the compute-validation-network job above (#623), so a
+      # collision between two different concurrent runs should be rare.
+      # This check remains as defense-in-depth for a genuine leftover
+      # network (e.g. a bridge left behind by a crashed prior run that
+      # never reached the teardown step): a raw `docker compose up` failure
+      # in that case is a cryptic "failed to set up container networking:
+      # Address already in use" with no indication of which network is
+      # actually at fault.
       - name: Check for a validation subnet collision
         run: |
           set -euo pipefail
@@ -2677,12 +2765,14 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - line-endings
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
+        needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
@@ -3276,12 +3366,14 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - line-endings
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
+        needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')

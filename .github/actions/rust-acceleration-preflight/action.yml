@@ -255,7 +255,17 @@ runs:
                   distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"
                 fi
                 case "$distcc_host_spec" in
-                  *,cpp*) distcc_pump_hosts="${distcc_pump_hosts:+$distcc_pump_hosts }$distcc_host_spec" ;;
+                  # distcc-pump's own lsdistcc probe does a literal hostname
+                  # lookup on every DISTCC_POTENTIAL_HOSTS token it is given
+                  # (verified live: "192.168.1.x,cpp,lzo" fails gethostbyname()
+                  # while "192.168.1.x" resolves fine), and distcc-pump
+                  # re-derives and re-appends the ,cpp/,lzo suffix itself for
+                  # whichever hosts it confirms alive. Feeding it the original
+                  # comma-suffixed spec here made every pump-candidate host
+                  # unresolvable, so DISTCC_POTENTIAL_HOSTS did not resolve to
+                  # usable remote hosts before this fix -- use the bare base
+                  # instead.
+                  *,cpp*) distcc_pump_hosts="${distcc_pump_hosts:+$distcc_pump_hosts }$distcc_host_base" ;;
                   *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;;
                 esac
               done
@@ -264,6 +274,24 @@ runs:
                 distcc_hosts="127.0.0.1"
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
+
+              # distcc-pump always exports a DISTCC_HOSTS value that starts
+              # with the "--randomize" option token, even when its lsdistcc
+              # probe found zero live hosts (in that case nothing follows the
+              # option). A plain non-empty-string test on DISTCC_HOSTS can't
+              # tell "pump published real hosts" apart from "pump published
+              # nothing" -- verified live, that false positive both wastes a
+              # doomed compile attempt and, further down, clobbers a good
+              # non-pump host list with that same hostless value.
+              distcc_pump_published_hosts() {
+                for distcc_host_token in $1; do
+                  case "$distcc_host_token" in
+                    --*) ;;
+                    *) return 0 ;;
+                  esac
+                done
+                return 1
+              }
 
               if [ "$distcc_enabled" = "1" ]; then
                 export PATH="$wrapper_dir:$PATH"
@@ -277,7 +305,7 @@ runs:
                   distcc_pump_filtered_hosts="${DISTCC_HOSTS:-}"
                   PATH="$wrapper_dir:$PATH"
                   export PATH
-                  if [ -n "$distcc_pump_filtered_hosts" ]; then
+                  if distcc_pump_published_hosts "$distcc_pump_filtered_hosts"; then
                     pump_started=1
                     pump_log="$preflight_dir/distcc-pump.log"
                     if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1; then
@@ -288,17 +316,27 @@ runs:
                       unset pump_started
                     fi
                   else
-                    echo "[INFO] distcc-pump did not publish usable hosts; continuing with plain distcc fallback."
+                    echo "[INFO] distcc-pump did not publish usable hosts (lsdistcc found none of the candidate hosts alive); continuing with plain distcc fallback."
+                    distcc_pump_filtered_hosts=""
                   fi
                   distcc-pump --shutdown >/dev/null 2>&1 || true
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
-                distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
+                # This probe runs AFTER distcc-pump has already been shut
+                # down above (INCLUDE_SERVER_PORT/INCLUDE_SERVER_PID unset),
+                # so it must never use the pump-published host list -- that
+                # list's ",cpp"/",lzo" suffix only means anything to a
+                # running include server. Reusing it here (a prior version
+                # of this logic reassigned distcc_hosts_without_pump from
+                # distcc_pump_filtered_hosts whenever pump succeeded) made a
+                # *successful* pump-host resolution trigger
+                # "INCLUDE_SERVER_PORT not set" on this post-shutdown probe
+                # instead of proving plain distcc acceleration -- confirmed
+                # live. distcc_hosts_without_pump already holds the correct,
+                # stripped non-pump host list computed above, before any
+                # pump handling; leave it untouched here.
                 final_distcc_hosts="$distcc_hosts_without_pump"
-                if [ -n "$distcc_pump_filtered_hosts" ]; then
-                  final_distcc_hosts="$distcc_pump_filtered_hosts"
-                fi
                 if [ -z "$final_distcc_hosts" ]; then
                   final_distcc_hosts="$distcc_hosts"
                 fi

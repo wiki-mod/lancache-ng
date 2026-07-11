@@ -188,9 +188,30 @@ kgs_snapshot_apply() {
     for ((i = ${#ids[@]} - 1; i >= 0; i--)); do
         id="${ids[$i]}"
         snap_dir="${snapshot_root}/${id}"
+
+        # Require every requested basename to be present in this snapshot
+        # before touching any live file. A finalized-but-incomplete
+        # snapshot (e.g. taken before a new generated file was added to the
+        # candidate list) would otherwise leave that one dest untouched --
+        # silently validating a mix of this snapshot's files and whatever
+        # happened to already be live, a combination that was never itself
+        # actually validated together.
+        local snapshot_complete=1
         for d in "${dest[@]}"; do
             base="$(basename "$d")"
-            [ -f "${snap_dir}/${base}" ] && cp -p "${snap_dir}/${base}" "$d"
+            if [ ! -f "${snap_dir}/${base}" ]; then
+                snapshot_complete=0
+                break
+            fi
+        done
+        if [ "$snapshot_complete" -ne 1 ]; then
+            kgs_log REJECT "$label" "rejected known-good snapshot $id: incomplete (missing at least one candidate file)"
+            continue
+        fi
+
+        for d in "${dest[@]}"; do
+            base="$(basename "$d")"
+            cp -p "${snap_dir}/${base}" "$d"
         done
 
         # Redirect the validator's own stdout to stderr: this function's
@@ -448,9 +469,19 @@ _load_public_suffix_list
 # proxy unable to start.
 declare -a _UNIQUE_DOMAINS=()
 declare -A _DOMAIN_IS_ROOT=()
+# Set to 1 by _collect_domain_rows when any cdn-domains.txt row is skipped
+# (invalid entry, or a root domain that could not be derived). A config
+# generated from a domain list with skipped rows can still pass `nginx -t`
+# (skipping a row is not a syntax error) -- but it is a *degraded* config
+# missing coverage cdn-domains.txt actually lists, and #415's known-good
+# snapshot mechanism must not treat it as a new known-good baseline (that
+# would prune away a possibly-complete prior snapshot in favor of this
+# incomplete one). See _proxy_validate_snapshot_or_rollback below.
+_DOMAIN_ROWS_SKIPPED=0
 _collect_domain_rows() {
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
+    _DOMAIN_ROWS_SKIPPED=0
     local raw_domain domain root
 
     while IFS= read -r raw_domain || [ -n "$raw_domain" ]; do
@@ -461,6 +492,7 @@ _collect_domain_rows() {
         # Validate and normalize domain before using it anywhere
         if ! _is_valid_domain "$domain"; then
             echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2
+            _DOMAIN_ROWS_SKIPPED=1
             continue
         fi
         domain="$(_normalize_domain "$domain")"
@@ -468,6 +500,7 @@ _collect_domain_rows() {
 
         if ! root="$(_registrable_domain "$domain")" || [[ -z "$root" ]]; then
             echo "[lancache] WARNING: could not derive a root domain for: $domain" >&2
+            _DOMAIN_ROWS_SKIPPED=1
             continue
         fi
 
@@ -737,7 +770,22 @@ _proxy_validate_snapshot_or_rollback() {
 
     echo "[lancache] Validating nginx config..."
     if nginx -t; then
-        kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "${candidate_files[@]}"
+        if [ "$_DOMAIN_ROWS_SKIPPED" -eq 1 ]; then
+            # nginx -t passing only proves the generated config is
+            # syntactically valid, not that it covers every domain
+            # cdn-domains.txt actually lists. Snapshotting this degraded
+            # config as "known-good" would prune away a possibly-complete
+            # prior snapshot the moment a single malformed row appears --
+            # skip the snapshot (the config still runs; only the rollback
+            # baseline is left untouched) until cdn-domains.txt is fixed.
+            echo "[lancache] WARNING: one or more cdn-domains.txt rows were skipped; NOT snapshotting this config as known-good (existing snapshot, if any, is preserved). Fix cdn-domains.txt to resume snapshotting." >&2
+        elif ! kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "${candidate_files[@]}"; then
+            # The config is valid and nginx still starts from it -- but
+            # without a recorded snapshot, a future invalid config has
+            # nothing to roll back to. Surface that loudly rather than
+            # silently degrading rollback protection.
+            echo "[lancache] WARNING: failed to record this valid config as a known-good snapshot (see FATAL line above); rollback protection is degraded until this succeeds." >&2
+        fi
         return 0
     fi
 

@@ -93,7 +93,7 @@ pub async fn add_dns(
     if let Err(e) = wrote {
         tracing::error!("Failed to write dns domain: {}", e);
     } else {
-        flush_recursor_cache(&state).await;
+        flush_recursor_cache(&state, &domain.domain).await;
         // The SSL proxy derives its wildcard-cert root domains and nginx
         // host-allowlist maps from this same file at container startup (see
         // services/proxy/entrypoint.sh) — there is no separate SSL domain
@@ -124,7 +124,11 @@ pub async fn remove_dns(
     if let Err(e) = removed {
         tracing::error!("Failed to remove dns domain: {}", e);
     } else {
-        flush_recursor_cache(&state).await;
+        let flushed_domain = match &domain {
+            DomainDeleteTarget::Canonical(spec) => spec.domain.clone(),
+            DomainDeleteTarget::Raw(raw) => raw.clone(),
+        };
+        flush_recursor_cache(&state, &flushed_domain).await;
         // The SSL proxy derives its wildcard-cert root domains and nginx
         // host-allowlist maps from this same file at container startup (see
         // services/proxy/entrypoint.sh) — removing a domain here means the
@@ -175,7 +179,7 @@ pub async fn add_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state).await;
+    flush_recursor_cache(&state, &name).await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -222,7 +226,7 @@ pub async fn remove_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state).await;
+    flush_recursor_cache(&state, &name).await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -257,10 +261,25 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
-async fn flush_recursor_cache(state: &AppState) {
+async fn flush_recursor_cache(state: &AppState, domain: &str) {
+    // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
+    // parameter and only flushes an exact name match, not a subtree --
+    // confirmed live while building issue #400's integration test:
+    // `?type=packet` (the previous call) always returned 422 Unprocessable
+    // Entity, and even `?domain=.` or `?domain=lan.` leave a just-deleted
+    // leaf record (e.g. `host.lan.`) resolving from cache until its TTL
+    // naturally expires. The caller must pass the exact name that changed.
+    // PowerDNS also requires canonical (dot-terminated) form, or the flush
+    // itself is rejected outright ("DNS Name '' is not canonical") --
+    // ensure that here so callers don't all need to remember it themselves.
+    let canonical_domain = if domain.ends_with('.') {
+        domain.to_string()
+    } else {
+        format!("{domain}.")
+    };
     let url = format!(
-        "{}/api/v1/servers/localhost/cache/flush?type=packet",
-        state.config.pdns_rec_url
+        "{}/api/v1/servers/localhost/cache/flush?domain={}",
+        state.config.pdns_rec_url, canonical_domain
     );
     state
         .http_client
@@ -271,9 +290,13 @@ async fn flush_recursor_cache(state: &AppState) {
         .ok();
 
     // Also publish flush event so all recursor instances clear their cache
+    // for this same domain, not just the one this UI instance talks to.
     state
         .nats
-        .publish("lancache.dns.flush", "{}".into())
+        .publish(
+            "lancache.dns.flush",
+            json!({"domain": canonical_domain}).to_string().into(),
+        )
         .await
         .ok();
 }

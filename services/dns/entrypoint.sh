@@ -212,9 +212,30 @@ kgs_snapshot_apply() {
     for ((i = ${#ids[@]} - 1; i >= 0; i--)); do
         id="${ids[$i]}"
         snap_dir="${snapshot_root}/${id}"
+
+        # Require every requested basename to be present in this snapshot
+        # before touching any live file. A finalized-but-incomplete
+        # snapshot (e.g. taken before a new generated file was added to the
+        # candidate list) would otherwise leave that one dest untouched --
+        # silently validating a mix of this snapshot's files and whatever
+        # happened to already be live, a combination that was never itself
+        # actually validated together.
+        local snapshot_complete=1
         for d in "${dest[@]}"; do
             base="$(basename "$d")"
-            [ -f "${snap_dir}/${base}" ] && cp -p "${snap_dir}/${base}" "$d"
+            if [ ! -f "${snap_dir}/${base}" ]; then
+                snapshot_complete=0
+                break
+            fi
+        done
+        if [ "$snapshot_complete" -ne 1 ]; then
+            kgs_log REJECT "$label" "rejected known-good snapshot $id: incomplete (missing at least one candidate file)"
+            continue
+        fi
+
+        for d in "${dest[@]}"; do
+            base="$(basename "$d")"
+            cp -p "${snap_dir}/${base}" "$d"
         done
 
         # Redirect the validator's own stdout to stderr: this function's

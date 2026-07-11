@@ -13,17 +13,61 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
+        # latest is intentionally not the default: this project has not cut
+        # a stable release yet, so every first-party service's :latest tag
+        # is an untouched leftover from before the promote/versioning
+        # contract existed (confirmed directly: ui/proxy/dns/watchdog/dhcp/
+        # dhcp-proxy:latest are all 1-2 weeks stale, and stack:latest --
+        # the coherent multi-service pointer -- does not exist at all). edge
+        # is the channel actually promoted daily from master.
         description: Stack image tag to validate against.
         required: false
-        default: latest
+        default: edge
 
 permissions:
   contents: read
 
 jobs:
+  # A fixed validation subnet collided repeatedly across different,
+  # concurrent workflow runs sharing one of the 3 physical self-hosted
+  # runner hosts (#623) -- `needs:` below only serializes jobs *within* this
+  # one run. Deriving the subnet from this run's own id/attempt gives every
+  # run its own subnet, so two runs on the same host (almost) never collide.
+  compute-validation-network:
+    name: derive per-run validation subnet
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+      gateway: ${{ steps.derive.outputs.gateway }}
+      proxy_ip: ${{ steps.derive.outputs.proxy_ip }}
+      proxy_ssl_ip: ${{ steps.derive.outputs.proxy_ssl_ip }}
+      dns_standard_ip: ${{ steps.derive.outputs.dns_standard_ip }}
+      dns_ssl_ip: ${{ steps.derive.outputs.dns_ssl_ip }}
+      watchdog_ip: ${{ steps.derive.outputs.watchdog_ip }}
+      netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
+      nats_ip: ${{ steps.derive.outputs.nats_ip }}
+      ui_ip: ${{ steps.derive.outputs.ui_ip }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Derive validation network
+        id: derive
+        uses: ./.github/actions/derive-validation-network
+
   full-setup-validate:
     name: validate full-setup image
+    needs: compute-validation-network
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
+      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
+      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
+      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
+      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
+      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
+      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
+      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
+      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -55,15 +99,16 @@ jobs:
             docker:latest \
             docker compose -f docker-compose.yml config >/dev/null
 
-      # The validation network's subnet is a fixed default (see
-      # docker-compose.yml) so services can reference each other's IPs
-      # deterministically. That default can collide with an unrelated
-      # network already on the host -- override it via VALIDATION_SUBNET
-      # (and the matching VALIDATION_*_IP / VALIDATION_GATEWAY vars) if it
-      # does. Check for that collision explicitly before starting: a raw
-      # `docker compose up` failure here is a cryptic
-      # "failed to set up container networking: Address already in use"
-      # with no indication of which network is actually at fault.
+      # VALIDATION_SUBNET (and the matching VALIDATION_*_IP /
+      # VALIDATION_GATEWAY vars, see docker-compose.yml) is now derived
+      # per-run by the compute-validation-network job above (#623), so a
+      # collision between two different concurrent runs should be rare.
+      # This check remains as defense-in-depth for a genuine leftover
+      # network (e.g. a bridge left behind by a crashed prior run that
+      # never reached the teardown step): a raw `docker compose up` failure
+      # in that case is a cryptic "failed to set up container networking:
+      # Address already in use" with no indication of which network is
+      # actually at fault.
       - name: Check for a validation subnet collision
         run: |
           set -euo pipefail
@@ -269,3 +314,106 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ssl-mitm-cache-simulation.sh
+
+  ui-nats-dns-integration-simulation:
+    # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test
+    # (issue #400, sub-item of #398 priority 1). Adds a LAN DNS record
+    # through the real Admin UI HTTP route, verifies it resolves via a real
+    # DNS query, removes it, verifies it's gone. Building this surfaced
+    # three independent, real product bugs (see #607) that made this
+    # feature completely non-functional -- fixed in the same PR as this job.
+    # Shares the ssl-mitm-cache-simulation job's collision constraint: same
+    # compose project name and fixed validation-network IPs as
+    # full-setup-validate, so it must not run concurrently with either.
+    name: UI/NATS/DNS integration simulation
+    needs: ssl-mitm-cache-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run UI/NATS/DNS integration simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          scripts/ui-nats-dns-integration-simulation.sh
+
+  setup-cli-simulation:
+    # Runs the real setup.sh CLI end-to-end (fresh install through its
+    # interactive prompts, update/migration, and one rollback-safety
+    # scenario) instead of only bash -n syntax checking it -- see issue
+    # #403. Independent of full-setup-validate above in what it exercises
+    # (that job runs deploy/full-setup/docker-compose.yml directly; this one
+    # runs the setup.sh installer itself, which generates and manages its
+    # own deploy/quickstart-derived install directory), but both jobs bind
+    # the same host ports (127.0.0.1:443, :8080, ...) on this shared
+    # self-hosted runner tier. Confirmed directly: running both jobs
+    # concurrently on the same workflow_dispatch produced "port is already
+    # allocated" here and a flaky "ui did not become healthy" in the other
+    # job. Chained after ui-nats-dns-integration-simulation (the last job in
+    # the full-setup-validate -> ssl-mitm-cache-simulation ->
+    # ui-nats-dns-integration-simulation sequence, all of which were added
+    # after this port-collision test and were never specifically re-tested
+    # against setup-cli-simulation) rather than directly after
+    # full-setup-validate, so this job is guaranteed to never run
+    # concurrently with any of them, not just the one it was tested against.
+    name: setup.sh CLI simulation
+    needs: ui-nats-dns-integration-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true: this workflow
+        # only ever runs via workflow_dispatch (event_name != pull_request),
+        # so select-build-tools-image.sh's trusted-ref path already always
+        # builds a fresh branch-local image from this checkout's Dockerfile
+        # instead of trying the published tag first. That is what's actually
+        # wanted here -- expect (added to tools/build-tools/Dockerfile in
+        # this same change) only exists on this branch, not yet in any
+        # published build-tools image.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run setup.sh CLI simulation
+        # expect and the Docker CLI needed to drive setup.sh's interactive
+        # prompts and manage the resulting stack both live in the build-tools
+        # image, per AG-VAL-016. The host's Docker socket is mounted so
+        # containers setup.sh starts inside this container are real sibling
+        # containers on the runner's own Docker daemon, not nested
+        # docker-in-docker.
+        #
+        # Mounted at the SAME absolute path ($PWD) inside this container as
+        # on the host, not at an arbitrary path like /work: docker compose,
+        # run from inside this container, resolves its bind-mount sources
+        # against the HOST daemon, which has no idea this container's
+        # filesystem exists. A path that only looks valid from inside this
+        # container (e.g. /work/...) resolves to nothing on the host, so the
+        # host daemon silently auto-creates it as an empty directory and
+        # then fails mounting that directory onto a file destination.
+        # Confirmed directly. Using the identical path on both sides is what
+        # makes any bind mount setup.sh itself declares (e.g.
+        # ./scripts/dhcp-probe.sh) resolve correctly no matter which side
+        # evaluates it.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            "$BUILD_TOOLS_IMAGE" \
+            bash scripts/setup-cli-simulation.sh
