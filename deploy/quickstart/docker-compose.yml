@@ -20,61 +20,13 @@
 
 name: lancache-ng
 
-x-docker-socket-proxy-command: &docker-socket-proxy-command |
-  cat > /tmp/lancache-haproxy.cfg <<'EOF'
-  # Docker exec and generic container creation are intentionally banned here:
-  # the Admin UI and watchdog only need narrowly scoped lifecycle operations for
-  # known lancache-ng containers. A compromised UI should not gain a general
-  # Docker API that can create privileged containers or attach to unrelated
-  # workloads on the host.
-  global
-      log stdout format raw daemon info
-      pidfile /run/haproxy.pid
-      maxconn 4000
-
-  defaults
-      mode http
-      log global
-      option httplog
-      option dontlognull
-      option http-server-close
-      timeout http-request 10s
-      timeout connect 10s
-      timeout client 10m
-      timeout server 10m
-
-  backend dockerbackend
-      server dockersocket /var/run/docker.sock
-
-  frontend dockerfrontend
-      bind [::]:2375 v4v6
-      # Permit only Docker daemon health/version checks plus a small set of
-      # container operations for fixed lancache-ng container names.
-      acl safe_get method GET
-      acl safe_head method HEAD
-      acl safe_post method POST
-      acl safe_ping path,url_dec -m reg -i ^(/v[0-9.]+)?/_ping$
-      acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
-      acl docker_container_path path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/
-      acl lancache_container path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)(/|$)
-      acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/json$
-      acl safe_container_logs path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/logs$
-      acl safe_service_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart$
-      acl safe_dhcp_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-dhcp|lancache-dhcp-proxy)/(start|stop)$
-      acl safe_probe_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/(start|stop|wait)$
-      http-request allow if safe_get safe_ping
-      http-request allow if safe_head safe_ping
-      http-request allow if safe_get safe_version
-      http-request allow if safe_get safe_container_inspect
-      http-request allow if safe_get safe_container_logs
-      http-request allow if safe_post safe_service_restart
-      http-request allow if safe_post safe_dhcp_action
-      http-request allow if safe_post safe_probe_action
-      http-request deny if docker_container_path !lancache_container
-      http-request deny
-      default_backend dockerbackend
-  EOF
-  exec haproxy -f /tmp/lancache-haproxy.cfg
+# The Docker socket proxy's HAProxy allowlist lives in exactly one place,
+# scripts/docker-socket-proxy.sh (mounted read-only below), which is the
+# canonical source per docs/naming-conventions.md. This file used to also
+# carry an unreferenced x-docker-socket-proxy-command YAML anchor with a
+# near-duplicate copy of that same config -- it was never aliased anywhere
+# (dead weight that could silently drift from the real script with no
+# functional effect) and has been removed.
 
 services:
 
@@ -219,6 +171,7 @@ services:
 
   # ── Log aggregator (optional, start with: docker compose --profile logging up) ──
   syslog:
+    container_name: lancache-syslog
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     profiles: [logging]
     command: >
@@ -307,6 +260,7 @@ services:
   # toggles with a deny-by-default allowlist for named lancache-ng containers.
   # It is isolated on docker-api so other services cannot reach the proxy API.
   docker-socket-proxy:
+    container_name: lancache-docker-socket-proxy
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     entrypoint: ["/usr/local/bin/lancache-docker-socket-proxy.sh"]
     command: []
@@ -324,6 +278,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   watchdog:
+    container_name: lancache-watchdog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
@@ -451,6 +406,7 @@ services:
   # UI_BIND_IP=127.0.0.1 to restrict access to the host. Direct Docker socket mount
   # removed; Docker operations are proxied through the isolated docker-api network.
   ui:
+    container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ui-data:/data
@@ -520,6 +476,7 @@ services:
 
   # ── Netdata (system metrics) ───────────────────────────────────────────────
   netdata:
+    container_name: lancache-netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata
     cap_add: [SYS_PTRACE]
@@ -543,6 +500,7 @@ services:
   # Only active if COMPOSE_PROFILES contains watchtower (setup.sh prompts for this)
   # Fork from nicholas-fedor: actively maintained, NegotiateAPIVersion=true (Docker 29+)
   watchtower:
+    container_name: lancache-watchtower
     profiles: [watchtower]
     image: ghcr.io/nicholas-fedor/watchtower:latest@sha256:c1dfdf27fe805dcfefe1cf048cee6960a511c097a99aa355b0bc4be6e6bb3bdf
     volumes:
