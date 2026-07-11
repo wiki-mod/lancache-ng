@@ -300,3 +300,75 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ui-nats-dns-integration-simulation.sh
+
+  setup-cli-simulation:
+    # Runs the real setup.sh CLI end-to-end (fresh install through its
+    # interactive prompts, update/migration, and one rollback-safety
+    # scenario) instead of only bash -n syntax checking it -- see issue
+    # #403. Independent of full-setup-validate above in what it exercises
+    # (that job runs deploy/full-setup/docker-compose.yml directly; this one
+    # runs the setup.sh installer itself, which generates and manages its
+    # own deploy/quickstart-derived install directory), but both jobs bind
+    # the same host ports (127.0.0.1:443, :8080, ...) on this shared
+    # self-hosted runner tier. Confirmed directly: running both jobs
+    # concurrently on the same workflow_dispatch produced "port is already
+    # allocated" here and a flaky "ui did not become healthy" in the other
+    # job. Chained after ui-nats-dns-integration-simulation (the last job in
+    # the full-setup-validate -> ssl-mitm-cache-simulation ->
+    # ui-nats-dns-integration-simulation sequence, all of which were added
+    # after this port-collision test and were never specifically re-tested
+    # against setup-cli-simulation) rather than directly after
+    # full-setup-validate, so this job is guaranteed to never run
+    # concurrently with any of them, not just the one it was tested against.
+    name: setup.sh CLI simulation
+    needs: ui-nats-dns-integration-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true: this workflow
+        # only ever runs via workflow_dispatch (event_name != pull_request),
+        # so select-build-tools-image.sh's trusted-ref path already always
+        # builds a fresh branch-local image from this checkout's Dockerfile
+        # instead of trying the published tag first. That is what's actually
+        # wanted here -- expect (added to tools/build-tools/Dockerfile in
+        # this same change) only exists on this branch, not yet in any
+        # published build-tools image.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run setup.sh CLI simulation
+        # expect and the Docker CLI needed to drive setup.sh's interactive
+        # prompts and manage the resulting stack both live in the build-tools
+        # image, per AG-VAL-016. The host's Docker socket is mounted so
+        # containers setup.sh starts inside this container are real sibling
+        # containers on the runner's own Docker daemon, not nested
+        # docker-in-docker.
+        #
+        # Mounted at the SAME absolute path ($PWD) inside this container as
+        # on the host, not at an arbitrary path like /work: docker compose,
+        # run from inside this container, resolves its bind-mount sources
+        # against the HOST daemon, which has no idea this container's
+        # filesystem exists. A path that only looks valid from inside this
+        # container (e.g. /work/...) resolves to nothing on the host, so the
+        # host daemon silently auto-creates it as an empty directory and
+        # then fails mounting that directory onto a file destination.
+        # Confirmed directly. Using the identical path on both sides is what
+        # makes any bind mount setup.sh itself declares (e.g.
+        # ./scripts/dhcp-probe.sh) resolve correctly no matter which side
+        # evaluates it.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            "$BUILD_TOOLS_IMAGE" \
+            bash scripts/setup-cli-simulation.sh
