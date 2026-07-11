@@ -469,7 +469,8 @@ services:
     depends_on:
       - syslog-ng
     networks:
-      - lancache
+      lancache:
+        ipv4_address: 172.28.0.9
     restart: unless-stopped
 
   # ── Central log receiver (#453; optional, start with: docker compose --profile logging up) ──
@@ -553,7 +554,8 @@ services:
       retries: 3
       start_period: 20s
     networks:
-      - lancache
+      lancache:
+        ipv4_address: 172.28.0.10
     restart: unless-stopped
 
   # ── Admin UI ──────────────────────────────────────────────────────────────
