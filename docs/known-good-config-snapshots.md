@@ -154,8 +154,7 @@ against the same documented contract as the shell adapters above (same
 retention semantics, same `KEEP_KNOWN_GOOD_CONFIGS` variable, same log
 vocabulary), persisted into the already-persistent `kea-data` volume
 (`/var/lib/kea`). That is a second PR's worth of work on its own and is
-intentionally out of scope here; see the tracking follow-up issue for Kea
-multi-generation snapshots referenced from #415.
+intentionally out of scope here; tracked in #614.
 
 ## PowerDNS (design only, not implemented)
 
@@ -198,7 +197,7 @@ different categories:
    API/database-backed state.
 
 Given that, the honest scope for PDNS in this PR is this documented design,
-not an implementation. A follow-up issue should scope PDNS static-config
+not an implementation. Follow-up issue #615 scopes PDNS static-config
 snapshotting (item 1 above, which likely *can* reuse the generic contract
 directly) separately from any zone/record rollback design (item 2, which
 needs its own explicit export/validate/apply/verify flow per the issue's
