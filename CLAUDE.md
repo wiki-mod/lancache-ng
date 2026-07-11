@@ -101,17 +101,24 @@ by configuring which DNS server IP they point to:
 - **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
   concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
   prebuilt release binaries — they're Rust, so there's no behavioral difference from building
-  them ourselves, just wasted build time. `actionlint` is the one exception, built from source
-  against `golang:latest`: Go statically embeds its entire standard library into every compiled
-  binary, so a stale upstream release binary permanently carries whatever stdlib CVEs existed
-  when *its* maintainers last cut a release — confirmed for real (2026-07-09): actionlint's
-  latest release (v1.7.12, published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings
-  (crypto/x509, crypto/tls, net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building
-  the same version from source with `golang:latest` picks up a current Go toolchain (1.26.5 as
-  of this writing) and scores 0. This is a narrow, justified exception to the "Rust and shell
-  only" project-language rule (see above), not a general license to add other language
-  toolchains — re-justify it the same way (a real Trivy/CVE finding, not a hypothetical one)
-  before reaching for a compiled-from-source dependency in another language again.
+  them ourselves, just wasted build time. `actionlint`, the Docker CLI, and `docker-compose`
+  are the exceptions, all built from source against `golang:latest` for the same reason: Go
+  statically embeds its entire standard library into every compiled binary, so a stale upstream
+  release binary permanently carries whatever stdlib CVEs existed when *its* maintainers last
+  cut a release. Confirmed for real (2026-07-09): actionlint's latest release (v1.7.12,
+  published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings (crypto/x509, crypto/tls,
+  net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building the same version from
+  source with `golang:latest` picks up a current Go toolchain (1.26.5 as of this writing) and
+  scores 0. Confirmed again (2026-07-10, CVE-2026-39822): the official static release binaries
+  for Docker CLI v29.6.1 and docker-compose v5.2.0 carry the same class of embedded-stdlib
+  vulnerability, with no patched upstream release available yet — building both from source
+  (`docker/cli`'s own `scripts/build/binary`, and a local `go build ./cmd` for
+  `docker/compose`, since neither project supports a plain `go install pkg@version`) against a
+  current Go toolchain is the only way to get a current, patched stdlib into them. This is a
+  narrow, justified exception to the "Rust and shell only" project-language rule (see above),
+  not a general license to add other language toolchains — re-justify it the same way (a real
+  Trivy/CVE finding, not a hypothetical one) before reaching for a compiled-from-source
+  dependency in another language again.
 
 ## Dev vs Prod Split
 
