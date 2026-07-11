@@ -43,6 +43,45 @@ same LAN. Two competing DHCP servers on one network cause unpredictable client
 configuration. If your router already provides DHCP, either keep using the
 router (and set DNS another way) or switch DHCP fully to LanCache NG.
 
+### Kea activation preflight (safety gate before Kea ever serves clients)
+
+Selecting `kea` in `setup.sh` prepares Kea's configuration, secrets, and
+volumes, but `setup.sh` does not let Kea become an active DHCP server without
+one more safety step. Immediately before the stack starts — after images are
+pulled, right before `docker compose up` — `setup.sh` runs a non-invasive
+DHCP discovery probe (`nmap --script broadcast-dhcp-discover`) using the Kea
+image itself. This only runs `nmap` inside that image and exits; it does not
+start Kea and does not touch the network beyond the broadcast probe.
+
+- If no other DHCP server answers, setup proceeds automatically and Kea
+  starts as normal.
+- If another DHCP server answers (Server Identifier detected), `setup.sh`
+  prints the responding server and requires an explicit `y`/`yes`
+  confirmation before continuing. Answering no cancels activation entirely —
+  Kea is never started.
+- If the probe itself could not run for any other reason (e.g. Docker/network
+  issues), `setup.sh` fails closed the same way: it requires an explicit
+  confirmation rather than silently proceeding as if no conflict exists.
+
+This closes the gap that existed before: previously, selecting `kea` started
+Kea immediately, and the only way to learn about a conflicting DHCP server was
+to open the Admin UI's DHCP page *after* Kea might already have been
+answering DHCP requests on the LAN.
+
+**This preflight is a one-time activation gate, not the same thing as the
+Admin UI's DHCP check.** The Admin UI's DHCP page (see "Verifying" below) runs
+the same kind of non-invasive discovery, but on demand, after the stack is
+already running — it is a diagnostic you can re-check at any time, and by
+itself it does not prevent Kea from serving. The `setup.sh` preflight
+documented here is what actually blocks Kea's first activation when a
+conflict is detected or the check could not run.
+
+Neither check validates Kea's own configuration or replays a real DHCP lease
+negotiation (`DHCPDISCOVER`/`DHCPOFFER`/`DHCPREQUEST`/`DHCPACK`) end to end —
+both are discovery-only broadcast probes for a second DHCP server on the
+segment. A behavioral test of Kea's actual lease/option responses is tracked
+separately (Refs #448).
+
 ## When to use dnsmasq-proxy mode
 
 Choose `dnsmasq-proxy` when the network already has a DHCP server you cannot
@@ -127,7 +166,11 @@ DNS servers:
    other DHCP servers on the LAN and reports whether a client dry-run received
    the expected options. In `dnsmasq-proxy` mode this is especially useful for
    spotting an upstream DHCP server whose own DNS option overrides the proxy
-   one.
+   one. This check is a **diagnostic** you can re-run at any time after the
+   stack is already up — it does not by itself gate whether Kea is currently
+   serving DHCP. The one-time safety gate that runs before Kea's first
+   activation is the `setup.sh` preflight described under "Kea activation
+   preflight" above.
 
 If a client does not pick up the LanCache NG DNS servers in `dnsmasq-proxy`
 mode, that is the expected limitation described above: the upstream DHCP
