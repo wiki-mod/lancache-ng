@@ -248,10 +248,10 @@ Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
 - GitHub Actions workflows upgraded to Node 24 compatible versions
 - nginx now handles both standard and SSL modes in single container (removed separate proxy-ssl service)
 - Cache location normalized to single `/srv/lancache/cache` directory (from multi-mount)
+- Watchtower helper switched from the original `containrrr/watchtower` (EOL since 2025, incompatible with Docker 29) to the maintained `nicholas-fedor/watchtower` fork
 
 ### Deprecated
 
-- Watchtower support temporarily removed (EOL since 2025, incompatible with Docker 29; re-added later via fork)
 - BIND9 DNS server (replaced by PowerDNS)
 
 ### Security
