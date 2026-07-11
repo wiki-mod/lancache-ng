@@ -87,6 +87,12 @@ pub struct Config {
     pub dhcp_ntp_servers: String,
     pub dhcp_proxy_subnet_start: String,
     pub dhcp_upstream_dhcp_ip: String,
+    pub dhcp_proxy_interface: String,
+    pub dhcp_proxy_router: String,
+    pub dhcp_proxy_domain: String,
+    pub dhcp_proxy_boot_filename: String,
+    pub dhcp_proxy_boot_server: String,
+    pub dhcp_proxy_custom_options: String,
     pub dhcp_mode: DhcpMode,
     pub dhcp_api_url: String,
     pub ui_settings_file: String,
@@ -146,6 +152,12 @@ impl fmt::Debug for Config {
             .field("dhcp_ntp_servers", &self.dhcp_ntp_servers)
             .field("dhcp_proxy_subnet_start", &self.dhcp_proxy_subnet_start)
             .field("dhcp_upstream_dhcp_ip", &self.dhcp_upstream_dhcp_ip)
+            .field("dhcp_proxy_interface", &self.dhcp_proxy_interface)
+            .field("dhcp_proxy_router", &self.dhcp_proxy_router)
+            .field("dhcp_proxy_domain", &self.dhcp_proxy_domain)
+            .field("dhcp_proxy_boot_filename", &self.dhcp_proxy_boot_filename)
+            .field("dhcp_proxy_boot_server", &self.dhcp_proxy_boot_server)
+            .field("dhcp_proxy_custom_options", &self.dhcp_proxy_custom_options)
             .field("dhcp_mode", &self.dhcp_mode.as_str())
             .field("dhcp_api_url", &self.dhcp_api_url)
             .field("ui_settings_file", &self.ui_settings_file)
@@ -238,6 +250,42 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
     }
 
+    // Issue #450: additional optional dnsmasq relay/proxy fields. All of
+    // these ride the supplemental ProxyDHCP/PXE exchange, same as
+    // DHCP_DNS_PRIMARY/SECONDARY above -- see docs/dhcp-modes.md and
+    // services/dhcp-proxy/entrypoint.sh's
+    // `_dhcp_proxy_render_optional_directives` for what that actually means
+    // for delivery to ordinary (non-PXE) clients.
+    pub fn effective_dhcp_proxy_interface(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_PROXY_INTERFACE")
+            .unwrap_or_else(|| self.dhcp_proxy_interface.clone())
+    }
+
+    pub fn effective_dhcp_proxy_router(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_PROXY_ROUTER")
+            .unwrap_or_else(|| self.dhcp_proxy_router.clone())
+    }
+
+    pub fn effective_dhcp_proxy_domain(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_PROXY_DOMAIN")
+            .unwrap_or_else(|| self.dhcp_proxy_domain.clone())
+    }
+
+    pub fn effective_dhcp_proxy_boot_filename(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_PROXY_BOOT_FILENAME")
+            .unwrap_or_else(|| self.dhcp_proxy_boot_filename.clone())
+    }
+
+    pub fn effective_dhcp_proxy_boot_server(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_PROXY_BOOT_SERVER")
+            .unwrap_or_else(|| self.dhcp_proxy_boot_server.clone())
+    }
+
+    pub fn effective_dhcp_proxy_custom_options(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_PROXY_CUSTOM_OPTIONS")
+            .unwrap_or_else(|| self.dhcp_proxy_custom_options.clone())
+    }
+
     // Renders the current effective DHCP settings back into the same
     // `KEY=value` line format `read_ui_override` parses, so this is what
     // gets written to `ui_settings_file` whenever the operator saves DHCP
@@ -266,6 +314,42 @@ impl Config {
         if !dhcp_ntp_servers.trim().is_empty() {
             lines.push(format!("DHCP_NTP_SERVERS={}", dhcp_ntp_servers.trim()));
         }
+        let dhcp_proxy_interface = self.effective_dhcp_proxy_interface();
+        if !dhcp_proxy_interface.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_PROXY_INTERFACE={}",
+                dhcp_proxy_interface.trim()
+            ));
+        }
+        let dhcp_proxy_router = self.effective_dhcp_proxy_router();
+        if !dhcp_proxy_router.trim().is_empty() {
+            lines.push(format!("DHCP_PROXY_ROUTER={}", dhcp_proxy_router.trim()));
+        }
+        let dhcp_proxy_domain = self.effective_dhcp_proxy_domain();
+        if !dhcp_proxy_domain.trim().is_empty() {
+            lines.push(format!("DHCP_PROXY_DOMAIN={}", dhcp_proxy_domain.trim()));
+        }
+        let dhcp_proxy_boot_filename = self.effective_dhcp_proxy_boot_filename();
+        if !dhcp_proxy_boot_filename.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_PROXY_BOOT_FILENAME={}",
+                dhcp_proxy_boot_filename.trim()
+            ));
+        }
+        let dhcp_proxy_boot_server = self.effective_dhcp_proxy_boot_server();
+        if !dhcp_proxy_boot_server.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_PROXY_BOOT_SERVER={}",
+                dhcp_proxy_boot_server.trim()
+            ));
+        }
+        let dhcp_proxy_custom_options = self.effective_dhcp_proxy_custom_options();
+        if !dhcp_proxy_custom_options.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_PROXY_CUSTOM_OPTIONS={}",
+                dhcp_proxy_custom_options.trim()
+            ));
+        }
         lines
     }
 
@@ -288,6 +372,12 @@ impl Config {
         let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "");
         let dhcp_proxy_subnet_start = env_str("DHCP_SUBNET_START", "");
         let dhcp_upstream_dhcp_ip = env_str("UPSTREAM_DHCP_IP", "");
+        let dhcp_proxy_interface = env_str("DHCP_PROXY_INTERFACE", "");
+        let dhcp_proxy_router = env_str("DHCP_PROXY_ROUTER", "");
+        let dhcp_proxy_domain = env_str("DHCP_PROXY_DOMAIN", "");
+        let dhcp_proxy_boot_filename = env_str("DHCP_PROXY_BOOT_FILENAME", "");
+        let dhcp_proxy_boot_server = env_str("DHCP_PROXY_BOOT_SERVER", "");
+        let dhcp_proxy_custom_options = env_str("DHCP_PROXY_CUSTOM_OPTIONS", "");
 
         let lancache_image_tag = env_str("LANCACHE_IMAGE_TAG", "latest");
         let lancache_image_channel = env::var("LANCACHE_IMAGE_CHANNEL")
@@ -318,6 +408,12 @@ impl Config {
             dhcp_ntp_servers,
             dhcp_proxy_subnet_start,
             dhcp_upstream_dhcp_ip,
+            dhcp_proxy_interface,
+            dhcp_proxy_router,
+            dhcp_proxy_domain,
+            dhcp_proxy_boot_filename,
+            dhcp_proxy_boot_server,
+            dhcp_proxy_custom_options,
             dhcp_mode,
             dhcp_api_url,
             ui_settings_file: env_str("UI_SETTINGS_FILE", DEFAULT_UI_SETTINGS_FILE),
@@ -927,6 +1023,134 @@ mod tests {
         assert_eq!(env_u32_clamped(key, 3), 7);
 
         env::remove_var(key);
+    }
+
+    #[test]
+    fn dhcp_proxy_optional_fields_load_from_env_and_ui_override_wins() {
+        // Issue #450: the new optional dnsmasq relay/proxy fields follow the
+        // same two-layer effective_* pattern as the pre-existing
+        // DHCP_SUBNET_START/UPSTREAM_DHCP_IP fields -- verify both the env
+        // load and that a persisted Admin UI override takes precedence.
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-dhcp-proxy-optional-{}.env",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&settings_path);
+        env::set_var("UI_SETTINGS_FILE", &settings_path);
+
+        env::set_var("DHCP_PROXY_INTERFACE", "eth0");
+        env::set_var("DHCP_PROXY_ROUTER", "10.0.0.1");
+        env::set_var("DHCP_PROXY_DOMAIN", "lan.local");
+        env::set_var("DHCP_PROXY_BOOT_FILENAME", "pxelinux.0");
+        env::set_var("DHCP_PROXY_BOOT_SERVER", "10.0.0.5");
+        env::set_var("DHCP_PROXY_CUSTOM_OPTIONS", "60:PXEClient");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.dhcp_proxy_interface, "eth0");
+        assert_eq!(cfg.dhcp_proxy_router, "10.0.0.1");
+        assert_eq!(cfg.dhcp_proxy_domain, "lan.local");
+        assert_eq!(cfg.dhcp_proxy_boot_filename, "pxelinux.0");
+        assert_eq!(cfg.dhcp_proxy_boot_server, "10.0.0.5");
+        assert_eq!(cfg.dhcp_proxy_custom_options, "60:PXEClient");
+        assert_eq!(cfg.effective_dhcp_proxy_interface(), "eth0");
+        assert_eq!(cfg.effective_dhcp_proxy_router(), "10.0.0.1");
+        assert_eq!(cfg.effective_dhcp_proxy_domain(), "lan.local");
+        assert_eq!(cfg.effective_dhcp_proxy_boot_filename(), "pxelinux.0");
+        assert_eq!(cfg.effective_dhcp_proxy_boot_server(), "10.0.0.5");
+        assert_eq!(cfg.effective_dhcp_proxy_custom_options(), "60:PXEClient");
+
+        fs::write(
+            &settings_path,
+            "DHCP_PROXY_INTERFACE=eth1\nDHCP_PROXY_ROUTER=10.0.0.254\n",
+        )
+        .unwrap();
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.effective_dhcp_proxy_interface(), "eth1");
+        assert_eq!(cfg.effective_dhcp_proxy_router(), "10.0.0.254");
+        // Fields not present in the override file still fall back to env.
+        assert_eq!(cfg.effective_dhcp_proxy_domain(), "lan.local");
+
+        for key in [
+            "DHCP_PROXY_INTERFACE",
+            "DHCP_PROXY_ROUTER",
+            "DHCP_PROXY_DOMAIN",
+            "DHCP_PROXY_BOOT_FILENAME",
+            "DHCP_PROXY_BOOT_SERVER",
+            "DHCP_PROXY_CUSTOM_OPTIONS",
+            "UI_SETTINGS_FILE",
+        ] {
+            env::remove_var(key);
+        }
+        let _ = fs::remove_file(&settings_path);
+    }
+
+    #[test]
+    fn dhcp_proxy_optional_fields_default_empty() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        for key in [
+            "DHCP_PROXY_INTERFACE",
+            "DHCP_PROXY_ROUTER",
+            "DHCP_PROXY_DOMAIN",
+            "DHCP_PROXY_BOOT_FILENAME",
+            "DHCP_PROXY_BOOT_SERVER",
+            "DHCP_PROXY_CUSTOM_OPTIONS",
+        ] {
+            env::remove_var(key);
+        }
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.dhcp_proxy_interface, "");
+        assert_eq!(cfg.dhcp_proxy_router, "");
+        assert_eq!(cfg.dhcp_proxy_domain, "");
+        assert_eq!(cfg.dhcp_proxy_boot_filename, "");
+        assert_eq!(cfg.dhcp_proxy_boot_server, "");
+        assert_eq!(cfg.dhcp_proxy_custom_options, "");
+    }
+
+    #[test]
+    fn ui_override_lines_omit_empty_optional_dhcp_proxy_fields() {
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-override-lines-{}.env",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&settings_path);
+        env::set_var("UI_SETTINGS_FILE", &settings_path);
+        env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        for key in [
+            "DHCP_PROXY_INTERFACE",
+            "DHCP_PROXY_ROUTER",
+            "DHCP_PROXY_DOMAIN",
+            "DHCP_PROXY_BOOT_FILENAME",
+            "DHCP_PROXY_BOOT_SERVER",
+            "DHCP_PROXY_CUSTOM_OPTIONS",
+        ] {
+            env::remove_var(key);
+        }
+
+        let cfg = Config::from_env().unwrap();
+        let lines = cfg.ui_override_lines();
+        for key in [
+            "DHCP_PROXY_INTERFACE",
+            "DHCP_PROXY_ROUTER",
+            "DHCP_PROXY_DOMAIN",
+            "DHCP_PROXY_BOOT_FILENAME",
+            "DHCP_PROXY_BOOT_SERVER",
+            "DHCP_PROXY_CUSTOM_OPTIONS",
+        ] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.starts_with(&format!("{key}="))),
+                "expected no {key} line when unset, got {lines:?}"
+            );
+        }
+
+        env::remove_var("DHCP_MODE");
+        env::remove_var("UI_SETTINGS_FILE");
+        let _ = fs::remove_file(&settings_path);
     }
 
     #[test]

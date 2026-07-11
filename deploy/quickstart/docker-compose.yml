@@ -523,10 +523,26 @@ services:
       - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
       - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
       - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
+      # Issue #450: additional optional dnsmasq relay/proxy options.
+      - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
+      - DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER:-}
+      - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
+      - DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN:-}
+      - DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME:-}
+      - DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER:-}
+      - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
+      # dnsmasq's ProxyDHCP/PXE reply path needs a raw broadcast socket;
+      # without NET_ADMIN, dnsmasq passes its own config self-test but then
+      # fails to actually start ("process is missing required capability
+      # NET_ADMIN"), confirmed live with a real dnsmasq build against the
+      # pre-issue-#450 four-variable config alone -- this was already
+      # broken before this issue's new options existed. Matches the dhcp
+      # (Kea) service's cap_add, which needs it for the same reason.
+      - NET_ADMIN
     restart: always
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
