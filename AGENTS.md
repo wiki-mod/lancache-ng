@@ -118,6 +118,33 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 - **[AG-SEC-002]** Known placeholders such as `CHANGE_ME_*` are not valid runtime values and must be replaced or rejected before dependent services start.
 - **[AG-OP-010]** Validation must happen before container restart, image pull, or runtime mutation when a failed validation would leave the installation in a worse state.
 - **[AG-OP-011]** Re-running `setup.sh update` after a successful update should report no destructive changes and should not rewrite stable local files unnecessarily.
+- **[AG-OP-013]** Any PR that changes setup, migration, generated config, runtime state writing, reload/restart behavior, backup/restore, or Compose/profile wiring must answer these five questions in the PR body: what state does this path own; what is the target converged state; what happens when it runs twice with the same input; what happens when validation fails halfway through; what test or guard proves this behavior. See issue #456.
+
+### Convergence/Idempotence Checklist
+
+Use this checklist (issue #456) when touching any stateful write path — `setup.sh`
+install/update/migration, `.env` generation/merge, Compose/profile generation,
+Kea/PowerDNS/dnsmasq/NATS/nginx config writers, watchdog recovery, or
+backup/restore:
+
+- [ ] Running the operation twice with identical input produces byte-identical
+  output (or an explicitly documented, deliberately volatile exception, e.g. a
+  channel-resolved image digest — name it, don't just accept unexplained diffs).
+- [ ] Stable secrets/tokens are never rotated by a repeat run; only missing or
+  known-placeholder values are (re)generated.
+- [ ] A failed validation does not leave the target half-written, does not
+  proceed to restart/reload/pull, and does not delete the last-known-good state.
+- [ ] An already-migrated or already-converged install is detected and left
+  alone rather than re-mutated.
+- [ ] At least one repeat-run or fixture test exercises the above for the
+  specific path being changed — see `tests/bats/setup_update_idempotence.bats`
+  for the pattern (source the real function, run it twice against a realistic
+  fixture, diff the result) and `scripts/setup-cli-simulation.sh`'s "Phase 2b"
+  for the same proof against the real CLI end-to-end rather than only the
+  extracted function.
+- [ ] Any part of this checklist that cannot be satisfied in the current PR is
+  listed explicitly with a linked follow-up issue, owner/scope, and reason —
+  not silently dropped.
 
 ## Project Language
 
@@ -356,13 +383,14 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-OP-003 | Lazy proxy default | Manual review + documentation |
 | AG-OP-004 | Strict behavior is opt-in | Manual review + documentation |
 | AG-OP-005 | Do not silently invert defaults | Manual review |
-| AG-OP-006 | Setup/update idempotence | Manual review (code inspection and test guidance) |
-| AG-OP-007 | Setup/update convergence | Manual review (code inspection and test guidance) |
+| AG-OP-006 | Setup/update idempotence | `tests/bats/setup_update_idempotence.bats` (repeat-run fixture against `migrate_env_for_update`) + `scripts/setup-cli-simulation.sh` Phase 2b (real CLI run twice, live). Covers the `.env`-migration path only; Kea/PDNS/NATS/watchdog writers still rely on manual review — see #456 follow-ups. |
+| AG-OP-007 | Setup/update convergence | `tests/bats/setup_update_idempotence.bats` (legacy-fixture convergence case) + `scripts/setup-cli-simulation.sh` Phase 2 (legacy `.env` through the real CLI). Same scope note as AG-OP-006. |
 | AG-OP-008 | Missing values rejected or generated | Manual review (code inspection) |
 | AG-OP-009 | Preserve existing local values | Manual review (code inspection) |
 | AG-OP-010 | Validate before restart/pull | Manual review (code inspection and test guidance) |
-| AG-OP-011 | Re-running update safe | Manual review (code inspection) |
+| AG-OP-011 | Re-running update safe | `tests/bats/setup_update_idempotence.bats` + `scripts/setup-cli-simulation.sh` Phase 2b (second consecutive `setup.sh update`, no input change, asserts a byte-identical `.env` and unrotated secrets) |
 | AG-OP-012 | Do not use `proxy_cache_key $request_uri` | Code review (nginx config inspection) |
+| AG-OP-013 | Convergence/idempotence PRs answer the 5 questions | Manual review (PR body inspection) |
 | AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
 | AG-CODE-001 | Default: no comments | Manual review |
 | AG-CODE-002 | Comments document WHY | Manual review |
