@@ -179,6 +179,44 @@ write_config() {
     [ "$(cat "$config_file")" = "CANDIDATE-BROKEN" ]
 }
 
+@test "kgs_snapshot_apply rejects an incomplete snapshot missing a requested file" {
+    # Regression test for a Codex review finding on #616: a finalized
+    # snapshot directory missing one of the requested basenames (e.g. taken
+    # before a new generated file was added to the multi-file candidate
+    # list) must be rejected outright, not partially applied -- otherwise
+    # the live file for the missing dest is left untouched, and validation
+    # runs against a mix of this snapshot's files plus whatever happened to
+    # already be live, a combination that was never itself validated.
+    two_file_dest_dir="$BATS_TEST_TMPDIR/two-file-live"
+    mkdir -p "$two_file_dest_dir"
+    config_a="$two_file_dest_dir/a.conf"
+    config_b="$two_file_dest_dir/b.conf"
+
+    # Older snapshot: complete (has both files).
+    printf 'OK-A-older\n' > "$config_a"
+    printf 'OK-B-older\n' > "$config_b"
+    kgs_snapshot_create "$snapshot_root" 3 "test" "$config_a" "$config_b" >/dev/null
+
+    # Newest snapshot: incomplete -- only a.conf, b.conf never included
+    # (simulates a snapshot predating b.conf's addition to the candidate
+    # list). Built directly rather than via kgs_snapshot_create, which
+    # cannot itself construct this deliberately-incomplete shape.
+    newest_id="$(kgs_new_snapshot_id)"
+    mkdir -p "$snapshot_root/$newest_id"
+    printf 'OK-A-newest\n' > "$snapshot_root/$newest_id/a.conf"
+
+    printf 'CANDIDATE-BROKEN-A\n' > "$config_a"
+    printf 'CANDIDATE-BROKEN-B\n' > "$config_b"
+
+    two_file_validator="grep -q '^OK' '$config_a' && grep -q '^OK' '$config_b'"
+    run kgs_snapshot_apply "$snapshot_root" "test" "$two_file_validator" "$config_a" "$config_b"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[known-good-snapshot][test][REJECT] rejected known-good snapshot $newest_id: incomplete"* ]]
+    [[ "$output" == *"[known-good-snapshot][test][SELECT]"* ]]
+    [ "$(cat "$config_a")" = "OK-A-older" ]
+    [ "$(cat "$config_b")" = "OK-B-older" ]
+}
+
 @test "kgs_snapshot_create is atomic-enough: no partial snapshot directory survives a failed copy" {
     write_config "OK"
     second_file="$dest_dir/second.conf"

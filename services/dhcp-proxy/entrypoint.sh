@@ -13,10 +13,25 @@ if [ -f /data/lancache-ui-settings.env ]; then
     . /data/lancache-ui-settings.env
 fi
 
-: "${DHCP_SUBNET_START:?DHCP_SUBNET_START is required for dnsmasq proxy mode.}"
-: "${DHCP_DNS_PRIMARY:?DHCP_DNS_PRIMARY is required for dnsmasq proxy mode.}"
+# DHCP_SUBNET_START/DHCP_DNS_PRIMARY/UPSTREAM_DHCP_IP are required for a
+# *working* dnsmasq proxy config, but must NOT hard-exit here (":?" aborts
+# the script immediately, before the known-good snapshot rollback path
+# below ever runs) -- a previously-validated snapshot may still exist and
+# should be tried first. Left unset/blank, envsubst below renders an empty
+# value into the template, which `dnsmasq --test` reliably rejects
+# ("bad dhcp-range"/"bad dhcp-proxy address", confirmed live), so the
+# existing validate-then-rollback flow already handles this correctly once
+# it's actually allowed to run.
+if [ -z "${DHCP_SUBNET_START:-}" ]; then
+    echo "WARNING: DHCP_SUBNET_START is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+fi
+if [ -z "${DHCP_DNS_PRIMARY:-}" ]; then
+    echo "WARNING: DHCP_DNS_PRIMARY is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+fi
 : "${DHCP_DNS_SECONDARY:=$DHCP_DNS_PRIMARY}"
-: "${UPSTREAM_DHCP_IP:?UPSTREAM_DHCP_IP is required for dnsmasq proxy mode.}"
+if [ -z "${UPSTREAM_DHCP_IP:-}" ]; then
+    echo "WARNING: UPSTREAM_DHCP_IP is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+fi
 : "${KEEP_KNOWN_GOOD_CONFIGS:=3}"
 : "${DHCP_PROXY_CONFIG_SNAPSHOT_DIR:=/var/lib/lancache-dhcp-proxy/config-snapshots}"
 
@@ -183,9 +198,30 @@ kgs_snapshot_apply() {
     for ((i = ${#ids[@]} - 1; i >= 0; i--)); do
         id="${ids[$i]}"
         snap_dir="${snapshot_root}/${id}"
+
+        # Require every requested basename to be present in this snapshot
+        # before touching any live file. A finalized-but-incomplete
+        # snapshot (e.g. taken before a new generated file was added to the
+        # candidate list) would otherwise leave that one dest untouched --
+        # silently validating a mix of this snapshot's files and whatever
+        # happened to already be live, a combination that was never itself
+        # actually validated together.
+        local snapshot_complete=1
         for d in "${dest[@]}"; do
             base="$(basename "$d")"
-            [ -f "${snap_dir}/${base}" ] && cp -p "${snap_dir}/${base}" "$d"
+            if [ ! -f "${snap_dir}/${base}" ]; then
+                snapshot_complete=0
+                break
+            fi
+        done
+        if [ "$snapshot_complete" -ne 1 ]; then
+            kgs_log REJECT "$label" "rejected known-good snapshot $id: incomplete (missing at least one candidate file)"
+            continue
+        fi
+
+        for d in "${dest[@]}"; do
+            base="$(basename "$d")"
+            cp -p "${snap_dir}/${base}" "$d"
         done
 
         # Redirect the validator's own stdout to stderr: this function's
