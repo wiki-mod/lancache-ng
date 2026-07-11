@@ -198,7 +198,6 @@ RUN --mount=type=secret,id=sccache_redis_url \
           distcc_pump_real_hosts=""; \
           for distcc_host_token in ${DISTCC_HOSTS:-}; do case "$distcc_host_token" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done; \
           if [ -z "$distcc_pump_real_hosts" ]; then unset DISTCC_HOSTS; fi; \
-          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
           PATH="$distcc_wrapper_dir:$PATH"; \
           export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
@@ -368,7 +367,6 @@ RUN --mount=type=secret,id=sccache_redis_url \
           distcc_pump_real_hosts=""; \
           for distcc_host_token in ${DISTCC_HOSTS:-}; do case "$distcc_host_token" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done; \
           if [ -z "$distcc_pump_real_hosts" ]; then unset DISTCC_HOSTS; fi; \
-          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
           PATH="$distcc_wrapper_dir:$PATH"; \
           export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \

@@ -323,11 +323,20 @@ runs:
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
-                distcc_hosts_without_pump="${distcc_pump_filtered_hosts:-$distcc_hosts_without_pump}"
+                # This probe runs AFTER distcc-pump has already been shut
+                # down above (INCLUDE_SERVER_PORT/INCLUDE_SERVER_PID unset),
+                # so it must never use the pump-published host list -- that
+                # list's ",cpp"/",lzo" suffix only means anything to a
+                # running include server. Reusing it here (a prior version
+                # of this logic reassigned distcc_hosts_without_pump from
+                # distcc_pump_filtered_hosts whenever pump succeeded) made a
+                # *successful* pump-host resolution trigger
+                # "INCLUDE_SERVER_PORT not set" on this post-shutdown probe
+                # instead of proving plain distcc acceleration -- confirmed
+                # live. distcc_hosts_without_pump already holds the correct,
+                # stripped non-pump host list computed above, before any
+                # pump handling; leave it untouched here.
                 final_distcc_hosts="$distcc_hosts_without_pump"
-                if [ -n "$distcc_pump_filtered_hosts" ]; then
-                  final_distcc_hosts="$distcc_pump_filtered_hosts"
-                fi
                 if [ -z "$final_distcc_hosts" ]; then
                   final_distcc_hosts="$distcc_hosts"
                 fi
