@@ -1,0 +1,165 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Reaps the per-PR GHCR staging tags that build-push.yml now pushes on
+# pull_request events (see #626) so "validate full-setup image" can test a
+# PR's own commits instead of stale base-branch state. Three tag shapes
+# exist per touched service: pr-<N>-sha-<short>-amd64 and
+# pr-<N>-sha-<short>-arm64 (the per-arch legs pushed by build/build-arm64),
+# and pr-<N>-sha-<short> (the combined multi-platform tag merge-manifests
+# assembles from those two legs, and the only one full-setup-validate
+# actually pulls). Without this workflow, those tags would accumulate in
+# GHCR forever -- every PR that touches a runtime service pushes staging
+# images per touched service, and nothing else in the repo ever removes
+# them.
+#
+# Two triggers cover both the common case and the safety-net case:
+#   - pull_request (closed): reaps promptly right after the PR that owns a
+#     given staging tag closes (merged or not).
+#   - schedule: a periodic full sweep across every service's package
+#     versions, so a PR whose close-triggered run never fired (workflow
+#     added after the PR closed, a failed run, a PR closed via a path that
+#     doesn't fire this trigger) still gets cleaned up eventually.
+# Both paths run the exact same reap logic: find every pr-<N>-sha-<short>
+# (optionally -amd64/-arm64 suffixed) tag, resolve PR <N>'s current state,
+# delete if it isn't open. There is no separate "delete just this one PR"
+# fast path -- checking every tag's own PR state is simple, avoids
+# duplicating the reap logic, and doubles as a general sweep on every PR
+# close for free.
+name: GC PR Staging Images
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master, "v[0-9]*"]
+  schedule:
+    # Weekly, offset from build-tools.yml's Sunday 03:23 refresh so the two
+    # scheduled jobs don't contend for the same runner at the same minute.
+    - cron: "17 4 * * 0"
+  workflow_dispatch: {}
+
+# Package version deletion is intentionally NOT done with the default
+# GITHUB_TOKEN: GitHub's REST API for deleting a container package version
+# requires a classic personal access token with read:packages and
+# delete:packages scopes (confirmed against GitHub's own REST API docs while
+# implementing #626) -- the Actions-issued GITHUB_TOKEN cannot do this
+# regardless of the `packages: write` permission granted to a job. No
+# permissions are needed here beyond the workflow default.
+permissions: {}
+
+jobs:
+  gc:
+    name: reap closed-PR staging tags
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
+      # storing it is a deliberate human/admin action (a new credential with
+      # org package-delete rights is a real operational decision, not
+      # something to mint unattended). Until a repo/org admin adds it, this
+      # job degrades to a loud no-op instead of failing the workflow: PR
+      # staging tags will keep accumulating in GHCR, but nothing else breaks.
+      - name: Check for GHCR deletion credentials
+        id: creds
+        env:
+          HAVE_PAT: ${{ secrets.GHCR_PACKAGE_DELETE_PAT != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_PAT" = "true" ]; then
+            echo "have-pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GHCR_PACKAGE_DELETE_PAT is not configured; skipping PR staging-tag GC. Container package version deletion requires a classic PAT with read:packages+delete:packages scopes (the default GITHUB_TOKEN cannot delete package versions) -- a repo/org admin must create this PAT and add it as a repository secret named GHCR_PACKAGE_DELETE_PAT before this job can reap anything. Until then, per-PR staging tags pushed by build-push.yml will keep accumulating in GHCR. See issue #626."
+            echo "have-pat=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reap staging tags for closed PRs
+        if: steps.creds.outputs.have-pat == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+        run: |
+          set -euo pipefail
+
+          org=wiki-mod
+          repo=wiki-mod/lancache-ng
+          # Every service build-push.yml's build/build-arm64 jobs can push a
+          # PR staging tag for. dhcp/dhcp-proxy aren't used by full-setup
+          # validate, but a PR touching them still gets a staging tag pushed
+          # (see #626's build-job change), so they need reaping too.
+          # build-tools is included: full-setup-validate's client-simulation
+          # step pulls it at the PR staging tag as well.
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+
+          declare -A pr_state_cache=()
+
+          # Returns 0 (true) only when PR $1 is currently open. Any other
+          # state -- closed, merged, or not found at all (a bad/garbled tag,
+          # or the PR/repo history was rewritten) -- means "safe to delete."
+          # Failing closed here (delete) rather than open (keep-forever) is
+          # the correct default for a GC job: an orphaned tag costs storage
+          # forever, a wrongly-deleted tag only affects a PR that is, by
+          # definition, not actively being validated right now.
+          pr_is_open() {
+            local pr_number="$1"
+            if [[ -z "${pr_state_cache[$pr_number]+set}" ]]; then
+              pr_state_cache["$pr_number"]="$(gh pr view "$pr_number" --repo "$repo" --json state --jq .state 2>/dev/null || echo "MISSING")"
+            fi
+            [[ "${pr_state_cache[$pr_number]}" == "OPEN" ]]
+          }
+
+          deleted=0
+          kept=0
+          for service in "${services[@]}"; do
+            package="lancache-ng%2F${service}"
+            versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>/dev/null || echo "[]")"
+
+            # A "version" in GHCR is keyed by digest, not by tag -- a
+            # back-filled service (see full-setup-validate's own "Ensure PR
+            # staging tags exist" step) shares its digest with a live
+            # edge/dev/latest/sha-* channel tag. Deleting that version would
+            # delete the channel tag too. So this only considers a version
+            # safe to delete when EVERY tag on it is a pr-<N>-sha-* tag
+            # (optionally -amd64/-arm64 suffixed) for a PR that is not open
+            # -- any other tag on the same version (a channel tag, a real
+            # sha-* source tag, or a still-open PR's staging tag) protects
+            # the whole version. A version with no pr-* tags to lose costs
+            # nothing extra anyway (it is byte-for-byte the same image the
+            # channel tag already keeps), so leaving it alone is correct,
+            # not just safe.
+            while IFS= read -r version_entry; do
+              [[ -z "$version_entry" ]] && continue
+              version_id="$(printf '%s' "$version_entry" | jq -r '.id')"
+              [[ -z "$version_id" || "$version_id" == "null" ]] && continue
+
+              protected=0
+              has_closed_pr_tag=0
+              while IFS= read -r tag; do
+                [[ -z "$tag" ]] && continue
+                if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
+                  pr_number="${BASH_REMATCH[1]}"
+                  if pr_is_open "$pr_number"; then
+                    protected=1
+                    break
+                  fi
+                  has_closed_pr_tag=1
+                else
+                  # Any non pr-* tag (edge, dev, latest, vX.Y.Z, sha-*, ...)
+                  # is a real published channel/source tag. Never delete it.
+                  protected=1
+                  break
+                fi
+              done < <(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]')
+
+              if [[ "$protected" == "1" || "$has_closed_pr_tag" == "0" ]]; then
+                kept=$((kept + 1))
+                continue
+              fi
+
+              tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []')"
+              echo "Deleting $service version $version_id (only closed-PR staging tags: $tags_display)."
+              if gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" >/dev/null 2>&1; then
+                deleted=$((deleted + 1))
+              else
+                echo "::warning::Failed to delete $service version $version_id."
+              fi
+            done < <(printf '%s' "$versions_json" | jq -c '.[]')
+          done
+
+          echo "::notice::PR staging-tag GC complete: deleted $deleted version(s), kept $kept."

@@ -1446,22 +1446,31 @@ jobs:
   full-setup-validate:
     name: validate full-setup image
     # On a pull_request event, `promote` never runs at all (see its own `if:`
-    # condition) -- there is no channel image for THIS PR to wait for, so this
-    # job validates whatever channel image is already live, same as before.
-    # On push events (master/vX.Y.Z), this job used to run in parallel with
-    # build/promote instead of after them, so it tried to pull the channel
-    # image THIS PUSH was about to publish before promote had actually
-    # published it -- pulling a tag that doesn't exist yet on the very push
-    # that would have created it, rather than "the house isn't inspected
-    # before the roof tiles are on." Depending on `promote` here makes this
-    # job validate the freshly-promoted state of the commit it's actually
-    # running for, instead of racing ahead of it or checking a stale channel
-    # tag left over from a previous push.
-    needs: [detect-changes, promote, compute-validation-network]
+    # condition) -- there is no channel image for THIS PR to wait for.
+    # Instead this job now waits directly for `merge-manifests`, because (see
+    # #626) that job is where a same-repo PR's per-arch staging legs
+    # (pr-<N>-sha-<short>-{amd64,arm64}, pushed by build/build-arm64) get
+    # combined into the real pr-<N>-sha-<short> multi-platform tag this job
+    # actually pulls. This job MUST NOT start before merge-manifests
+    # finishes: build/build-arm64 wait on shellcheck, validate-compose,
+    # ci_scope_policy, file-headers, pr-template-check, line-endings, and
+    # then compile Rust, so they (and merge-manifests after them) are much
+    # slower than the lightweight `detect-changes` job this used to depend on
+    # alone -- depending on only `detect-changes` let this job race ahead and
+    # find no staging tags yet, silently falling back to stale base-channel
+    # content for every service and reproducing the exact bug #626 fixes. On
+    # push events (master/vX.Y.Z), this job still waits for `promote` so it
+    # validates the freshly-promoted channel state of the commit it's
+    # actually running for, instead of racing ahead of it or checking a
+    # stale channel tag left over from a previous push.
+    needs: [detect-changes, merge-manifests, promote, compute-validation-network]
     if: >-
       ${{
         always() &&
-        (github.event_name == 'pull_request' || needs.promote.result == 'success') &&
+        (
+          (github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success') ||
+          (github.event_name != 'pull_request' && needs.promote.result == 'success')
+        ) &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
@@ -1469,6 +1478,9 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: read
+      packages: write
     env:
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
@@ -1491,21 +1503,90 @@ jobs:
       # and fails for reasons unrelated to the branch under test. Mirror the
       # same ref-to-channel mapping the `promote` job uses so this job
       # validates the channel this branch actually publishes to.
+      #
+      # On a pull_request event this now resolves to the PR's OWN staging tag
+      # (see #626) instead of the base-ref channel, so this job actually
+      # tests the PR's own commits rather than whatever the base branch last
+      # published. base_channel_tag is still computed on PR events: the next
+      # step uses it as the fallback source for any full-setup service this
+      # PR did not touch (and therefore never pushed a staging tag for).
       - name: Determine validation image channel
         id: channel
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+
           if [[ "$BASE_REF" == "master" ]]; then
-            tag=edge
+            base_channel_tag=edge
           elif [[ "$BASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            tag=dev
+            base_channel_tag=dev
           else
-            tag=latest
+            base_channel_tag=latest
           fi
-          echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
+          echo "base-channel-tag=$base_channel_tag" >> "$GITHUB_OUTPUT"
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            short_sha="${HEAD_SHA::7}"
+            tag="pr-${PR_NUMBER}-sha-${short_sha}"
+            echo "Validating against this PR's own staging tag '$tag' (base-channel fallback for untouched services: '$base_channel_tag')."
+          else
+            tag="$base_channel_tag"
+            echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for
+      # every service, and the "Run client simulation" step below pulls
+      # build-tools at that same tag -- but build/build-arm64 only push the
+      # PR staging tag for services detect-changes says this PR actually
+      # touched (real, deliberate additional push cost -- see #626 -- not
+      # "rebuild everything per PR for free"). Any of those services this PR
+      # did NOT touch has no image at the staging tag yet, so back-fill it
+      # with a cheap registry-side copy from the base-ref channel image (the
+      # correct thing to validate for an untouched service anyway). This
+      # mirrors the `promote`/`merge-manifests` jobs' own
+      # `docker buildx imagetools create` pattern for moving/combining tags
+      # without re-pulling image layers.
+      - name: Set up Docker Buildx
+        if: github.event_name == 'pull_request'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: github.event_name == 'pull_request'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure PR staging tags exist for full-setup services
+        if: github.event_name == 'pull_request'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_TAG: ${{ steps.channel.outputs.tag }}
+          BASE_CHANNEL_TAG: ${{ steps.channel.outputs.base-channel-tag }}
+        run: |
+          set -euo pipefail
+
+          # The services deploy/full-setup/docker-compose.yml references,
+          # plus build-tools (used by the client-simulation step further
+          # down, not by the compose file itself). dhcp and dhcp-proxy are
+          # part of neither and are intentionally excluded.
+          full_setup_services=(proxy dns watchdog ui build-tools)
+          for service in "${full_setup_services[@]}"; do
+            pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
+            if docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
+              echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
+              continue
+            fi
+            base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
+            echo "::notice::$service has no staging image at $PR_TAG (untouched by this PR); copying from $base_image."
+            docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
+          done
 
       - name: Build full-setup validation image
         env:
@@ -1691,6 +1772,20 @@ jobs:
           fi
 
           echo "Full-setup stack is stable: all services running and healthy."
+
+      # Unlike the failure-only log dump above, this always runs -- #626's
+      # whole point is that a *green* run here must be verifiable as having
+      # actually tested this commit's own code (not stale base-branch
+      # content), and that's only checkable if the logs are visible
+      # regardless of outcome.
+      - name: Show full-setup service logs
+        if: always()
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          echo "::group::Logs from all services"
+          docker compose logs --no-color || true
+          echo "::endgroup::"
 
       - name: Run client simulation against the full-setup stack
         env:
@@ -2887,11 +2982,18 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
+        # Pull requests now also log in: this same-repo-only project (no fork
+        # PRs, confirmed in #626) pushes a PR-scoped staging tag below so
+        # "validate full-setup image" can test the PR's own commits instead
+        # of stale base-branch state. The fork check is a fail-safe in case
+        # that assumption ever stops holding -- a fork PR's GITHUB_TOKEN is
+        # read-only anyway, so login would fail loudly rather than silently.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
             (
-              steps.should-build.outputs.should-build == 'true'
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
             )
           }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2913,6 +3015,41 @@ jobs:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-amd64
+
+      # docker/metadata-action's `type=sha` uses the ephemeral pull_request
+      # merge-commit SHA by default (github.sha), not the PR branch's own
+      # head commit -- that merge SHA churns every time the base branch
+      # moves even with no new commits on the PR, which would make this
+      # staging tag both unstable and hard for a human to recognize. Compute
+      # a tag tied to the PR's actual head commit instead, with a `pr-<N>-`
+      # prefix so the GC workflow (.github/workflows/gc-pr-staging-images.yml)
+      # can find and reap it once the PR closes. The `-amd64` suffix matches
+      # this job's own per-arch tag convention (see "Extract metadata"
+      # above); merge-manifests combines it with build-arm64's `-arm64` PR
+      # staging tag into the real pr-<N>-sha-<short> multi-platform tag that
+      # full-setup-validate actually consumes.
+      - name: Compute PR staging tag
+        id: pr-tag
+        if: >-
+          ${{
+            github.event_name == 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MATRIX_SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${HEAD_SHA::7}"
+          tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
+          echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -3158,8 +3295,8 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -3183,7 +3320,10 @@ jobs:
         # retry, instead of retrying instantly against whatever just failed.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3197,7 +3337,10 @@ jobs:
         # image build) was what the first attempt's auth failure was tied to.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3233,8 +3376,8 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -3483,11 +3626,13 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
+        # Same fork-safety reasoning as build's own "Log in to GHCR" step.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
             (
-              steps.should-build.outputs.should-build == 'true'
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
             )
           }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -3506,6 +3651,31 @@ jobs:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-arm64
+
+      # Mirrors build's own "Compute PR staging tag" step, just for the
+      # arm64 leg -- see that step's comment for the full rationale.
+      - name: Compute PR staging tag
+        id: pr-tag
+        if: >-
+          ${{
+            github.event_name == 'pull_request' &&
+            steps.should-build.outputs.should-build == 'true' &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MATRIX_SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${HEAD_SHA::7}"
+          tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
+          echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -3579,8 +3749,8 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -3598,7 +3768,10 @@ jobs:
         # equivalent step.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3609,7 +3782,10 @@ jobs:
       - name: Re-authenticate to GHCR before retry
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            ) &&
             (
               steps.should-build.outputs.should-build == 'true'
             ) &&
@@ -3639,8 +3815,8 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -3714,9 +3890,19 @@ jobs:
     # the same tool promote already uses to move channel tags -- so no image
     # is rebuilt here, only a manifest list assembled from two already-pushed
     # digests.
+    #
+    # Also runs on pull_request events now (see #626): a same-repo PR pushes
+    # its own pr-<N>-sha-<short>-{amd64,arm64} legs in build/build-arm64, and
+    # this job merges those into the real pr-<N>-sha-<short> tag that
+    # full-setup-validate consumes to test the PR's own commits. The
+    # existing sha-<short> merge below stays gated to non-PR events only --
+    # that tag's *inputs* are never pushed on a PR (push: stays false there
+    # for the plain, unprefixed sha-* tag), so running it on a PR would just
+    # loop through seven harmless "no linux/amd64 image" skips for no
+    # reason.
     name: merge multi-platform manifests
     needs: [build, build-arm64]
-    if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success' && github.event_name != 'pull_request'"
+    if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     permissions:
       contents: read
@@ -3736,6 +3922,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-platform manifests
+        if: github.event_name != 'pull_request'
         env:
           REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
@@ -3758,6 +3945,46 @@ jobs:
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
               echo "::error::$service has a linux/amd64 image but no linux/arm64 image ($arm64_image); refusing to publish a single-platform tag under the multi-platform contract."
+              exit 1
+            fi
+
+            docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
+            bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+          done
+
+      # Same merge, for the PR-scoped staging tag instead of the trusted-ref
+      # sha-<short> tag. Only same-repo PRs ever push the two per-arch inputs
+      # (build/build-arm64's own fork check), so this naturally no-ops for a
+      # fork PR: neither leg exists, every service is skipped, nothing is
+      # published. A service this PR did not touch also has no inputs here
+      # (detect-changes scoped build/build-arm64 to skip it) -- that is
+      # expected and not an error; full-setup-validate's own backfill step
+      # fills the gap for full-setup services from the base-ref channel.
+      - name: Create PR staging multi-platform manifest
+        if: github.event_name == 'pull_request'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+        run: |
+          set -euo pipefail
+
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          short_sha="${HEAD_SHA::7}"
+          source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
+
+          for service in "${services[@]}"; do
+            amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
+            arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
+            target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+
+            if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
+              echo "::notice::Skipping $service: no linux/amd64 PR staging image (not touched by this PR, or a fork PR)."
+              continue
+            fi
+            if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
+              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building."
               exit 1
             fi
 
