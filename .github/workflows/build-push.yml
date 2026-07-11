@@ -497,6 +497,8 @@ jobs:
           grep -F 'config/prod' setup.sh >/dev/null \
             && grep -F 'services/dns/cdn-domains.txt' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must include repo-root config/prod env files and the domain list."; exit 1; }
+          grep -F 'scripts/docker-socket-proxy.sh' setup.sh >/dev/null \
+            || { echo "::error::deploy/prod backups must include the repo-root scripts/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
           grep -F 'deploy_prod_repo_root "$archived_install"' setup.sh >/dev/null \
             && grep -F 'deploy_prod_repo_root "$install_dir"' setup.sh >/dev/null \
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
@@ -737,7 +739,13 @@ jobs:
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
                 exit 1
               }
-            grep -Fq 'x-docker-socket-proxy-command' "$compose_file" \
+            # Match only the real top-level YAML key/anchor syntax here, not
+            # any occurrence of the string -- the explanatory comment above
+            # (and in docs/naming-conventions.md) legitimately mentions
+            # "x-docker-socket-proxy-command" as prose describing what was
+            # removed, and a substring match would flag that prose as a
+            # reintroduction on every run.
+            grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
               && {
                 echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/docker-socket-proxy.sh without ever being referenced."
                 exit 1

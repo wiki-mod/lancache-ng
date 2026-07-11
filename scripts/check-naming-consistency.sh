@@ -134,12 +134,15 @@ EOF_WATCHDOG
 # --- UI's *_SERVICE defaults match a real Compose *service* name ----------
 # This is the other namespace (see docs/naming-conventions.md): these
 # defaults must equal a Compose *service* key (used for Docker DNS / HTTP
-# URLs), not a container_name. Checking them against the allowlist above
-# would be wrong on purpose.
+# URLs, and as input to docker_client::container_name_for_service, which
+# accepts either the bare service name or the lancache-* container name), not
+# a raw container_name. Checking them against the allowlist above would be
+# wrong on purpose.
 declare -A service_env_defaults=(
   [DNS_STANDARD_SERVICE]=dns-standard
   [DNS_SSL_SERVICE]=dns-ssl
   [PROXY_SERVICE]=proxy
+  [NATS_SERVICE]=nats
 )
 
 for var in "${!service_env_defaults[@]}"; do
@@ -159,6 +162,18 @@ for var in "${!service_env_defaults[@]}"; do
     fi
   done
 done
+
+# PROXY_SSL_SERVICE is deliberately not in the table above: its own default
+# is not an independent string literal, it inherits proxy_service's already-
+# validated value (`env_or("PROXY_SSL_SERVICE", proxy_service.clone())`), by
+# design -- SSL mode reuses the same unified proxy service as standard mode.
+# Assert that inheritance relationship stays literally in place instead of
+# re-deriving "proxy" a second time, so a future edit that gives
+# PROXY_SSL_SERVICE its own independent literal default doesn't silently
+# stop tracking PROXY_SERVICE's value.
+if ! grep -Fq 'env_or("PROXY_SSL_SERVICE", proxy_service.clone())' "$UI_CONFIG_RS"; then
+  fail "$UI_CONFIG_RS must default \$PROXY_SSL_SERVICE from proxy_service.clone() (inheriting \$PROXY_SERVICE's own default), not an independent literal -- see services/ui/src/routes/domains.rs's restart_service(proxy_ssl_service) call."
+fi
 
 if [ "$failures" -gt 0 ]; then
   printf '::error::check-naming-consistency: %d naming-contract violation(s) found (see docs/naming-conventions.md).\n' "$failures" >&2

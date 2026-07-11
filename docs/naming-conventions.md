@@ -197,13 +197,23 @@ document the mapping explicitly rather than leaving it implicit:
 | Variable | Default | Namespace | Used for |
 |---|---|---|---|
 | `PROXY_SERVICE` | `proxy` | Compose service name | Building `PROXY_STANDARD_URL`/`PROXY_SSL_URL` defaults (`http://proxy`) |
-| `PROXY_SSL_SERVICE` | `proxy` | Compose service name | Same as above |
+| `PROXY_SSL_SERVICE` | `proxy` (inherits `PROXY_SERVICE`'s resolved value, not an independent literal) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/routes/domains.rs`) |
 | `DNS_STANDARD_SERVICE` | `dns-standard` | Compose service name | UI-internal service identification, dashboard labels |
 | `DNS_SSL_SERVICE` | `dns-ssl` | Compose service name | Same as above |
+| `NATS_SERVICE` | `nats` | Compose service name, also fed into `container_name_for_service()` | Restarting NATS after a secondary registration rewrites `nats.conf` (`services/ui/src/routes/secondaries.rs`) |
 | `CONTAINER_PROXY` | `lancache-proxy` | Container name | Watchdog health/restart calls through the socket proxy |
 | `CONTAINER_DNS_STANDARD` | `lancache-dns-standard` | Container name | Same as above |
 | `CONTAINER_DNS_SSL` | `lancache-dns-ssl` | Container name | Same as above |
 | `DOCKER_PROXY_URL` | `http://docker-socket-proxy:2375` | Compose service name (URL host) | Admin UI/watchdog's Docker API entry point |
+
+`PROXY_SSL_SERVICE` and `NATS_SERVICE` sit at the seam between the two
+namespaces: their *default value* is a Compose service name, but both are
+also passed straight into `container_name_for_service()` (see below), which
+accepts either a bare service name or a `lancache-`-prefixed container name
+and resolves either one to the real container name before the Docker API
+call. That dual acceptance is what lets a Compose-service-name default work
+correctly as a Docker-API restart target without a separate, redundant
+`CONTAINER_*` variable for the proxy and NATS restart paths.
 
 `services/ui/src/docker_client.rs`'s `container_name_for_service()` mirrors
 the container-name namespace directly (it accepts either the bare Compose
