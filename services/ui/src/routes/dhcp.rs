@@ -2641,6 +2641,13 @@ mod tests {
         assert_eq!(calls[2]["arguments"], expected_modified);
     }
 
+    // #614's snapshot creation is wired in as a single choke-point hook
+    // (`on_write_success`) rather than duplicated into every mutation route,
+    // so this locks in both that the hook actually fires on a confirmed
+    // config-write success, and that it receives the real applied config
+    // (post-modify, post-config-test) -- not the stale pre-modify config --
+    // since a snapshot of the wrong generation would make rollback silently
+    // restore an older, unintended state.
     #[tokio::test]
     async fn kea_config_modify_invokes_snapshot_sink_with_applied_config_on_success() {
         let initial_config = json!({"Dhcp4": {"subnet4": [{"id": 1}]}});
@@ -2682,6 +2689,10 @@ mod tests {
         );
     }
 
+    // A config-write that gets rolled back was, by definition, just proven
+    // to fail persisting -- if the snapshot sink fired anyway, a rejected
+    // config would get recorded as "known-good" and poison every future
+    // rollback target with something that was never actually good.
     #[tokio::test]
     async fn kea_config_modify_does_not_invoke_snapshot_sink_on_rollback() {
         let initial_config = json!({"Dhcp4": {"subnet4": [{"id": 1}]}});

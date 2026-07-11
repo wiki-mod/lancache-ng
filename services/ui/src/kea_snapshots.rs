@@ -254,6 +254,11 @@ mod tests {
         std::env::temp_dir().join(format!("lancache-ng-{name}-{stamp}"))
     }
 
+    // Fixed width matters, not just "is a number": `list_snapshot_ids` relies
+    // on plain string sorting to equal chronological order, with no separate
+    // index file recording creation time. A variable-width decimal (no
+    // leading zeros) would sort "10" before "9", silently reordering
+    // snapshots and making retention/rollback pick the wrong one.
     #[test]
     fn snapshot_ids_are_fixed_width_and_sort_chronologically() {
         let a = new_snapshot_id();
@@ -263,6 +268,11 @@ mod tests {
         assert!(b >= a, "later id must sort at or after the earlier one");
     }
 
+    // The Admin UI displays snapshot timestamps client-side (via the same
+    // Intl.DateTimeFormat helper used for lease expiries), so the id -> epoch
+    // recovery must round-trip correctly, and must fail closed (None, not a
+    // panic or a garbage timestamp) for a non-numeric id -- e.g. a stray
+    // directory an operator created by hand inside the snapshot root.
     #[test]
     fn snapshot_created_unix_recovers_a_plausible_epoch_second() {
         let id = new_snapshot_id();
@@ -275,12 +285,19 @@ mod tests {
         assert_eq!(snapshot_created_unix("not-a-number"), None);
     }
 
+    // A fresh install (or a first-ever Kea DHCP mutation) has no
+    // config-snapshots directory at all yet -- that must read as "zero
+    // snapshots", not an I/O error, so `fetch_kea_snapshot_summaries` can
+    // render an empty list instead of failing the whole `/dhcp` page.
     #[test]
     fn list_snapshot_ids_is_empty_for_a_missing_root() {
         let root = temp_dir("kea-snapshots-missing");
         assert_eq!(list_snapshot_ids(&root).unwrap(), Vec::<String>::new());
     }
 
+    // Locks in the basic contract every caller depends on: what
+    // `create_snapshot` writes is exactly what `read_snapshot` returns later,
+    // and the new id shows up in `list_snapshot_ids` immediately.
     #[test]
     fn create_read_and_list_round_trip() {
         let root = temp_dir("kea-snapshots-roundtrip");
@@ -296,6 +313,10 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // Retention must prune the OLDEST snapshots first, keeping the most
+    // recent ones -- pruning newest-first (or in the wrong order) would
+    // throw away exactly the configs an operator is most likely to want to
+    // roll back to, while keeping stale ones nobody asked to preserve.
     #[test]
     fn create_snapshot_prunes_beyond_retention_oldest_first() {
         let root = temp_dir("kea-snapshots-prune");
@@ -322,6 +343,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // `keep_n=0` (from an unset/empty/non-numeric KEEP_KNOWN_GOOD_CONFIGS,
+    // per `config.rs`'s `env_u32_clamped`, or a raw `0` passed directly)
+    // must NOT be interpreted as "keep zero snapshots" -- that would prune
+    // away every snapshot on every single create, including the one that
+    // create_snapshot just finished writing, leaving nothing to roll back to
+    // the moment a config change is made. It must clamp to the documented
+    // default of 3 instead, mirroring the shell library's own
+    // `kgs_snapshot_prune` clamp.
     #[test]
     fn prune_clamps_a_zero_keep_n_to_the_documented_default() {
         let root = temp_dir("kea-snapshots-clamp");
@@ -341,6 +370,13 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // A `.staging.*` directory is a snapshot `create_snapshot` was still
+    // assembling when the process was killed (see its doc comment: files
+    // are written into staging first, then renamed into place atomically),
+    // and a finalized directory with no `dhcp4.json` payload is likewise
+    // unusable. Either one must never be treated as a real snapshot --
+    // `read_snapshot`/rollback would either fail outright or, worse, apply a
+    // half-written config that was never actually validated as a whole.
     #[test]
     fn list_snapshot_ids_skips_staging_and_incomplete_directories() {
         let root = temp_dir("kea-snapshots-skip");
@@ -356,6 +392,11 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // `rollback_kea_snapshot` only calls `read_snapshot` for an id it just
+    // confirmed via `list_snapshot_ids`, but the two calls are not atomic --
+    // this locks in that a missing id still fails with a normal `Err`
+    // (rather than panicking) so a snapshot removed between those two calls
+    // surfaces as an ordinary rollback failure, not a crash.
     #[test]
     fn read_snapshot_reports_an_error_for_an_unknown_id() {
         let root = temp_dir("kea-snapshots-unknown");
