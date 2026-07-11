@@ -1073,6 +1073,23 @@ where
         .cloned()
         .ok_or("config-get: missing arguments")?;
 
+    // config-get's response is `{"Dhcp4": {...}, "hash": "<config hash>"}` on
+    // the real Kea Control Agent (observed live against Kea 2.6.3, the
+    // version this project's `services/dhcp` image ships) -- `hash` is a
+    // server-computed digest of the loaded config, not an accepted input.
+    // Feeding it straight back as `arguments` to config-test/config-set (as
+    // this function previously did) makes Kea reject the request with
+    // "Unsupported 'hash' parameter." on every single call, even when the
+    // config is otherwise byte-identical to what config-get just returned.
+    // Stripped once, immediately after the fetch, so every downstream user
+    // of `config` (the `modify` closure, `old_config`'s own rollback
+    // config-set, config-test/config-set's request bodies, and the
+    // known-good snapshot payload captured further down) works with the
+    // clean `{"Dhcp4": {...}}` shape Kea actually accepts back.
+    if let Some(map) = config.as_object_mut() {
+        map.remove("hash");
+    }
+
     // Step 2: Save old config for potential rollback
     let old_config = config.clone();
 
@@ -2697,6 +2714,60 @@ mod tests {
         assert!(
             sink_calls.lock().unwrap().is_empty(),
             "a rolled-back config-write must never be recorded as a known-good snapshot"
+        );
+    }
+
+    // Regression test for a bug found via live verification against a real
+    // Kea 2.6.3 Control Agent (not caught by any prior test, since all of
+    // them mock config-get without a `hash` field): the real Control Agent's
+    // config-get response is `{"Dhcp4": {...}, "hash": "<digest>"}`, and
+    // feeding that whole object straight back as config-test/config-set's
+    // `arguments` makes Kea reject the request with
+    // "Unsupported 'hash' parameter." on every call. This asserts `hash` is
+    // stripped before it reaches either request body (and is absent from the
+    // config the `modify` closure receives).
+    #[tokio::test]
+    async fn kea_config_modify_strips_hash_from_config_get_before_reuse() {
+        let config_get_with_hash = json!([{
+            "result": 0,
+            "arguments": {
+                "Dhcp4": {"subnet4": [{"id": 1}]},
+                "hash": "0123456789abcdef0123456789abcdef01234567"
+            }
+        }]);
+
+        let (result, calls) = run_kea_config_modify_with_steps(
+            vec![
+                MockStep::Response(config_get_with_hash),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                assert!(
+                    config.get("hash").is_none(),
+                    "the modify closure must never see a leftover hash field"
+                );
+                config["Dhcp4"]["subnet4"]
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?
+                    .push(json!({"id": 2}));
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(calls[0]["command"], "config-get");
+        assert_eq!(calls[1]["command"], "config-test");
+        assert_eq!(calls[2]["command"], "config-set");
+        assert!(
+            calls[1]["arguments"].get("hash").is_none(),
+            "config-test's arguments must not carry the config-get hash field"
+        );
+        assert!(
+            calls[2]["arguments"].get("hash").is_none(),
+            "config-set's arguments must not carry the config-get hash field"
         );
     }
 
