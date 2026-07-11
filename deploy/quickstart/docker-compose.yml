@@ -101,6 +101,9 @@ services:
       # standard/ssl split-cache installs must be migrated before using this stack.
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
+      # Known-good nginx config snapshots (#415): persistent, service-owned
+      # volume so rollback survives container restarts/recreates.
+      - proxy-config-snapshots:/var/lib/lancache-proxy
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
@@ -403,6 +406,9 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ui-data:/data:ro
+      # Known-good dnsmasq config snapshots (#415): persistent, service-owned
+      # volume so rollback survives container restarts/recreates.
+      - dhcp-proxy-config-snapshots:/var/lib/lancache-dhcp-proxy
     environment:
       - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
       - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
@@ -554,6 +560,9 @@ networks:
 
 volumes:
   proxy-logs:
+  # Known-good config snapshots (#415), one persistent volume per adapter.
+  proxy-config-snapshots:
+  dhcp-proxy-config-snapshots:
   watchdog-status:
   nats-data:
   nats-conf:

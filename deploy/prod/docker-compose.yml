@@ -85,6 +85,10 @@ services:
       # Both standard and SSL proxy paths write into this same cache tree.
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
+      # Known-good nginx config snapshots (#415): must be a persistent,
+      # service-owned volume, not the ephemeral container layer, so
+      # rollback survives container restarts/recreates.
+      - proxy-config-snapshots:/var/lib/lancache-proxy
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
@@ -281,6 +285,9 @@ services:
       - ../../config/prod/dhcp-proxy.env
     volumes:
       - ui-data:/data:ro
+      # Known-good dnsmasq config snapshots (#415): persistent, service-owned
+      # volume so rollback survives container restarts/recreates.
+      - dhcp-proxy-config-snapshots:/var/lib/lancache-dhcp-proxy
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -515,6 +522,13 @@ volumes:
       # normal production path is derived from the shared state root.
       device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
+  # Known-good config snapshots (#415), one persistent volume per adapter.
+  # Deliberately plain Docker-managed volumes (not part of the LANCACHE_STATE_DIR
+  # bind-mount contract used by cache/kea/pdns/nats): see
+  # docs/known-good-config-snapshots.md for why these are out of scope for
+  # setup.sh backup/restore in this change.
+  proxy-config-snapshots:
+  dhcp-proxy-config-snapshots:
   watchdog-status:
   netdataconfig:
   netdatalib:

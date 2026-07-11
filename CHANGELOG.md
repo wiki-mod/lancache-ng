@@ -11,6 +11,14 @@ Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
 
 ### Added
 
+- Added a known-good configuration snapshot mechanism for the nginx proxy and
+  dnsmasq `dhcp-proxy` adapters: generated config is validated (`nginx -t`,
+  `dnsmasq --test`) before being snapshotted to a persistent, service-owned
+  volume, retaining the last `KEEP_KNOWN_GOOD_CONFIGS` (default 3) validated
+  configs, and a candidate that fails validation at startup automatically
+  rolls back to the newest snapshot that re-validates instead of crash-looping
+  or running with an invalid config. Kea and PowerDNS adapters are deferred to
+  follow-up issues; see `docs/known-good-config-snapshots.md` (#415).
 - Completed the `dnsmasq-proxy` DHCP mode: documentation guide, DHCP
   mode-selection tests, the Kea/dnsmasq mutual-exclusion invariant test,
   dnsmasq template rendering coverage, and Compose validation for both DHCP

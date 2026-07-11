@@ -93,6 +93,10 @@ services:
       # single-CACHE_DIR behavior as prod/quickstart.
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
+      # Known-good nginx config snapshots (#415): must be a persistent,
+      # service-owned volume, not the ephemeral container layer, so
+      # rollback survives container restarts/recreates.
+      - proxy-config-snapshots:/var/lib/lancache-proxy
     ports:
       - "${IP_STANDARD}:8080:80"    # use port 8080 in dev to avoid conflicts
       - "${IP_STANDARD}:8443:8443"  # standard mode SNI passthrough
@@ -275,6 +279,9 @@ services:
       - ../../config/dev/dhcp-proxy.env
     volumes:
       - ui-data:/data:ro
+      # Known-good dnsmasq config snapshots (#415): persistent, service-owned
+      # volume so rollback survives container restarts/recreates.
+      - dhcp-proxy-config-snapshots:/var/lib/lancache-dhcp-proxy
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -504,6 +511,9 @@ networks:
 volumes:
   proxy-cache:
   proxy-logs:
+  # Known-good config snapshots (#415), one persistent volume per adapter.
+  proxy-config-snapshots:
+  dhcp-proxy-config-snapshots:
   watchdog-status:
   kea-data:
   nats-data:
