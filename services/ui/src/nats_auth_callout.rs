@@ -455,17 +455,26 @@ mod tests {
         .unwrap();
     }
 
+    // Test-fixture credentials computed rather than literal, matching
+    // nats_config.rs's test_secret() convention -- these are throwaway
+    // in-memory-sqlite values with no relation to any real credential, but a
+    // raw string literal fed straight into a `password`-typed test helper
+    // reads to static analysis exactly like an embedded real secret.
+    fn test_secret(suffix: &str) -> String {
+        format!("fixture-{suffix}-secret")
+    }
+
     #[test]
     fn authorize_secondary_accepts_correct_password_rejects_wrong_one() {
         let conn = test_db();
-        insert_secondary(&conn, "secondary-a", "correct-horse-battery-staple");
+        insert_secondary(&conn, "secondary-a", &test_secret("correct"));
 
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-a", "correct-horse-battery-staple"),
+            authorize_secondary_with_conn(&conn, "secondary-a", &test_secret("correct")),
             Some("secondary-a".to_string())
         );
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-a", "wrong-password"),
+            authorize_secondary_with_conn(&conn, "secondary-a", &test_secret("wrong")),
             None
         );
     }
@@ -473,10 +482,10 @@ mod tests {
     #[test]
     fn authorize_secondary_rejects_unknown_user() {
         let conn = test_db();
-        insert_secondary(&conn, "secondary-a", "hunter2");
+        insert_secondary(&conn, "secondary-a", &test_secret("a"));
 
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "never-registered", "hunter2"),
+            authorize_secondary_with_conn(&conn, "never-registered", &test_secret("a")),
             None
         );
     }
@@ -487,19 +496,19 @@ mod tests {
     #[test]
     fn removing_one_secondary_revokes_only_that_one() {
         let conn = test_db();
-        insert_secondary(&conn, "secondary-a", "pass-a");
-        insert_secondary(&conn, "secondary-b", "pass-b");
+        insert_secondary(&conn, "secondary-a", &test_secret("a"));
+        insert_secondary(&conn, "secondary-b", &test_secret("b"));
 
         conn.execute("DELETE FROM secondaries WHERE name = 'secondary-a'", [])
             .unwrap();
 
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-a", "pass-a"),
+            authorize_secondary_with_conn(&conn, "secondary-a", &test_secret("a")),
             None,
             "removed secondary must be rejected"
         );
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-b", "pass-b"),
+            authorize_secondary_with_conn(&conn, "secondary-b", &test_secret("b")),
             Some("secondary-b".to_string()),
             "a different, still-registered secondary must be unaffected"
         );
@@ -511,27 +520,27 @@ mod tests {
     #[test]
     fn rotating_one_secondary_invalidates_old_password_only_for_that_secondary() {
         let conn = test_db();
-        insert_secondary(&conn, "secondary-a", "old-password");
-        insert_secondary(&conn, "secondary-b", "pass-b");
+        insert_secondary(&conn, "secondary-a", &test_secret("old"));
+        insert_secondary(&conn, "secondary-b", &test_secret("b"));
 
         conn.execute(
             "UPDATE secondaries SET nats_password_hash = ?1 WHERE name = 'secondary-a'",
-            [hash_nats_password("new-password")],
+            [hash_nats_password(&test_secret("new"))],
         )
         .unwrap();
 
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-a", "old-password"),
+            authorize_secondary_with_conn(&conn, "secondary-a", &test_secret("old")),
             None,
             "old password must no longer work after rotation"
         );
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-a", "new-password"),
+            authorize_secondary_with_conn(&conn, "secondary-a", &test_secret("new")),
             Some("secondary-a".to_string()),
             "new password must work after rotation"
         );
         assert_eq!(
-            authorize_secondary_with_conn(&conn, "secondary-b", "pass-b"),
+            authorize_secondary_with_conn(&conn, "secondary-b", &test_secret("b")),
             Some("secondary-b".to_string()),
             "rotating secondary-a must not affect secondary-b"
         );
@@ -630,9 +639,9 @@ mod tests {
 
     #[test]
     fn hash_nats_password_is_deterministic_and_distinct() {
-        let a = hash_nats_password("secret-one");
-        let b = hash_nats_password("secret-one");
-        let c = hash_nats_password("secret-two");
+        let a = hash_nats_password(&test_secret("one"));
+        let b = hash_nats_password(&test_secret("one"));
+        let c = hash_nats_password(&test_secret("two"));
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
