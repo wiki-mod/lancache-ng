@@ -1523,7 +1523,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # github.sha, NOT github.event.pull_request.head.sha: for a
+          # pull_request event this is the synthetic merge commit actually
+          # checked out and built (head merged into the base branch's tip
+          # AT THE TIME OF THIS EVENT), and -- critically -- it changes
+          # whenever that merge result changes even if the PR's own head
+          # commit does not (e.g. a "reopened" event after the base branch
+          # moved while the PR was closed). Keying the tag on the PR head
+          # SHA alone let two events for the identical head, merged against
+          # two different base states, collide on one tag and let whichever
+          # push landed last silently overwrite the other's image content.
+          BUILD_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.actor }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPOSITORY: ${{ github.repository }}
@@ -1546,9 +1557,9 @@ jobs:
           echo "pr-staging-available=$pr_staging_available" >> "$GITHUB_OUTPUT"
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            short_sha="${HEAD_SHA::7}"
+            short_sha="${BUILD_SHA::7}"
             tag="pr-${PR_NUMBER}-sha-${short_sha}"
-            echo "Validating against this PR's own staging tag '$tag' (base-channel fallback for untouched services: '$base_channel_tag')."
+            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; base-channel fallback for untouched services: '$base_channel_tag')."
           else
             tag="$base_channel_tag"
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -3115,17 +3126,27 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-amd64
 
-      # docker/metadata-action's `type=sha` uses the ephemeral pull_request
-      # merge-commit SHA by default (github.sha), not the PR branch's own
-      # head commit -- that merge SHA churns every time the base branch
-      # moves even with no new commits on the PR, which would make this
-      # staging tag both unstable and hard for a human to recognize. Compute
-      # a tag tied to the PR's actual head commit instead, with a `pr-<N>-`
-      # prefix so the GC workflow (.github/workflows/gc-pr-staging-images.yml)
-      # can find and reap it once the PR closes. The `-amd64` suffix matches
-      # this job's own per-arch tag convention (see "Extract metadata"
-      # above); merge-manifests combines it with build-arm64's `-arm64` PR
-      # staging tag into the real pr-<N>-sha-<short> multi-platform tag that
+      # Uses github.sha (the actual checked-out/built commit), NOT
+      # docker/metadata-action's `type=sha` output above and NOT the PR
+      # branch's own head commit. For a pull_request event, github.sha is
+      # the synthetic merge commit -- head merged into the base branch's
+      # tip AT THE TIME OF THIS EVENT -- and that's exactly the property
+      # needed here: it changes whenever the actual built content changes,
+      # even if the PR's own head commit doesn't (e.g. a "reopened" event
+      # after the base branch moved while the PR was closed), and it stays
+      # the same across a re-run of the identical event (GitHub reuses the
+      # original event's github.sha for re-runs, not a freshly re-resolved
+      # one). Tagging by the PR head SHA alone let two different events for
+      # the same head, merged against two different base states, collide on
+      # one tag -- and since this workflow's concurrency group does not
+      # cancel in-progress PR runs, a slower/older run could overwrite a
+      # newer run's tag with different image content after the fact. The
+      # `pr-<N>-` prefix lets the GC workflow
+      # (.github/workflows/gc-pr-staging-images.yml) find and reap this
+      # once the PR closes. The `-amd64` suffix matches this job's own
+      # per-arch tag convention (see "Extract metadata" above);
+      # merge-manifests combines it with build-arm64's `-arm64` PR staging
+      # tag into the real pr-<N>-sha-<short> multi-platform tag that
       # full-setup-validate actually consumes.
       - name: Compute PR staging tag
         id: pr-tag
@@ -3138,12 +3159,12 @@ jobs:
           }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BUILD_SHA: ${{ github.sha }}
           MATRIX_SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
 
-          short_sha="${HEAD_SHA::7}"
+          short_sha="${BUILD_SHA::7}"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
           {
@@ -3775,12 +3796,12 @@ jobs:
           }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BUILD_SHA: ${{ github.sha }}
           MATRIX_SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
 
-          short_sha="${HEAD_SHA::7}"
+          short_sha="${BUILD_SHA::7}"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
           {
@@ -4082,13 +4103,16 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Must match build/build-arm64's "Compute PR staging tag" exactly
+          # -- see that step's comment for why this is github.sha (the
+          # actual built merge commit), not the PR head SHA.
+          BUILD_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
         run: |
           set -euo pipefail
 
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
-          short_sha="${HEAD_SHA::7}"
+          short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
           for service in "${services[@]}"; do

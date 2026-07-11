@@ -104,21 +104,35 @@ jobs:
           # KNOW the PR's state) from an ambiguous one (any other failure),
           # and only a confirmed non-open state is ever deletable.
           pr_lookup_state() {
-            local pr_number="$1" api_output api_status pr_state
+            local pr_number="$1" api_output pr_state
             if [[ -n "${pr_state_cache[$pr_number]:-}" ]]; then
               printf '%s\n' "${pr_state_cache[$pr_number]}"
               return
             fi
 
-            api_output="$(gh api "repos/${repo}/pulls/${pr_number}" 2>&1)"
-            api_status=$?
-
-            if [[ "$api_status" == "0" ]]; then
-              pr_state="$(printf '%s' "$api_output" | jq -r '.state // empty')"
-              if [[ "$pr_state" == "open" ]]; then
-                pr_state_cache["$pr_number"]="OPEN"
+            # `api_output="$(gh api ...)"` as a bare assignment statement is
+            # itself a "simple command" under `set -e`: if `gh api` returns
+            # non-zero, THIS SCRIPT (not just the function) would exit right
+            # here, before a separately-captured `$?` on the next line could
+            # ever be read -- an earlier version of this function did
+            # exactly that and was caught in review. Putting the assignment
+            # directly in the `if` condition makes it a tested context, so a
+            # failure is handled by the `else` branches below instead of
+            # aborting the whole GC run.
+            if api_output="$(gh api "repos/${repo}/pulls/${pr_number}" 2>&1)"; then
+              if pr_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
+                if [[ "$pr_state" == "open" ]]; then
+                  pr_state_cache["$pr_number"]="OPEN"
+                else
+                  pr_state_cache["$pr_number"]="CLOSED"
+                fi
               else
-                pr_state_cache["$pr_number"]="CLOSED"
+                # gh api succeeded (a real response came back) but jq itself
+                # failed to parse it -- same "don't let this bare assignment
+                # trip set -e" reasoning as the gh api call above, applied to
+                # every other jq call in this script.
+                echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $pr_state" >&2
+                pr_state_cache["$pr_number"]="LOOKUP_FAILED"
               fi
             elif [[ "$api_output" == *"HTTP 404"* ]]; then
               # Confirmed: this PR number genuinely does not exist (deleted,
@@ -169,13 +183,38 @@ jobs:
             # nothing extra anyway (it is byte-for-byte the same image the
             # channel tag already keeps), so leaving it alone is correct,
             # not just safe.
+            # jq's exit status inside a process substitution (`< <(... | jq
+            # ...)`) is NOT checked by `set -e` -- bash simply never looks at
+            # it, so a missing/broken `jq` or malformed input here would
+            # make the loop silently see zero versions and this service
+            # would report as "nothing to clean" instead of "couldn't be
+            # inspected." Capturing jq's output via a checked command
+            # substitution first (same fix shape as the listing-failure fix
+            # above) and feeding a plain variable to `read` via a here-string
+            # instead makes a jq failure visible and fails the run, exactly
+            # like every other failure mode in this script.
+            if ! version_list="$(printf '%s' "$versions_json" | jq -c '.[]' 2>&1)"; then
+              echo "::error::Failed to enumerate package versions for lancache-ng/${service} via jq: $version_list"
+              had_errors=1
+              continue
+            fi
+
             while IFS= read -r version_entry; do
               [[ -z "$version_entry" ]] && continue
-              version_id="$(printf '%s' "$version_entry" | jq -r '.id')"
+              if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
+                echo "::error::Failed to read a package version's id for $service via jq: $version_id"
+                had_errors=1
+                continue
+              fi
               [[ -z "$version_id" || "$version_id" == "null" ]] && continue
 
               protected=0
               has_closed_pr_tag=0
+              if ! tag_list="$(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]' 2>&1)"; then
+                echo "::error::Failed to enumerate tags for $service version $version_id via jq: $tag_list"
+                had_errors=1
+                continue
+              fi
               while IFS= read -r tag; do
                 [[ -z "$tag" ]] && continue
                 if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
@@ -198,14 +237,18 @@ jobs:
                   protected=1
                   break
                 fi
-              done < <(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]')
+              done <<< "$tag_list"
 
               if [[ "$protected" == "1" || "$has_closed_pr_tag" == "0" ]]; then
                 kept=$((kept + 1))
                 continue
               fi
 
-              tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []')"
+              # Cosmetic (log message only, the tags this version already
+              # has were fully resolved via tag_list above) -- a jq failure
+              # here degrades the message instead of aborting or failing the
+              # run over something that isn't actually blocking the delete.
+              tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []' 2>&1)" || tags_display="<jq error: $tags_display>"
               echo "Deleting $service version $version_id (only closed-PR staging tags: $tags_display)."
               delete_output=""
               if delete_output="$(gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" 2>&1)"; then
@@ -219,7 +262,7 @@ jobs:
                 echo "::error::Failed to delete $service version $version_id (tags: $tags_display): $delete_output"
                 had_errors=1
               fi
-            done < <(printf '%s' "$versions_json" | jq -c '.[]')
+            done <<< "$version_list"
           done
 
           echo "::notice::PR staging-tag GC complete: deleted $deleted version(s), kept $kept."
