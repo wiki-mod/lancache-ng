@@ -1,52 +1,38 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# dnsmasq DHCP proxy entrypoint. Validates required env vars, renders
-# dnsmasq.conf.template via envsubst, validates the result and keeps a
-# known-good configuration snapshot history (#415, see
-# docs/known-good-config-snapshots.md), then starts dnsmasq in proxy mode.
-
-set -e
-
-if [ -f /data/lancache-ui-settings.env ]; then
-    # shellcheck disable=SC1091
-    . /data/lancache-ui-settings.env
-fi
-
-# DHCP_SUBNET_START/DHCP_DNS_PRIMARY/UPSTREAM_DHCP_IP are required for a
-# *working* dnsmasq proxy config, but must NOT hard-exit here (":?" aborts
-# the script immediately, before the known-good snapshot rollback path
-# below ever runs) -- a previously-validated snapshot may still exist and
-# should be tried first. Left unset/blank, envsubst below renders an empty
-# value into the template, which `dnsmasq --test` reliably rejects
-# ("bad dhcp-range"/"bad dhcp-proxy address", confirmed live), so the
-# existing validate-then-rollback flow already handles this correctly once
-# it's actually allowed to run.
-if [ -z "${DHCP_SUBNET_START:-}" ]; then
-    echo "WARNING: DHCP_SUBNET_START is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
-fi
-if [ -z "${DHCP_DNS_PRIMARY:-}" ]; then
-    echo "WARNING: DHCP_DNS_PRIMARY is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
-fi
-: "${DHCP_DNS_SECONDARY:=$DHCP_DNS_PRIMARY}"
-if [ -z "${UPSTREAM_DHCP_IP:-}" ]; then
-    echo "WARNING: UPSTREAM_DHCP_IP is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
-fi
-: "${KEEP_KNOWN_GOOD_CONFIGS:=3}"
-: "${DHCP_PROXY_CONFIG_SNAPSHOT_DIR:=/var/lib/lancache-dhcp-proxy/config-snapshots}"
-
-export DHCP_SUBNET_START DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY UPSTREAM_DHCP_IP
-
-# ────────────────────────────────────────────────────────────────────────────
-# Known-good configuration snapshot library (#415)
+# Known-good configuration snapshot contract (see
+# docs/known-good-config-snapshots.md and issue #415).
 #
-# See docs/known-good-config-snapshots.md for the full contract. This block
-# is a byte-identical copy of scripts/lib/known-good-snapshots.sh's function
-# definitions (verified by tests/bats/known_good_snapshots_sync.bats) rather
-# than a sourced file, because this Dockerfile builds from
-# services/dhcp-proxy/ alone with no shared-file build context wired up.
-# ────────────────────────────────────────────────────────────────────────────
-# BEGIN known-good-snapshot library (scripts/lib/known-good-snapshots.sh)
+# This is the canonical, documented reference implementation of the generic
+# retention/validate/rollback functions every file-based runtime-managed
+# service adapter follows. It is intentionally pure functions with no
+# top-level executable code, so it can be sourced directly by tests.
+#
+# It is NOT copied into any container image via a shared Docker build
+# context: each service Dockerfile (services/proxy, services/dhcp-proxy)
+# builds from its own isolated directory with no shared-file context wired
+# up (unlike the cdn-domains.txt `dns-domains` build context, adding a
+# second shared context here would require the build-push.yml matrix to
+# support multiple --build-context values per image, which none of its
+# three job definitions do today). Instead, services/proxy/entrypoint.sh
+# and services/dhcp-proxy/entrypoint.sh each embed a byte-identical copy of
+# these functions between the marker comments
+#   # BEGIN known-good-snapshot library (scripts/lib/known-good-snapshots.sh)
+#   # END known-good-snapshot library
+# tests/bats/known_good_snapshots_sync.bats fails the build if either
+# embedded copy ever drifts from this file, so "generic" here means one
+# documented, behaviorally-verified contract, not necessarily one physical
+# file loaded at runtime.
+#
+# Snapshot layout on disk, rooted at <snapshot_root> (a service-owned
+# persistent volume, never an ephemeral container layer):
+#   <snapshot_root>/<id>/           one directory per validated snapshot
+#   <snapshot_root>/<id>/<basename> one file per snapshotted config path
+# <id> is a lexicographically sortable, monotonically increasing timestamp
+# (date -u +%Y%m%dT%H%M%S.%N), so plain `sort` gives chronological order
+# without any extra index/bookkeeping file.
+
 # kgs_log <level> <label> <message...>
 # Emits one explicit, greppable log line for every snapshot lifecycle event
 # (create, prune, rollback-select, reject) per the issue's acceptance
@@ -252,46 +238,3 @@ kgs_snapshot_apply() {
     kgs_log FATAL "$label" "no known-good snapshot passed validation; refusing rollback"
     return 1
 }
-# END known-good-snapshot library
-
-envsubst < /etc/dnsmasq.conf.template > /etc/dnsmasq.conf
-
-# _dhcp_proxy_validate_snapshot_or_rollback <file...>
-# Factored into its own function (rather than inline top-level script code)
-# so tests/bats/dhcp_proxy_known_good_snapshot.bats can drive the full
-# dnsmasq adapter flow against a stub `dnsmasq` binary without needing to
-# run the rest of this entrypoint.
-_dhcp_proxy_validate_snapshot_or_rollback() {
-    local -a candidate_files=("$@")
-    # dnsmasq's -C flag can point at an arbitrary path (unlike nginx -t,
-    # which always validates the fixed in-container config due to absolute
-    # conf.d/stream.d includes), so the config path is taken from the
-    # caller's candidate list instead of being hardcoded here. This also
-    # lets tests point it at a throwaway path instead of the real
-    # /etc/dnsmasq.conf.
-    local dnsmasq_conf="${candidate_files[0]}"
-
-    echo "Validating dnsmasq config..."
-    if dnsmasq --test -C "$dnsmasq_conf"; then
-        kgs_snapshot_create "$DHCP_PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "dhcp-proxy" "${candidate_files[@]}"
-        return 0
-    fi
-
-    echo "ERROR: generated dnsmasq config failed validation (dnsmasq --test)." >&2
-    echo "ERROR: attempting rollback to the newest known-good snapshot instead of starting with an invalid config." >&2
-    local selected_id
-    if selected_id="$(kgs_snapshot_apply "$DHCP_PROXY_CONFIG_SNAPSHOT_DIR" "dhcp-proxy" "dnsmasq --test -C '${dnsmasq_conf}'" "${candidate_files[@]}")"; then
-        echo "WARNING: dnsmasq is starting from known-good snapshot ${selected_id}, NOT the newly generated config." >&2
-        echo "WARNING: check DHCP_SUBNET_START/DHCP_DNS_PRIMARY/DHCP_DNS_SECONDARY/UPSTREAM_DHCP_IP and restart to pick up the intended change." >&2
-        return 0
-    fi
-
-    echo "FATAL: no known-good dnsmasq config snapshot is available; refusing to start with an invalid config." >&2
-    return 1
-}
-
-DHCP_PROXY_CANDIDATE_FILES=(/etc/dnsmasq.conf)
-_dhcp_proxy_validate_snapshot_or_rollback "${DHCP_PROXY_CANDIDATE_FILES[@]}" || exit 1
-
-echo "Starting dnsmasq DHCP proxy (subnet: $DHCP_SUBNET_START, DNS: $DHCP_DNS_PRIMARY, $DHCP_DNS_SECONDARY)..."
-exec dnsmasq -k -C /etc/dnsmasq.conf
