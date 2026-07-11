@@ -391,7 +391,7 @@ _dns_auth_validate_snapshot_or_rollback() {
     config_dir="$(dirname "$pdns_conf")"
 
     echo "[lancache-dns] Validating pdns.conf (pdns_server --config=check)..."
-    if pdns_server --config=check --config-dir="$config_dir" >/dev/null 2>&1; then
+    if pdns_server --config=check --config-dir="$config_dir" >/dev/null; then
         kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-auth" "$pdns_conf"
         return 0
     fi
