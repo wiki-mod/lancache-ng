@@ -84,7 +84,7 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 
 - `.github/workflows/build-tools.yml`:
   - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
-  - `docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0` ✅ Pinned by commit SHA
+  - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
 
 - `.github/workflows/codeql.yml`:
   - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA

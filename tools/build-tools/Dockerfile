@@ -7,26 +7,53 @@
 FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
+ARG DOCKER_CLI_VERSION=29.6.1
+ARG DOCKER_COMPOSE_VERSION=5.2.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# actionlint is a Go binary, and Go statically embeds its entire standard
-# library into every compiled binary -- unlike a dynamically-linked C tool,
-# there is no way to get security fixes into an already-built Go binary
-# short of recompiling it. actionlint's own upstream release binaries are
-# only cut when actionlint itself has a new feature/fix to ship, not on
-# every Go stdlib security release, so the latest available release
-# (v1.7.12, published 2026-03-30) is built against a Go toolchain old enough
-# to carry 11 known stdlib CVEs (crypto/x509, crypto/tls, net/mail, HTTP/2 --
-# confirmed via Trivy scanning that exact release binary). Building from
-# source with whatever Go toolchain `golang:latest` resolves to at build
-# time is the only way to get a current, patched stdlib into this specific
-# tool. cargo-audit and cargo-tarpaulin below don't have this problem: they
-# are Rust binaries, not Go, so they carry no equivalent statically-embedded
+# actionlint, the Docker CLI, and docker-compose are all Go binaries, and Go
+# statically embeds its entire standard library into every compiled binary --
+# unlike a dynamically-linked C tool, there is no way to get security fixes
+# into an already-built Go binary short of recompiling it. Each of these
+# three projects only cuts a new upstream release when the tool itself has a
+# feature/fix to ship, not on every Go stdlib security release, so their
+# latest available release binaries can (and have: confirmed via Trivy
+# scanning the exact official static binaries for actionlint v1.7.12 and
+# Docker CLI/compose v29.6.1/v5.2.0) carry known stdlib CVEs from whatever Go
+# toolchain happened to be current when that release was cut. Building from
+# source with whatever Go toolchain `golang:latest` resolves to at build time
+# is the only way to get a current, patched stdlib into these tools.
+# cargo-audit and cargo-tarpaulin below don't have this problem: they are
+# Rust binaries, not Go, so they carry no equivalent statically-embedded
 # runtime to go stale.
+# docker/cli deliberately ships a `vendor.mod`, not a `go.mod` -- its own
+# build docs explain this keeps the CLI from being importable as a library
+# dependency by other Go modules -- so a plain `go install .../cmd/docker@vX`
+# does not work (the Go toolchain has no module file to resolve against).
+# Cloning the tagged release (which ships its own complete vendor/ directory,
+# so this needs no network access beyond the initial clone) and running its
+# own `scripts/build/binary` reproduces upstream's exact official build.
+# docker-compose is a normal Go-modules project, but its go.mod has `exclude`
+# directives, which `go install pkg@version` rejects (it requires treating the
+# target as if it were the main module, and `exclude` is only valid in a
+# genuine main module) -- cloning and running a real local `go build` from
+# within the checkout sidesteps that restriction.
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
-    /out/actionlint --version
+    /out/actionlint --version; \
+    docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
+    install -d "$(dirname "$docker_cli_src")"; \
+    git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"; \
+    ( cd "$docker_cli_src" && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
+    install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker; \
+    rm -rf "$(go env GOPATH)/src/github.com"; \
+    /out/docker --version; \
+    compose_src="$(mktemp -d)"; \
+    git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
+    ( cd "$compose_src" && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
+    rm -rf "$compose_src"; \
+    /out/docker-compose version
 
 FROM rust:latest
 
@@ -43,8 +70,6 @@ ARG CARGO_TARPAULIN_VERSION=0.37.0
 ARG CARGO_TARPAULIN_SHA256_AMD64=398ca437e9f2b2baee46ef9d3d03966112f03f2cce8b1655a8ba0b61cef08bff
 ARG CARGO_TARPAULIN_SHA256_ARM64=d6ae06b7126fb44414dd65165f9aec9e330146513f709af69e6a7927093f277a
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
-ARG DOCKER_CLI_VERSION=29.6.1
-ARG DOCKER_COMPOSE_VERSION=5.2.0
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 ARG DEBIAN_FRONTEND=noninteractive
@@ -93,9 +118,9 @@ RUN set -euo pipefail; \
 # unlike sccache, neither needs a non-default feature set -- so building
 # them from source would only add build time for no behavioral difference.
 # Fetch and checksum-verify the official release asset for each instead,
-# matching the existing docker/docker-compose/shellspec pattern below.
-# actionlint is not included here -- see the actionlint-builder stage above
-# for why it's built from source instead.
+# matching the shellspec pattern below. actionlint, docker, and docker-compose
+# are not included here -- see the actionlint-builder stage above for why
+# those three are built from source instead.
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
@@ -135,24 +160,14 @@ RUN set -euo pipefail; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
 
-RUN set -euo pipefail; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-      amd64) docker_arch="x86_64"; compose_arch="x86_64" ;; \
-      arm64) docker_arch="aarch64"; compose_arch="aarch64" ;; \
-      *) echo "Unsupported Docker CLI architecture: $arch" >&2; exit 1 ;; \
-    esac; \
-    docker_tmp="$(mktemp -d)"; \
-    trap 'rm -rf "$docker_tmp"' EXIT; \
-    curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
-      -o "$docker_tmp/docker.tgz"; \
-    tar -xzf "$docker_tmp/docker.tgz" -C "$docker_tmp"; \
-    install -m 0755 "$docker_tmp/docker/docker" /usr/local/bin/docker; \
-    install -d /usr/local/lib/docker/cli-plugins; \
-    curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
-      -o /usr/local/lib/docker/cli-plugins/docker-compose; \
-    chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose; \
-    docker --version; \
+# Built from source in the actionlint-builder stage above (see its comment):
+# the official static binaries for these exact versions carry a known,
+# fixed-upstream Go stdlib CVE (confirmed via Trivy) that only a rebuild
+# against a current Go toolchain resolves.
+RUN install -d /usr/local/lib/docker/cli-plugins
+COPY --from=actionlint-builder /out/docker /usr/local/bin/docker
+COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+RUN docker --version; \
     docker compose version
 
 RUN set -euo pipefail; \
