@@ -1644,22 +1644,38 @@ jobs:
           # plus build-tools (used by the client-simulation step further
           # down, not by the compose file itself). dhcp and dhcp-proxy are
           # part of neither and are intentionally excluded.
+          #
+          # Decide touched-or-not FIRST, before looking at whether a pr_image
+          # already exists. A prior run of this exact PR head (a manual
+          # re-run, or this job simply running twice for the same commit) may
+          # already have back-filled an untouched service's pr-<N>-sha-<short>
+          # tag from whatever the base channel pointed at THEN. If the base
+          # channel (edge/dev) has since moved -- another PR merged in the
+          # meantime -- an existence check alone would see the stale alias,
+          # assume it's still correct, and `continue` without refreshing it:
+          # this job would then validate a deploy/workflow-only PR that
+          # doesn't touch that service against an old, no-longer-current
+          # base image, silently. So an untouched service is unconditionally
+          # (re)pointed at whatever the base channel resolves to RIGHT NOW --
+          # `imagetools create` is a cheap registry-side manifest write, not
+          # a rebuild, so refreshing it even when nothing actually changed
+          # costs nothing worth optimizing away.
           full_setup_services=(proxy dns watchdog ui build-tools)
           for service in "${full_setup_services[@]}"; do
             pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
-            if docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
-              echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
-              continue
-            fi
-
             should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
+
             if [[ "$should_exist" == "true" ]]; then
+              if docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
+                echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
+                continue
+              fi
               echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to base-channel content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
               exit 1
             fi
 
             base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
-            echo "::notice::$service has no staging image at $PR_TAG (untouched by this PR); copying from $base_image."
+            echo "::notice::$service is untouched by this PR; (re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
             docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
 

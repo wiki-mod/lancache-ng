@@ -132,11 +132,29 @@ jobs:
             printf '%s\n' "${pr_state_cache[$pr_number]}"
           }
 
+          # had_errors turns a listing or delete failure into a failed GC
+          # run instead of a silently "successful" one. Without this, a
+          # broken GHCR_PACKAGE_DELETE_PAT (missing read:packages or
+          # delete:packages), a rate limit, or a missing `gh` binary would
+          # make every listing/delete call fail, the loop below would just
+          # see empty results or failed deletes, and this workflow would
+          # report success having inspected or removed nothing -- exactly
+          # the kind of "looks healthy but does nothing" failure mode that
+          # would let staging tags accumulate in GHCR forever undetected.
+          # A single service's listing failure doesn't abort the whole run
+          # immediately: other services still get processed (so a
+          # per-package hiccup doesn't block cleanup everywhere else), but
+          # the run still exits non-zero at the end so CI reflects reality.
+          had_errors=0
           deleted=0
           kept=0
           for service in "${services[@]}"; do
             package="lancache-ng%2F${service}"
-            versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>/dev/null || echo "[]")"
+            if ! versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>&1)"; then
+              echo "::error::Failed to list package versions for lancache-ng/${service}: $versions_json"
+              had_errors=1
+              continue
+            fi
 
             # A "version" in GHCR is keyed by digest, not by tag -- a
             # back-filled service (see full-setup-validate's own "Ensure PR
@@ -189,12 +207,24 @@ jobs:
 
               tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []')"
               echo "Deleting $service version $version_id (only closed-PR staging tags: $tags_display)."
-              if gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" >/dev/null 2>&1; then
+              delete_output=""
+              if delete_output="$(gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" 2>&1)"; then
                 deleted=$((deleted + 1))
               else
-                echo "::warning::Failed to delete $service version $version_id."
+                # Logged and counted, not just warned: this is exactly the
+                # "PAT can list but lacks delete:packages" case (or GitHub
+                # rejecting one specific delete) -- if every delete in a run
+                # failed this way, deleted would stay 0 forever while the
+                # job still exited 0 unless had_errors makes it fail below.
+                echo "::error::Failed to delete $service version $version_id (tags: $tags_display): $delete_output"
+                had_errors=1
               fi
             done < <(printf '%s' "$versions_json" | jq -c '.[]')
           done
 
           echo "::notice::PR staging-tag GC complete: deleted $deleted version(s), kept $kept."
+
+          if [[ "$had_errors" == "1" ]]; then
+            echo "::error::One or more package-version listings or deletions failed (see errors above). Failing this run instead of reporting success -- GHCR_PACKAGE_DELETE_PAT may be missing read:packages/delete:packages scopes, the API may be rate-limited, or GitHub rejected a delete for another reason. A GC run that looks healthy while silently doing nothing would let PR staging tags accumulate in GHCR forever undetected."
+            exit 1
+          fi
