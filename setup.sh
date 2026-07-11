@@ -1628,8 +1628,19 @@ derive_release_archive_image_tag() {
                 # trust every repository regardless of path -- so it does not
                 # weaken the dubious-ownership protection for anything other
                 # than this script resolving its own, already-trusted path.
+                # Match against only git's first stderr line: the full
+                # message also repeats the path later (in its own
+                # single-quoted "git config --global --add safe.directory
+                # '<path>'" suggestion), and a greedy (.+) spanning the
+                # whole multi-line string would capture through to that
+                # later quote instead of stopping at the first line's own
+                # closing quote -- confirmed live (a path containing a
+                # space reproduced this: the over-captured value never
+                # matched what git actually checked, so the retry below
+                # still failed and fell through to the stale VERSION file).
                 local dubious_path="$SCRIPT_DIR"
-                if [[ "$git_stderr" =~ dubious\ ownership\ in\ repository\ at\ \'(.+)\' ]]; then
+                local dubious_first_line="${git_stderr%%$'\n'*}"
+                if [[ "$dubious_first_line" =~ dubious\ ownership\ in\ repository\ at\ \'(.+)\' ]]; then
                     dubious_path="${BASH_REMATCH[1]}"
                 fi
                 safe_dir_opt=(-c "safe.directory=$dubious_path")

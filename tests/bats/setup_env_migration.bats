@@ -222,6 +222,51 @@ setup() {
     [ "$tag" = "v2.0.0" ]
 }
 
+@test "git dubious-ownership rejection extracts only the first line's path, not the later config-suggestion quote" {
+    # Regression test for a Codex review finding on #609: real git's
+    # dubious-ownership message repeats the path a second time, quoted, in
+    # its "git config --global --add safe.directory '<path>'" suggestion a
+    # few lines later. A path containing a space forces git to quote it (and
+    # is realistic -- e.g. "Program Files"-style install locations). A
+    # greedy regex applied to the WHOLE multi-line stderr blob would match
+    # from the first line's opening quote all the way through to the LAST
+    # closing quote in the message (the config-suggestion line), producing a
+    # garbage path that never matches what git actually checked -- so the
+    # retry below would still fail and fall through to the stale VERSION
+    # file. The fix restricts extraction to stderr's first line only.
+    repo_dir="$BATS_TEST_TMPDIR/repo with space"
+    mkdir -p "$repo_dir"
+    : > "$repo_dir/.git"
+    printf '%s\n' '1.0.1' > "$repo_dir/VERSION"
+
+    SCRIPT_DIR="$repo_dir"
+    export SCRIPT_DIR
+
+    git() {
+        local arg saw_safe_dir=0
+        for arg in "$@"; do
+            [[ "$arg" == "safe.directory=$repo_dir" ]] && saw_safe_dir=1
+        done
+        if [[ "$saw_safe_dir" -eq 0 ]]; then
+            # Real git's actual multi-line message shape: the path appears
+            # quoted on the first line AND again in the later suggestion.
+            printf "fatal: detected dubious ownership in repository at '%s'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory '%s'\n" "$repo_dir" "$repo_dir" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            *"describe --tags --exact-match"*) printf 'v3.2.1\n'; return 0 ;;
+        esac
+        return 1
+    }
+
+    tag=$(derive_release_archive_image_tag)
+    status=$?
+
+    [ "$status" -eq 0 ]
+    [ "$tag" = "v3.2.1" ]
+}
+
 @test "proxy security migration restores lazy default for legacy strict without allowlist" {
     printf '%s\n' \
         'PROXY_SECURITY_MODE=strict' \
