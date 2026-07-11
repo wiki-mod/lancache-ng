@@ -139,8 +139,9 @@ services:
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
   # socket-proxy limits Docker access to Admin UI/watchdog operations. The
-  # custom HAProxy config above replaces Tecnativa's broad CONTAINERS/POST
-  # toggles with a deny-by-default allowlist for named lancache-ng containers.
+  # custom HAProxy config in scripts/docker-socket-proxy.sh (mounted below)
+  # replaces Tecnativa's broad CONTAINERS/POST toggles with a deny-by-default
+  # allowlist for named lancache-ng containers.
   docker-socket-proxy:
     container_name: lancache-docker-socket-proxy
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
