@@ -404,64 +404,77 @@ services:
   # ── Log collector (#453; optional, start with: docker compose --profile logging up) ──
   # Tails the proxy access log into two independent pipelines: a local
   # plain-text file (kept for Netdata's web_log parser) and a forward to the
-  # central syslog-ng receiver below. Config is generated inline (not
-  # bind-mounted) so quickstart -- which has no local repo checkout to
-  # bind-mount from -- runs the exact same fluent-bit behavior as dev/prod.
+  # central syslog-ng receiver below. Config is passed as CLI flags (not a
+  # bind-mounted or generated file) because this image ships no shell at all
+  # (distroless-style), and because quickstart has no local repo checkout to
+  # bind-mount a config file from -- CLI flags are the one delivery mechanism
+  # that works identically across dev/prod/quickstart.
   syslog:
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     profiles: [logging]
-    entrypoint: ["/bin/sh", "-c"]
     command:
-      - |
-        set -e
-        mkdir -p /fluent-bit/etc
-        cat > /fluent-bit/etc/fluent-bit.conf <<'EOF'
-        [SERVICE]
-            Flush         5
-            Daemon        Off
-            Log_Level     warn
-            storage.path  /data/flb-storage
-
-        [INPUT]
-            Name          tail
-            Path          /var/log/nginx/access.log
-            Tag           nginx.file
-            DB            /data/flb-proxy-file.db
-            Skip_Long_Lines On
-
-        [INPUT]
-            Name          tail
-            Path          /var/log/nginx/access.log
-            Tag           nginx.syslog
-            DB            /data/flb-proxy-syslog.db
-            Skip_Long_Lines On
-
-        [FILTER]
-            Name          record_modifier
-            Match         nginx.syslog
-            Record        host lancache-proxy
-            Record        ident nginx-access
-
-        [OUTPUT]
-            Name          file
-            Match         nginx.file
-            Path          /var/log/lancache
-            File          nginx-proxy.log
-            Format        template
-            Template      {log}
-
-        [OUTPUT]
-            Name                 syslog
-            Match                nginx.syslog
-            Host                 syslog-ng
-            Port                 601
-            Mode                 tcp
-            Syslog_Format        rfc5424
-            Syslog_Hostname_key  host
-            Syslog_Appname_key   ident
-            Syslog_Message_key   log
-        EOF
-        exec /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluent-bit.conf
+      - -f
+      - "5"
+      - -b
+      - /data/flb-storage
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/access.log
+      - -p
+      - tag=nginx.file
+      - -p
+      - db=/data/flb-proxy-file.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/access.log
+      - -p
+      - tag=nginx.syslog
+      - -p
+      - db=/data/flb-proxy-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -F
+      - record_modifier
+      - -m
+      - nginx.syslog
+      - -p
+      - record=host lancache-proxy
+      - -p
+      - record=ident nginx-access
+      - -o
+      - file
+      - -m
+      - nginx.file
+      - -p
+      - path=/var/log/lancache
+      - -p
+      - file=nginx-proxy.log
+      - -p
+      - format=template
+      - -p
+      - template={log}
+      - -o
+      - syslog
+      - -m
+      - nginx.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
     volumes:
       - proxy-logs:/var/log/nginx:ro
       - logs:/var/log/lancache
