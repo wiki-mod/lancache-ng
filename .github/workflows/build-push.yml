@@ -535,7 +535,12 @@ jobs:
 
       - name: Validate compose files
         env:
-          CACHE_DIR_STANDARD: /tmp/lancache-standard
+          # CACHE_DIR_STANDARD/CACHE_DIR_SSL are intentionally absent here: no
+          # compose file reads either key anymore (issue #445), so injecting
+          # one would validate a var no service consumes. SSL_CACHE_MAX_GB and
+          # STANDARD_CACHE_MAX_GB stay below because deploy/prod/docker-compose.yml
+          # still falls back to them when CACHE_MAX_GB is unset, for installs
+          # that haven't gone through setup.sh update yet.
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
           CACHE_MEM_MB: "256"
@@ -574,7 +579,6 @@ jobs:
             -w /work \
             --env HOME=/tmp \
             --env DOCKER_CONFIG=/tmp/.docker \
-            --env CACHE_DIR_STANDARD \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
             --env CACHE_MEM_MB \
