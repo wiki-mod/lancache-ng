@@ -228,12 +228,27 @@ jobs:
     # Cheap repository hygiene gate (issue #601). .gitattributes already
     # normalizes line endings for files git touches going forward, but does
     # not catch files where that normalization was bypassed.
+    #
+    # Runs inside the same build-tools image selected by validate-compose,
+    # same as shellcheck -- per AGENTS.md's Build-tools Verification
+    # Contract, verification must run in that container, not against
+    # whatever bash/grep happen to be installed on the runner host.
     name: line endings
+    needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/check-line-endings.sh
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
 
   line-endings-hosted:
     name: line endings (GitHub-hosted fallback)
@@ -2699,12 +2714,14 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - line-endings
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
+        needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
@@ -3298,12 +3315,14 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - line-endings
     if: >-
       ${{
         always() &&
         needs.shellcheck.result == 'success' &&
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
+        needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')

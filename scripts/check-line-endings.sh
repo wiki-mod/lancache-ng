@@ -31,9 +31,13 @@ offenders=()
 for path in "${files[@]}"; do
     [ -f "$path" ] || continue
     is_excluded "$path" && continue
-    # grep -I treats a binary file as non-matching instead of erroring, so
-    # any binary type not covered by is_excluded above is still skipped safely.
-    if grep -Iq $'\r' "$path" 2>/dev/null; then
+    # grep -a (treat every file as text) rather than -I: -I's binary-file
+    # heuristic looks for a NUL byte and silently skips the file if found,
+    # which also skips every UTF-16 text file (each ASCII character encodes
+    # as <byte> 0x00 in UTF-16LE) -- including a genuine CRLF-terminated one
+    # (0d 00 0a 00), such as a PowerShell script saved by Windows tooling.
+    # -a scans raw bytes for \r in every file not already excluded above.
+    if grep -aq $'\r' "$path" 2>/dev/null; then
         offenders+=("$path")
     fi
 done
