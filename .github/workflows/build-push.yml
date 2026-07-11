@@ -1507,9 +1507,16 @@ jobs:
       # On a pull_request event this now resolves to the PR's OWN staging tag
       # (see #626) instead of the base-ref channel, so this job actually
       # tests the PR's own commits rather than whatever the base branch last
-      # published. base_channel_tag is still computed on PR events: the next
-      # step uses it as the fallback source for any full-setup service this
-      # PR did not touch (and therefore never pushed a staging tag for).
+      # published -- UNLESS this is a Dependabot PR or (should that ever
+      # start existing) a fork PR: those get a read-only GITHUB_TOKEN from
+      # GitHub (same restriction, confirmed for Dependabot in GitHub's own
+      # docs), so build/build-arm64 never push anything for them (see their
+      # own "Log in to GHCR" steps) and there is no PR staging tag to
+      # validate against at all. pr-staging-available captures that so every
+      # later step can gate off one flag instead of re-deriving it.
+      # base_channel_tag is always computed: it's the resolved tag itself
+      # when staging isn't available, and the fallback source for any
+      # full-setup service an eligible PR did not touch either way.
       - name: Determine validation image channel
         id: channel
         env:
@@ -1517,6 +1524,9 @@ jobs:
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTOR: ${{ github.actor }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -1529,12 +1539,21 @@ jobs:
           fi
           echo "base-channel-tag=$base_channel_tag" >> "$GITHUB_OUTPUT"
 
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          pr_staging_available=false
+          if [[ "$EVENT_NAME" == "pull_request" && "$ACTOR" != "dependabot[bot]" && "$HEAD_REPO" == "$REPOSITORY" ]]; then
+            pr_staging_available=true
+          fi
+          echo "pr-staging-available=$pr_staging_available" >> "$GITHUB_OUTPUT"
+
+          if [[ "$pr_staging_available" == "true" ]]; then
             short_sha="${HEAD_SHA::7}"
             tag="pr-${PR_NUMBER}-sha-${short_sha}"
             echo "Validating against this PR's own staging tag '$tag' (base-channel fallback for untouched services: '$base_channel_tag')."
           else
             tag="$base_channel_tag"
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              echo "::notice::$ACTOR's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
+            fi
             echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -1551,26 +1570,75 @@ jobs:
       # mirrors the `promote`/`merge-manifests` jobs' own
       # `docker buildx imagetools create` pattern for moving/combining tags
       # without re-pulling image layers.
+      #
+      # Gated on pr-staging-available, not a bare `github.event_name ==
+      # 'pull_request'`: a Dependabot/fork PR has no PR staging tag for ANY
+      # service (build/build-arm64 skip pushing entirely for them), so
+      # steps.channel.outputs.tag already equals base_channel_tag above --
+      # there is nothing to back-fill, and attempting to log in/push here
+      # with that PR's read-only GITHUB_TOKEN would just fail instead of
+      # skipping cleanly.
       - name: Set up Docker Buildx
-        if: github.event_name == 'pull_request'
+        if: steps.channel.outputs.pr-staging-available == 'true'
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        if: github.event_name == 'pull_request'
+        if: steps.channel.outputs.pr-staging-available == 'true'
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A service detect-changes says THIS PR touched (or any service other
+      # than build-tools, if the PR changed a workflow/CI-contract file --
+      # mirrors build/build-arm64's own should-build override exactly) must
+      # already have a staging image by the time this runs: full-setup-
+      # validate now waits for merge-manifests (see this job's own `needs:`
+      # comment above) specifically so that's true. If it's missing anyway --
+      # build/build-arm64 actually failed to push it, or imagetools inspect
+      # hit a transient registry error -- silently copying base-channel
+      # content into that service's pr-<N>-sha-<short> tag would make this
+      # job green while testing exactly the stale image #626 exists to stop
+      # testing, just now hidden behind a tag name that LOOKS PR-specific.
+      # Fail loudly instead; only a genuinely untouched service gets the
+      # base-channel back-fill.
       - name: Ensure PR staging tags exist for full-setup services
-        if: github.event_name == 'pull_request'
+        if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
           BASE_CHANNEL_TAG: ${{ steps.channel.outputs.base-channel-tag }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
+          PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
+          DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
+          WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
+          UI_TOUCHED: ${{ needs['detect-changes'].outputs.ui }}
+          BUILD_TOOLS_TOUCHED: ${{ needs['detect-changes'].outputs.build_tools }}
         run: |
           set -euo pipefail
+
+          # Mirrors build/build-arm64's "Determine whether this service
+          # needs building" should-build override exactly: a workflow/CI-
+          # contract change forces every service except build-tools to be
+          # treated as touched, because build-tools' own detect-changes
+          # scoping (tools/build-tools/** only) is intentionally narrower.
+          service_should_have_staging_tag() {
+            local service="$1" touched="$2"
+            if [[ "$WORKFLOW_CHANGED" == "true" && "$service" != "build-tools" ]]; then
+              echo true
+            else
+              echo "$touched"
+            fi
+          }
+
+          declare -A touched_map=(
+            [proxy]="$PROXY_TOUCHED"
+            [dns]="$DNS_TOUCHED"
+            [watchdog]="$WATCHDOG_TOUCHED"
+            [ui]="$UI_TOUCHED"
+            [build-tools]="$BUILD_TOOLS_TOUCHED"
+          )
 
           # The services deploy/full-setup/docker-compose.yml references,
           # plus build-tools (used by the client-simulation step further
@@ -1583,6 +1651,13 @@ jobs:
               echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
               continue
             fi
+
+            should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
+            if [[ "$should_exist" == "true" ]]; then
+              echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to base-channel content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
+              exit 1
+            fi
+
             base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
             echo "::notice::$service has no staging image at $PR_TAG (untouched by this PR); copying from $base_image."
             docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
@@ -2988,12 +3063,20 @@ jobs:
         # of stale base-branch state. The fork check is a fail-safe in case
         # that assumption ever stops holding -- a fork PR's GITHUB_TOKEN is
         # read-only anyway, so login would fail loudly rather than silently.
+        # Dependabot PRs get the same read-only-token treatment as fork PRs
+        # (GitHub docs: Dependabot Actions runs never get a write-scoped
+        # GITHUB_TOKEN, even for a same-repo PR) -- excluded explicitly so
+        # this step (and the push below) is skipped cleanly instead of
+        # attempting a login/push that GitHub would reject with a 403.
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' &&
             (
               github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             )
           }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -3034,6 +3117,7 @@ jobs:
           ${{
             github.event_name == 'pull_request' &&
             steps.should-build.outputs.should-build == 'true' &&
+            github.actor != 'dependabot[bot]' &&
             github.event.pull_request.head.repo.full_name == github.repository
           }}
         env:
@@ -3295,7 +3379,7 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
@@ -3322,7 +3406,10 @@ jobs:
           ${{
             (
               github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             ) &&
             (
               steps.should-build.outputs.should-build == 'true'
@@ -3339,7 +3426,10 @@ jobs:
           ${{
             (
               github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             ) &&
             (
               steps.should-build.outputs.should-build == 'true'
@@ -3376,7 +3466,7 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
@@ -3626,13 +3716,17 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        # Same fork-safety reasoning as build's own "Log in to GHCR" step.
+        # Same fork-safety and Dependabot-safety reasoning as build's own
+        # "Log in to GHCR" step.
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' &&
             (
               github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             )
           }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -3660,6 +3754,7 @@ jobs:
           ${{
             github.event_name == 'pull_request' &&
             steps.should-build.outputs.should-build == 'true' &&
+            github.actor != 'dependabot[bot]' &&
             github.event.pull_request.head.repo.full_name == github.repository
           }}
         env:
@@ -3749,7 +3844,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
@@ -3770,7 +3865,10 @@ jobs:
           ${{
             (
               github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             ) &&
             (
               steps.should-build.outputs.should-build == 'true'
@@ -3784,7 +3882,10 @@ jobs:
           ${{
             (
               github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
             ) &&
             (
               steps.should-build.outputs.should-build == 'true'
@@ -3815,7 +3916,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}

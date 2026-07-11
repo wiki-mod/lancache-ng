@@ -89,19 +89,47 @@ jobs:
 
           declare -A pr_state_cache=()
 
-          # Returns 0 (true) only when PR $1 is currently open. Any other
-          # state -- closed, merged, or not found at all (a bad/garbled tag,
-          # or the PR/repo history was rewritten) -- means "safe to delete."
-          # Failing closed here (delete) rather than open (keep-forever) is
-          # the correct default for a GC job: an orphaned tag costs storage
-          # forever, a wrongly-deleted tag only affects a PR that is, by
-          # definition, not actively being validated right now.
-          pr_is_open() {
-            local pr_number="$1"
-            if [[ -z "${pr_state_cache[$pr_number]+set}" ]]; then
-              pr_state_cache["$pr_number"]="$(gh pr view "$pr_number" --repo "$repo" --json state --jq .state 2>/dev/null || echo "MISSING")"
+          # Prints exactly one of OPEN / CLOSED / LOOKUP_FAILED for PR $1.
+          # These are NOT the same thing, and collapsing them was a real bug
+          # caught in review: `gh pr view ... 2>/dev/null || echo MISSING`
+          # can't tell "this PR genuinely doesn't exist" apart from "the API
+          # call itself failed" (rate limit, auth hiccup, GitHub outage,
+          # network blip) -- both looked identical to the caller and both
+          # got deleted. A transient lookup failure must NOT be treated as
+          # "safe to delete": that would let a temporary GitHub/token issue
+          # delete an ACTIVE PR's staging images out from under it, which is
+          # exactly the kind of confusing, hard-to-diagnose breakage #626
+          # itself was about. So this distinguishes a confirmed answer
+          # (`gh api` succeeded, or failed with a real 404 -- either way we
+          # KNOW the PR's state) from an ambiguous one (any other failure),
+          # and only a confirmed non-open state is ever deletable.
+          pr_lookup_state() {
+            local pr_number="$1" api_output api_status pr_state
+            if [[ -n "${pr_state_cache[$pr_number]:-}" ]]; then
+              printf '%s\n' "${pr_state_cache[$pr_number]}"
+              return
             fi
-            [[ "${pr_state_cache[$pr_number]}" == "OPEN" ]]
+
+            api_output="$(gh api "repos/${repo}/pulls/${pr_number}" 2>&1)"
+            api_status=$?
+
+            if [[ "$api_status" == "0" ]]; then
+              pr_state="$(printf '%s' "$api_output" | jq -r '.state // empty')"
+              if [[ "$pr_state" == "open" ]]; then
+                pr_state_cache["$pr_number"]="OPEN"
+              else
+                pr_state_cache["$pr_number"]="CLOSED"
+              fi
+            elif [[ "$api_output" == *"HTTP 404"* ]]; then
+              # Confirmed: this PR number genuinely does not exist (deleted,
+              # renumbered, whatever) -- a real answer, not an ambiguous one.
+              pr_state_cache["$pr_number"]="CLOSED"
+            else
+              echo "::warning::Could not determine PR #$pr_number's state (not a 404): $api_output" >&2
+              pr_state_cache["$pr_number"]="LOOKUP_FAILED"
+            fi
+
+            printf '%s\n' "${pr_state_cache[$pr_number]}"
           }
 
           deleted=0
@@ -134,11 +162,18 @@ jobs:
                 [[ -z "$tag" ]] && continue
                 if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
                   pr_number="${BASH_REMATCH[1]}"
-                  if pr_is_open "$pr_number"; then
-                    protected=1
-                    break
-                  fi
-                  has_closed_pr_tag=1
+                  case "$(pr_lookup_state "$pr_number")" in
+                    OPEN|LOOKUP_FAILED)
+                      # An ambiguous lookup is treated exactly like an open
+                      # PR: keep, don't delete. See pr_lookup_state's own
+                      # comment for why collapsing these was the actual bug.
+                      protected=1
+                      ;;
+                    CLOSED)
+                      has_closed_pr_tag=1
+                      ;;
+                  esac
+                  [[ "$protected" == "1" ]] && break
                 else
                   # Any non pr-* tag (edge, dev, latest, vX.Y.Z, sha-*, ...)
                   # is a real published channel/source tag. Never delete it.
