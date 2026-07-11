@@ -417,3 +417,54 @@ jobs:
             -w "$PWD" \
             "$BUILD_TOOLS_IMAGE" \
             bash scripts/setup-cli-simulation.sh
+
+  dhcp-kea-lease-flow-simulation:
+    # Real DHCP behavior test for our own Kea service (issue #448) --
+    # distinct from services/ui/dhcp-probe.sh's existing #377 broadcast
+    # conflict-discovery check, which only detects whether ANY DHCP server
+    # answers, not whether OUR service hands out correct options. Builds a
+    # throwaway Kea container from THIS checkout's services/dhcp on a
+    # dedicated, isolated Docker bridge network it creates and destroys
+    # itself (never the full-setup-validate compose project's network, and
+    # never a host interface), then drives a real dhclient
+    # Discover/Offer/Request/Ack against it and asserts the offered
+    # address/server-identifier/router/DNS/NTP/lease-time/domain-name
+    # options match what this run configured. See
+    # scripts/dhcp-kea-lease-flow-simulation.sh's own header comment and
+    # docs/dhcp-modes.md for exactly what is and is not verified (static
+    # reservations and DHCP-DDNS follow-through are explicitly out of scope
+    # here; Refs #557). Independent of the full-setup-validate compose
+    # project (its own network/containers, not deploy/full-setup's), so it
+    # does not need to chain after those jobs for IP-collision reasons the
+    # way ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation do --
+    # chained after setup-cli-simulation anyway simply to keep this
+    # workflow's jobs running one at a time on the shared self-hosted
+    # runner tier rather than introducing new concurrency here.
+    name: DHCP Kea lease-flow simulation
+    needs: setup-cli-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
+        # setup-cli-simulation's own reasoning above: isc-dhcp-client (added
+        # to tools/build-tools/Dockerfile in this same change) only exists
+        # on this branch, not yet in any published build-tools image. This
+        # workflow only ever runs via workflow_dispatch (event_name !=
+        # pull_request), so select-build-tools-image.sh's trusted-ref path
+        # already always builds a fresh branch-local image instead of
+        # trying the published tag first.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run DHCP Kea lease-flow simulation
+        env:
+          DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/dhcp-kea-lease-flow-simulation.sh
