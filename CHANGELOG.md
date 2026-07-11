@@ -5,9 +5,12 @@ All notable changes to lancache-ng are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## Pending stable release (live on dev)
 
-Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
+Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06). Not yet
+a stable, tagged release, but already published and pullable via the `dev`
+channel (see `docs/release-versioning.md`) -- "Unreleased" undersold that this
+is real, live, running code, not just work sitting in source control.
 
 ### Added
 
