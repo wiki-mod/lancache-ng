@@ -8,7 +8,7 @@
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
 | Kea DHCP | off | — | Requires PowerDNS (DDNS via nsupdate) |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
-| syslog-ng | on | — | Central logging for all containers |
+| syslog-ng | off (`--profile logging`) | — | Central log receiver; fluent-bit forwards proxy access logs to it (#453) |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
 | Cache Warmer | off | — | steamcmd, startable on demand |
 
@@ -136,7 +136,7 @@ Lightweight container with Docker socket access (restart permission).
 - nginx: HTTP request on `/health`
 - PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
-- syslog-ng: Process check
+- syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit does not have a healthcheck yet (follow-up #633)
 
 **Auto-restart:** X failed checks → `docker restart <container>`
 
@@ -153,21 +153,38 @@ Lightweight container with Docker socket access (restart permission).
 
 ## syslog-ng
 
-Central logging for all containers. All services send to syslog-ng.
+Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `dev`, `prod`, and `quickstart` alike. `fluent-bit` (the `syslog` service) is the collector/forwarder: it tails the proxy access log and fans it out to two independent pipelines — a local plain-text file (used by Netdata's `web_log` job in dev) and a forward to `syslog-ng` over TCP/601 (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`.
 
-- Self-managed storage: max file size + automatic rotation
-- Retention configurable (default: 30 days)
-- **Log level per service configurable in Admin UI:**
+**Currently implemented:**
+- Size-bounded rotation: an active log file is rotated once it exceeds `SYSLOG_MAX_FILE_MB` (default 100), then `syslog-ng` is signaled (`SIGHUP`) to reopen the (recreated) destination file.
+- Compression: rotated files are compressed with `zstd -T0` at `SYSLOG_COMPRESSION_LEVEL` (default 19); falls back to `gzip` if `zstd` cannot be installed at container start (e.g. no network egress).
+- Config for both `syslog` and `syslog-ng` is generated at container start (CLI flags for fluent-bit, an inline heredoc for syslog-ng) rather than bind-mounted, so `quickstart` — which has no local repo checkout — runs the identical pipeline as `dev`/`prod`.
+- Only the proxy/nginx access log is wired end to end today.
 
-| Service | Level options |
-|---|---|
-| nginx | `emerg / error / warn / info / debug` |
-| PowerDNS | `critical / error / warning / notice / info / debug` |
-| Kea | `fatal / error / warn / info / debug` |
-| Watchdog | `error / info / debug` |
+**Not implemented yet (tracked in follow-up #633):**
+- The remaining per-container logging matrix (DNS, DHCP, Admin UI, watchdog, NATS, netdata, dhcp-probe logs are not yet routed to syslog-ng).
+- Admin UI log reading from the central path (the UI still reads `STANDARD_LOG`/`SSL_LOG` directly).
+- Per-service log level configuration in the Admin UI.
+- The full `SYSLOG_MAX_GB` / `SYSLOG_RETENTION_DAYS` size-priority retention budget engine — today's rotation is a fixed per-file size threshold, not an overall storage budget.
+- Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
+- A CI guard that fails when a new container is added without a declared logging path.
 
-- **Forwarding:** destination IP + port + protocol (UDP/TCP/TLS, RFC 5424 or 3164) configurable in Admin UI
-- Change in UI → writes config → `syslog-ng-ctl reload`
+**Logging matrix** (maintained here per #453's requirement; kept up to date as more services are wired):
+
+| Service | Logging path | Notes |
+| --- | --- | --- |
+| proxy (nginx) | Via fluent-bit → syslog-ng | Access log tailed and forwarded; nginx error log not yet included |
+| dns-standard | Not yet wired | Follow-up #633 |
+| dns-ssl | Not yet wired | Follow-up #633 |
+| dhcp | Not yet wired | Follow-up #633 |
+| dhcp-proxy | Not yet wired | Follow-up #633 |
+| ui | Not yet wired | Follow-up #633 |
+| watchdog | Not yet wired | Follow-up #633 |
+| nats | Not yet wired | Follow-up #633 |
+| netdata | Not yet wired | Follow-up #633 |
+| dhcp-probe | Not yet wired | Follow-up #633 |
+| fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet; no healthcheck yet (follow-up #633) |
+| syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
 
 ## Cache Warming
 
@@ -222,8 +239,8 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 - DNS: create zones, host entries, PTR checkbox for LAN IPs
 - Kea: lease overview, create/edit static assignments
 - Cache: start warming, progress, purging, retention + slice/size settings
-- Logs: filtered by service, level selectable
-- Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced"
+- Logs: filtered by service, level selectable (not yet implemented against the central syslog-ng path; see follow-up #633)
+- Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced" (syslog forwarding configuration is not yet exposed in the UI; see follow-up #633)
 
 ## IPv6
 
