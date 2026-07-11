@@ -171,6 +171,13 @@ COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plu
 RUN docker --version; \
     docker compose version
 
+# isc-dhcp-client (dhclient) is needed by
+# scripts/dhcp-kea-lease-flow-simulation.sh (issue #448) to perform a real
+# Discover/Offer/Request/Ack exchange against a Kea container on an isolated
+# Docker bridge network, then read the resulting lease file's options. This
+# is the same client binary services/ui/dhcp-probe.sh already uses for its
+# own (separate, host-interface) dry-run check -- reusing it here keeps the
+# project to one DHCP client implementation instead of two.
 RUN set -euo pipefail; \
     distcc_pump_tmp=""; \
     cleanup_build_tools_apt() { \
@@ -189,6 +196,7 @@ RUN set -euo pipefail; \
       gettext-base \
       gnupg \
       iproute2 \
+      isc-dhcp-client \
       openssl \
       procps \
       python3 \
@@ -254,6 +262,7 @@ RUN set -euo pipefail; \
       c++ \
       cp \
       curl \
+      dhclient \
       dig \
       dirname \
       distcc \
