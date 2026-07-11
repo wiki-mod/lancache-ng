@@ -18,6 +18,20 @@ case "${1:-}" in
         ;;
 esac
 
+# Known-good Kea config snapshots (#614, follow-up to #415) are written by
+# the Admin UI's own process (services/ui/src/kea_snapshots.rs), not by this
+# entrypoint or the Kea daemons themselves -- Kea never reads or writes this
+# directory. The UI container runs as a fixed non-root UID/GID (10001, see
+# services/ui/Dockerfile), while this container runs as root and owns
+# everything else under /var/lib/kea (kea-dhcp4.conf, kea-leases4.csv, ...).
+# Since /var/lib/kea itself is root-owned (mode 0755, not writable by the UI
+# user), the UI process cannot even create its own subdirectory here without
+# this. Re-asserted on every start, the same pattern the `nats` service uses
+# to keep its shared /etc/nats/nats.conf writable by the Admin UI user after
+# a NATS restart (see deploy/*/docker-compose.yml).
+mkdir -p /var/lib/kea/config-snapshots
+chown -R 10001:10001 /var/lib/kea/config-snapshots
+
 # Defaults
 : "${DHCP_SUBNET:=10.0.0.0/24}"
 : "${DHCP_RANGE_START:=10.0.0.128}"

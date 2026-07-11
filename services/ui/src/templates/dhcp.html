@@ -459,6 +459,53 @@
     </div>
   </div>
 
+  <!-- Konfigurations-Snapshots (#614) -->
+  <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">Konfigurations-Snapshots</h2>
+      <span class="text-xs text-slate-400">Aufbewahrung: {{ kea_snapshot_retention }}</span>
+    </div>
+    <p class="text-sm text-slate-400 mb-4">
+      Nach jeder erfolgreich übernommenen DHCP-Änderung wird die validierte Konfiguration
+      hier als Snapshot gesichert. Bei Bedarf kann auf einen früheren Snapshot zurückgerollt
+      werden; die ausgewählte Konfiguration wird vor der Übernahme erneut geprüft.
+    </p>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="border-b border-slate-700">
+          <tr>
+            <th class="text-left py-2 text-slate-300">Erstellt</th>
+            <th class="text-left py-2 text-slate-300">Aktion</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for snapshot in kea_snapshots %}
+          <tr class="border-b border-slate-700 hover:bg-slate-700">
+            <td class="py-2 text-white">
+              <span class="dhcp-expiry" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
+            </td>
+            <td class="py-2">
+              <form method="POST" action="/dhcp/snapshot/rollback" class="inline"
+                onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
+                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                  Zurückrollen
+                </button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if kea_snapshots | length == 0 %}
+          <tr>
+            <td colspan="2" class="py-4 text-slate-500 text-center">Noch keine Snapshots vorhanden</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   {% endif %}
 </div>
 

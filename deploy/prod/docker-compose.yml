@@ -556,6 +556,10 @@ services:
       - proxy-cache:/var/cache/proxy:ro
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats   # shared with NATS: UI writes nats.conf here
+      # Shared with the dhcp (Kea) service: UI writes known-good Kea config
+      # snapshots into config-snapshots/ here (#614), never touching Kea's
+      # own kea-dhcp4.conf/kea-leases4.csv/etc. in the same directory.
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -587,6 +591,7 @@ services:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=${PDNS_API_KEY}
