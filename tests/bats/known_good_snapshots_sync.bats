@@ -1,16 +1,17 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Drift guard for the known-good configuration snapshot library (#415).
+# Drift guard for the known-good configuration snapshot library (#415, #615).
 #
 # scripts/lib/known-good-snapshots.sh is the single documented, tested
-# contract, but it is not baked into the proxy/dhcp-proxy container images
-# via a shared Docker build context (see docs/known-good-config-snapshots.md
-# for why). Instead, services/proxy/entrypoint.sh and
-# services/dhcp-proxy/entrypoint.sh each embed a byte-identical copy of its
+# contract, but it is not baked into the proxy/dhcp-proxy/dns container
+# images via a shared Docker build context (see
+# docs/known-good-config-snapshots.md for why). Instead,
+# services/proxy/entrypoint.sh, services/dhcp-proxy/entrypoint.sh, and
+# services/dns/entrypoint.sh each embed a byte-identical copy of its
 # function definitions between "# BEGIN known-good-snapshot library" and
 # "# END known-good-snapshot library" markers. This test fails loudly the
-# moment either embedded copy drifts from the canonical file, so a future
+# moment any embedded copy drifts from the canonical file, so a future
 # edit to one copy can't silently leave the others behind.
 
 setup() {
@@ -45,7 +46,13 @@ extract_embedded_block() {
     diff <(extract_canonical_functions) <(extract_embedded_block "$repo_root/services/dhcp-proxy/entrypoint.sh")
 }
 
-@test "both entrypoint copies are identical to each other" {
+@test "services/dns/entrypoint.sh embeds the canonical known-good-snapshot library verbatim" {
+    diff <(extract_canonical_functions) <(extract_embedded_block "$repo_root/services/dns/entrypoint.sh")
+}
+
+@test "all three entrypoint copies are identical to each other" {
     diff <(extract_embedded_block "$repo_root/services/proxy/entrypoint.sh") \
          <(extract_embedded_block "$repo_root/services/dhcp-proxy/entrypoint.sh")
+    diff <(extract_embedded_block "$repo_root/services/proxy/entrypoint.sh") \
+         <(extract_embedded_block "$repo_root/services/dns/entrypoint.sh")
 }

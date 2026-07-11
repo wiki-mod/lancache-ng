@@ -3,9 +3,11 @@
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
 # (with monotonic serial handling), renders the recursor/authoritative config
-# templates, configures DDNS TSIG auth (configure_ddns_tsig), and starts the
-# authoritative server, recursor, and NATS subscriber in one container so DNS
-# records stay aligned with Admin UI changes.
+# templates, validates them and keeps a known-good configuration snapshot
+# history (#615, see docs/known-good-config-snapshots.md), configures DDNS
+# TSIG auth (configure_ddns_tsig), and starts the authoritative server,
+# recursor, and NATS subscriber in one container so DNS records stay aligned
+# with Admin UI changes.
 set -euo pipefail
 
 # ── Setup Variables ──────────────────────────────────────────────────────────
@@ -24,6 +26,10 @@ NATS_PASSWORD="${NATS_PASSWORD:-}"
 NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
+KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
+DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
+RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
+PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 
 # Fail if PDNS_API_KEY is a known placeholder value
 case "$PDNS_API_KEY" in
@@ -43,6 +49,198 @@ if [ ${#PDNS_API_KEY} -lt 16 ]; then
 fi
 
 export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
+
+# ────────────────────────────────────────────────────────────────────────────
+# Known-good configuration snapshot library (#415, #615)
+#
+# See docs/known-good-config-snapshots.md for the full contract. This block
+# is a byte-identical copy of scripts/lib/known-good-snapshots.sh's function
+# definitions (verified by tests/bats/known_good_snapshots_sync.bats) rather
+# than a sourced file, because this Dockerfile builds from services/dns/
+# alone with no shared-file build context wired up for it (same reasoning as
+# the proxy/dhcp-proxy adapters).
+# ────────────────────────────────────────────────────────────────────────────
+# BEGIN known-good-snapshot library (scripts/lib/known-good-snapshots.sh)
+# kgs_log <level> <label> <message...>
+# Emits one explicit, greppable log line for every snapshot lifecycle event
+# (create, prune, rollback-select, reject) per the issue's acceptance
+# criteria. level is a short tag: CREATE/PRUNE/SELECT/REJECT/FATAL.
+kgs_log() {
+    local level="$1" label="$2"
+    shift 2
+    echo "[known-good-snapshot][${label}][${level}] $*" >&2
+}
+
+# kgs_new_snapshot_id
+# Prints a new, sortable, practically collision-free snapshot id.
+kgs_new_snapshot_id() {
+    date -u +%Y%m%dT%H%M%S.%N
+}
+
+# kgs_list_snapshots <snapshot_root>
+# Prints existing snapshot ids, oldest first, one per line. Empty output
+# (no error) when <snapshot_root> does not exist yet or holds no snapshots.
+kgs_list_snapshots() {
+    local snapshot_root="$1"
+    [ -d "$snapshot_root" ] || return 0
+    find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+}
+
+# kgs_snapshot_create <snapshot_root> <keep_n> <label> <file...>
+# Copies <file...> into a new snapshot directory, then prunes anything
+# beyond the newest <keep_n>. Creation is atomic-enough: files are
+# assembled in a temporary sibling directory on the same filesystem and only
+# `mv`-ed into their final <id> name once complete, so a crash mid-copy
+# never leaves a partially-written snapshot directory visible to
+# kgs_list_snapshots/kgs_snapshot_apply.
+kgs_snapshot_create() {
+    local snapshot_root="$1" keep_n="$2" label="$3"
+    shift 3
+    local -a files=("$@")
+    local id staging f base
+
+    mkdir -p "$snapshot_root" || {
+        kgs_log FATAL "$label" "cannot create snapshot root $snapshot_root"
+        return 1
+    }
+
+    id="$(kgs_new_snapshot_id)"
+    staging="$(mktemp -d "${snapshot_root}/.staging.XXXXXX")" || {
+        kgs_log FATAL "$label" "cannot create staging directory under $snapshot_root"
+        return 1
+    }
+
+    for f in "${files[@]}"; do
+        if [ ! -f "$f" ]; then
+            kgs_log FATAL "$label" "candidate file missing, refusing snapshot: $f"
+            rm -rf "$staging"
+            return 1
+        fi
+        base="$(basename "$f")"
+        if ! cp -p "$f" "$staging/$base"; then
+            kgs_log FATAL "$label" "failed to copy $f into snapshot staging"
+            rm -rf "$staging"
+            return 1
+        fi
+    done
+
+    if ! mv "$staging" "${snapshot_root}/${id}"; then
+        kgs_log FATAL "$label" "failed to finalize snapshot $id"
+        rm -rf "$staging"
+        return 1
+    fi
+
+    kgs_log CREATE "$label" "created known-good snapshot $id (${files[*]})"
+    kgs_snapshot_prune "$snapshot_root" "$keep_n" "$label"
+}
+
+# kgs_snapshot_prune <snapshot_root> <keep_n> <label>
+# Deletes the oldest snapshots beyond <keep_n>. A missing/non-numeric/
+# non-positive keep_n is clamped to the documented default of 3 rather than
+# trusted as-is, so a misconfigured KEEP_KNOWN_GOOD_CONFIGS (e.g. "0" or
+# empty) can never silently disable retention or prune away every snapshot,
+# including the one just created by kgs_snapshot_create.
+kgs_snapshot_prune() {
+    local snapshot_root="$1" keep_n="$2" label="$3"
+    case "$keep_n" in
+        '' | *[!0-9]*) keep_n=3 ;;
+    esac
+    [ "$keep_n" -ge 1 ] || keep_n=3
+
+    local -a ids=()
+    while IFS= read -r id; do
+        [ -n "$id" ] && ids+=("$id")
+    done < <(kgs_list_snapshots "$snapshot_root")
+
+    local total=${#ids[@]}
+    local excess=$((total - keep_n))
+    [ "$excess" -gt 0 ] || return 0
+
+    local i id
+    for ((i = 0; i < excess; i++)); do
+        id="${ids[$i]}"
+        if rm -rf "${snapshot_root:?}/${id}"; then
+            kgs_log PRUNE "$label" "pruned known-good snapshot $id (retention=${keep_n})"
+        else
+            kgs_log FATAL "$label" "failed to prune snapshot $id"
+        fi
+    done
+}
+
+# kgs_snapshot_apply <snapshot_root> <label> <validator_cmd> <dest...>
+# Attempts to roll the live config at <dest...> back to the newest snapshot
+# that passes <validator_cmd> (a command string evaluated with no arguments
+# after the snapshot's files have been copied onto <dest...>; it must exit 0
+# for a valid config, e.g. "nginx -t" or "dnsmasq --test -C /etc/dnsmasq.conf").
+# Tries snapshots newest-to-oldest, logging a REJECT line for each one that
+# fails validation, and never applies one that doesn't pass. Prints the
+# selected snapshot id and returns 0 on success. If no snapshot validates (or
+# none exist), <dest...> is restored to exactly what was live before this
+# function was called, so a failed rollback attempt never leaves <dest...>
+# in a half-applied state, and returns 1.
+kgs_snapshot_apply() {
+    local snapshot_root="$1" label="$2" validator_cmd="$3"
+    shift 3
+    local -a dest=("$@")
+    local -a ids=()
+    while IFS= read -r id; do
+        [ -n "$id" ] && ids+=("$id")
+    done < <(kgs_list_snapshots "$snapshot_root")
+
+    if [ "${#ids[@]}" -eq 0 ]; then
+        kgs_log FATAL "$label" "no known-good snapshots available to roll back to"
+        return 1
+    fi
+
+    local backup_dir
+    backup_dir="$(mktemp -d)" || {
+        kgs_log FATAL "$label" "cannot create rollback backup directory"
+        return 1
+    }
+    local d base
+    for d in "${dest[@]}"; do
+        base="$(basename "$d")"
+        [ -f "$d" ] && cp -p "$d" "$backup_dir/$base"
+    done
+
+    local i id snap_dir
+    for ((i = ${#ids[@]} - 1; i >= 0; i--)); do
+        id="${ids[$i]}"
+        snap_dir="${snapshot_root}/${id}"
+        for d in "${dest[@]}"; do
+            base="$(basename "$d")"
+            [ -f "${snap_dir}/${base}" ] && cp -p "${snap_dir}/${base}" "$d"
+        done
+
+        # Redirect the validator's own stdout to stderr: this function's
+        # stdout is the caller's return channel (the selected snapshot id
+        # via command substitution), and a validator like "nginx -t" or
+        # "dnsmasq --test" may print its own diagnostic text to stdout,
+        # which would otherwise silently corrupt that return value.
+        if eval "$validator_cmd" 1>&2; then
+            kgs_log SELECT "$label" "selected known-good snapshot $id for rollback"
+            rm -rf "$backup_dir"
+            printf '%s\n' "$id"
+            return 0
+        fi
+        kgs_log REJECT "$label" "rejected known-good snapshot $id: failed validation"
+    done
+
+    # Nothing validated: restore exactly what was live before this call so a
+    # failed rollback attempt never leaves dest in a half-applied state.
+    for d in "${dest[@]}"; do
+        base="$(basename "$d")"
+        if [ -f "$backup_dir/$base" ]; then
+            cp -p "$backup_dir/$base" "$d"
+        else
+            rm -f "$d"
+        fi
+    done
+    rm -rf "$backup_dir"
+    kgs_log FATAL "$label" "no known-good snapshot passed validation; refusing rollback"
+    return 1
+}
+# END known-good-snapshot library
 
 LAN_ZONES=(
     lan.
@@ -126,6 +324,113 @@ render_template_atomic() {
     fi
 }
 
+# _dns_recursor_validate_snapshot_or_rollback <recursor_conf_file>
+# recursor.conf's validator: `pdns_recursor --config=check` is a genuine
+# side-effect-free check-only invocation, confirmed present in the Debian
+# Trixie pdns-recursor package (5.2.x) -- it parses and validates the YAML
+# config and exits non-zero on error without binding any sockets or starting
+# the recursor, exactly like `nginx -t`/`dnsmasq --test`. Factored into its
+# own function so tests/bats/dns_known_good_snapshot.bats can drive it
+# against a stub `pdns_recursor` binary.
+_dns_recursor_validate_snapshot_or_rollback() {
+    local recursor_conf="$1"
+    local config_dir
+    config_dir="$(dirname "$recursor_conf")"
+
+    echo "[lancache-dns] Validating recursor.conf (pdns_recursor --config=check)..."
+    if pdns_recursor --config=check --config-dir="$config_dir" >/dev/null; then
+        kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/recursor" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-recursor" "$recursor_conf"
+        return 0
+    fi
+
+    echo "[lancache-dns] ERROR: generated recursor.conf failed validation (pdns_recursor --config=check)." >&2
+    echo "[lancache-dns] ERROR: attempting rollback to the newest known-good snapshot instead of starting with an invalid config." >&2
+    local selected_id
+    if selected_id="$(kgs_snapshot_apply "${DNS_CONFIG_SNAPSHOT_DIR}/recursor" "dns-recursor" "pdns_recursor --config=check --config-dir='${config_dir}'" "$recursor_conf")"; then
+        echo "[lancache-dns] WARNING: recursor is starting from known-good snapshot ${selected_id}, NOT the newly generated config." >&2
+        echo "[lancache-dns] WARNING: check PDNS_API_KEY/LOG_QUERIES and restart to pick up the intended change." >&2
+        return 0
+    fi
+
+    echo "[lancache-dns] FATAL: no known-good recursor.conf snapshot is available; refusing to start with an invalid config." >&2
+    return 1
+}
+
+# _dns_auth_probe <config_dir>
+# PowerDNS's authoritative server (pdns_server) has no side-effect-free
+# "check config, don't start" flag equivalent to `nginx -t`/`dnsmasq --test`
+# -- verified against the real Debian Trixie pdns-server package (4.9.x):
+# its --help lists no config-check option, only --config (dump effective
+# config) and --no-config. This function instead does a short-lived
+# start-then-verify probe, per the pattern the issue anticipated for exactly
+# this case: start pdns_server in the foreground with the candidate config,
+# poll the control socket with `pdns_control rping` for up to ~5s, then stop
+# the probe process either way. Empirically (verified against the real
+# binary), a config that fails to parse or whose backend fails to open (bad
+# `launch=`, unreadable sqlite database, garbage setting) makes pdns_server
+# exit within well under a second without ever creating the control socket,
+# so rping reliably distinguishes valid from invalid candidates. This probe
+# instance is torn down regardless of outcome; the real long-running server
+# is started separately by run_auth() later, once a valid config is
+# confirmed in place. Factored into its own function so
+# tests/bats/dns_known_good_snapshot.bats can drive it against a stub
+# `pdns_server`/`pdns_control` pair.
+_dns_auth_probe() {
+    local config_dir="$1"
+    local socket_dir="/var/run/pdns"
+    mkdir -p "$socket_dir"
+    rm -f "${socket_dir}/pdns.controlsocket"
+
+    pdns_server --config-dir="$config_dir" --guardian=no --daemon=no >/dev/null 2>&1 &
+    local probe_pid=$!
+
+    local ready=1
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if pdns_control --socket-dir="$socket_dir" rping >/dev/null 2>&1; then
+            ready=0
+            break
+        fi
+        # Stop polling early if the probe already died (invalid config) --
+        # no point waiting out the full timeout.
+        kill -0 "$probe_pid" 2>/dev/null || break
+        sleep 0.5
+    done
+
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    rm -f "${socket_dir}/pdns.controlsocket"
+    return "$ready"
+}
+
+# _dns_auth_validate_snapshot_or_rollback <pdns_conf_file>
+# Same validate-then-snapshot-or-rollback contract as the nginx/dnsmasq
+# adapters, using _dns_auth_probe (see above) as the validator instead of a
+# pure pre-start check command, because pdns_server has none.
+_dns_auth_validate_snapshot_or_rollback() {
+    local pdns_conf="$1"
+    local config_dir
+    config_dir="$(dirname "$pdns_conf")"
+
+    echo "[lancache-dns] Validating pdns.conf (start-then-verify probe)..."
+    if _dns_auth_probe "$config_dir"; then
+        kgs_snapshot_create "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "$KEEP_KNOWN_GOOD_CONFIGS" "dns-auth" "$pdns_conf"
+        return 0
+    fi
+
+    echo "[lancache-dns] ERROR: generated pdns.conf failed the start-then-verify probe (pdns_server did not respond to pdns_control rping)." >&2
+    echo "[lancache-dns] ERROR: attempting rollback to the newest known-good snapshot instead of starting with an invalid config." >&2
+    local selected_id
+    if selected_id="$(kgs_snapshot_apply "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "dns-auth" "_dns_auth_probe '${config_dir}'" "$pdns_conf")"; then
+        echo "[lancache-dns] WARNING: pdns_server is starting from known-good snapshot ${selected_id}, NOT the newly generated config." >&2
+        echo "[lancache-dns] WARNING: check PDNS_API_KEY/DDNS_ALLOW_FROM and restart to pick up the intended change." >&2
+        return 0
+    fi
+
+    echo "[lancache-dns] FATAL: no known-good pdns.conf snapshot is available; refusing to start with an invalid config." >&2
+    return 1
+}
+
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
 
@@ -135,12 +440,13 @@ echo "[lancache-dns] Generating recursor.conf..."
 if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
 fi
-render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template /etc/pdns/recursor.conf "$LOG_QUERIES"
+render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$LOG_QUERIES"
+_dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || exit 1
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable names.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' /etc/pdns/auth/pdns.conf.template /etc/pdns/auth/pdns.conf
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE"
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
@@ -155,7 +461,15 @@ if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     chown pdns:pdns /var/lib/powerdns/pdns.sqlite3
 fi
 
-# ── 4. Migrate Legacy AAAA Filter Marker ─────────────────────────────────────
+# ── 4. Validate Authoritative Config (start-then-verify probe, #615) ────────
+# Placed after the SQLite database exists (the gsqlite3 backend needs it to
+# open successfully) but before any pdnsutil call below, since those also
+# depend on pdns.conf being parseable -- if this rolls back to a known-good
+# snapshot, every subsequent pdnsutil/zone-creation call must see that
+# rolled-back config, not the rejected candidate.
+_dns_auth_validate_snapshot_or_rollback "$PDNS_AUTH_CONF_FILE" || exit 1
+
+# ── 5. Migrate Legacy AAAA Filter Marker ─────────────────────────────────────
 # The AAAA filter marker moved from this container's own data volume
 # (toggled via `docker exec` before the Docker socket proxy was narrowed) to
 # the shared /var/lib/powerdns-state volume the Admin UI now toggles instead.
@@ -176,7 +490,7 @@ if [ -f "$LEGACY_AAAA_FILTER_MARKER" ]; then
     rm -f "$LEGACY_AAAA_FILTER_MARKER"
 fi
 
-# ── 5. Create LAN Zones ──────────────────────────────────────────────────────
+# ── 6. Create LAN Zones ──────────────────────────────────────────────────────
 echo "[lancache-dns] Creating LAN zones in authoritative database..."
 
 # Create LAN zones (will not error if already exist)
@@ -191,7 +505,7 @@ done
 
 configure_ddns_tsig
 
-# ── 6. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
+# ── 7. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
 SERIAL=$(date +%s | tail -c 11)
 RPZ_FILE="/var/lib/powerdns/rpz.zone"
@@ -238,7 +552,7 @@ count=$(grep -c "^[a-zA-Z*]" "$RPZ_FILE" 2>/dev/null || true)
 echo "[lancache-dns] RPZ zone: ${count:-0} records written."
 chown pdns:pdns "$RPZ_FILE"
 
-# ── 7. Start Both Processes (with restart loops) ─────────────────────────────
+# ── 8. Start Both Processes (with restart loops) ─────────────────────────────
 echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
@@ -280,7 +594,7 @@ fi
 run_recursor &
 REC_PID=$!
 
-# ── 8. Start NATS Subscriber ────────────────────────────────────────────────
+# ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
         nats-subscriber || true

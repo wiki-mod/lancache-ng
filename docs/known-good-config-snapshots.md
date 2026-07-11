@@ -38,6 +38,7 @@ adapter) is:
    |---|---|---|
    | proxy (nginx) | `/var/lib/lancache-proxy/config-snapshots` | `proxy-config-snapshots` |
    | dhcp-proxy (dnsmasq) | `/var/lib/lancache-dhcp-proxy/config-snapshots` | `dhcp-proxy-config-snapshots` |
+   | dns-standard, dns-ssl (PowerDNS recursor + auth) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots-standard`, `pdns-config-snapshots-ssl` |
    | dhcp (Kea) | not yet implemented — see "Kea" below | n/a |
 
 4. **Rollback refuses invalid snapshots.** When a candidate config fails
@@ -51,27 +52,29 @@ adapter) is:
    `[known-good-snapshot][<service>][<LEVEL>]` with `LEVEL` one of `CREATE`,
    `PRUNE`, `SELECT` (chosen for rollback), or `REJECT`/`FATAL`.
 
-### Why the contract is one document but two files per adapter, not one shared file
+### Why the contract is one document but several files per adapter, not one shared file
 
 `scripts/lib/known-good-snapshots.sh` is the canonical, tested reference
-implementation. It is not baked into the `proxy` or `dhcp-proxy` container
-images via a shared Docker build context, because each of those Dockerfiles
-builds from its own isolated service directory
-(`services/proxy/`, `services/dhcp-proxy/`) with no shared-file context wired
-up for either — unlike `cdn-domains.txt`, which already uses a named
-`dns-domains` additional build context for the `proxy` image only. Extending
-that pattern to a second shared context for both images would require
-`build-push.yml`'s image build matrix to support multiple `--build-context`
-values per image, which it does not today (`build_contexts` is treated as one
-`name=path` pair). Given the mechanism itself is genuinely small (roughly 150
-lines of straightforward bash), each entrypoint embeds a byte-identical copy
-of the same functions instead, marked with
-`# BEGIN known-good-snapshot library` / `# END known-good-snapshot library`
-comments. `tests/bats/known_good_snapshots_sync.bats` fails if either
-embedded copy ever drifts from `scripts/lib/known-good-snapshots.sh`, so
-"generic" here means one documented, behaviorally-verified contract that
-happens to exist as three physically-identical copies, not literal
-single-file reuse at runtime.
+implementation. It is not baked into the `proxy`, `dhcp-proxy`, or `dns`
+container images via a shared Docker build context, because each of those
+Dockerfiles builds from its own isolated service directory
+(`services/proxy/`, `services/dhcp-proxy/`, `services/dns/`) with no
+shared-file context wired up for any of them — unlike `cdn-domains.txt`,
+which already uses a named `dns-domains` additional build context for the
+`proxy` image only. Extending that pattern to a second shared context for
+every image would require `build-push.yml`'s image build matrix to support
+multiple `--build-context` values per image, which it does not today
+(`build_contexts` is treated as one `name=path` pair). Given the mechanism
+itself is genuinely small (roughly 150 lines of straightforward bash), each
+entrypoint embeds a byte-identical copy of the same functions instead,
+marked with `# BEGIN known-good-snapshot library` /
+`# END known-good-snapshot library` comments.
+`tests/bats/known_good_snapshots_sync.bats` fails if any embedded copy ever
+drifts from `scripts/lib/known-good-snapshots.sh`, so "generic" here means
+one documented, behaviorally-verified contract that happens to exist as
+four physically-identical copies (the canonical file plus one embedded copy
+each in proxy, dhcp-proxy, and dns), not literal single-file reuse at
+runtime.
 
 ## nginx / proxy
 
@@ -156,53 +159,114 @@ vocabulary), persisted into the already-persistent `kea-data` volume
 (`/var/lib/kea`). That is a second PR's worth of work on its own and is
 intentionally out of scope here; tracked in #614.
 
-## PowerDNS (design only, not implemented)
+## PowerDNS
 
-PowerDNS is explicitly treated differently in issue #415, and this PR does
-not implement PDNS snapshot/rollback. PowerDNS's state splits into two very
-different categories:
+PowerDNS's state splits into two very different categories, and only the
+first is in scope for the generic file-snapshot mechanism (#615). The
+second is explicitly deferred; see "Zones, records, and TSIG/DDNS metadata
+(deferred)" below.
 
-1. **Static service config** — `pdns.conf` and `recursor.conf`, rendered by
-   `services/dns/entrypoint.sh`'s `render_template_atomic()` from templates
-   and env vars (`PDNS_API_KEY`, `DDNS_ALLOW_FROM`, `LOG_QUERIES`). This is
-   the same shape of problem as nginx/dnsmasq: file-based, deterministically
-   regenerated, and could in principle use the exact same
-   validate-then-snapshot contract described above. PowerDNS does not expose
-   a dedicated "check config, don't start" flag equivalent to `nginx -t` or
-   `dnsmasq --test`; `pdns_control` requires a running daemon. A safe adapter
-   for this piece alone would need either a short-lived
-   `pdns_server --config-check`-equivalent invocation (verify current
-   PowerDNS version support before relying on it) or a start-then-verify
-   pattern (start, confirm the control socket responds and the config it
-   loaded matches what was intended, otherwise stop and fall back) rather
-   than the pure pre-start validation the other two adapters use.
-2. **Zones, records, and TSIG/DDNS metadata** — authoritative over
-   `pdns.sqlite3` and mutated live via `pdnsutil`, the Admin UI's DDNS/NATS
-   sync path, and dynamic DNS updates from Kea. This is API/database-backed
-   state, not a config file. A blind file-level snapshot/restore of
-   `pdns.sqlite3` while the daemon is live risks capturing an inconsistent
-   database file, and "rolling back" zone/record data has completely
-   different implications than rolling back a static config file — it can
-   silently undo legitimate client DHCP leases, DDNS-driven hostname
-   records, or secondary-node reconciliation state that changed after the
-   snapshot was taken. Restoring database state safely needs the database
-   backend either stopped or in a supported hot-backup mode, an explicit
-   decision about which zones are in scope (LAN zones vs. the CDN RPZ zone,
-   which is fully regenerated from `cdn-domains.txt` on every start and
-   therefore does not need snapshotting at all), and a clear answer for what
-   "invalid" even means for record data (there is no equivalent of
-   `nginx -t` for "is this zone file consistent with what NATS/DHCP expect
-   right now"). Rushing this into the generic file-snapshot contract would
-   violate the issue's explicit warning against blind file rollback for
-   API/database-backed state.
+### Static service config — `pdns.conf` / `recursor.conf` (implemented, #615)
 
-Given that, the honest scope for PDNS in this PR is this documented design,
-not an implementation. Follow-up issue #615 scopes PDNS static-config
-snapshotting (item 1 above, which likely *can* reuse the generic contract
-directly) separately from any zone/record rollback design (item 2, which
-needs its own explicit export/validate/apply/verify flow per the issue's
-acceptance criteria, and should stay out of the generic file-snapshot
-mechanism entirely).
+`services/dns/entrypoint.sh` regenerates `recursor.conf` and
+`pdns.conf` on every start from templates and env vars (`PDNS_API_KEY`,
+`DDNS_ALLOW_FROM`, `LOG_QUERIES`) via `render_template_atomic()`. This is the
+same shape of problem as nginx/dnsmasq — file-based, deterministically
+regenerated — and reuses the exact same generic contract, but the two files
+belong to two independent daemons (the recursor and the authoritative
+server) with two independently-generated configs, so each is validated,
+snapshotted, and rolled back **separately**: a broken `recursor.conf` never
+blocks a still-good `pdns.conf` from starting, and vice versa. Both live
+under one persistent volume per `dns-standard`/`dns-ssl` container
+(`pdns-config-snapshots-standard`, `pdns-config-snapshots-ssl`, mounted at
+`/var/lib/lancache-dns`), in separate `recursor/` and `auth/` subdirectories
+so the two independent snapshot histories never collide.
+
+**recursor.conf: pure pre-start check, like `nginx -t`.** Debian Trixie's
+`pdns-recursor` package (5.2.x) ships a genuine, side-effect-free check-only
+invocation: `pdns_recursor --config=check --config-dir=<dir>`. Verified
+empirically against the real packaged binary (not assumed from
+documentation) before writing the adapter: it parses and validates the YAML
+config and exits non-zero on error — both on a YAML syntax error and on a
+semantically-invalid-but-syntactically-fine config (an unrecognized
+top-level key) — without binding any sockets or starting the recursor. This
+is exactly the pure pre-start validator the other two adapters use, so
+`_dns_recursor_validate_snapshot_or_rollback()` in
+`services/dns/entrypoint.sh` follows the identical
+validate-then-snapshot-or-rollback shape as
+`_proxy_validate_snapshot_or_rollback()` /
+`_dhcp_proxy_validate_snapshot_or_rollback()`, just with
+`pdns_recursor --config=check` as the validator command.
+
+**pdns.conf: no check-only flag exists — start-then-verify instead.**
+Debian Trixie's `pdns-server` package (4.9.x) has no equivalent: its
+`--help` output lists no config-check option, only `--config` (dump the
+effective config to stdout) and `--no-config` (skip parsing entirely),
+neither of which validates a candidate file. `_dns_auth_probe()` in
+`services/dns/entrypoint.sh` instead does the start-then-verify pattern the
+issue anticipated for exactly this case: start `pdns_server` in the
+foreground against the candidate config, poll the control socket with
+`pdns_control rping` for up to ~5s, then stop the probe process either way
+regardless of outcome. This is safe and reliable because, verified
+empirically against the real binary: a config that fails to parse (bad
+syntax) or whose backend fails to initialize (unknown `launch=` backend, or
+a `gsqlite3-database=` path that does not exist) makes `pdns_server` exit
+within well under a second, before it ever creates the control socket — so
+`pdns_control rping` reliably distinguishes a valid candidate (process stays
+up, control socket responds) from an invalid one (process exits, socket
+never appears) without needing any deeper semantic check. The probe instance
+is always torn down after the check (success or failure); the real,
+long-running server is started separately, afterward, by the existing
+`run_auth()` restart loop once a valid config is confirmed in place — so a
+successful probe briefly starts and stops `pdns_server` an extra time at
+every container start, which is an accepted, minor startup-time cost for
+correctness (there is no way to check validity without actually starting the
+daemon, since no check-only flag exists).
+`_dns_auth_validate_snapshot_or_rollback()` wraps `_dns_auth_probe()` in the
+same validate-then-snapshot-or-rollback shape as the other adapters, using
+`_dns_auth_probe` as the validator instead of a pure pre-start check
+command.
+
+Ordering matters here in a way it does not for nginx/dnsmasq: pdns.conf
+validation/rollback runs *before* any `pdnsutil` call in the entrypoint
+(zone creation, TSIG import), because those calls also read `pdns.conf` via
+`--config-dir` — if pdns.conf is rolled back to a known-good snapshot,
+every subsequent `pdnsutil` call in that same startup must see the rolled-
+back config, not the rejected candidate. It runs *after* the SQLite database
+file exists (so the `gsqlite3` backend can actually open it during the
+probe), but before zone creation and `configure_ddns_tsig`.
+
+**Operational risk to know about:** same shape as nginx/dnsmasq — if the
+fallback path is taken, PowerDNS keeps running on a stale known-good config
+while the newly generated one (whatever `PDNS_API_KEY`/`DDNS_ALLOW_FROM`/
+`LOG_QUERIES` change an operator most recently made) was rejected, and every
+restart re-generates and re-rejects the same broken candidate until the
+underlying input is fixed. The `WARNING`/`ERROR` `[lancache-dns]` log lines
+at fallback time are the only current signal.
+
+### Zones, records, and TSIG/DDNS metadata (deferred)
+
+Authoritative over `pdns.sqlite3` and mutated live via `pdnsutil`, the
+Admin UI's DDNS/NATS sync path, and dynamic DNS updates from Kea. This is
+API/database-backed state, not a config file. A blind file-level
+snapshot/restore of `pdns.sqlite3` while the daemon is live risks capturing
+an inconsistent database file, and "rolling back" zone/record data has
+completely different implications than rolling back a static config file —
+it can silently undo legitimate client DHCP leases, DDNS-driven hostname
+records, or secondary-node reconciliation state that changed after the
+snapshot was taken. Restoring database state safely needs the database
+backend either stopped or in a supported hot-backup mode, an explicit
+decision about which zones are in scope (LAN zones vs. the CDN RPZ zone,
+which is fully regenerated from `cdn-domains.txt` on every start and
+therefore does not need snapshotting at all), and a clear answer for what
+"invalid" even means for record data (there is no equivalent of
+`nginx -t` for "is this zone file consistent with what NATS/DHCP expect
+right now"). Rushing this into the generic file-snapshot contract would
+violate the issue's explicit warning against blind file rollback for
+API/database-backed state. This stays out of scope of the generic
+file-snapshot mechanism entirely and needs its own explicit
+export/validate/apply/verify design in a dedicated follow-up issue before
+any implementation.
 
 ## Manual recovery
 

@@ -127,6 +127,10 @@ services:
       # when it has to preserve a real legacy/custom path during update.
       - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
+      # Known-good pdns.conf/recursor.conf snapshots (#615): deliberately a
+      # plain Docker-managed volume, not part of the LANCACHE_STATE_DIR
+      # bind-mount/backup contract -- see docs/known-good-config-snapshots.md.
+      - pdns-config-snapshots-standard:/var/lib/lancache-dns
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
@@ -164,6 +168,7 @@ services:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - ${PDNS_SSL_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-ssl}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
+      - pdns-config-snapshots-ssl:/var/lib/lancache-dns
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
@@ -522,13 +527,17 @@ volumes:
       # normal production path is derived from the shared state root.
       device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
-  # Known-good config snapshots (#415), one persistent volume per adapter.
-  # Deliberately plain Docker-managed volumes (not part of the LANCACHE_STATE_DIR
-  # bind-mount contract used by cache/kea/pdns/nats): see
+  # Known-good config snapshots (#415, #615), one persistent volume per
+  # adapter. Deliberately plain Docker-managed volumes (not part of the
+  # LANCACHE_STATE_DIR bind-mount contract used by cache/kea/pdns/nats): see
   # docs/known-good-config-snapshots.md for why these are out of scope for
-  # setup.sh backup/restore in this change.
+  # setup.sh backup/restore in this change. dns-standard and dns-ssl are
+  # separate containers with independently-generated config, so each gets
+  # its own snapshot history, same as pdns-data-standard/pdns-data-ssl.
   proxy-config-snapshots:
   dhcp-proxy-config-snapshots:
+  pdns-config-snapshots-standard:
+  pdns-config-snapshots-ssl:
   watchdog-status:
   netdataconfig:
   netdatalib:

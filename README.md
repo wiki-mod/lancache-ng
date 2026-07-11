@@ -646,7 +646,7 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
-`KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq configurations are kept for automatic rollback if a newly generated config fails validation at container startup. See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
+`KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq/PowerDNS configurations are kept for automatic rollback if a newly generated config fails validation at container startup. See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the
 latest stable release. Use `edge` only when you explicitly want the tested

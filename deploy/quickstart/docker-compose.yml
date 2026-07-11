@@ -249,6 +249,7 @@ services:
     volumes:
       - pdns-data-standard:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
+      - pdns-config-snapshots-standard:/var/lib/lancache-dns
     depends_on:
       - nats
     ports:
@@ -282,6 +283,7 @@ services:
     volumes:
       - pdns-data-ssl:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
+      - pdns-config-snapshots-ssl:/var/lib/lancache-dns
     depends_on:
       - nats
     ports:
@@ -560,9 +562,13 @@ networks:
 
 volumes:
   proxy-logs:
-  # Known-good config snapshots (#415), one persistent volume per adapter.
+  # Known-good config snapshots (#415, #615), one persistent volume per
+  # adapter. dns-standard and dns-ssl are separate containers with
+  # independently-generated config, so each gets its own snapshot history.
   proxy-config-snapshots:
   dhcp-proxy-config-snapshots:
+  pdns-config-snapshots-standard:
+  pdns-config-snapshots-ssl:
   watchdog-status:
   nats-data:
   nats-conf:
