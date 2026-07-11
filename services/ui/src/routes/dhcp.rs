@@ -935,8 +935,8 @@ pub async fn rollback_kea_snapshot(
         ));
     }
 
-    let snapshot_config = kea_snapshots::read_snapshot(&snapshot_root, &form.snapshot_id)
-        .map_err(|e| {
+    let snapshot_config =
+        kea_snapshots::read_snapshot(&snapshot_root, &form.snapshot_id).map_err(|e| {
             kea_snapshots::kgs_log(
                 "REJECT",
                 &format!(
@@ -968,7 +968,10 @@ pub async fn rollback_kea_snapshot(
 
     kea_snapshots::kgs_log(
         "SELECT",
-        &format!("selected known-good snapshot {} for rollback", form.snapshot_id),
+        &format!(
+            "selected known-good snapshot {} for rollback",
+            form.snapshot_id
+        ),
     );
     Ok(Redirect::to("/dhcp"))
 }

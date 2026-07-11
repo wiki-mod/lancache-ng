@@ -149,9 +149,8 @@ pub fn list_snapshot_ids(snapshot_root: &Path) -> io::Result<Vec<String>> {
 /// `snapshot_root`.
 pub fn read_snapshot(snapshot_root: &Path, id: &str) -> Result<Value, KeaSnapshotError> {
     let path = snapshot_root.join(id).join(SNAPSHOT_FILE_NAME);
-    let raw = fs::read_to_string(&path).map_err(|e| {
-        snapshot_err(format!("cannot read known-good snapshot {id}: {e}"))
-    })?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| snapshot_err(format!("cannot read known-good snapshot {id}: {e}")))?;
     serde_json::from_str(&raw)
         .map_err(|e| snapshot_err(format!("known-good snapshot {id} is not valid JSON: {e}")))
 }
