@@ -35,7 +35,15 @@ setup() {
     export DDNS_TSIG_KEY="dGVzdC10c2lnLWtleS1iYXNlNjQtZW5jb2RlZA=="
     export DHCP_NTP_OPTION=""
 
-    # ENVSUBST_VARS from entrypoint.sh
+    # Must mirror entrypoint.sh's own ENVSUBST_VARS exactly (see
+    # render_kea_config() there). Passing an explicit variable list to
+    # envsubst -- instead of calling it with no arguments -- means only
+    # these named variables get substituted; every other literal `$` in
+    # the Kea JSON templates (there are none today, but a future template
+    # edit could add one) is left untouched rather than silently replaced
+    # by whatever happens to be in the shell environment. If this list
+    # drifts from entrypoint.sh's, the test stops exercising the real
+    # rendering behavior.
     export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
 }
 
@@ -151,7 +159,11 @@ setup() {
     [ "$status" -eq 0 ]
     [ -f "$dhcp4_output" ]
 
-    # Verify the output is valid JSON
+    # `jq empty` parses without producing output -- it's the standard way to
+    # check "is this syntactically valid JSON" without asserting on content.
+    # This matters because Kea refuses to start on malformed config; a
+    # template edit that breaks JSON syntax (e.g. a stray trailing comma)
+    # should fail here, in CI, not at container boot on a real deployment.
     run jq empty "$dhcp4_output"
     [ "$status" -eq 0 ]
 }
@@ -234,7 +246,13 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == '"basic"' ]]
 
-    # Verify credentials are present
+    # The username is a fixed literal "admin" in the template, not
+    # substituted from an env var -- Kea's Basic-Auth scheme requires *a*
+    # username, but this deployment only ever has one caller (the Admin UI's
+    # Kea client), so the real secret is the password/token below, not the
+    # username. Asserting the literal here catches a template edit that
+    # accidentally parameterizes or renames it, which would break the UI's
+    # hardcoded Kea API client credentials.
     run jq -e '.["Control-agent"].authentication.clients[0].user' "$ctrl_agent_output"
     [ "$status" -eq 0 ]
     [[ "$output" == '"admin"' ]]
@@ -268,7 +286,13 @@ setup() {
     run jq -e '.DhcpDdns' "$ddns_output"
     [ "$status" -eq 0 ]
 
-    # Verify port is set correctly
+    # 53001 is DhcpDdns's own fixed internal control-channel port (where
+    # kea-dhcp4 sends it NameChangeRequests), hardcoded in the template --
+    # it is NOT the same thing as $DHCP_DDNS_PORT below, which configures
+    # the *outbound* port DhcpDdns forwards those updates to on the
+    # DNS/PowerDNS side. Confusing the two would silently misroute DDNS
+    # updates, so this asserts the internal port never becomes accidentally
+    # parameterized.
     run jq -e '.DhcpDdns.port' "$ddns_output"
     [ "$status" -eq 0 ]
     [ "$output" = "53001" ]
@@ -285,16 +309,29 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$output" = '"array"' ]
 
-    # Verify first TSIG key structure
+    # "lancache-ddns-key" is a fixed literal, referenced by name from both
+    # forward-ddns and reverse-ddns below -- Kea matches DDNS domains to
+    # TSIG keys purely by this string, so if the name here ever drifted from
+    # what forward-ddns/reverse-ddns reference, DDNS updates would fail
+    # signature verification at the PowerDNS side with no obvious error
+    # pointing back to this template.
     run jq -e '.DhcpDdns["tsig-keys"][0].name' "$ddns_output"
     [ "$status" -eq 0 ]
     [[ "$output" == '"lancache-ddns-key"' ]]
 
+    # HMAC-SHA256 is required, not a stylistic choice: PowerDNS's own TSIG
+    # keys for the same zone (services/dns) must use the identical algorithm
+    # and secret, or DDNS updates signed by Kea are rejected as invalid on
+    # arrival -- this asserts Kea's side of that shared contract.
     run jq -e '.DhcpDdns["tsig-keys"][0].algorithm' "$ddns_output"
     [ "$status" -eq 0 ]
     [[ "$output" == '"HMAC-SHA256"' ]]
 
-    # Verify secret is substituted (should match the exported DDNS_TSIG_KEY)
+    # The secret is a pre-base64-encoded value (generated once by setup.sh
+    # and shared verbatim with PowerDNS) -- envsubst must not alter it in
+    # any way (no re-encoding, no whitespace/newline trimming beyond what
+    # the shell already does), since PowerDNS decodes it independently and
+    # any mismatch breaks DDNS auth silently rather than erroring loudly.
     run jq -r '.DhcpDdns["tsig-keys"][0].secret' "$ddns_output"
     [ "$status" -eq 0 ]
     [ "$output" = "dGVzdC10c2lnLWtleS1iYXNlNjQtZW5jb2RlZA==" ]
@@ -311,13 +348,22 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == '"lancache-ddns-key"' ]]
 
-    # Verify DNS servers are configured
+    # Two entries, not one: the template always lists both the standard-mode
+    # and SSL-mode DNS containers ($DHCP_DNS_SERVER_IP /
+    # $DHCP_DNS_SERVER_IP_SSL) as DDNS targets, regardless of which mode is
+    # actually active, so Kea keeps both DNS instances' zone data in sync
+    # even if only one is presently serving traffic.
     run jq -e '.DhcpDdns["forward-ddns"]["ddns-domains"][0]["dns-servers"] | length' "$ddns_output"
     [ "$status" -eq 0 ]
     [ "$output" = "2" ]
 }
 
 @test "DHCP-DDNS config has domain suffix set from DHCP_DOMAIN" {
+    # Overrides setup()'s default "lan" specifically to prove the domain
+    # name is a live template substitution, not a value that happens to
+    # match by coincidence -- an operator who changes their LAN domain in
+    # the UI must see DDNS start updating that new zone, not silently keep
+    # writing to "lan.".
     export DHCP_DOMAIN="example.com"
     ddns_template="$repo_root/services/dhcp/kea-dhcp-ddns.conf"
     ddns_output="$test_config_dir/kea-dhcp-ddns-domain.conf"
