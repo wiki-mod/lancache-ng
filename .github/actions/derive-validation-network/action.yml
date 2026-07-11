@@ -1,0 +1,103 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# GitHub Action for deriving a per-CI-run full-setup validation Docker subnet
+name: Derive validation network
+description: >-
+  Compute a per-run 172.30.<n>.0/24 validation Docker subnet (and its
+  matching gateway/service IPs) from the current workflow run ID and
+  attempt. Used by the full-setup validation jobs so two different,
+  concurrent workflow runs sharing a self-hosted runner host never fight
+  over the same fixed bridge subnet (see issue #623).
+
+outputs:
+  subnet:
+    description: Validation network subnet, e.g. 172.30.42.0/24
+    value: ${{ steps.derive.outputs.subnet }}
+  gateway:
+    description: Validation network gateway IP
+    value: ${{ steps.derive.outputs.gateway }}
+  proxy_ip:
+    description: proxy service IP (standard mode)
+    value: ${{ steps.derive.outputs.proxy_ip }}
+  proxy_ssl_ip:
+    description: proxy service IP (SSL mode)
+    value: ${{ steps.derive.outputs.proxy_ssl_ip }}
+  dns_standard_ip:
+    description: dns-standard service IP
+    value: ${{ steps.derive.outputs.dns_standard_ip }}
+  dns_ssl_ip:
+    description: dns-ssl service IP
+    value: ${{ steps.derive.outputs.dns_ssl_ip }}
+  watchdog_ip:
+    description: watchdog service IP
+    value: ${{ steps.derive.outputs.watchdog_ip }}
+  netdata_ip:
+    description: netdata service IP
+    value: ${{ steps.derive.outputs.netdata_ip }}
+  nats_ip:
+    description: nats service IP
+    value: ${{ steps.derive.outputs.nats_ip }}
+  ui_ip:
+    description: ui service IP
+    value: ${{ steps.derive.outputs.ui_ip }}
+
+runs:
+  using: composite
+  steps:
+    # A fixed 172.30.99.0/24 validation subnet repeatedly collided when two
+    # different workflow runs landed on the same shared self-hosted runner
+    # host at the same time (#623) -- `needs:` only serializes jobs *within*
+    # one run, not across runs. Deriving the subnet from this run's own
+    # identity means two concurrent runs (almost) never pick the same one.
+    - name: Derive a per-run validation subnet
+      id: derive
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+        : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+
+        # run_attempt is included because a rerun of a failed run reuses the
+        # exact same run_id -- without it, re-running a failed job would
+        # derive the same subnet again and could collide with a leftover
+        # bridge from its own previous (failed, possibly not fully torn
+        # down) attempt.
+        raw="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+        # Hash rather than using run_id directly mod N: GitHub doesn't
+        # document run_id distribution, and consecutive runs (the common
+        # case: back-to-back pushes/PRs) hashing on raw low-order digits
+        # could cluster near each other instead of spreading across the
+        # available range.
+        digest="$(printf '%s' "$raw" | sha256sum | cut -c1-8)"
+        decimal=$((16#$digest))
+
+        # Reserve the third octet of 172.30.0.0/16 as the per-run pool.
+        #   - 0 and 1 are excluded from the pool outright (not derived at all).
+        #   - 28 is deploy/dev's docker-compose subnet (172.28.0.0/16,
+        #     see deploy/dev/docker-compose.yml) -- excluded so a derived
+        #     run can never reproduce that unrelated network's third octet.
+        #   - 99 was the old fixed value; excluding it isn't required for
+        #     correctness, it just keeps the derived pool visibly distinct
+        #     from the previous hardcoded default.
+        octet=$(( (decimal % 252) + 2 )) # 2..253
+        case "$octet" in
+          28|99) octet=$(( octet + 100 )) ;;
+        esac
+
+        subnet="172.30.${octet}.0/24"
+        echo "Derived validation subnet ${subnet} from run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}."
+
+        {
+          echo "octet=${octet}"
+          echo "subnet=${subnet}"
+          echo "gateway=172.30.${octet}.1"
+          echo "proxy_ip=172.30.${octet}.2"
+          echo "dns_standard_ip=172.30.${octet}.3"
+          echo "proxy_ssl_ip=172.30.${octet}.4"
+          echo "dns_ssl_ip=172.30.${octet}.5"
+          echo "watchdog_ip=172.30.${octet}.6"
+          echo "netdata_ip=172.30.${octet}.7"
+          echo "nats_ip=172.30.${octet}.8"
+          echo "ui_ip=172.30.${octet}.9"
+        } >> "$GITHUB_OUTPUT"
