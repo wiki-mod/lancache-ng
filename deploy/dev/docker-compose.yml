@@ -401,15 +401,159 @@ services:
         ipv4_address: 172.28.0.8
     restart: unless-stopped
 
-  # ── Log aggregator (optional, start with: docker compose --profile logging up) ──
+  # ── Log collector (#453; optional, start with: docker compose --profile logging up) ──
+  # Tails the proxy access log into two independent pipelines: a local
+  # plain-text file (kept for Netdata's web_log parser) and a forward to the
+  # central syslog-ng receiver below. Config is generated inline (not
+  # bind-mounted) so quickstart -- which has no local repo checkout to
+  # bind-mount from -- runs the exact same fluent-bit behavior as dev/prod.
   syslog:
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     profiles: [logging]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /fluent-bit/etc
+        cat > /fluent-bit/etc/fluent-bit.conf <<'EOF'
+        [SERVICE]
+            Flush         5
+            Daemon        Off
+            Log_Level     warn
+            storage.path  /data/flb-storage
+
+        [INPUT]
+            Name          tail
+            Path          /var/log/nginx/access.log
+            Tag           nginx.file
+            DB            /data/flb-proxy-file.db
+            Skip_Long_Lines On
+
+        [INPUT]
+            Name          tail
+            Path          /var/log/nginx/access.log
+            Tag           nginx.syslog
+            DB            /data/flb-proxy-syslog.db
+            Skip_Long_Lines On
+
+        [FILTER]
+            Name          record_modifier
+            Match         nginx.syslog
+            Record        host lancache-proxy
+            Record        ident nginx-access
+
+        [OUTPUT]
+            Name          file
+            Match         nginx.file
+            Path          /var/log/lancache
+            File          nginx-proxy.log
+            Format        template
+            Template      {log}
+
+        [OUTPUT]
+            Name                 syslog
+            Match                nginx.syslog
+            Host                 syslog-ng
+            Port                 601
+            Mode                 tcp
+            Syslog_Format        rfc5424
+            Syslog_Hostname_key  host
+            Syslog_Appname_key   ident
+            Syslog_Message_key   log
+        EOF
+        exec /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluent-bit.conf
     volumes:
       - proxy-logs:/var/log/nginx:ro
-      - ../../services/syslog/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - logs:/var/log/lancache
       - syslog-data:/data
+    depends_on:
+      - syslog-ng
+    networks:
+      - lancache
+    restart: unless-stopped
+
+  # ── Central log receiver (#453; optional, start with: docker compose --profile logging up) ──
+  # Receives forwarded logs from the `syslog` (fluent-bit) service above over
+  # TCP/601 (RFC 5424, plain LF framing -- what fluent-bit's syslog output
+  # sends by default) and writes them per-source, per-day under
+  # logs-syslog-ng. Config and the rotation/compression loop are generated
+  # inline for the same reason as fluent-bit above.
+  syslog-ng:
+    image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
+    profiles: [logging]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /etc/syslog-ng
+        cat > /etc/syslog-ng/syslog-ng.conf <<'EOF'
+        @version: 4.8
+
+        options {
+            time-reap(30);
+            mark-freq(10);
+            keep-hostname(yes);
+            create-dirs(yes);
+            dir-perm(0750);
+            perm(0640);
+        };
+
+        source s_forwarders {
+            network(transport(tcp) port(601) flags(syslog-protocol));
+        };
+
+        destination d_lancache {
+            file(
+                "/var/log/lancache-syslog-ng/$${HOST}/$${YEAR}$${MONTH}$${DAY}.log"
+                template("$$ISODATE $$HOST $$PROGRAM: $$MSGONLY\n")
+                create-dirs(yes)
+            );
+        };
+
+        log { source(s_forwarders); destination(d_lancache); };
+        EOF
+        # Size-bounded rotation + zstd high-compression (#453): every
+        # SYSLOG_NG_ROTATE_INTERVAL_SECONDS, rotate any active log file once it
+        # exceeds SYSLOG_MAX_FILE_MB, signal syslog-ng to reopen the (now
+        # recreated) destination file, then compress the rotated file with
+        # zstd -T0 (all cores) at SYSLOG_COMPRESSION_LEVEL. Falls back to gzip
+        # if zstd cannot be installed (e.g. no network egress at startup), so
+        # rotation/compression degrades gracefully instead of failing hard.
+        # This is a fixed-threshold baseline, not the full SYSLOG_MAX_GB /
+        # SYSLOG_RETENTION_DAYS size-priority budget engine -- see follow-up #633.
+        (
+          if ! command -v zstd >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y --no-install-recommends zstd >/dev/null 2>&1 || true
+          fi
+          while true; do
+            sleep "$${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}"
+            find /var/log/lancache-syslog-ng -type f -name '*.log' -size +"$${SYSLOG_MAX_FILE_MB:-100}"M 2>/dev/null | while read -r f; do
+              ts="$$(date -u +%Y%m%dT%H%M%SZ)"
+              mv "$$f" "$${f}.$${ts}"
+              kill -HUP 1 2>/dev/null || true
+              if command -v zstd >/dev/null 2>&1; then
+                zstd -q -T0 "-$${SYSLOG_COMPRESSION_LEVEL:-19}" --rm "$${f}.$${ts}" 2>/dev/null || true
+              else
+                gzip "$${f}.$${ts}" 2>/dev/null || true
+              fi
+            done
+          done
+        ) &
+        exec /usr/local/bin/entrypoint.sh
+    environment:
+      - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
+      - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
+      - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
+    volumes:
+      - logs-syslog-ng:/var/log/lancache-syslog-ng
+    healthcheck:
+      test: ["CMD-SHELL", "syslog-ng-ctl healthcheck --timeout 5"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - lancache
     restart: unless-stopped
 
   # ── Admin UI ──────────────────────────────────────────────────────────────
@@ -526,4 +670,5 @@ volumes:
   pdns-filter-state:
   logs:
   syslog-data:
+  logs-syslog-ng:
   ui-data:
