@@ -346,6 +346,28 @@ jobs:
           set -euo pipefail
           scripts/ui-nats-dns-integration-simulation.sh
 
+  watchtower-update-simulation:
+    # Real Watchtower verification (issue #611, sub-item of #398): detect a
+    # genuine image digest change, recreate only the affected container, come
+    # back healthy, and don't misfire full-setup-validate's crash-loop
+    # heuristic. Shares the earlier jobs' collision constraint: same compose
+    # project name and fixed validation-network IPs as full-setup-validate,
+    # so it must not run concurrently with any of them. No BUILD_TOOLS_IMAGE
+    # client container is needed here (unlike the two simulations above) --
+    # this test drives docker/docker compose directly on the runner, the
+    # same as full-setup-validate's own steps.
+    name: Watchtower update simulation
+    needs: ui-nats-dns-integration-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Run Watchtower update simulation
+        run: |
+          set -euo pipefail
+          scripts/watchtower-update-simulation.sh
+
   setup-cli-simulation:
     # Runs the real setup.sh CLI end-to-end (fresh install through its
     # interactive prompts, update/migration, and one rollback-safety
@@ -358,15 +380,18 @@ jobs:
     # self-hosted runner tier. Confirmed directly: running both jobs
     # concurrently on the same workflow_dispatch produced "port is already
     # allocated" here and a flaky "ui did not become healthy" in the other
-    # job. Chained after ui-nats-dns-integration-simulation (the last job in
-    # the full-setup-validate -> ssl-mitm-cache-simulation ->
-    # ui-nats-dns-integration-simulation sequence, all of which were added
-    # after this port-collision test and were never specifically re-tested
-    # against setup-cli-simulation) rather than directly after
-    # full-setup-validate, so this job is guaranteed to never run
-    # concurrently with any of them, not just the one it was tested against.
+    # job. Chained after watchtower-update-simulation (itself chained after
+    # ui-nats-dns-integration-simulation, the last job in the
+    # full-setup-validate -> ssl-mitm-cache-simulation ->
+    # ui-nats-dns-integration-simulation sequence) rather than directly
+    # after full-setup-validate or in parallel with watchtower-update-simulation,
+    # so this job is guaranteed to never run concurrently with any of them,
+    # not just the one it was tested against -- watchtower-update-simulation
+    # shares the exact same compose-project/port/network collision
+    # constraint, so it must be in this same serial chain too, not a sibling
+    # of it.
     name: setup.sh CLI simulation
-    needs: ui-nats-dns-integration-simulation
+    needs: watchtower-update-simulation
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
