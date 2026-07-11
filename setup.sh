@@ -1606,19 +1606,34 @@ derive_release_archive_image_tag() {
                 # for) and must not silently resolve a possibly-stale
                 # VERSION tag instead.
                 #
-                # Trust $SCRIPT_DIR -- the directory this very script lives
-                # in, already implicitly trusted by the act of running it --
-                # for this ONE git invocation only, via `-c` on the command
-                # line. This is deliberately narrower than
-                # `git config --global --add safe.directory`: it is never
-                # written to any git config file, never persists beyond this
-                # single process, never affects any other git invocation on
-                # the system, and never uses a wildcard ("*") that would
+                # Trust the path this run's dubious-ownership check actually
+                # rejected -- not necessarily $SCRIPT_DIR verbatim. Git checks
+                # safe.directory against the repository's real (symlink-
+                # resolved) path, so if $SCRIPT_DIR is itself a symlink,
+                # scoping trust to the symlink path would not match and this
+                # retry would still fail, falling through to the possibly-
+                # stale VERSION file -- exactly the bug this is meant to
+                # avoid. Git's own error message already names the exact path
+                # it checked ("... in repository at '<path>' ..."), so parse
+                # that out instead of assuming $SCRIPT_DIR is already the
+                # physical path; fall back to $SCRIPT_DIR only if the message
+                # format is ever unrecognized.
+                #
+                # Either way, this is scoped for this ONE git invocation only,
+                # via `-c` on the command line. This is deliberately narrower
+                # than `git config --global --add safe.directory`: it is
+                # never written to any git config file, never persists beyond
+                # this single process, never affects any other git invocation
+                # on the system, and never uses a wildcard ("*") that would
                 # trust every repository regardless of path -- so it does not
                 # weaken the dubious-ownership protection for anything other
                 # than this script resolving its own, already-trusted path.
-                safe_dir_opt=(-c "safe.directory=$SCRIPT_DIR")
-                printf 'Note: %s has different file ownership than the current user; trusting it for this run only (see: git help safe.directory).\n' "$SCRIPT_DIR" >&2
+                local dubious_path="$SCRIPT_DIR"
+                if [[ "$git_stderr" =~ dubious\ ownership\ in\ repository\ at\ \'(.+)\' ]]; then
+                    dubious_path="${BASH_REMATCH[1]}"
+                fi
+                safe_dir_opt=(-c "safe.directory=$dubious_path")
+                printf 'Note: %s has different file ownership than the current user; trusting it for this run only (see: git help safe.directory).\n' "$dubious_path" >&2
             else
                 printf 'Warning: %s contains a .git directory but git rejected it:\n%s\nFalling back to the VERSION file, which may be stale or unpublished. Set LANCACHE_IMAGE_TAG or LANCACHE_IMAGE_CHANNEL to override.\n' "$SCRIPT_DIR" "$git_stderr" >&2
             fi

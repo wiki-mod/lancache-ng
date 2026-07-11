@@ -174,6 +174,54 @@ setup() {
     [ "$tag" != "v1.0.1" ]
 }
 
+@test "git dubious-ownership rejection scopes trust to the physical path, not a symlinked SCRIPT_DIR" {
+    # Regression test for a Codex review finding on #609: git checks
+    # safe.directory against the repository's real (symlink-resolved) path,
+    # not necessarily the path it was invoked through. If SCRIPT_DIR is a
+    # symlink to the real checkout, scoping safe.directory to the symlink
+    # path would not match what git actually checked -- the retry would
+    # still be rejected and fall through to the stale VERSION file, the
+    # exact bug #595/#609 exist to fix. The function must parse the physical
+    # path git itself names in its dubious-ownership error message
+    # ("... in repository at '<path>' ...") and scope trust to THAT path.
+    real_dir="$BATS_TEST_TMPDIR/physical-repo"
+    link_dir="$BATS_TEST_TMPDIR/symlinked-checkout"
+    mkdir -p "$real_dir"
+    ln -s "$real_dir" "$link_dir"
+    : > "$link_dir/.git"
+    printf '%s\n' '1.0.1' > "$link_dir/VERSION"
+
+    SCRIPT_DIR="$link_dir"
+    export SCRIPT_DIR
+
+    git() {
+        local arg saw_safe_dir=0
+        for arg in "$@"; do
+            # Only the PHYSICAL path must satisfy the safe.directory check --
+            # a value matching the symlink path ($link_dir) must NOT count,
+            # since that's exactly the bug being guarded against here.
+            [[ "$arg" == "safe.directory=$real_dir" ]] && saw_safe_dir=1
+        done
+        if [[ "$saw_safe_dir" -eq 0 ]]; then
+            # Real git reports the resolved physical path here, not the
+            # symlink path it was invoked through.
+            printf "fatal: detected dubious ownership in repository at '%s'\n" "$real_dir" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            *"describe --tags --exact-match"*) printf 'v2.0.0\n'; return 0 ;;
+        esac
+        return 1
+    }
+
+    tag=$(derive_release_archive_image_tag)
+    status=$?
+
+    [ "$status" -eq 0 ]
+    [ "$tag" = "v2.0.0" ]
+}
+
 @test "proxy security migration restores lazy default for legacy strict without allowlist" {
     printf '%s\n' \
         'PROXY_SECURITY_MODE=strict' \
