@@ -497,6 +497,8 @@ jobs:
           grep -F 'config/prod' setup.sh >/dev/null \
             && grep -F 'services/dns/cdn-domains.txt' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must include repo-root config/prod env files and the domain list."; exit 1; }
+          grep -F 'scripts/docker-socket-proxy.sh' setup.sh >/dev/null \
+            || { echo "::error::deploy/prod backups must include the repo-root scripts/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
           grep -F 'deploy_prod_repo_root "$archived_install"' setup.sh >/dev/null \
             && grep -F 'deploy_prod_repo_root "$install_dir"' setup.sh >/dev/null \
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
@@ -707,25 +709,52 @@ jobs:
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
+          # The HAProxy allowlist itself lives in exactly one place,
+          # scripts/docker-socket-proxy.sh (see docs/naming-conventions.md's
+          # "Docker socket proxy allowlist" section) -- it used to also be
+          # duplicated into an unreferenced x-docker-socket-proxy-command
+          # anchor in each of the three Compose files, which this check used
+          # to validate instead of the real script. Those anchors were dead
+          # (never aliased) and have been removed; validate the one real
+          # copy directly instead of three unreachable shadow copies.
+          socket_proxy_script="scripts/docker-socket-proxy.sh"
+          grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
+            && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
+            && grep -Fq 'acl safe_probe_action' "$socket_proxy_script" \
+            && grep -Fq 'acl lancache_container' "$socket_proxy_script" \
+            && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$socket_proxy_script" \
+            && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$socket_proxy_script" \
+            && grep -Fq 'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)' "$socket_proxy_script" \
+            && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$socket_proxy_script" \
+            && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$socket_proxy_script" \
+            && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$socket_proxy_script" \
+            && grep -Fq 'http-request deny' "$socket_proxy_script" \
+            && ! grep -Fq '/containers/create' "$socket_proxy_script" \
+            && ! grep -Fq '/containers/json' "$socket_proxy_script" \
+            && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$socket_proxy_script" \
+            || {
+              echo "::error file=${socket_proxy_script}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
+              exit 1
+            }
+
           for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'acl safe_service_restart' "$compose_file" \
-              && grep -Fq 'acl safe_dhcp_action' "$compose_file" \
-              && grep -Fq 'acl safe_probe_action' "$compose_file" \
-              && grep -Fq 'acl lancache_container' "$compose_file" \
-              && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$compose_file" \
-              && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$compose_file" \
-              && grep -Fq 'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)' "$compose_file" \
-              && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$compose_file" \
-              && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$compose_file" \
-              && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$compose_file" \
-              && grep -Fq 'http-request deny' "$compose_file" \
-              && ! grep -Fq '/containers/create' "$compose_file" \
-              && ! grep -Fq '/containers/json' "$compose_file" \
-              && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$compose_file" \
+            grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
+                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
                 exit 1
               }
+            # Match only the real top-level YAML key/anchor syntax here, not
+            # any occurrence of the string -- the explanatory comment above
+            # (and in docs/naming-conventions.md) legitimately mentions
+            # "x-docker-socket-proxy-command" as prose describing what was
+            # removed, and a substring match would flag that prose as a
+            # reintroduction on every run.
+            grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
+              && {
+                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/docker-socket-proxy.sh without ever being referenced."
+                exit 1
+              }
+            true
           done
 
           missing_required=0
@@ -1398,6 +1427,17 @@ jobs:
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
+
+      - name: Check naming consistency (docs/naming-conventions.md)
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-naming-consistency.sh
 
       - name: Remove fallback compose validation image
         if: always()

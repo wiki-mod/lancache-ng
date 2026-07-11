@@ -1337,6 +1337,12 @@ deploy_prod_repo_input_paths() {
     [[ -d "$repo_root/certs" ]] && printf '%s\n' "$repo_root/certs"
     [[ -d "$repo_root/config/prod" ]] && printf '%s\n' "$repo_root/config/prod"
     [[ -f "$repo_root/services/dns/cdn-domains.txt" ]] && printf '%s\n' "$repo_root/services/dns/cdn-domains.txt"
+    # docker-socket-proxy is also mounted via ../../scripts/docker-socket-proxy.sh
+    # (see docs/naming-conventions.md's "Docker socket proxy allowlist"
+    # section) -- without this, a manual deploy/prod config backup would
+    # silently omit the one file that defines which container names the
+    # socket proxy allows the Admin UI/watchdog to act on.
+    [[ -f "$repo_root/scripts/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/docker-socket-proxy.sh"
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains

@@ -145,6 +145,25 @@ A LAN cache that intercepts and caches game/software downloads. Two operating mo
 
 Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
 
+## Naming Convention
+
+`docs/naming-conventions.md` is the single, authoritative naming contract for
+every runtime object this project creates: Compose project/service names,
+Docker `container_name` values, Docker volumes, host bind-mount directories,
+GHCR image/package names, environment variables that refer to services or
+containers, the Docker socket proxy's security allowlist, and backup/restore
+paths that depend on those names. Any change that adds a new service,
+volume, environment variable, or socket-proxy allowlist entry must follow
+that document's rule for its category, not invent a new naming shape
+inline. `scripts/check-naming-consistency.sh` (run in CI as part of
+`validate-compose` in `.github/workflows/build-push.yml`) enforces the
+mechanically-checkable parts of that contract — the allowlist in
+`scripts/docker-socket-proxy.sh` must stay a superset of the container names
+the Admin UI (`services/ui/src/docker_client.rs`) and watchdog
+(`services/watchdog/watchdog.sh`) can act on, and the Admin UI's `*_SERVICE`
+defaults must match a real Compose service name — but does not replace
+reading the document for anything that needs human judgment.
+
 ## Coding Patterns
 
 - **[AG-REL-002]** **Docker builds**: production/runtime Dockerfiles still use multi-stage builds with pinned base images, but the Rust service builders for `services/dns` and `services/ui` consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` contract through a `BUILD_TOOLS_IMAGE` argument. Do not add ad-hoc `rust:latest` or Debian-based bootstrap layers back into those service builders. Local developer helper scripts and the repository build-tools image intentionally use `rust:latest` by default when the image is explicitly overrideable; this keeps developer validation tooling current while remaining separate from production service image pinning.
