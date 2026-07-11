@@ -67,18 +67,26 @@ section_exists_with_content() {
     local body="$2"
 
     # Look for the section heading "## <Section>".
-    if ! echo "$body" | grep -qF "## $section"; then
+    # Here-string, not `echo "$body" | grep`: with `set -o pipefail`, a large
+    # $body plus awk's `exit` below closing its stdin early can make the
+    # `echo` on the left side of a pipe receive SIGPIPE before it finishes
+    # writing, failing the whole pipeline non-deterministically depending on
+    # body size and where the target section falls -- confirmed this exact
+    # failure live in CI (PR #627) as a false "missing section" report. A
+    # here-string has no such race: the shell writes it out before awk/grep
+    # ever start reading.
+    if ! grep -qF "## $section" <<<"$body"; then
         return 1
     fi
 
     # Extract content after the section heading until the next ## heading using awk.
     # This avoids sed delimiter issues with sections containing "/" characters.
     local section_content
-    section_content=$(echo "$body" | awk -v sec="$section" '
+    section_content=$(awk -v sec="$section" '
         /^## / && $0 ~ ("^## " sec "$") {found=1; next}
         found && /^## / {exit}
         found {print}
-    ')
+    ' <<<"$body")
 
     # Remove leading/trailing whitespace and check if empty.
     local trimmed
