@@ -720,7 +720,7 @@ async fn main() -> Result<()> {
         // router would attach a session-issuing Set-Cookie to a response
         // already marked publicly cacheable, letting a shared cache in
         // front of the Admin UI replay one client's session cookie to
-        // another (see PR #553 review). The browser's own Basic Auth
+        // another. The browser's own Basic Auth
         // prompt still blocks every request to this origin regardless, so
         // this doesn't change when a client can actually fetch them.
         .route("/favicon.ico", get(favicon_ico))
