@@ -383,15 +383,15 @@ jobs:
           bash scripts/ui-nats-dns-integration-simulation.sh
 
   watchtower-update-simulation:
-    # Real Watchtower verification (issue #611, sub-item of #398): detect a
-    # genuine image digest change, recreate only the affected container, come
-    # back healthy, and don't misfire full-setup-validate's crash-loop
-    # heuristic. Shares the earlier jobs' collision constraint: same compose
-    # project name and fixed validation-network IPs as full-setup-validate,
-    # so it must not run concurrently with any of them. No BUILD_TOOLS_IMAGE
-    # client container is needed here (unlike the two simulations above) --
-    # this test drives docker/docker compose directly on the runner, the
-    # same as full-setup-validate's own steps.
+    # Real Watchtower verification: detect a genuine image digest change,
+    # recreate only the affected container, come back healthy, and don't
+    # misfire full-setup-validate's crash-loop heuristic. Shares the earlier
+    # jobs' collision constraint: same compose project name and fixed
+    # validation-network IPs as full-setup-validate, so it must not run
+    # concurrently with any of them. No BUILD_TOOLS_IMAGE client container is
+    # needed here (unlike the two simulations above) -- this test drives
+    # docker/docker compose directly on the runner, the same as
+    # full-setup-validate's own steps.
     name: Watchtower update simulation
     needs: [compute-validation-network, ui-nats-dns-integration-simulation]
     if: always()
@@ -403,6 +403,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Run Watchtower update simulation
+        # Without this, the script falls back to its own default image tag
+        # regardless of what this workflow was dispatched to validate, so a
+        # non-default image_tag run could pass here while actually checking
+        # an unrelated proxy image and mask tag-specific update regressions.
+        env:
+          LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           bash scripts/watchtower-update-simulation.sh

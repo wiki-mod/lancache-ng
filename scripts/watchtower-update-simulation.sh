@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Real end-to-end Watchtower verification (issue #611, sub-item of #398).
+# Real end-to-end Watchtower verification.
 # Watchtower is a documented, supported optional feature (COMPOSE_PROFILES=
 # watchtower; README.md, docs/release-external-images.md,
 # docs/backup-restore.md) whose actual runtime behavior -- detect a new
@@ -46,18 +46,28 @@ upstream_registry="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}"
 upstream_prefix="${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 
-mirror_port="${WATCHTOWER_SIM_REGISTRY_PORT:-5511}"
+# A fixed registry container name and host port collided across concurrent
+# workflow runs sharing one self-hosted runner host: an unconditional
+# `docker rm -f` under a shared name could delete another run's registry
+# mid-push/pull, and a shared port made two simulations race against the
+# same endpoint instead of validating Watchtower independently. The compose
+# project name doesn't need the same treatment here -- it already arrives
+# pre-derived per run via COMPOSE_PROJECT_NAME, set by the workflow's own
+# per-run network-derivation job. Mirror that same run-identity approach for
+# the registry container/port: hash the run's own identity (with a random
+# fallback so an operator can still run this script directly, not just via
+# GitHub Actions) into a small numeric range, exactly like
+# dhcp-kea-lease-flow-simulation.sh already does for its own throwaway
+# network resources.
+run_identity="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-$$}-${RANDOM:-0}"
+run_digest="$(printf '%s' "$run_identity" | sha256sum | cut -c1-8)"
+run_offset=$(( (16#$run_digest % 252) + 2 )) # 2..253
+mirror_port="${WATCHTOWER_SIM_REGISTRY_PORT:-$(( 5500 + run_offset ))}"
 mirror_registry="127.0.0.1:${mirror_port}"
 mirror_prefix="watchtower-sim"
 mirror_tag="watchtower-test"
 mirror_ref="${mirror_registry}/${mirror_prefix}/proxy:${mirror_tag}"
-# Known tracked gap: the registry container name, host port, and compose
-# project name are fixed constants shared with the sibling validation
-# scripts, so two runs on the same host collide instead of isolating per run
-# via a per-run VALIDATION_SUBNET. This is deliberately not fixed here to keep
-# this review pass scoped; the systemic fix across all three scripts is
-# tracked in issue #661.
-registry_container="lancache-ng-watchtower-sim-registry"
+registry_container="lancache-ng-watchtower-sim-registry-${run_offset}-$$"
 
 work_dir="$repo_root/.watchtower-update-simulation-tmp"
 rm -rf "$work_dir"
@@ -75,7 +85,11 @@ trap cleanup EXIT
 
 echo "== Starting a throwaway local registry mirror on 127.0.0.1:${mirror_port} =="
 docker rm -f "$registry_container" >/dev/null 2>&1 || true
-docker run -d --name "$registry_container" -p "127.0.0.1:${mirror_port}:5000" registry:2 >/dev/null
+# Pinned to an immutable digest per docs/ci-image-pinning-policy.md: this
+# script downloads registry:2 on every CI run, so a mutable tag could start
+# failing or silently run different code with no repository change at all.
+docker run -d --name "$registry_container" -p "127.0.0.1:${mirror_port}:5000" \
+    registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
 
 echo "== Seeding the mirror with the real, currently published proxy:$image_tag image (generation 1) =="
 docker pull "${upstream_registry}/${upstream_prefix}/proxy:${image_tag}"
@@ -169,7 +183,22 @@ if [[ "$v1_image_id" == "$v2_image_id" ]]; then
     echo "::error::generation-2 image ID is identical to generation 1 ($v1_image_id) -- the derived image did not actually change, so this test cannot prove anything." >&2
     exit 1
 fi
-echo "Mirror now serves generation 2 ($v2_image_id), confirmed different from generation 1 ($v1_image_id)."
+echo "Mirror now serves generation 2 ($v2_image_id) in the registry, confirmed different from generation 1 ($v1_image_id)."
+
+# `docker build -t "$mirror_ref"` above also loaded generation 2 straight
+# into this host's local Docker image cache under the exact tag Watchtower
+# is about to pull. Left as-is, Watchtower's recreate decision could be
+# satisfied entirely from that local cache -- comparing the running
+# (generation 1) container against the already-local generation-2 tag --
+# without ever actually fetching anything from the registry, which would
+# let this job pass even if the push above silently failed or the registry
+# served stale content. That defeats the point of the test: proving
+# Watchtower detects and pulls a real registry-side digest change, not that
+# it can compare two locally-built images. Re-tag the local cache back to
+# generation 1 so the only way "$mirror_ref" can become generation 2 again
+# locally is a genuine `docker pull` against the registry (the fallback
+# path Watchtower itself uses here, see below).
+docker tag "$v1_image_id" "$mirror_ref"
 
 echo "== Running Watchtower once, scoped by the real full-setup compose enable label =="
 # --label-enable plus explicit container names is a real AND, not an
