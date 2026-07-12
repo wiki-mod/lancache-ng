@@ -55,6 +55,26 @@ work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/client-state"
 
+# ISC dhclient (4.4.x, the Debian isc-dhcp-client package) binds the raw DHCP
+# socket as root, then permanently drops privileges to an unprivileged,
+# package-hardcoded system account before opening this script's own -pf/-lf
+# paths or exec'ing the -sf lease-apply script below. dhclient.out keeps
+# being written fine regardless (its fd was already open, inherited from
+# this script's own shell redirect, before that privilege drop happens --
+# writing through an already-open fd needs no further permission check), but
+# any *new* file dhclient itself tries to create afterward in
+# client-state/ gets EACCES from that unprivileged identity. Confirmed
+# directly (issue #712): a real run showed "can't create
+# .../dhclient.leases: Permission denied" and "Can't create
+# .../dhclient.pid: Permission denied" interleaved with a fully successful
+# DHCPACK/bound-to exchange -- the lease negotiation itself was never the
+# problem, dhclient just couldn't persist it to disk. Making this directory
+# world-writable is safe here: it is a throwaway, per-run temp directory
+# scoped to this one script invocation, not a shared or security-sensitive
+# path, and this is what lets dhclient's post-privilege-drop identity
+# actually write the lease file the rest of this script depends on.
+chmod 0777 "$work_dir/client-state"
+
 # A fixed subnet would collide across concurrent runs sharing one of this
 # project's self-hosted runner hosts, exactly like the full-setup validation
 # network did before #623's per-run derivation. Mirror that fix here: derive
@@ -157,7 +177,13 @@ docker run -d --name "$client_container" \
     bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /dhcp-test/dhclient.pid -lf /dhcp-test/dhclient.leases eth0 >/dhcp-test/dhclient.out 2>&1; echo DONE >> /dhcp-test/dhclient.out' \
     >/dev/null
 
-lease_deadline=$((SECONDS + 30))
+# lease_timeout_seconds is kept separate from lease_deadline (an absolute
+# SECONDS-based cutoff) so the error message below can report the actual
+# wait duration instead of a shifting absolute value -- $lease_deadline
+# itself is meaningless to a reader, since $SECONDS keeps advancing for the
+# rest of the script's own runtime.
+lease_timeout_seconds=30
+lease_deadline=$((SECONDS + lease_timeout_seconds))
 lease_obtained=0
 while (( SECONDS < lease_deadline )); do
     if [[ -s "$work_dir/client-state/dhclient.leases" ]] && grep -q '^}' "$work_dir/client-state/dhclient.leases" 2>/dev/null; then
@@ -174,7 +200,7 @@ cat "$work_dir/client-state/dhclient.out" 2>/dev/null || echo "(no client output
 echo "::endgroup::"
 
 if [[ "$lease_obtained" -ne 1 ]]; then
-    echo "::error::dhclient never obtained a lease from the Kea container within ${lease_deadline}s." >&2
+    echo "::error::dhclient never obtained a lease from the Kea container within ${lease_timeout_seconds}s." >&2
     docker logs "$kea_container" >&2 || true
     exit 1
 fi

@@ -263,7 +263,7 @@ jobs:
           FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          scripts/full-setup-client-simulation.sh
+          bash scripts/full-setup-client-simulation.sh
 
       - name: Tear down full-setup validation stack
         if: always()
@@ -320,7 +320,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          scripts/ssl-mitm-cache-simulation.sh
+          bash scripts/ssl-mitm-cache-simulation.sh
 
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test
@@ -354,7 +354,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          scripts/ui-nats-dns-integration-simulation.sh
+          bash scripts/ui-nats-dns-integration-simulation.sh
 
   watchtower-update-simulation:
     # Real Watchtower verification (issue #611, sub-item of #398): detect a
@@ -379,7 +379,7 @@ jobs:
       - name: Run Watchtower update simulation
         run: |
           set -euo pipefail
-          scripts/watchtower-update-simulation.sh
+          bash scripts/watchtower-update-simulation.sh
 
   setup-cli-simulation:
     # Runs the real setup.sh CLI end-to-end (fresh install through its
@@ -555,4 +555,4 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          scripts/nats-secondary-auth-callout-simulation.sh
+          bash scripts/nats-secondary-auth-callout-simulation.sh
