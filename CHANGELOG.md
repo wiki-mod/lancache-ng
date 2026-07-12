@@ -97,6 +97,14 @@ is real, live, running code, not just work sitting in source control.
   independently registered secondaries, immediate revocation on removal, and
   credential rotation all work against a real nats-server and the real
   `nats-subscriber` client.
+- Added GitHub-hosted CI fallback jobs for `pr-template-check` and
+  `watchdog_test`, completing hosted-fallback coverage for the full
+  cheap-lint job class (`file-headers`, `line-endings`, `shellcheck`,
+  `pr-template-check`, `watchdog_test`). Added
+  `docs/ci-github-hosted-fallback-decision.md`, a standalone decision
+  document on whether/how the harder Rust build/test and image build/push
+  job classes could get a GitHub-hosted fallback path, with follow-up issues
+  filed for both (#491).
 
 ### Changed
 
