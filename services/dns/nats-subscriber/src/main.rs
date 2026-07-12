@@ -188,15 +188,49 @@ async fn main() {
                     match msg_result {
                         Ok(msg) => {
                             let result = handle_message(&msg, &pdns_api_key, &http_client).await;
-                            // #56 fix: only ack on success; on failure, don't ack so JetStream redelivers
-                            if result {
-                                if let Err(e) = msg.ack().await {
-                                    eprintln!("Error acknowledging message: {}", e);
+                            // #653 fix: what to do with THIS message is decided by the pure
+                            // `decide_msg` (unit-tested below via `simulate_batch_processing`)
+                            // so the ack/nak-and-stop decision itself -- not just this call
+                            // site -- is covered by tests without a real NATS connection.
+                            match decide_msg(result) {
+                                MsgDecision::AckAndContinue => {
+                                    if let Err(e) = msg.ack().await {
+                                        eprintln!("Error acknowledging message: {}", e);
+                                    }
                                 }
-                            } else {
-                                // P2 fix: Brief delay before retry to reduce ordering issues on redelivery.
-                                // Without ack(), NATS will requeue the message automatically.
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                MsgDecision::NakAndStopBatch => {
+                                    // A retryable (5xx) failure must not let a LATER message
+                                    // in this SAME fetched batch get acked ahead of it. Example
+                                    // race this closes: message A (older update for
+                                    // zone/name/type X) fails transiently here; message B (a
+                                    // newer update for that same X) is later in the batch and
+                                    // would otherwise succeed and get acked. A then sits unacked
+                                    // until AckWait, gets redelivered, and reapplies --
+                                    // clobbering B's newer state with stale data. The previous
+                                    // fix only added a 100ms sleep before the *next fetch loop
+                                    // iteration*, which did nothing to stop the rest of the
+                                    // *current* batch (already pulled via messages.next()) from
+                                    // being processed and acked.
+                                    //
+                                    // Fix: NAK this message with an explicit delay (a precise
+                                    // server-side "retry me later" signal, rather than relying
+                                    // on implicit AckWait timeout) and immediately stop
+                                    // consuming the rest of the batch. Messages left unconsumed
+                                    // here were already pulled from the server but never
+                                    // acked/nakked, so JetStream simply redelivers them on its
+                                    // own after AckWait -- no message is lost, they're just
+                                    // deferred to a later fetch cycle where ordering relative
+                                    // to this retry is no longer at risk.
+                                    if let Err(e) = msg
+                                        .ack_with(jetstream::AckKind::Nak(Some(
+                                            Duration::from_millis(100),
+                                        )))
+                                        .await
+                                    {
+                                        eprintln!("Error naking message: {}", e);
+                                    }
+                                    break;
+                                }
                             }
                         }
                         Err(e) => {
@@ -236,6 +270,32 @@ async fn main() {
                 backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
             }
         }
+    }
+}
+
+/// What to do with a single fetched message, given whether `handle_message`
+/// succeeded. This is the actual decision `main`'s batch loop acts on (see
+/// the `match decide_msg(result)` call site) -- pulled out as a pure
+/// function so the #653 fix ("on a retryable failure, nak this message AND
+/// stop consuming the rest of the batch") is unit-testable without a real
+/// NATS connection, and so a test exercising it is exercising the same
+/// logic the production loop runs, not a reimplementation of it.
+#[derive(Debug, PartialEq, Eq)]
+enum MsgDecision {
+    /// `handle_message` succeeded: ack this message, keep consuming the batch.
+    AckAndContinue,
+    /// `handle_message` returned a retryable (5xx/network) failure: nak this
+    /// message (with delay) and stop consuming the rest of the batch, so no
+    /// later same-batch message (e.g. a newer update for the same
+    /// zone/name/type) can get acked ahead of this pending retry.
+    NakAndStopBatch,
+}
+
+fn decide_msg(handled_ok: bool) -> MsgDecision {
+    if handled_ok {
+        MsgDecision::AckAndContinue
+    } else {
+        MsgDecision::NakAndStopBatch
     }
 }
 
@@ -710,5 +770,122 @@ mod tests {
         // Empty records list should still be present
         assert!(rrset.records.is_some());
         assert_eq!(rrset.records.as_ref().unwrap().len(), 0);
+    }
+
+    // Per-message outcome of replaying a batch through the SAME `decide_msg`
+    // the production loop calls (see the `match decide_msg(result)` in
+    // `main`). This is a thin test harness around real production logic,
+    // not a reimplementation of it: `SkippedDueToEarlierFailure` models
+    // "never handed to handle_message this cycle because an earlier message
+    // in the batch already returned NakAndStopBatch", i.e. the `break` in
+    // `main`'s loop, which `decide_msg` itself cannot express (it only
+    // decides one message at a time).
+    #[derive(Debug, PartialEq, Eq)]
+    enum BatchOutcome {
+        Acked,
+        NakedAndBatchStopped,
+        SkippedDueToEarlierFailure,
+    }
+
+    // Replays `decide_msg` -- the exact function the production batch loop
+    // calls -- over a synthetic ordered sequence of `handle_message` results,
+    // and additionally models the loop's `break` on `NakAndStopBatch` (a
+    // real NATS `Messages` stream can't be driven from a plain unit test, so
+    // this is the closest test double for "the rest of the batch is left
+    // unconsumed").
+    fn simulate_batch_processing(handle_results: &[bool]) -> Vec<BatchOutcome> {
+        let mut outcomes = Vec::with_capacity(handle_results.len());
+        let mut stopped = false;
+
+        for &ok in handle_results {
+            if stopped {
+                outcomes.push(BatchOutcome::SkippedDueToEarlierFailure);
+                continue;
+            }
+
+            match decide_msg(ok) {
+                MsgDecision::AckAndContinue => outcomes.push(BatchOutcome::Acked),
+                MsgDecision::NakAndStopBatch => {
+                    outcomes.push(BatchOutcome::NakedAndBatchStopped);
+                    stopped = true;
+                }
+            }
+        }
+
+        outcomes
+    }
+
+    #[test]
+    fn decide_msg_acks_on_success_and_naks_and_stops_on_failure() {
+        assert_eq!(decide_msg(true), MsgDecision::AckAndContinue);
+        assert_eq!(decide_msg(false), MsgDecision::NakAndStopBatch);
+    }
+
+    // Proves the #653 fix: a retryable failure for an earlier message in a
+    // batch (e.g. message A, an older update for zone/name/type X) must stop
+    // the rest of that batch from being consumed -- otherwise a later
+    // message for the same key (message B, a newer update for X) could
+    // reach handle_message, succeed, and get acked while A is still pending
+    // redelivery. A's later redelivery would then reapply stale data over
+    // B's newer state. This test uses a synthetic handle_message result
+    // sequence (no real NATS connection) to check that nothing after the
+    // first `false` is ever processed ("Acked") within the same batch.
+    #[test]
+    fn batch_processing_stops_after_first_retryable_failure() {
+        // Index 0: unrelated message succeeds.
+        // Index 1: message A fails transiently (simulated 5xx).
+        // Index 2: message B, a newer update for the same key as A, is
+        //          later in this same batch and must NOT be acked now.
+        // Index 3: any further message in the batch must also be skipped.
+        let handle_results = vec![true, false, true, true];
+
+        let outcomes = simulate_batch_processing(&handle_results);
+
+        assert_eq!(
+            outcomes,
+            vec![
+                BatchOutcome::Acked,
+                BatchOutcome::NakedAndBatchStopped,
+                BatchOutcome::SkippedDueToEarlierFailure,
+                BatchOutcome::SkippedDueToEarlierFailure,
+            ]
+        );
+    }
+
+    // Baseline: when nothing in the batch fails, every message is acked and
+    // consumption never stops early. Guards against a fix that over-eagerly
+    // halts batches even without a failure.
+    #[test]
+    fn batch_processing_continues_when_all_succeed() {
+        let handle_results = vec![true, true, true];
+
+        let outcomes = simulate_batch_processing(&handle_results);
+
+        assert_eq!(
+            outcomes,
+            vec![
+                BatchOutcome::Acked,
+                BatchOutcome::Acked,
+                BatchOutcome::Acked,
+            ]
+        );
+    }
+
+    // A failure as the very first message in the batch must stop
+    // immediately -- nothing at all gets acked this cycle.
+    #[test]
+    fn batch_processing_stops_immediately_on_first_message_failure() {
+        let handle_results = vec![false, true, true];
+
+        let outcomes = simulate_batch_processing(&handle_results);
+
+        assert_eq!(
+            outcomes,
+            vec![
+                BatchOutcome::NakedAndBatchStopped,
+                BatchOutcome::SkippedDueToEarlierFailure,
+                BatchOutcome::SkippedDueToEarlierFailure,
+            ]
+        );
     }
 }
