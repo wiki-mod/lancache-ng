@@ -402,7 +402,7 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-OP-003 | Lazy proxy default | Manual review + documentation |
 | AG-OP-004 | Strict behavior is opt-in | Manual review + documentation |
 | AG-OP-005 | Do not silently invert defaults | Manual review |
-| AG-OP-006 | Setup/update idempotence | `tests/bats/setup_update_idempotence.bats` (repeat-run fixture against `migrate_env_for_update`) + `scripts/setup-cli-simulation.sh` Phase 2b (real CLI run twice, live). Covers the `.env`-migration path only; Kea/PDNS/NATS/watchdog writers still rely on manual review — see #456 follow-ups. |
+| AG-OP-006 | Setup/update idempotence | `tests/bats/setup_update_idempotence.bats` (repeat-run fixture against `migrate_env_for_update`) + `scripts/setup-cli-simulation.sh` Phase 2b (real CLI run twice, live). Covers the `.env`-migration path; watchdog's restart-counter/status-write convergence is covered separately by `tests/bats/watchdog_idempotence.bats` (repeat-cycle fixture against `check_and_maybe_restart`/`write_status`). Kea/PDNS/NATS writers still rely on manual review — see #456/#640 follow-ups. |
 | AG-OP-007 | Setup/update convergence | `tests/bats/setup_update_idempotence.bats` (legacy-fixture convergence case) + `scripts/setup-cli-simulation.sh` Phase 2 (legacy `.env` through the real CLI). Same scope note as AG-OP-006. |
 | AG-OP-008 | Missing values rejected or generated | Manual review (code inspection) |
 | AG-OP-009 | Preserve existing local values | Manual review (code inspection) |
