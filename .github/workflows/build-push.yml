@@ -4375,6 +4375,16 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # The manifest lists created below (both the trusted sha-<commit> tag
+      # and the PR staging tag) are the actual multi-platform references that
+      # promote/release/setup.sh/full-setup-validate resolve and pull -- not
+      # the platform-suffixed -amd64/-arm64 legs build/build-arm64 already
+      # attest. Those per-arch attestations say nothing about the merged
+      # digest itself, so this job needs the same attestation permissions
+      # build/build-arm64/promote already carry.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -4390,6 +4400,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-platform manifests
+        id: create-trusted-manifests
         if: github.event_name != 'pull_request'
         env:
           REPOSITORY: ${{ github.repository }}
@@ -4423,6 +4434,25 @@ jobs:
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
 
+          # Duplicated rather than factored into a shared script/action:
+          # GitHub Actions workflow YAML has no import mechanism for shell
+          # functions across job steps, and this file's own convention (see
+          # build/build-tools-base-digests and promote's copies of this same
+          # helper) is a local copy per job over introducing a new composite
+          # action just for one function. Same quote-stripping as those.
+          digest_for_image() {
+            local image=$1
+            local digest
+
+            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]]
+            printf '%s\n' "$digest"
+          }
+
           for service in "${services[@]}"; do
             amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
             arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
@@ -4440,6 +4470,13 @@ jobs:
             docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image" \
               --annotation "index:org.opencontainers.image.description=${service_descriptions[$service]}"
             bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+
+            # Output key uses underscores (dhcp-proxy/build-tools contain
+            # hyphens, which the expression syntax in the attest steps below
+            # would otherwise parse as subtraction) so those steps can
+            # reference steps.create-trusted-manifests.outputs.<service>_digest.
+            merged_digest="$(digest_for_image "$target_image")"
+            printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
 
       # Same merge, for the PR-scoped staging tag instead of the trusted-ref
@@ -4451,6 +4488,7 @@ jobs:
       # expected and not an error; full-setup-validate's own backfill step
       # fills the gap for full-setup services from the base-ref channel.
       - name: Create PR staging multi-platform manifest
+        id: create-pr-staging-manifests
         if: github.event_name == 'pull_request'
         env:
           REPOSITORY: ${{ github.repository }}
@@ -4466,6 +4504,22 @@ jobs:
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
+
+          # Same helper as the trusted-ref step above (and promote's own
+          # copy) -- kept duplicated per step/job rather than shared, which
+          # is the existing convention in this file.
+          digest_for_image() {
+            local image=$1
+            local digest
+
+            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]]
+            printf '%s\n' "$digest"
+          }
 
           for service in "${services[@]}"; do
             amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
@@ -4483,7 +4537,141 @@ jobs:
 
             docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
             bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+
+            # Same underscore-key reasoning as the trusted-ref step above.
+            # This PR staging manifest is the exact tag full-setup-validate
+            # pulls and runs for this PR's commits, not a throwaway build
+            # artifact, so it gets the same provenance attestation.
+            merged_digest="$(digest_for_image "$target_image")"
+            printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
+
+      # actions/attest is a standalone action step, so it cannot run inside
+      # the bash loops above -- one explicit step per service is required,
+      # same as promote's single "Attest stack pointer provenance" step just
+      # repeated for each of the seven merged multi-platform manifests. Each
+      # step is gated only on its own digest output being non-empty: the
+      # "Create ..." step above already skips (via `continue`, not a step
+      # failure) any service with no per-arch inputs for this event, which
+      # leaves that service's *_digest output unset here -- nothing else
+      # needs checking, so this is a plain non-empty guard, not a job-level
+      # always()/!cancelled() status check (this job's own if:/needs: are
+      # unchanged).
+      - name: Attest proxy merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.proxy_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/proxy
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.proxy_digest }}
+          push-to-registry: true
+
+      - name: Attest dns merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.dns_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/dns
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.dns_digest }}
+          push-to-registry: true
+
+      - name: Attest watchdog merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.watchdog_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/watchdog
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.watchdog_digest }}
+          push-to-registry: true
+
+      - name: Attest dhcp merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.dhcp_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/dhcp
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_digest }}
+          push-to-registry: true
+
+      - name: Attest dhcp-proxy merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.dhcp_proxy_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest }}
+          push-to-registry: true
+
+      - name: Attest ui merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.ui_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/ui
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.ui_digest }}
+          push-to-registry: true
+
+      - name: Attest build-tools merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.build_tools_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/build-tools
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest }}
+          push-to-registry: true
+
+      # Fork PRs self-skip here without any extra guard needed: build/build-arm64
+      # never push a fork PR's per-arch legs, so create-pr-staging-manifests'
+      # own loop above never emits these *_digest outputs for a fork PR, and
+      # every one of these seven steps is gated off by its own `if:` as a result.
+      - name: Attest proxy PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.proxy_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/proxy
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.proxy_digest }}
+          push-to-registry: true
+
+      - name: Attest dns PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.dns_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/dns
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dns_digest }}
+          push-to-registry: true
+
+      - name: Attest watchdog PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.watchdog_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/watchdog
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.watchdog_digest }}
+          push-to-registry: true
+
+      - name: Attest dhcp PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.dhcp_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/dhcp
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_digest }}
+          push-to-registry: true
+
+      - name: Attest dhcp-proxy PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
+          push-to-registry: true
+
+      - name: Attest ui PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.ui_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/ui
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.ui_digest }}
+          push-to-registry: true
+
+      - name: Attest build-tools PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.build_tools_digest != ''
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/build-tools
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.build_tools_digest }}
+          push-to-registry: true
 
   promote:
     # Promotion is intentionally separate from image build. It moves coherent
@@ -4781,6 +4969,18 @@ jobs:
             bash scripts/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
           done
 
+      # Patches (rather than overwrites) an existing release body: the
+      # image_notes_start/end HTML-comment markers bound exactly the
+      # auto-generated section, so any text a maintainer added by hand
+      # outside those markers survives a re-run of this job (e.g. a manual
+      # `workflow_dispatch` re-promotion of the same tag, or a rerun after a
+      # transient failure). A brand-new release has no existing body to
+      # preserve, so its notes are just the auto-generated section verbatim.
+      # The prerelease-state check further down exists because GitHub's
+      # PATCH endpoint for releases would otherwise happily flip a release's
+      # prerelease flag to match whatever this run computes -- silently
+      # promoting/demoting a release that a maintainer may have already
+      # published deliberately.
       - name: Create or update GitHub release for built images
         shell: bash
         env:
