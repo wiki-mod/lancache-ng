@@ -345,6 +345,18 @@ migrate_dhcp4_config /var/lib/kea/kea-dhcp4.conf
 # The Control Agent config is not modified by the UI, but it is persisted on
 # the Kea data volume. Regenerate it when KEA_CTRL_TOKEN or KEA_CTRL_HOST
 # changes so upgrades do not leave the API using stale credentials.
+#
+# This is a full-file `cmp`, not a field-level merge, by design: unlike
+# kea-dhcp4.conf above (which the Admin UI mutates live, so
+# migrate_dhcp4_config() merges narrowly to preserve that live state), this
+# file has no UI-mutated state to protect, and full regeneration is what lets
+# a future template change (new auth default, logger, socket path) reach
+# already-deployed installs on upgrade -- the same reason kea-dhcp-ddns.conf
+# below is fully regenerated rather than merged. The tradeoff: any manual
+# edit made directly to the persisted /var/lib/kea/kea-ctrl-agent.conf (e.g.
+# added TLS settings or an extra authenticated client) is silently discarded
+# on the next container start. Do not hand-edit this file; per #651, it is
+# treated as fully generated, like every other file this entrypoint renders.
 CTRL_AGENT_TEMPLATE="/etc/kea/kea-ctrl-agent.conf.template"
 CTRL_AGENT_RUNTIME="/var/lib/kea/kea-ctrl-agent.conf"
 CTRL_AGENT_NEXT="$(mktemp)"
