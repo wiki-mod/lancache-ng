@@ -377,6 +377,7 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
 | AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
 | AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-021 | CodeQL #394 macro-expansion carve-out worked example | Manual review. **Known gap**: this worked example's own wording still contradicts the general carve-out at AG-DOC-001's neighboring text (see issue #702, open) — do not treat this ID as settling that contradiction, only as a citable anchor for the example's current (disputed) text. |
 | AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
 | AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
 | AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
@@ -413,6 +414,16 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-OP-012 | Do not use `proxy_cache_key $request_uri` | Code review (nginx config inspection) |
 | AG-OP-013 | Convergence/idempotence PRs answer the 5 questions | Manual review (PR body inspection) |
 | AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
+| AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
+| AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
+| AG-DOC-004 | Precedence: area-specific AGENTS files (item 3) | Manual review |
+| AG-DOC-005 | Precedence: `SECURITY.md` (item 4) | Manual review |
+| AG-DOC-006 | Precedence: architecture/release documentation (item 5) | Manual review |
+| AG-DOC-007 | Precedence: `README.md`/user-facing docs (item 6) | Manual review |
+| AG-DOC-008 | Do not silently pick a side on a real conflict | Manual review |
+| AG-DOC-009 | Surface conflicts explicitly | Manual review |
+| AG-DOC-010 | Fix one side of a conflict or ask for guidance | Manual review |
+| AG-DOC-011 | Documented exceptions must follow the Scope/Reason/Tracking/Validation/Non-Expansion format | Manual review |
 | AG-CODE-001 | Default: no comments | Manual review |
 | AG-CODE-002 | Comments document WHY | Manual review |
 | AG-CODE-003 | No task/PR refs in comments | Manual review |
