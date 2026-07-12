@@ -51,6 +51,12 @@ mirror_registry="127.0.0.1:${mirror_port}"
 mirror_prefix="watchtower-sim"
 mirror_tag="watchtower-test"
 mirror_ref="${mirror_registry}/${mirror_prefix}/proxy:${mirror_tag}"
+# Known tracked gap: the registry container name, host port, and compose
+# project name are fixed constants shared with the sibling validation
+# scripts, so two runs on the same host collide instead of isolating per run
+# via a per-run VALIDATION_SUBNET. This is deliberately not fixed here to keep
+# this review pass scoped; the systemic fix across all three scripts is
+# tracked in issue #661.
 registry_container="lancache-ng-watchtower-sim-registry"
 
 work_dir="$repo_root/.watchtower-update-simulation-tmp"
@@ -74,7 +80,25 @@ docker run -d --name "$registry_container" -p "127.0.0.1:${mirror_port}:5000" re
 echo "== Seeding the mirror with the real, currently published proxy:$image_tag image (generation 1) =="
 docker pull "${upstream_registry}/${upstream_prefix}/proxy:${image_tag}"
 docker tag "${upstream_registry}/${upstream_prefix}/proxy:${image_tag}" "$mirror_ref"
-docker push "$mirror_ref" >/dev/null
+# `docker run -d` above returns when the registry container is created, not
+# when the registry process inside it is accepting connections. The upstream
+# pull+tag usually masks that startup gap, but a warm image cache can make the
+# pull return almost instantly and race the very first push against a registry
+# that is not listening yet. Retry the first push (the push is both the
+# readiness probe and the operation that races) until it succeeds, giving the
+# registry a bounded window to come up instead of relying on incidental
+# timing. A docker-only wait avoids adding a host `curl`/`wget` dependency that
+# this script family never assumes (its other HTTP probes all run inside
+# containers).
+push_deadline=$((SECONDS + 30))
+until docker push "$mirror_ref" >/dev/null 2>&1; do
+    if (( SECONDS >= push_deadline )); then
+        echo "::error::first push to ${mirror_registry} did not succeed within 30s -- the local registry never became ready." >&2
+        docker logs "$registry_container" 2>&1 | tail -n 20 >&2 || true
+        exit 1
+    fi
+    sleep 1
+done
 v1_image_id="$(docker image inspect --format '{{.Id}}' "$mirror_ref")"
 echo "Mirror seeded at generation 1: $v1_image_id"
 
@@ -115,6 +139,26 @@ proxy_cid_before="$("${compose[@]}" ps -q proxy)"
 proxy_name="$(docker inspect --format '{{.Name}}' "$proxy_cid_before" | sed 's#^/##')"
 netdata_cid_before="$("${compose[@]}" ps -q netdata)"
 netdata_name="$(docker inspect --format '{{.Name}}' "$netdata_cid_before" | sed 's#^/##')"
+
+# Recreating the proxy container must reattach the same persistent proxy-cache
+# named volume, never spin up a fresh (empty) one. That volume holds every
+# cached byte an operator has accumulated, and docs/backup-restore.md treats
+# its survival as the reason Watchtower is safe to enable -- so a recreate that
+# silently swapped, dropped, or re-created it would destroy real cache with no
+# error surfaced. Capture the volume's identity (name + host source) and its
+# creation timestamp before the update to compare afterwards. CreatedAt is
+# captured too because it catches a same-name delete+recreate that a name-only
+# check would miss (a fresh volume of the same name would be empty).
+proxy_cache_dest="/var/cache/nginx/lancache"
+cache_mount_before="$(docker inspect \
+    --format "{{range .Mounts}}{{if eq .Destination \"$proxy_cache_dest\"}}{{.Name}}|{{.Source}}{{end}}{{end}}" \
+    "$proxy_cid_before")"
+cache_volume_name="${cache_mount_before%%|*}"
+if [[ -z "$cache_volume_name" ]]; then
+    echo "::error::proxy container has no named volume mounted at $proxy_cache_dest before the update -- cannot verify the cache survives the recreate." >&2
+    exit 1
+fi
+cache_created_before="$(docker volume inspect --format '{{.CreatedAt}}' "$cache_volume_name")"
 
 echo "== Building a minimally-derived generation-2 image to force a genuine digest change =="
 printf 'FROM %s\nLABEL lancache.watchtower-simulation-generation=2\n' "$mirror_ref" \
@@ -203,6 +247,21 @@ else
     echo "Recreated proxy container's RestartCount is $proxy_restarts_after -- a fresh container, not a crash loop. full-setup-validate.yml's 'RestartCount > 1' heuristic would not misfire on a legitimate Watchtower update."
 fi
 
+cache_mount_after="$(docker inspect \
+    --format "{{range .Mounts}}{{if eq .Destination \"$proxy_cache_dest\"}}{{.Name}}|{{.Source}}{{end}}{{end}}" \
+    "$proxy_cid_after")"
+cache_volume_name_after="${cache_mount_after%%|*}"
+cache_created_after=""
+if [[ -n "$cache_volume_name_after" ]]; then
+    cache_created_after="$(docker volume inspect --format '{{.CreatedAt}}' "$cache_volume_name_after" 2>/dev/null || echo "")"
+fi
+if [[ "$cache_mount_after" != "$cache_mount_before" || "$cache_created_after" != "$cache_created_before" ]]; then
+    echo "::error::proxy's persistent cache volume did not survive the recreate intact (before: $cache_mount_before @ $cache_created_before, after: ${cache_mount_after:-missing} @ ${cache_created_after:-missing}) -- a Watchtower update that swaps, drops, or re-creates the cache volume would silently wipe an operator's accumulated cache." >&2
+    failed=1
+else
+    echo "proxy's persistent cache volume survived the recreate intact ($cache_volume_name, created $cache_created_before) -- Watchtower reattached the same named volume, so operators' cached data is preserved across the update."
+fi
+
 netdata_cid_after="$("${compose[@]}" ps -q netdata)"
 if [[ "$netdata_cid_after" != "$netdata_cid_before" ]]; then
     echo "::error::netdata's container ID changed ($netdata_cid_before -> $netdata_cid_after) -- Watchtower restarted a container whose image never changed." >&2
@@ -215,4 +274,4 @@ if [[ "$failed" -eq 1 ]]; then
     exit 1
 fi
 
-echo "watchtower-update-simulation passed: Watchtower detected a genuine digest change via the real full-setup compose enable label, recreated only the proxy container, it came back healthy with RestartCount 0, and the unrelated netdata container was left untouched."
+echo "watchtower-update-simulation passed: Watchtower detected a genuine digest change via the real full-setup compose enable label, recreated only the proxy container with its persistent cache volume reattached intact, it came back healthy with RestartCount $proxy_restarts_after (the crash-loop heuristic tolerates up to 1), and the unrelated netdata container was left untouched."
