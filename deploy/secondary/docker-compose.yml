@@ -17,9 +17,16 @@ services:
       - NATS_PASSWORD=${NATS_PASSWORD}
       - NATS_CONSUMER=${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
+      # Known-good pdns.conf/recursor.conf snapshot retention (#615), same
+      # variable/default as the primary's config/{dev,prod}/dns-standard.env.
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
+      # Known-good pdns.conf/recursor.conf snapshots (#615): without this,
+      # a secondary node keeps its rollback baseline only in the container
+      # layer, and loses it on every image update/recreate.
+      - pdns-config-snapshots:/var/lib/lancache-dns
     ports:
       - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
       - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
@@ -39,3 +46,4 @@ services:
 volumes:
   pdns-data:
   pdns-filter-state:
+  pdns-config-snapshots:
