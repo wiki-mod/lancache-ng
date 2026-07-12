@@ -173,7 +173,13 @@ maybe_purge() {
 
     # Purging is rate-limited by a stamp file so a restarted watchdog does not
     # repeatedly scan a large cache tree on every boot loop.
-    # Validate and read purge stamp
+    # Validate and read purge stamp. A stamp file is operator-writable/
+    # persisted state, not something the script fully controls (e.g. a manual
+    # edit, a partial write, or a leftover file from an older version could
+    # leave non-digit content) -- reject anything that isn't purely digits
+    # here, before it ever reaches the arithmetic below, since under
+    # `set -euo pipefail` an invalid `$((...))` expression there would abort
+    # the whole watchdog process, not just skip this one purge check.
     if [ -f "$PURGE_STAMP" ]; then
         last=$(cat "$PURGE_STAMP")
         case "$last" in
@@ -187,6 +193,17 @@ maybe_purge() {
     # Force decimal parsing so digit-only corrupt stamps like "08" are not
     # interpreted as invalid octal values by Bash arithmetic under set -e.
     local last_epoch=$((10#$last))
+    # A stamp newer than "now" (clock skew, a manually edited stamp, or a
+    # future-dated value surviving from a host that was misconfigured) would
+    # make `now - last_epoch` negative below, which is still "-lt 86400" --
+    # i.e. it reads as "less than a day has passed" and forces an immediate,
+    # unintended purge scan this cycle (the function still writes a fresh,
+    # valid "now" stamp at the end, so this self-corrects after one cycle --
+    # but that one unplanned purge is still a real, avoidable disk I/O spike
+    # this guard exists to prevent). Resetting to epoch 0 here makes
+    # `now - last_epoch` a large positive number instead, so the normal
+    # once-a-day rate limit applies immediately rather than after that first
+    # unplanned purge.
     if [ "$last_epoch" -gt "$now" ]; then
         log "PURGE_STAMP=${last} is in the future; forcing purge timestamp reset"
         last_epoch=0
@@ -204,6 +221,17 @@ maybe_purge() {
     log "Daily purge: removing cache files older than ${CACHE_VALID_DAYS} days"
     if [ -d "$CACHE_DIR" ]; then
         local count=0
+        # `find` streams matches from a live cache directory that nginx can
+        # still be writing to concurrently, so a file this loop hasn't
+        # reached yet can legitimately vanish or get rewritten between find
+        # finding it and this iteration processing it. `[ -f "$file" ]`
+        # before `rm` avoids a spurious "No such file" error/count mismatch
+        # for that race rather than treating it as a real purge failure (the
+        # `if`/`rm` pair is already safe under `set -e` regardless -- this is
+        # about accurate accounting and a clean log, not script-abort risk).
+        # `2>/dev/null` on `find` itself covers the same race one level up:
+        # `find` can still warn about a directory entry that disappeared
+        # while it was traversing the tree.
         while IFS= read -r -d '' file; do
             if [ -f "$file" ] && rm -- "$file"; then
                 count=$(( count + 1 ))
