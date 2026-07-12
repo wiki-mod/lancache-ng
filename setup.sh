@@ -2245,8 +2245,10 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
     ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
-    set_env_key_if_empty_or_missing NATS_DNS_READER_USER "lancache-dns-reader" "$env_file"
-    ensure_secret_env_key NATS_DNS_READER_PASSWORD "$env_file" hex32
+    set_env_key_if_empty_or_missing NATS_DNS_REPLICA_USER "lancache-dns-replica" "$env_file"
+    ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
+    set_env_key_if_empty_or_missing NATS_CALLOUT_USER "lancache-nats-callout" "$env_file"
+    ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
@@ -3725,9 +3727,12 @@ NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
 NATS_DNS_WRITER_USER=$(get_env_var NATS_DNS_WRITER_USER "$env_file")
 NATS_DNS_WRITER_USER="${NATS_DNS_WRITER_USER:-lancache-dns-writer}"
 NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env_file" hex32)
-NATS_DNS_READER_USER=$(get_env_var NATS_DNS_READER_USER "$env_file")
-NATS_DNS_READER_USER="${NATS_DNS_READER_USER:-lancache-dns-reader}"
-NATS_DNS_READER_PASSWORD=$(get_or_generate_secret NATS_DNS_READER_PASSWORD "$env_file" hex32)
+NATS_DNS_REPLICA_USER=$(get_env_var NATS_DNS_REPLICA_USER "$env_file")
+NATS_DNS_REPLICA_USER="${NATS_DNS_REPLICA_USER:-lancache-dns-replica}"
+NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$env_file" hex32)
+NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
+NATS_CALLOUT_USER="${NATS_CALLOUT_USER:-lancache-nats-callout}"
+NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
 UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
@@ -3777,8 +3782,10 @@ validate_env_values_for_initial_write \
     "NATS_UI_PASSWORD=${NATS_UI_PASSWORD}" \
     "NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}" \
     "NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}" \
-    "NATS_DNS_READER_USER=${NATS_DNS_READER_USER}" \
-    "NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}" \
+    "NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER}" \
+    "NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}" \
+    "NATS_CALLOUT_USER=${NATS_CALLOUT_USER}" \
+    "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
     "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
     "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
@@ -3870,9 +3877,16 @@ NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
 # DNS writer role for primary DNS containers (generated, do not change)
 NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}
 NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
-# DNS reader role for secondary DNS containers (generated, do not change)
-NATS_DNS_READER_USER=${NATS_DNS_READER_USER}
-NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD}
+# DNS replica role for the primary's own co-located dns-ssl container only
+# (generated, do not change). NOT used by registered secondaries -- each of
+# those gets its own per-instance NATS credential via auth callout at
+# registration time instead (issue #583).
+NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER}
+NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}
+# Admin UI's own NATS identity for answering auth-callout requests for
+# registered secondaries (generated, do not change)
+NATS_CALLOUT_USER=${NATS_CALLOUT_USER}
+NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 

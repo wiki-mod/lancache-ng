@@ -493,3 +493,50 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/dhcp-kea-lease-flow-simulation.sh
+
+  nats-auth-callout-simulation:
+    # Real per-secondary NATS auth-callout integration test. Drives the actual
+    # Admin UI register / rotate-token / remove routes plus a real nats-server
+    # and the real nats-subscriber client (the one shipped inside the published
+    # dns image, i.e. the exact code a registered secondary runs) to prove that
+    # each secondary gets its own genuinely unique NATS credential, that
+    # removing a secondary revokes exactly that secondary's access on its next
+    # connection attempt, and that rotating a credential invalidates the old
+    # one immediately while the new one works -- with no impact on any other
+    # secondary. See scripts/nats-secondary-auth-callout-simulation.sh's own
+    # header comment for the exact properties verified.
+    #
+    # Uses deploy/full-setup/docker-compose.yml with its fixed
+    # validation-network IPs (172.30.99.0/24), so it shares that compose
+    # project's network state with full-setup-validate,
+    # ssl-mitm-cache-simulation, and ui-nats-dns-integration-simulation and
+    # must not run concurrently with any of them. Chained at the end of this
+    # workflow's serial job sequence to keep every job running one at a time on
+    # the shared self-hosted runner tier rather than introducing new
+    # concurrency here (matching dhcp-kea-lease-flow-simulation's own rationale
+    # for being chained rather than parallel).
+    name: NATS auth-callout simulation
+    needs: dhcp-kea-lease-flow-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run NATS auth-callout simulation
+        # curl/awk client verification runs through the published build-tools
+        # image (matching ssl-mitm-cache-simulation / ui-nats-dns-integration-
+        # simulation); the real proxy/dns/nats/ui and nats-subscriber
+        # containers come from the already-published images the script pulls
+        # itself.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          scripts/nats-secondary-auth-callout-simulation.sh

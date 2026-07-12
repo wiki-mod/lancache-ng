@@ -556,10 +556,12 @@ jobs:
           ALLOW_INSECURE_UI: "true"
           KEA_CTRL_TOKEN: ci-kea-token
           NATS_CONSUMER: ci-secondary
-          NATS_DNS_READER_PASSWORD: ci-nats-dns-reader-password
-          NATS_DNS_READER_USER: ci-nats-dns-reader
+          NATS_DNS_REPLICA_PASSWORD: ci-nats-dns-replica-password
+          NATS_DNS_REPLICA_USER: ci-nats-dns-replica
           NATS_DNS_WRITER_PASSWORD: ci-nats-dns-writer-password
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
+          NATS_CALLOUT_PASSWORD: ci-nats-callout-password
+          NATS_CALLOUT_USER: ci-nats-callout
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -594,10 +596,12 @@ jobs:
             --env ALLOW_INSECURE_UI \
             --env KEA_CTRL_TOKEN \
             --env NATS_CONSUMER \
-            --env NATS_DNS_READER_PASSWORD \
-            --env NATS_DNS_READER_USER \
+            --env NATS_DNS_REPLICA_PASSWORD \
+            --env NATS_DNS_REPLICA_USER \
             --env NATS_DNS_WRITER_PASSWORD \
             --env NATS_DNS_WRITER_USER \
+            --env NATS_CALLOUT_PASSWORD \
+            --env NATS_CALLOUT_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \
@@ -896,10 +900,12 @@ jobs:
             DDNS_TSIG_KEY
             KEA_CTRL_TOKEN
             LANCACHE_IMAGE_TAG
-            NATS_DNS_READER_PASSWORD
-            NATS_DNS_READER_USER
+            NATS_DNS_REPLICA_PASSWORD
+            NATS_DNS_REPLICA_USER
             NATS_DNS_WRITER_PASSWORD
             NATS_DNS_WRITER_USER
+            NATS_CALLOUT_PASSWORD
+            NATS_CALLOUT_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             PDNS_API_KEY
@@ -939,10 +945,12 @@ jobs:
             LANCACHE_IMAGE_PREFIX
             LANCACHE_IMAGE_REGISTRY
             LANCACHE_IMAGE_TAG
-            NATS_DNS_READER_PASSWORD
-            NATS_DNS_READER_USER
+            NATS_DNS_REPLICA_PASSWORD
+            NATS_DNS_REPLICA_USER
             NATS_DNS_WRITER_PASSWORD
             NATS_DNS_WRITER_USER
+            NATS_CALLOUT_PASSWORD
+            NATS_CALLOUT_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             NGINX_UPSTREAM_RESOLVER

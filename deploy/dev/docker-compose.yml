@@ -119,8 +119,8 @@ services:
       - PDNS_API_KEY=${PDNS_API_KEY:-lancache-pdns-dev-secret}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - NATS_URL=nats://nats:4222
-      - NATS_USER=${NATS_DNS_READER_USER:-lancache-dns-reader}
-      - NATS_PASSWORD=${NATS_DNS_READER_PASSWORD:-lancache-nats-reader-dev-secret}
+      - NATS_USER=${NATS_DNS_REPLICA_USER:-lancache-dns-replica}
+      - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-lancache-nats-replica-dev-secret}
       - NATS_CONSUMER=dns-ssl
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
@@ -277,11 +277,17 @@ services:
   nats:
     container_name: lancache-nats
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
-    # On every start: generate nats.conf from this container's own credentials
-    # into the shared volume, chown it back to the Admin UI user, then exec
-    # nats-server. In the v0.1.0 shared-token model the UI writes the same
-    # shared config and restarts this service to reload it; regenerating here
-    # keeps full recreates with rotated .env credentials convergent.
+    # On every start: generate a minimal nats.conf (the 4 static roles, no
+    # auth_callout stanza -- this container has no way to know the Admin
+    # UI's auth-callout issuer public key) into the shared volume, chown it
+    # to the Admin UI user, then exec nats-server. The Admin UI overwrites
+    # this with the real config (adding auth_callout once it has generated/
+    # loaded its issuer keypair) and restarts this service moments after its
+    # own startup -- see services/ui/src/routes/secondaries.rs::update_nats_conf
+    # and services/ui/src/nats_auth_callout.rs for the full auth-callout flow
+    # (issue #583). Regenerating the static subset here keeps full recreates
+    # with rotated .env credentials convergent even before the UI's first
+    # write lands.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -324,8 +330,8 @@ services:
               }
             }
             {
-              user: "__NATS_DNS_READER_USER__"
-              password: "__NATS_DNS_READER_PASSWORD__"
+              user: "__NATS_DNS_REPLICA_USER__"
+              password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
@@ -346,8 +352,8 @@ services:
           -e "s|__NATS_UI_PASSWORD__|$$(escape_sed "$$NATS_UI_PASSWORD")|g" \
           -e "s|__NATS_DNS_WRITER_USER__|$$(escape_sed "$$NATS_DNS_WRITER_USER")|g" \
           -e "s|__NATS_DNS_WRITER_PASSWORD__|$$(escape_sed "$$NATS_DNS_WRITER_PASSWORD")|g" \
-          -e "s|__NATS_DNS_READER_USER__|$$(escape_sed "$$NATS_DNS_READER_USER")|g" \
-          -e "s|__NATS_DNS_READER_PASSWORD__|$$(escape_sed "$$NATS_DNS_READER_PASSWORD")|g" \
+          -e "s|__NATS_DNS_REPLICA_USER__|$$(escape_sed "$$NATS_DNS_REPLICA_USER")|g" \
+          -e "s|__NATS_DNS_REPLICA_PASSWORD__|$$(escape_sed "$$NATS_DNS_REPLICA_PASSWORD")|g" \
           /tmp/nats.conf.template > "$$tmp_nats_conf"
         chown 10001:10001 "$$tmp_nats_conf"
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
@@ -362,8 +368,8 @@ services:
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-lancache-nats-ui-dev-secret}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:-lancache-dns-writer}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-lancache-nats-writer-dev-secret}
-      - NATS_DNS_READER_USER=${NATS_DNS_READER_USER:-lancache-dns-reader}
-      - NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD:-lancache-nats-reader-dev-secret}
+      - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:-lancache-dns-replica}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-lancache-nats-replica-dev-secret}
     networks:
       lancache:
         ipv4_address: 172.28.0.8
@@ -597,8 +603,10 @@ services:
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-lancache-nats-ui-dev-secret}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:-lancache-dns-writer}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-lancache-nats-writer-dev-secret}
-      - NATS_DNS_READER_USER=${NATS_DNS_READER_USER:-lancache-dns-reader}
-      - NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD:-lancache-nats-reader-dev-secret}
+      - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:-lancache-dns-replica}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-lancache-nats-replica-dev-secret}
+      - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:-lancache-nats-callout}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-lancache-nats-callout-dev-secret}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-lancache-reg-dev-secret}
     networks:
       - lancache

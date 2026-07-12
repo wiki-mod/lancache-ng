@@ -92,8 +92,35 @@ is real, live, running code, not just work sitting in source control.
   generation (#524, closes #401), bats-core tests for DNS zone/RPZ generation
   (#525), and Kea/DHCP config generation tests (#526, issue #404).
 - Created `CHANGELOG.md` with `v0.1.0` release notes (#513).
+- Implemented per-secondary NATS identity via NATS auth callout (#583, per
+  #433's "finish the originally-intended design" decision): every registered
+  secondary now gets its own unique, individually-revocable NATS credential
+  instead of the shared DNS-reader role all secondaries used to present. A
+  small responder inside the Admin UI (`services/ui/src/nats_auth_callout.rs`)
+  answers NATS's `$SYS.REQ.USER.AUTH` callout by checking the presented
+  credential's hash against that one row in the `secondaries` table, live, on
+  every connection attempt, and signs a per-connection user JWT scoped to the
+  same DNS-sync permissions the old shared role had. `rotate_token` now
+  actually regenerates that one secondary's own credential; removing a
+  secondary revokes only that secondary, immediately, with zero effect on any
+  other. Added `scripts/nats-secondary-auth-callout-simulation.sh`, a real
+  multi-service integration test proving registration, isolation between two
+  independently registered secondaries, immediate revocation on removal, and
+  credential rotation all work against a real nats-server and the real
+  `nats-subscriber` client.
 
 ### Changed
+
+- Renamed the `NATS_DNS_READER_USER`/`NATS_DNS_READER_PASSWORD` NATS role to
+  `NATS_DNS_REPLICA_USER`/`NATS_DNS_REPLICA_PASSWORD` (#583): this static
+  credential is now understood to be specifically for the primary's own
+  co-located `dns-ssl` container (there is always exactly one, so a static
+  credential is fine), not for registered secondaries, which authenticate via
+  NATS auth callout instead. **Upgrade note**: any secondary registered before
+  this change has a `NULL` per-secondary credential after the automatic,
+  additive database migration and cannot authenticate until it is
+  re-registered (`setup.sh secondary ...`) or its credential is rotated from
+  the Admin UI's Secondaries page.
 
 - CI: `build-push`, `codeql`, and `build-tools` workflows now also trigger on
   PRs/pushes targeting `v0.2.0`, not just `master` (#503).
