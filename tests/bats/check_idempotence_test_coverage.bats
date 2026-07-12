@@ -17,6 +17,25 @@
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-idempotence-test-coverage.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
+    # bats-core's own preprocessor (tools/build-tools's bats-preprocess,
+    # BATS_TEST_PATTERN='^[[:blank:]]*@test[[:blank:]]+...') scans every
+    # *line* of a .bats file for a literal `@test "..." {` pattern and
+    # rewrites matches into `bats_test_function ...` boilerplate -- and it
+    # does this blindly over the whole file's raw text, with no concept of
+    # heredocs. Below, seed_passing_fixture() and the "no repeat-run-named
+    # test" fixture override both need to write literal `@test "name" {`
+    # lines into synthetic fixture files via heredoc; if that text were
+    # written directly, bats would transpile THIS file's own heredoc-embedded
+    # `@test` line before the heredoc ever runs, silently replacing the
+    # fixture's intended content with unrelated bats internals (confirmed via
+    # `od -c` on the resulting fixture file: it contained
+    # `bats_test_function --description ...`, not `@test "..."`). Building
+    # the marker through this variable, and using unquoted heredocs below
+    # instead of the usual `<<'EOF'`, keeps the literal string "@test" out of
+    # this file's own source so the preprocessor has nothing to match; the
+    # variable is expanded back into a real `@test "..." {` line only when
+    # the heredoc actually runs and writes the fixture file to disk.
+    at_test='@test'
 }
 
 # seed_passing_fixture
@@ -30,22 +49,22 @@ seed_passing_fixture() {
     mkdir -p "$fixture_root/services/ui/src/routes"
 
     printf '#!/usr/bin/env bash\n# fixture setup.sh\n' > "$fixture_root/setup.sh"
-    cat > "$fixture_root/tests/bats/setup_update_idempotence.bats" <<'EOF'
-@test "migrate_env_for_update is idempotent across repeated runs" {
+    cat > "$fixture_root/tests/bats/setup_update_idempotence.bats" <<EOF
+${at_test} "migrate_env_for_update is idempotent across repeated runs" {
     true
 }
 EOF
 
     printf '#!/usr/bin/env bash\n# fixture dns entrypoint\n' > "$fixture_root/services/dns/entrypoint.sh"
-    cat > "$fixture_root/tests/bats/dns_config_snapshot_idempotence.bats" <<'EOF'
-@test "recursor rollback repeats to the same known-good config" {
+    cat > "$fixture_root/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
+${at_test} "recursor rollback repeats to the same known-good config" {
     true
 }
 EOF
 
     printf '#!/usr/bin/env bash\n# fixture watchdog\n' > "$fixture_root/services/watchdog/watchdog.sh"
-    cat > "$fixture_root/tests/bats/watchdog_idempotence.bats" <<'EOF'
-@test "write_status converges across repeated writes" {
+    cat > "$fixture_root/tests/bats/watchdog_idempotence.bats" <<EOF
+${at_test} "write_status converges across repeated writes" {
     true
 }
 EOF
@@ -91,8 +110,8 @@ EOF
 
 @test "fails when a bats evidence file exists but has no repeat-run-named test" {
     seed_passing_fixture
-    cat > "$fixture_root/tests/bats/dns_config_snapshot_idempotence.bats" <<'EOF'
-@test "recursor validates a config once" {
+    cat > "$fixture_root/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
+${at_test} "recursor validates a config once" {
     true
 }
 EOF
