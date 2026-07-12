@@ -1332,6 +1332,29 @@ jobs:
           grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
+          # Guards issue #704: build-tools.yml's "Promote mutable tags" step
+          # writes a branch-name-derived mutable tag, and this repo has a
+          # branch literally named "v0.2.0" -- without the "branch-" prefix,
+          # a push to that branch would publish build-tools:v0.2.0, the
+          # exact tag build-push.yml's own promote job below writes as the
+          # real, immutable vX.Y.Z stable-release tag for the same GHCR
+          # package once that version is actually tagged. A pin check alone
+          # (grepping for the literal "branch-${sanitized_ref}" text) would
+          # pass even if a future edit kept that literal string but added a
+          # conditional bypass elsewhere, so this also proves the *behavior*:
+          # it re-derives the tag build-tools.yml's own logic would produce
+          # for a representative set of real and adversarial ref names --
+          # including "v0.2.0" itself and other vX.Y.Z-shaped branch names --
+          # and fails if any of them come out shaped like a real release tag.
+          grep -F 'branch_tag="branch-${sanitized_ref}"' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::build-tools.yml's branch-tag promotion must prefix every derived tag with 'branch-' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
+          for candidate_ref in v0.2.0 v1.2.3 v10.20.30 master feature/x; do
+            derived_tag="branch-$(printf '%s' "$candidate_ref" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+            if printf '%s' "$derived_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::build-tools.yml's branch-tag derivation must never be able to emit a release-shaped tag; ref '$candidate_ref' produced '$derived_tag'."
+              exit 1
+            fi
+          done
           for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
             grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
               && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \
