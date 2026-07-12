@@ -1000,6 +1000,25 @@ pub async fn add_reservation(
     }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
+        // Codex review finding on this same PR: if an operator has hand-edited
+        // the *global* Dhcp4.host-reservation-identifiers list to something
+        // that excludes "hw-address" (e.g. ["client-id"]), Kea would accept
+        // this config-set call but then silently never match the reservation
+        // we're about to add -- config-set succeeds, the form redirects as if
+        // it worked, and the reservation is permanently dead. This project's
+        // own shipped kea-dhcp4.conf never sets this key (relies entirely on
+        // Kea's compiled-in default, which does include "hw-address"), so the
+        // gap only bites a manually-edited config -- but "silently accepted,
+        // never actually works" is exactly the failure class this project
+        // refuses to ship (see AG-OP-005: do not silently invert defaults).
+        // Fail loudly instead of writing a reservation Kea will never honor.
+        if !global_reservation_identifiers_include_hw_address(config) {
+            return Err(
+                "cannot add a hw-address reservation: this Kea config's global \
+                 Dhcp4.host-reservation-identifiers list does not include \
+                 \"hw-address\", so Kea would never match it",
+            );
+        }
         let subnets = dhcp4_subnets_mut(config)?;
         let subnet = subnets
             .iter_mut()
@@ -1948,6 +1967,27 @@ fn dhcp4_subnets_mut(config: &mut Value) -> Result<&mut Vec<Value>, &'static str
         .ok_or("subnet4 missing")?
         .as_array_mut()
         .ok_or("subnet4 not an array")
+}
+
+// Absence of this key means Kea falls back to its own compiled-in default
+// list, which includes "hw-address" -- only an explicit, hand-edited global
+// list can exclude it (see the call site in add_reservation for why this
+// matters: a hw-address reservation Kea will never actually match).
+fn global_reservation_identifiers_include_hw_address(config: &Value) -> bool {
+    match config
+        .get("Dhcp4")
+        .and_then(|dhcp4| dhcp4.get("host-reservation-identifiers"))
+    {
+        None => true,
+        Some(value) => value
+            .as_array()
+            .map(|identifiers| {
+                identifiers
+                    .iter()
+                    .any(|identifier| identifier.as_str() == Some("hw-address"))
+            })
+            .unwrap_or(false),
+    }
 }
 
 fn find_subnet_mut(config: &mut Value, subnet_id: u32) -> Result<&mut Value, &'static str> {
@@ -3835,5 +3875,79 @@ mod tests {
                 call["command"]
             );
         }
+    }
+
+    // Regression coverage for a Codex review finding on this same PR: removing
+    // the per-subnet write (above) means correctness now depends entirely on
+    // the *global* Dhcp4.host-reservation-identifiers list still including
+    // "hw-address". This project's own shipped config never sets that key
+    // (relies on Kea's compiled-in default), but nothing stopped an operator
+    // from hand-editing it to something narrower -- these three cases pin the
+    // helper's behavior for each state that key can be in.
+    #[test]
+    fn global_reservation_identifiers_include_hw_address_when_key_absent() {
+        let config = json!({"Dhcp4": {"subnet4": []}});
+        assert!(global_reservation_identifiers_include_hw_address(&config));
+    }
+
+    #[test]
+    fn global_reservation_identifiers_include_hw_address_when_explicitly_listed() {
+        let config = json!({
+            "Dhcp4": {"host-reservation-identifiers": ["duid", "hw-address"]}
+        });
+        assert!(global_reservation_identifiers_include_hw_address(&config));
+    }
+
+    #[test]
+    fn global_reservation_identifiers_exclude_hw_address_when_narrowed() {
+        let config = json!({
+            "Dhcp4": {"host-reservation-identifiers": ["client-id"]}
+        });
+        assert!(!global_reservation_identifiers_include_hw_address(&config));
+    }
+
+    // End-to-end: add_reservation's guard must reject the request *before*
+    // ever sending config-test/config-set -- otherwise the write would still
+    // race Kea's own silent (non-)matching behavior the Codex finding warned
+    // about. Only a config-get call should happen; asserting `calls.len()`
+    // pins that config-test/config-set are never reached.
+    #[tokio::test]
+    async fn kea_config_modify_rejects_reservation_add_when_global_identifiers_exclude_hw_address()
+    {
+        let config_get_response = kea_config_get_response(json!({
+            "Dhcp4": {
+                "host-reservation-identifiers": ["client-id"],
+                "subnet4": [{"id": 1, "reservations": []}]
+            }
+        }));
+
+        let (result, calls) = run_kea_config_modify_with_steps(
+            vec![MockStep::Response(config_get_response)],
+            |config| {
+                if !global_reservation_identifiers_include_hw_address(config) {
+                    return Err(
+                        "cannot add a hw-address reservation: this Kea config's global \
+                         Dhcp4.host-reservation-identifiers list does not include \
+                         \"hw-address\", so Kea would never match it",
+                    );
+                }
+                let subnets = dhcp4_subnets_mut(config)?;
+                let subnet = subnets
+                    .iter_mut()
+                    .find(|s| s["id"].as_u64() == Some(1))
+                    .ok_or("subnet not found")?;
+                let reservations = subnet_reservations_mut(subnet)?;
+                upsert_reservation(
+                    reservations,
+                    json!({"hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.0.4.50"}),
+                )?;
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.len(), 1, "only config-get should have been called");
+        assert_eq!(calls[0]["command"], "config-get");
     }
 }
