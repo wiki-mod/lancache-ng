@@ -145,12 +145,19 @@ directly.
 
 ### Option B (no code change): admin-run one-liner
 
-The admin serves the file ad hoc from the install directory, e.g.:
+The admin serves the file ad hoc — but **never** point `python3 -m http.server`
+at the `certs/` directory itself: it serves the entire current directory, and
+`certs/` also holds `ca.key`, the private CA key. Copy just `ca.crt` into an
+empty throwaway directory first, then serve *that*:
 
 ```bash
-cd /opt/lancache-ng/certs && python3 -m http.server 8000
+mkdir -p /tmp/lancache-ca-serve && cp /opt/lancache-ng/certs/ca.crt /tmp/lancache-ca-serve/ && cd /tmp/lancache-ca-serve && python3 -m http.server 8000
 # clients then browse to http://<lancache-lan-ip>:8000/ca.crt, then Ctrl-C when done
+# rm -rf /tmp/lancache-ca-serve when finished
 ```
+
+Because only `ca.crt` was copied in, `ca.key` is never inside the directory
+being served — there is no window, however brief, in which it is reachable.
 
 or copies it off with `scp`:
 
@@ -161,6 +168,11 @@ scp user@<lancache-lan-ip>:/opt/lancache-ng/certs/ca.crt .
 - **Pro:** zero code, works today.
 - **Con:** manual and temporary; `python3` is not guaranteed on the host; `scp`
   still needs per-device handling. A stop-gap, not a real distribution path.
+- **Warning:** while the one-liner's server is running, `http://<lancache-lan-ip>:8000/ca.crt`
+  is reachable by any device on the LAN with no authentication. That is fine —
+  `ca.crt` is public — but don't leave it running longer than needed; `Ctrl-C`
+  it and remove the throwaway directory once every client device has fetched
+  the file.
 
 ### Option C (complementary): "Download CA certificate" button in the Admin UI
 
