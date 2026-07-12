@@ -453,6 +453,22 @@ _dns_auth_validate_snapshot_or_rollback() {
     if selected_id="$(kgs_snapshot_apply "${DNS_CONFIG_SNAPSHOT_DIR}/auth" "dns-auth" "pdns_server --config=check --config-dir='${config_dir}'" "$pdns_conf")"; then
         echo "[lancache-dns] WARNING: pdns_server is starting from known-good snapshot ${selected_id}, NOT the newly generated config." >&2
         echo "[lancache-dns] WARNING: check PDNS_API_KEY/DDNS_ALLOW_FROM and restart to pick up the intended change." >&2
+        # Mirrors the recursor rollback's stale-API-key detection above (see
+        # the comment there for why a partial rollback -- only one side
+        # restoring an older snapshot while the other still validates -- can
+        # leave PDNS_API_KEY out of sync between daemons). Here it's the
+        # authoritative server's own REST API (port 8081, consumed by the
+        # Admin UI and nats-subscriber) that ends up on the stale key while
+        # recursor.conf keeps the current one. Detected here, not assumed:
+        # compare what's actually on disk after the restore against the live
+        # env, so this only fires when the two are genuinely out of sync.
+        # pdns.conf is flat `key=value` (no leading whitespace, no YAML
+        # colon), unlike recursor.conf's indented `api_key: value`.
+        local restored_api_key
+        restored_api_key=$(sed -n 's/^api-key=//p' "$pdns_conf" | head -n1)
+        if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
+            echo "[lancache-dns] WARNING: the restored pdns.conf's api-key does not match the current PDNS_API_KEY. The authoritative server's REST API (port 8081) is now authenticating with a stale key while recursor.conf, the Admin UI, and nats-subscriber use the current one -- domain writes/reconciliation calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
+        fi
         return 0
     fi
 
