@@ -18,6 +18,7 @@ use std::path::Path as FsPath;
 use std::process;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use tera::Context;
 
 #[derive(Deserialize)]
@@ -115,7 +116,15 @@ pub async fn register_secondary(
     if state.config.secondary_registration_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if form.token != state.config.secondary_registration_token {
+    // Constant-time comparison so a byte-by-byte timing side-channel can't be
+    // used to recover the registration token one character at a time. Matches
+    // the same idiom used for the CSRF token (routes/mod.rs) and the NATS
+    // password hash (nats_auth_callout.rs).
+    if !bool::from(
+        form.token
+            .as_bytes()
+            .ct_eq(state.config.secondary_registration_token.as_bytes()),
+    ) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -216,7 +225,12 @@ pub async fn rotate_token(
     if state.config.secondary_registration_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if form.token != state.config.secondary_registration_token {
+    // Constant-time comparison, same rationale as register_secondary above.
+    if !bool::from(
+        form.token
+            .as_bytes()
+            .ct_eq(state.config.secondary_registration_token.as_bytes()),
+    ) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
