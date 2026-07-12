@@ -1334,12 +1334,12 @@ jobs:
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
           # build-tools.yml's "Promote mutable tags" step writes a
           # branch-name-derived mutable tag, and this repo has a branch
-          # literally named "v0.2.0" -- without the "branch-" prefix, a push
-          # to that branch would publish build-tools:v0.2.0, the exact tag
-          # build-push.yml's own promote job below writes as the real,
-          # immutable vX.Y.Z stable-release tag for the same GHCR package
-          # once that version is actually tagged. A pin check alone
-          # (grepping for the literal "branch_tag=\"branch-${sanitized_ref}\""
+          # literally named "v0.2.0" -- without the "-tc" ("test candidate")
+          # suffix, a push to that branch would publish build-tools:v0.2.0,
+          # the exact tag build-push.yml's own promote job below writes as
+          # the real, immutable vX.Y.Z stable-release tag for the same GHCR
+          # package once that version is actually tagged. A pin check alone
+          # (grepping for the literal "branch_tag=\"${sanitized_ref}-tc\""
           # text) would pass even if a future edit kept that literal string
           # in place but then overwrote branch_tag again afterward for a
           # release-shaped ref, so the grep alone cannot catch that. Instead
@@ -1353,8 +1353,8 @@ jobs:
           # shaped like a real release tag. Because this runs the real
           # script text, a bypass added anywhere in that extracted range
           # (not just a changed literal) is caught too.
-          grep -F 'branch_tag="branch-${sanitized_ref}"' .github/workflows/build-tools.yml >/dev/null \
-            || { echo "::error::build-tools.yml's branch-tag promotion must prefix every derived tag with 'branch-' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
+          grep -F 'branch_tag="${sanitized_ref}-tc"' .github/workflows/build-tools.yml >/dev/null \
+            || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
           # Anchored on the plain substring "sanitized_ref=" (no regex
           # metacharacters) rather than a fuller literal match: this awk
           # script must behave identically on CI's mawk and on gawk used

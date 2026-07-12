@@ -157,8 +157,8 @@ is real, live, running code, not just work sitting in source control.
   `vX.Y.Z` stable-release tag for the same package once that version is
   actually tagged, silently overwriting it on the next
   `tools/build-tools/**`-touching commit. Branch-derived tags are now always
-  prefixed `branch-` (e.g. `branch-v0.2.0`), which can never collide with a
-  release-channel tag by construction, and a new CI guard in
+  suffixed `-tc` ("test candidate", e.g. `v0.2.0-tc`), which can never
+  collide with a release-channel tag by construction, and a new CI guard in
   `build-push.yml`'s compose-validation job asserts this derivation can
   never emit a `vX.Y.Z`-shaped tag, so this can't silently regress (#704).
 - Fixed `promote`/`release` CI jobs being silently skipped on every push due
