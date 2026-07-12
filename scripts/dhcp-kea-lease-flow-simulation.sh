@@ -55,6 +55,26 @@ work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/client-state"
 
+# ISC dhclient (4.4.x, the Debian isc-dhcp-client package) binds the raw DHCP
+# socket as root, then permanently drops privileges to an unprivileged,
+# package-hardcoded system account before opening this script's own -pf/-lf
+# paths or exec'ing the -sf lease-apply script below. dhclient.out keeps
+# being written fine regardless (its fd was already open, inherited from
+# this script's own shell redirect, before that privilege drop happens --
+# writing through an already-open fd needs no further permission check), but
+# any *new* file dhclient itself tries to create afterward in
+# client-state/ gets EACCES from that unprivileged identity. Confirmed
+# directly (issue #712): a real run showed "can't create
+# .../dhclient.leases: Permission denied" and "Can't create
+# .../dhclient.pid: Permission denied" interleaved with a fully successful
+# DHCPACK/bound-to exchange -- the lease negotiation itself was never the
+# problem, dhclient just couldn't persist it to disk. Making this directory
+# world-writable is safe here: it is a throwaway, per-run temp directory
+# scoped to this one script invocation, not a shared or security-sensitive
+# path, and this is what lets dhclient's post-privilege-drop identity
+# actually write the lease file the rest of this script depends on.
+chmod 0777 "$work_dir/client-state"
+
 # A fixed subnet would collide across concurrent runs sharing one of this
 # project's self-hosted runner hosts, exactly like the full-setup validation
 # network did before #623's per-run derivation. Mirror that fix here: derive
@@ -71,13 +91,42 @@ kea_ip="172.31.${octet}.2"
 pool_start="172.31.${octet}.128"
 pool_end="172.31.${octet}.200"
 
+# $work_dir above needs no per-run uniqueness of its own: $repo_root is
+# already GitHub Actions' own per-run workspace checkout (or, run locally,
+# just this one operator's own checkout), so a fixed subdirectory name under
+# it can never collide with another run. Docker objects are different: the
+# daemon on a shared self-hosted runner host is one process serving every
+# concurrent workflow run and every operator's local invocation, so object
+# *names* need their own collision avoidance independent of the subnet. The
+# octet alone is not enough for that (only 252 buckets, so two concurrent
+# runs can still land on the same octet); appending this shell's own PID
+# ($$) is what actually guarantees the docker network/container/image names
+# themselves never collide, even when the subnet-derived octet does.
 network_name="lancache-ng-dhcp448-${octet}-$$"
 kea_container="lancache-ng-dhcp448-kea-${octet}-$$"
 image_tag="lancache-ng-dhcp448-kea:${octet}-$$"
 
+# services/dhcp/entrypoint.sh refuses to start Kea at all if KEA_CTRL_TOKEN
+# or DDNS_TSIG_KEY is empty or one of its known placeholder defaults (it
+# exists to catch a real deployment left on a default secret). This is a
+# disposable, per-run test instance torn down at the end of this script, so
+# there is no need to persist these values anywhere -- generating a fresh
+# random one each run only has to satisfy that startup check and match what
+# this script itself sends back to the Control Agent API below.
 kea_ctrl_token="$(openssl rand -hex 32)"
 ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"
 
+# `local status=$?` captures the script's real exit code before any cleanup
+# command below can overwrite $? with its own (success or failure), so
+# `exit "$status"` at the end still reports the original pass/fail result to
+# the caller (e.g. GitHub Actions) instead of whatever the last cleanup
+# command happened to return. The three docker teardown commands are also
+# ordered deliberately, not just alphabetically: the network can't be
+# removed while $kea_container is still attached to it, and the image can't
+# be removed while $kea_container still exists and references it -- doing
+# it in the reverse order would leave a dangling network or image behind on
+# every run. Each is still `|| true` regardless, so a problem tearing down
+# one of them never masks the script's real result or skips the others.
 cleanup() {
     local status=$?
     docker rm -f "$kea_container" >/dev/null 2>&1 || true
@@ -103,6 +152,10 @@ docker network create \
     "$network_name" >/dev/null
 
 echo "== Starting a real Kea container on the isolated network =="
+# --cap-add NET_ADMIN: services/dhcp/entrypoint.sh runs iptables on every
+# start to restrict the Control Agent API to Docker-internal networks (see
+# that file's own comment). Without NET_ADMIN those iptables calls fail and
+# the entrypoint would not behave the same way it does in a real deployment.
 docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
@@ -121,6 +174,10 @@ docker run -d --name "$kea_container" \
     "$image_tag" >/dev/null
 
 echo "== Waiting for the Kea Control Agent API to answer =="
+# config-get is used purely as the readiness probe because it is a
+# read-only Kea command: it cannot change anything Kea already loaded from
+# its own config file, so polling it repeatedly here has no side effects on
+# the DHCPv4 configuration this script later relies on being untouched.
 deadline=$((SECONDS + 60))
 kea_ready=0
 while (( SECONDS < deadline )); do
@@ -149,6 +206,12 @@ echo "== Running a real DHCP client (dhclient) against Kea: Discover/Offer/Reque
 # polls for the lease file instead of trusting dhclient's own exit code, and
 # force-kills it once a lease has actually been written.
 client_container="lancache-ng-dhcp448-client-${octet}-$$"
+# NET_RAW: before a lease is granted this container has no IP of its own,
+# so dhclient must send/receive DHCP over a raw broadcast socket rather than
+# a normal bound UDP socket -- that needs CAP_NET_RAW regardless of -sf's
+# no-op lease-apply step. NET_ADMIN is added alongside it because dhclient
+# also touches interface-level state (e.g. ARP) while negotiating, before
+# it ever gets to the point of calling -sf.
 docker run -d --name "$client_container" \
     --network "$network_name" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -157,9 +220,23 @@ docker run -d --name "$client_container" \
     bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /dhcp-test/dhclient.pid -lf /dhcp-test/dhclient.leases eth0 >/dhcp-test/dhclient.out 2>&1; echo DONE >> /dhcp-test/dhclient.out' \
     >/dev/null
 
-lease_deadline=$((SECONDS + 30))
+# lease_timeout_seconds is kept separate from lease_deadline (an absolute
+# SECONDS-based cutoff) so the error message below can report the actual
+# wait duration instead of a shifting absolute value -- $lease_deadline
+# itself is meaningless to a reader, since $SECONDS keeps advancing for the
+# rest of the script's own runtime.
+lease_timeout_seconds=30
+lease_deadline=$((SECONDS + lease_timeout_seconds))
 lease_obtained=0
 while (( SECONDS < lease_deadline )); do
+    # `-s` alone is not enough: the lease file appears the moment dhclient
+    # starts writing it, well before the record is complete. The trailing
+    # `^}` (a closing brace at column 0) is what ISC dhclient writes only
+    # once a lease record is fully committed to the file, so checking for it
+    # is what actually distinguishes "lease negotiation still in progress,
+    # file exists but is partially written" from "lease obtained and safe to
+    # parse" -- reading the file one poll iteration too early would hand
+    # dhcp_lease_parse_latest below a truncated record.
     if [[ -s "$work_dir/client-state/dhclient.leases" ]] && grep -q '^}' "$work_dir/client-state/dhclient.leases" 2>/dev/null; then
         lease_obtained=1
         break
@@ -174,7 +251,7 @@ cat "$work_dir/client-state/dhclient.out" 2>/dev/null || echo "(no client output
 echo "::endgroup::"
 
 if [[ "$lease_obtained" -ne 1 ]]; then
-    echo "::error::dhclient never obtained a lease from the Kea container within ${lease_deadline}s." >&2
+    echo "::error::dhclient never obtained a lease from the Kea container within ${lease_timeout_seconds}s." >&2
     docker logs "$kea_container" >&2 || true
     exit 1
 fi

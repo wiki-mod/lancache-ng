@@ -224,6 +224,27 @@ is real, live, running code, not just work sitting in source control.
 - Fixed an outdated two-proxy architecture description in the docs (#511).
 - Fixed a shellcheck `SC2064` warning in a test cleanup trap, no functional
   change (#514).
+- Fixed `scripts/nats-secondary-auth-callout-simulation.sh` being committed
+  without the executable bit, which made `full-setup-validate.yml`'s "NATS
+  auth-callout simulation" job fail every run with exit code 126 (`Permission
+  denied`) — a recurrence of the same defect class already fixed once in
+  #617 for a different script. `scripts/dhcp-kea-lease-flow-simulation.sh`
+  had the identical missing-bit defect, only masked because its own workflow
+  step already invoked it via an explicit `bash` prefix; fixed its
+  executable bit too, and normalized every `scripts/*.sh` invocation in
+  `full-setup-validate.yml` to use an explicit `bash scripts/...sh` prefix so
+  the executable bit can no longer cause a job failure for any of them
+  (#711).
+- Fixed `scripts/dhcp-kea-lease-flow-simulation.sh` failing its own
+  success-check (`dhclient never obtained a lease from the Kea container`)
+  despite a genuinely successful DHCP exchange (`DHCPACK`/`bound to` in the
+  raw `dhclient` log). Root cause: ISC dhclient drops privileges to an
+  unprivileged system account right after binding the raw DHCP socket, so it
+  could no longer create its own `-pf`/`-lf` files in the bind-mounted test
+  directory — the lease was negotiated correctly but never persisted to
+  disk for the harness to read back. Made that per-run temp directory
+  world-writable so dhclient's post-privilege-drop identity can write the
+  lease file the harness's option-verification depends on (#712).
 
 ## [0.1.0] - 2026-07-06
 
