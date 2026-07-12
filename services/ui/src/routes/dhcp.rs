@@ -60,15 +60,26 @@ impl DhcpError {
         }
     }
 
+    // Used for genuine config-mutation/backend failures (a Kea API call
+    // failed, a rollback couldn't complete, etc.) -- the request itself was
+    // well-formed, but the server-side operation it triggered did not
+    // succeed.
     fn config_error(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
 
+    // Used when the request is well-formed but conflicts with current
+    // server state (e.g. a mutation attempted while not in Kea mode) --
+    // distinct from config_error's "the operation failed" and from a plain
+    // 400 "the input itself was invalid".
     fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, message)
     }
 }
 
+// Lets `?` convert a bare StatusCode (used for simple input-validation
+// failures like a malformed MAC/IP) straight into a DhcpError without every
+// call site constructing one by hand.
 impl From<StatusCode> for DhcpError {
     fn from(status: StatusCode) -> Self {
         Self::new(status, format!("HTTP {}", status.as_u16()))
@@ -83,6 +94,11 @@ impl std::fmt::Display for DhcpError {
 
 impl std::error::Error for DhcpError {}
 
+// Every DHCP route in this file renders full HTML pages (this is the Admin
+// UI, not a JSON API), so an error result is rendered the same way as a
+// successful page -- a minimal standalone HTML error page with a link back
+// to /dhcp -- rather than a bare status code or a JSON error body an
+// operator's browser would show unstyled.
 impl IntoResponse for DhcpError {
     fn into_response(self) -> Response {
         let body = format!(
@@ -95,6 +111,12 @@ impl IntoResponse for DhcpError {
     }
 }
 
+// The three-way outcome of Kea's config-write command (see kea_write_config
+// further down): Success and ConfirmedFailure are unambiguous, but
+// AmbiguousFailure means the request itself errored (network/transport
+// issue), so it is genuinely unknown whether Kea applied the write --
+// kea_config_modify_with_post's retry-then-rollback logic branches on this
+// three-way split, not a plain bool, specifically to keep that distinction.
 #[derive(Debug)]
 enum KeaWriteOutcome {
     Success,
@@ -102,6 +124,11 @@ enum KeaWriteOutcome {
     AmbiguousFailure(String),
 }
 
+// Manual escaping instead of a crate dependency: this project's error
+// messages are short, server-generated strings (Kea API error text, a
+// validation failure description) inserted into a hand-built HTML template,
+// not general-purpose HTML rendering -- pulling in a full HTML-escaping
+// library for this one call site isn't worth the extra dependency.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -218,6 +245,9 @@ pub struct Reservation {
 // subnet's id is assigned by add_subnet itself (see its "next_id" logic),
 // never supplied by the operator.
 
+// Submitted from the "add subnet" form on /dhcp: creates a brand-new Kea
+// subnet4 entry (see add_subnet). No id field -- add_subnet assigns the next
+// free id itself, since a new subnet doesn't have one yet.
 #[derive(Deserialize)]
 pub struct AddSubnetForm {
     pub csrf_token: String,
@@ -232,6 +262,8 @@ pub struct AddSubnetForm {
     pub domain: String,
 }
 
+// Same fields as AddSubnetForm plus `id`, since editing must target one
+// specific existing subnet4 entry (see update_subnet).
 #[derive(Deserialize)]
 pub struct UpdateSubnetForm {
     pub csrf_token: String,
@@ -247,12 +279,17 @@ pub struct UpdateSubnetForm {
     pub domain: String,
 }
 
+// Deletes a subnet4 entry outright (see remove_subnet) -- irreversible from
+// the UI's own state, only recoverable via a Kea config snapshot rollback.
 #[derive(Deserialize)]
 pub struct RemoveSubnetForm {
     pub csrf_token: String,
     pub id: u32,
 }
 
+// Adds one custom DHCP option (by numeric code) to a specific subnet (see
+// add_subnet_option) -- distinct from the built-in fields above (gateway,
+// DNS, etc.), which map to their own dedicated Kea option codes already.
 #[derive(Deserialize)]
 pub struct AddSubnetOptionForm {
     pub csrf_token: String,
@@ -261,6 +298,10 @@ pub struct AddSubnetOptionForm {
     pub data: String,
 }
 
+// Removes one custom DHCP option from a subnet (see remove_subnet_option).
+// Both code and data are required (not just code) because Kea's option-data
+// array can hold multiple entries for the same code; matching on code+data
+// together is how remove_custom_subnet_option finds the exact one to drop.
 #[derive(Deserialize)]
 pub struct RemoveSubnetOptionForm {
     pub csrf_token: String,
@@ -269,6 +310,9 @@ pub struct RemoveSubnetOptionForm {
     pub data: String,
 }
 
+// Static host reservations (fixed IP for a given MAC), independent of the
+// subnet forms above -- these submit through add_reservation/
+// remove_reservation, which match existing entries by normalized MAC.
 #[derive(Deserialize)]
 pub struct AddReservationForm {
     pub csrf_token: String,
@@ -285,12 +329,18 @@ pub struct RemoveReservationForm {
     pub mac: String,
 }
 
+// Releases an active (dynamically-assigned, non-reserved) lease early --
+// distinct from removing a reservation, which is a permanent config change
+// rather than a one-off runtime action against lease4-del.
 #[derive(Deserialize)]
 pub struct ReleaseLeaseForm {
     pub csrf_token: String,
     pub ip: String,
 }
 
+// The remaining forms below configure DHCP at the whole-stack level (which
+// backend runs at all, and dnsmasq-proxy's relay settings), not a specific
+// subnet/reservation/lease -- see update_dhcp_mode/update_dhcp_proxy.
 #[derive(Deserialize)]
 pub struct UpdateDhcpModeForm {
     pub csrf_token: String,
@@ -344,6 +394,12 @@ struct KeaSnapshotSummary {
 
 // ─── Handlers ───
 
+// Renders the whole /dhcp settings page: current mode, dnsmasq-proxy fields,
+// and (only when Kea is actually reachable) the live subnet/lease/
+// reservation tables plus known-good config snapshots. Never errors -- if
+// Kea is unreachable or a fetch fails, the affected tables render empty
+// instead of taking down the whole page (see the else-branch and the
+// `unwrap_or_default()` calls below).
 pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let mut ctx = Context::new();
     let dhcp_mode = state.config.effective_dhcp_mode();
@@ -380,6 +436,10 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     );
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
+    // Leases and reservations don't depend on each other, so they're
+    // fetched concurrently via tokio::join! rather than two sequential
+    // awaits -- this page can otherwise feel slow on a Kea instance with
+    // many leases.
     if kea_api_available(
         state.config.effective_dhcp_mode(),
         &state.config.dhcp_api_url,
@@ -406,6 +466,11 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     crate::routes::render(&state.templates, "dhcp.html", &ctx, state.config.dev_mode)
 }
 
+// Gate used by every subnet/option/reservation/lease mutation route (add_subnet,
+// remove_reservation, release_lease, etc.): rejects the request up front with
+// a 409 if the stack isn't actually running in Kea mode, rather than letting
+// it fail deeper inside a Kea API call whose error message wouldn't clearly
+// say "you're not in Kea mode at all".
 fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
     if kea_api_available(
         state.config.effective_dhcp_mode(),
@@ -419,10 +484,19 @@ fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
     }
 }
 
+// Both conditions are required: DhcpMode can be set to Kea without an API
+// URL configured yet (e.g. right after switching modes, before the operator
+// has filled in dhcp_api_url), and that half-configured state must still be
+// treated as "Kea not available" everywhere in this file.
 fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
     mode.is_kea() && !api_url.is_empty()
 }
 
+// Parses the dhcp_mode form field from update_dhcp_mode into the typed enum.
+// Unrecognized input (including empty/garbage) returns None rather than
+// defaulting to one of the three modes, so update_dhcp_mode can reject a bad
+// submission with a clear error instead of silently switching to an
+// unintended mode.
 fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "disabled" => Some(crate::config::DhcpMode::Disabled),
@@ -468,6 +542,13 @@ async fn reconcile_dhcp_mode(
     Ok(())
 }
 
+// Writes the whole-stack DHCP settings (mode, dnsmasq-proxy fields) to the
+// UI's own settings file, which entrypoint.sh reads on container start to
+// decide what to run. Only non-empty values are written, so a field the
+// operator never configured stays absent rather than becoming an explicit
+// empty string. Written via a temp-file-then-rename so a crash mid-write
+// can never leave a half-written settings file behind for entrypoint.sh to
+// read on the next start.
 fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<(), DhcpError> {
     let mut map = BTreeMap::new();
     for (key, value) in values {
@@ -477,6 +558,10 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
         }
     }
 
+    // Iterates this fixed, explicit key list rather than `map`'s own keys so
+    // the settings file always comes out in the same, predictable order and
+    // never accidentally persists an unrelated key -- `values` is caller-
+    // controlled input, not the full set of possible settings.
     let mut content = String::new();
     for key in [
         "DHCP_MODE",
@@ -485,6 +570,10 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
         "DHCP_DNS_SECONDARY",
         "UPSTREAM_DHCP_IP",
         "DHCP_NTP_SERVERS",
+        // Issue #450's optional relay/PXE fields -- this key list is the
+        // authoritative whitelist of what this file can ever contain, so a
+        // future field must be added here too or persist_ui_settings will
+        // silently drop it even if the caller passes it in `values`.
         "DHCP_PROXY_INTERFACE",
         "DHCP_PROXY_ROUTER",
         "DHCP_PROXY_DOMAIN",
@@ -527,6 +616,11 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
     })
 }
 
+// Switches the whole stack between disabled/Kea/dnsmasq-proxy DHCP: starts
+// and stops the matching Docker services (reconcile_dhcp_mode), then
+// persists the new mode plus every other current DHCP setting so a later
+// container restart comes back up in the same mode instead of reverting to
+// whatever DHCP_MODE was in the original env file.
 pub async fn update_dhcp_mode(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -537,6 +631,11 @@ pub async fn update_dhcp_mode(
         .ok_or_else(|| DhcpError::conflict("Invalid DHCP mode requested."))?;
 
     reconcile_dhcp_mode(&state, mode).await?;
+    // Re-persists every DHCP setting, not just DHCP_MODE: persist_ui_settings
+    // overwrites the whole settings file each call, so any field left out
+    // here would be dropped from it (and fall back to its original env
+    // default on the next container start) even though the operator never
+    // touched that field on this particular save.
     persist_ui_settings(
         &state,
         &[
@@ -561,6 +660,10 @@ pub async fn update_dhcp_mode(
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
+            // The remaining entries are issue #450's optional relay/PXE
+            // fields; update_dhcp_mode never lets an operator edit these
+            // directly, so it just carries the current effective value
+            // through unchanged rather than losing it on a mode switch.
             (
                 "DHCP_PROXY_INTERFACE",
                 state.config.effective_dhcp_proxy_interface(),
@@ -590,6 +693,11 @@ pub async fn update_dhcp_mode(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Validates and saves the dnsmasq-proxy mode's settings (relay subnet, DNS,
+// upstream DHCP server, plus issue #450's optional PXE/relay fields). Every
+// field is checked here so a typo is caught immediately with a specific
+// error message, rather than only surfacing later when dnsmasq itself
+// rejects the rendered config on container start.
 pub async fn update_dhcp_proxy(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -665,6 +773,11 @@ pub async fn update_dhcp_proxy(
             "Invalid PXE boot server address: must be a valid IPv4 address.",
         ));
     }
+    // Cross-field check (not just a per-field one like the validations
+    // above): a boot server with no filename is meaningless to a PXE client
+    // and would render an incomplete `dhcp-boot=` directive, so this is
+    // rejected even though both fields individually passed their own
+    // per-field validation above.
     if !form.dhcp_proxy_boot_server.trim().is_empty()
         && form.dhcp_proxy_boot_filename.trim().is_empty()
     {
@@ -681,6 +794,10 @@ pub async fn update_dhcp_proxy(
             )
         })?;
 
+    // DHCP_MODE is carried through unchanged (this route never switches
+    // modes, only edits the dnsmasq-proxy settings) -- it must still be
+    // included here since persist_ui_settings overwrites the whole file,
+    // same reasoning as update_dhcp_mode's own re-persist above.
     persist_ui_settings(
         &state,
         &[
@@ -734,6 +851,9 @@ fn is_valid_interface_name(raw: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
+// Checks the whole dotted name against DNS's own length rules (each label
+// max 63 bytes, the full name max 253) before checking each label's
+// characters via is_valid_dns_label below.
 fn is_valid_domain_name(raw: &str) -> bool {
     let name = raw.trim();
     !name.is_empty()
@@ -817,6 +937,10 @@ fn custom_options_storage_to_form(stored: &str) -> String {
         .join("\n")
 }
 
+// Creates a new Kea subnet4 entry. The new subnet's id is one higher than
+// the current highest id (or 1 if there are none yet) -- Kea subnet ids
+// just need to be unique, so reusing "max + 1" avoids ever colliding with
+// an existing subnet even after subnets have been removed and re-added.
 pub async fn add_subnet(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -837,6 +961,11 @@ pub async fn add_subnet(
     .map_err(DhcpError::from)?;
 
     kea_config_modify(&state, move |config| {
+        // Each `.ok_or(...)?` names exactly which part of the expected
+        // `{"Dhcp4": {"subnet4": [...]}}` shape is missing/malformed, rather
+        // than one generic "invalid config" error -- useful when debugging a
+        // hand-edited or unusually old Kea config that doesn't match what
+        // this project's own kea-dhcp4.conf always produces.
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
         let subnets = dhcp4
             .get_mut("subnet4")
@@ -873,6 +1002,13 @@ pub async fn add_subnet(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Edits an existing subnet4 entry in place (found by id). Unlike add_subnet,
+// this must carry forward two things the form doesn't submit: the subnet's
+// existing custom options (preserved_subnet_options) and its existing
+// reservations, filtered down to only the ones still compatible with the
+// (possibly changed) subnet CIDR (compatible_reservations_for_subnet) --
+// otherwise a reservation for an IP outside the new subnet range would be
+// silently kept in a subnet it no longer belongs to.
 pub async fn update_subnet(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -894,6 +1030,7 @@ pub async fn update_subnet(
     let subnet_id = form.id;
 
     kea_config_modify(&state, move |config| {
+        // Same per-field-named navigation as add_subnet above.
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
         let subnets = dhcp4
             .get_mut("subnet4")
@@ -931,6 +1068,11 @@ pub async fn update_subnet(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Deletes a subnet4 entry (and, implicitly, everything nested inside it in
+// Kea's JSON -- its pools, options, and reservations) in one config-modify
+// call. There is no separate confirmation step here; the known-good config
+// snapshot taken on the previous successful write is the recovery path if
+// this was a mistake.
 pub async fn remove_subnet(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -956,6 +1098,10 @@ pub async fn remove_subnet(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Adds one custom DHCP option (by numeric code, e.g. a vendor-specific
+// option) to a subnet. Both code and data are validated before touching the
+// config -- see parse_custom_dhcp_option_code/validate_custom_dhcp_option_data
+// further down for what makes a code/value acceptable here.
 pub async fn add_subnet_option(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -988,6 +1134,11 @@ pub async fn add_subnet_option(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Removes one custom DHCP option from a subnet, matched by code AND data
+// together (see RemoveSubnetOptionForm's own comment for why both are
+// needed) -- the same code/data parsing as add_subnet_option is re-run here
+// so the value being removed is normalized the same way the stored value
+// was when it was added, and the two compare equal.
 pub async fn remove_subnet_option(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1080,6 +1231,10 @@ pub async fn add_reservation(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Removes a static host reservation by (normalized) MAC address. Unlike
+// add_reservation, this has no global-identifiers guard to check: deleting
+// an entry is safe regardless of whether Kea would currently match it, so
+// there's nothing here that could silently fail to take effect.
 pub async fn remove_reservation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1103,6 +1258,11 @@ pub async fn remove_reservation(
     Ok(Redirect::to("/dhcp"))
 }
 
+// Ends an active dynamic lease early via Kea's lease4-del command. This
+// goes straight through kea_post, not kea_config_modify -- releasing a
+// lease is a runtime action against Kea's lease database, not a
+// config-file change, so it needs none of config-modify's config-test/
+// config-set/config-write/rollback/snapshot machinery.
 pub async fn release_lease(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1464,6 +1624,11 @@ where
     }
 }
 
+// Issues Kea's config-write command, which persists the just-applied
+// runtime config to /var/lib/kea/kea-dhcp4.conf. Returns one of three
+// outcomes rather than a plain Result -- see KeaWriteOutcome's own comment
+// for why the network-error case (AmbiguousFailure) must be distinguished
+// from a definite Kea-side rejection (ConfirmedFailure).
 async fn kea_write_config<P, Fut>(post: &mut P) -> KeaWriteOutcome
 where
     P: FnMut(Value) -> Fut + Send,
@@ -1478,6 +1643,13 @@ where
     }
 }
 
+// Called only after a confirmed config-write failure: re-applies the config
+// exactly as it was before this request's changes, via the same config-set
+// command used for the original (attempted) change. Always returns Err even
+// when the rollback itself succeeds -- from the caller's point of view the
+// operator's requested change did not happen, so this is never a success
+// path, only a "how badly did it fail" distinction (rolled back cleanly vs.
+// runtime/persisted state now disagree).
 async fn rollback_kea_config<P, Fut>(post: &mut P, old_config: Value, write_err: &str) -> KeaResult
 where
     P: FnMut(Value) -> Fut + Send,
@@ -1523,6 +1695,9 @@ where
 
 // ─── Data Fetchers ───
 
+// Fetches Kea's live config, the same config-get command kea_config_modify_with_post
+// uses -- but as a plain read, not the start of a modify/test/set/write chain.
+// Used by the read-only fetch_subnets/fetch_all_reservations below.
 async fn fetch_dhcp_config(
     state: &AppState,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -1540,12 +1715,21 @@ async fn fetch_dhcp_config(
         .ok_or("config-get: missing arguments")?)
 }
 
+// Converts Kea's raw subnet4 JSON array into the Subnet read-model (see its
+// struct comment). A missing/malformed subnet4 array renders as an empty
+// list rather than an error -- consistent with dhcp_page's own fail-open
+// treatment of an unreachable Kea API.
 fn fetch_subnets_from_config(config: &Value) -> Vec<Subnet> {
     dhcp4_subnets(config)
         .map(|subnets| subnets.iter().map(parse_subnet_entry).collect())
         .unwrap_or_default()
 }
 
+// Flattens every subnet's nested `reservations` array into one flat list of
+// Reservation, tagging each with its owning subnet_id (Kea nests
+// reservations inside their subnet; the Admin UI's reservations table is
+// one flat list across all subnets, so this is the shape conversion between
+// the two).
 fn fetch_reservations_from_config(config: &Value) -> Vec<Reservation> {
     dhcp4_subnets(config)
         .map(|subnets| {
@@ -1572,6 +1756,10 @@ async fn fetch_subnets(
 ) -> Result<Vec<Subnet>, Box<dyn std::error::Error + Send + Sync>> {
     Ok(fetch_subnets_from_config(&fetch_dhcp_config(state).await?))
 }
+
+// fetch_leases below talks to Kea's lease database directly (lease4-get-all)
+// rather than going through fetch_dhcp_config -- leases are runtime state,
+// not part of the Dhcp4 config JSON subnets/reservations live in.
 
 // Lists known-good Kea config snapshots (#614) for the DHCP settings page,
 // newest first (the order an operator picking a rollback target cares
@@ -1608,6 +1796,11 @@ async fn fetch_leases(
         .and_then(|l| l.as_array())
     {
         for lease in lease_array {
+            // Kea reports a lease's client-lease-time (`cltt`, when it was
+            // last renewed) and its lease duration (`valid-lft`) separately;
+            // their sum is the absolute expiry time the Admin UI's
+            // `formatDhcpExpiries()` JS renders as a human-readable
+            // countdown/date.
             let cltt = lease.get("cltt").and_then(|v| v.as_i64()).unwrap_or(0);
             let valid_lft = lease.get("valid-lft").and_then(|v| v.as_i64()).unwrap_or(0);
             leases.push(Lease {
@@ -1665,6 +1858,10 @@ async fn check_dhcp_probe(state: &AppState) -> DhcpCheckReport {
     parse_dhcp_probe_report(&output)
 }
 
+// Strips nmap's own output decoration (`|` and `|_` prefixes nmap uses for
+// script-result lines) so parse_conflict_probe_result's plain-text fallback
+// scan (see below) can match "Server Identifier:" regardless of which
+// nmap output line style produced it.
 fn normalize_nmap_line(line: &str) -> &str {
     line.trim_start_matches(|ch: char| ch == '|' || ch == '_' || ch.is_whitespace())
         .trim_end()
@@ -1675,6 +1872,14 @@ const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
 const DHCP_CONFLICT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CONFLICT_RESULT__";
 const DHCP_CLIENT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CLIENT_RESULT__";
 
+// Restarts the predeclared dhcp-probe container fresh and runs it to
+// completion (an nmap DHCP-conflict scan plus a dhclient dry-run, see
+// services/dhcp-probe), then returns only the log output from this run.
+// Two layers keep an old run's output from leaking into a new result:
+// `started_since` (captured right after stopping the container) is passed
+// to Docker's own log API as a `since` filter, and current_probe_output
+// further discards anything before this run's own start marker within
+// whatever logs that filter still let through.
 async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
     let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
         .context("resolve DHCP probe container")?;
@@ -1724,6 +1929,11 @@ fn parse_dhcp_probe_report(output: &str) -> DhcpCheckReport {
     }
 }
 
+// Prefers the probe script's own explicit `__LANCACHE_DHCP_CONFLICT_RESULT__`
+// marker line (see parse_probe_result_line) when present, since that's an
+// unambiguous status the probe script itself computed (services/ui/dhcp-probe.sh
+// always emits it). The raw nmap-output scan below it is a defensive
+// fallback for output that doesn't include that marker line at all.
 fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
     if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CONFLICT_RESULT_MARKER) {
         return match status {
@@ -1757,6 +1967,10 @@ fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
     DhcpConflictCheckStatus::NotFound
 }
 
+// Same marker-line-first strategy as parse_conflict_probe_result, but for
+// the dhclient dry-run's own result marker. Unlike that function, there is
+// no plain-text fallback scan here -- if the marker line is absent, this
+// falls straight through to "dhclient summary missing" below.
 fn parse_client_probe_result(output: &str) -> DhcpClientCheckStatus {
     if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CLIENT_RESULT_MARKER) {
         return match status {
@@ -1792,6 +2006,10 @@ fn parse_client_probe_result(output: &str) -> DhcpClientCheckStatus {
     }
 }
 
+// Scans lines in reverse (last line matching the marker wins) so a marker
+// that happens to appear earlier in unrelated log noise (e.g. echoed from a
+// previous probe run's leftover buffer) never shadows this run's real,
+// final result line.
 fn parse_probe_result_line<'a>(output: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
     output.lines().rev().find_map(|line| {
         let line = line.trim();
@@ -1802,6 +2020,10 @@ fn parse_probe_result_line<'a>(output: &'a str, marker: &str) -> Option<(&'a str
     })
 }
 
+// Reads every stdout/stderr log chunk emitted since `since` and concatenates
+// them into one string for parse_dhcp_probe_report to scan -- Docker's log
+// stream is delivered in arbitrary-sized chunks, not whole lines, so this
+// must buffer everything before any line-based parsing can happen.
 async fn collect_container_logs_since(
     docker: &bollard::Docker,
     id: &str,
@@ -1831,6 +2053,11 @@ async fn collect_container_logs_since(
     Ok(output)
 }
 
+// Keeps only the output after the LAST start-marker line -- `rsplit_once`
+// (not `split_once`) matters here: if Docker's `since` filter (see
+// run_dhcp_probe) still let through part of a previous run's output ending
+// in its own start marker, splitting on the first marker would return that
+// stale run's output instead of the current one.
 fn current_probe_output(output: &str) -> String {
     output
         .rsplit_once(DHCP_PROBE_START_MARKER)
@@ -1838,6 +2065,10 @@ fn current_probe_output(output: &str) -> String {
         .unwrap_or_else(|| output.to_string())
 }
 
+// Docker's logs API `since` parameter takes an i32 second count, not the u64
+// this project's other timestamp helpers use elsewhere -- clamped to
+// i32::MAX rather than truncating/wrapping, since a wrapped value could come
+// out negative or as an unrelated past timestamp.
 fn unix_timestamp_seconds() -> i32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1845,6 +2076,9 @@ fn unix_timestamp_seconds() -> i32 {
         .unwrap_or_default()
 }
 
+// Stops the probe container if a previous run left it running (it normally
+// exits on its own, so this is the abnormal-state cleanup path before
+// starting a fresh run).
 async fn stop_container_if_running(
     docker: &bollard::Docker,
     id: &str,
@@ -1897,11 +2131,18 @@ fn is_valid_ip(ip: &str) -> bool {
     parse_ipv4(ip).is_some()
 }
 
+// Accepts a MAC in either colon- or hyphen-separated form (both are common
+// copy-paste sources for an operator entering a device's MAC) -- 12 hex
+// digits after stripping either separator is the only shape check; the
+// canonical colon form is produced separately by normalize_mac.
 fn is_valid_mac(mac: &str) -> bool {
     let cleaned = mac.to_uppercase().replace([':', '-'], "");
     cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+// Groups every field add_subnet/update_subnet must validate together, since
+// several checks are cross-field (pool bounds within the subnet's own CIDR,
+// pool_start <= pool_end) rather than checkable per-field in isolation.
 struct DhcpFormValidation<'a> {
     subnet: &'a str,
     pool_start: &'a str,
@@ -1913,12 +2154,20 @@ struct DhcpFormValidation<'a> {
     lease_time: &'a str,
 }
 
+// Returns the parsed lease_time on success (the one field the caller still
+// needs as a typed value afterward; everything else is consumed as owned
+// Strings by build_subnet_value/apply_subnet_value instead).
 fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> {
     let (subnet_addr, prefix_len) = parse_cidr(input.subnet).ok_or(StatusCode::BAD_REQUEST)?;
     let pool_start_addr = parse_ipv4(input.pool_start).ok_or(StatusCode::BAD_REQUEST)?;
     let pool_end_addr = parse_ipv4(input.pool_end).ok_or(StatusCode::BAD_REQUEST)?;
     let gateway_addr = parse_ipv4(input.gateway).ok_or(StatusCode::BAD_REQUEST)?;
     let dns_primary_addr = parse_ipv4(input.dns_primary).ok_or(StatusCode::BAD_REQUEST)?;
+    // An empty secondary DNS field is allowed (it's optional on the form),
+    // but if given, it must still be a valid address -- parsed here as
+    // `dns_primary_addr` only to reuse the same "is it valid" check, since
+    // this function only reports success/failure, not the parsed values
+    // themselves.
     let _dns_secondary_addr = if input.dns_secondary.trim().is_empty() {
         dns_primary_addr
     } else {
@@ -1952,6 +2201,11 @@ fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
     Ipv4Addr::from_str(ip).ok()
 }
 
+// Parses "a.b.c.d/N" and rejects anything where the host bits aren't
+// already zero (e.g. "192.168.1.5/24" is rejected -- the address part must
+// be the network's own base address, not an arbitrary host within it) --
+// this is what actually enforces that an operator enters a real network
+// address in the subnet field, not just any address with a slash after it.
 fn parse_cidr(cidr: &str) -> Option<(Ipv4Addr, u8)> {
     let (addr, prefix) = cidr.split_once('/')?;
     let network = parse_ipv4(addr)?;
@@ -1971,6 +2225,10 @@ fn parse_cidr(cidr: &str) -> Option<(Ipv4Addr, u8)> {
     Some((Ipv4Addr::from(network_u32 & mask), prefix_len))
 }
 
+// `network` here is always parse_cidr's already-masked output (host bits
+// zero), so masking `ip` the same way and comparing is a correct
+// same-subnet test regardless of which host address within the subnet `ip`
+// is.
 fn ipv4_in_cidr(network: Ipv4Addr, prefix_len: u8, ip: Ipv4Addr) -> bool {
     let mask = if prefix_len == 0 {
         0
@@ -1984,6 +2242,12 @@ fn ipv4_to_u32(ip: Ipv4Addr) -> u32 {
     u32::from(ip)
 }
 
+// Read-only counterpart of dhcp4_subnets_mut below, used by the data
+// fetchers (fetch_subnets_from_config, fetch_reservations_from_config)
+// which only display config, never modify it -- returns a plain Option
+// rather than a Result since a fetch's fail-open convention treats a
+// missing/malformed subnet4 array the same as "no subnets" (see
+// fetch_subnets_from_config's own comment), not a hard error.
 fn dhcp4_subnets(config: &Value) -> Option<&Vec<Value>> {
     config
         .get("Dhcp4")
@@ -2106,6 +2370,13 @@ fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'sta
     Ok(())
 }
 
+// Rebuilds a subnet's option-data array: `editable_options` (the subnet's
+// custom options, already stripped of UI-managed entries by the caller via
+// preserved_subnet_options) plus a fresh "routers"/"domain-name-servers"/
+// "domain-name"/"domain-search"/"ntp-servers" entry built from this save's
+// form fields. The `retain` call here is a defensive second filter, not the
+// primary one -- it makes this function safe to call even if a future
+// caller passes an unfiltered options list.
 fn build_subnet_options(
     mut editable_options: Vec<Value>,
     gateway: String,
@@ -2129,6 +2400,10 @@ fn build_subnet_options(
     editable_options
 }
 
+// Returns a subnet's option-data entries EXCLUDING the ones the dedicated
+// gateway/DNS/domain/NTP form fields manage -- these are the operator's own
+// custom options (added via add_subnet_option), which update_subnet must
+// carry forward untouched since its form has no field for them.
 fn preserved_subnet_options(subnet: &Value) -> Vec<Value> {
     subnet
         .get("option-data")
@@ -2143,6 +2418,12 @@ fn preserved_subnet_options(subnet: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+// True for an option-data entry that one of the dedicated subnet form
+// fields owns (routers/domain-name/domain-search/domain-name-servers/
+// ntp-servers, by name or by their well-known Kea/DHCP option codes
+// 3/6/15/42/119) -- matched by name OR code because Kea accepts an option
+// specified either way, and an entry this project itself wrote or an
+// operator hand-edited one could use either form.
 fn is_ui_managed_subnet_option(option: &Value) -> bool {
     if !is_dhcp4_option_space(option) {
         return false;
@@ -2167,6 +2448,12 @@ fn is_ui_managed_subnet_option(option: &Value) -> bool {
     managed_by_name || managed_by_code
 }
 
+// Code-only version of the check above, used by add_subnet_option/
+// remove_subnet_option (see parse_custom_dhcp_option_code below) to reject a
+// custom-option submission for one of these codes before it ever reaches
+// the config -- these codes must only ever be set via the dedicated form
+// fields, never the free-form custom option list, so there is exactly one
+// way to configure each of them.
 fn is_ui_managed_subnet_option_code(code: u16) -> bool {
     matches!(code, 3 | 6 | 15 | 42 | 119)
 }
@@ -2185,6 +2472,11 @@ fn is_dhcp4_option_space(option: &Value) -> bool {
         .unwrap_or(true)
 }
 
+// 0 and 255+ are excluded: DHCPv4 option code 0 is the reserved "Pad"
+// option and 255 is "End", neither a real configurable option; the rest of
+// the valid DHCPv4 option space (1-254) is otherwise open here except for
+// the five codes is_ui_managed_subnet_option_code reserves for the
+// dedicated form fields.
 fn parse_custom_dhcp_option_code(raw: &str) -> Result<u16, &'static str> {
     let code = raw
         .trim()
@@ -2199,6 +2491,10 @@ fn parse_custom_dhcp_option_code(raw: &str) -> Result<u16, &'static str> {
     Ok(code)
 }
 
+// Data itself is stored as an opaque string (Kea's own option-data "data"
+// field accepts whatever encoding the option type expects); only the shape
+// constraints that would break this project's own storage/rendering are
+// checked here, not the value's meaning for a given option code.
 fn validate_custom_dhcp_option_data(raw: &str) -> Result<String, &'static str> {
     let data = raw.trim();
     if data.is_empty() {
@@ -2213,6 +2509,14 @@ fn validate_custom_dhcp_option_data(raw: &str) -> Result<String, &'static str> {
     Ok(data.to_string())
 }
 
+// True for an option-data entry that is a genuine operator-added custom
+// option: dhcp4-space, NOT one of the UI-managed fields (see
+// is_ui_managed_subnet_option), has a numeric code in the valid range, and
+// has string data. This is the same "does this look like a real custom
+// option" test used both to display them (custom_subnet_options) and to
+// match one for add/remove (add_custom_subnet_option/
+// remove_custom_subnet_option) -- an entry missing "code" or "data" isn't
+// something this UI ever wrote, so it's excluded from both.
 fn is_custom_dhcp4_option(option: &Value) -> bool {
     is_dhcp4_option_space(option)
         && !is_ui_managed_subnet_option(option)
@@ -2227,6 +2531,9 @@ fn is_custom_dhcp4_option(option: &Value) -> bool {
             .is_some()
 }
 
+// Surfaces a subnet's custom (non-UI-managed) options for the read-model
+// Subnet struct's `custom_options` field, rendered as a table on the
+// settings page.
 fn custom_subnet_options(subnet: &Value) -> Vec<DhcpOption> {
     subnet
         .get("option-data")
@@ -2247,6 +2554,10 @@ fn custom_subnet_options(subnet: &Value) -> Vec<DhcpOption> {
         .unwrap_or_default()
 }
 
+// A brand-new subnet (see add_subnet) has no "option-data" key at all yet --
+// this creates an empty array in that case so add_custom_subnet_option can
+// push into it uniformly, instead of every caller needing its own
+// key-missing handling.
 fn subnet_options_mut(subnet: &mut Value) -> Result<&mut Vec<Value>, &'static str> {
     let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
     if !subnet.contains_key("option-data") {
@@ -2258,6 +2569,9 @@ fn subnet_options_mut(subnet: &mut Value) -> Result<&mut Vec<Value>, &'static st
         .ok_or("option-data not an array")
 }
 
+// Rejects an exact code+data duplicate rather than silently accepting a
+// second identical entry -- Kea would apply both, which is never useful and
+// likely indicates a double form submission.
 fn add_custom_subnet_option(subnet: &mut Value, code: u16, data: &str) -> Result<(), &'static str> {
     let options = subnet_options_mut(subnet)?;
     if options.iter().any(|option| {
@@ -2289,6 +2603,10 @@ fn remove_custom_subnet_option(
     Ok(())
 }
 
+// Kea's option-data "data" string for a multi-value option (like
+// domain-name-servers) is comma-separated; this also tolerates
+// whitespace-separated input from parse_subnet_entry's read side, since
+// that is easier to type/paste in a form field than strict commas.
 fn split_option_list(raw: &str) -> Vec<String> {
     raw.split(|ch: char| ch == ',' || ch.is_whitespace())
         .map(str::trim)
@@ -2297,6 +2615,10 @@ fn split_option_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+// Omits the secondary server entirely when it's blank or identical to the
+// primary, rather than writing e.g. "8.8.8.8, 8.8.8.8" -- Kea would accept a
+// duplicate, but it adds nothing and would misleadingly imply two distinct
+// DNS servers are configured when there's really just one.
 fn format_dns_server_option(primary: &str, secondary: &str) -> String {
     if secondary.trim().is_empty() || secondary.trim() == primary.trim() {
         primary.trim().to_string()
@@ -2305,6 +2627,10 @@ fn format_dns_server_option(primary: &str, secondary: &str) -> String {
     }
 }
 
+// Unlike DNS (always written, even if just one server), the NTP option
+// itself is entirely omitted from the subnet's option-data when the form
+// field is empty -- returning None here (rather than an empty string) is
+// what lets build_subnet_options skip adding an "ntp-servers" entry at all.
 fn format_ntp_server_option(ntp_servers: &str) -> Option<String> {
     let servers = parse_ntp_server_list(ntp_servers);
     if servers.is_empty() {
@@ -2318,7 +2644,16 @@ fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
 }
 
+// Converts one Kea subnet4 JSON entry back into the Subnet read-model for
+// display. The inner `opt` closure looks up a built-in option by name OR by
+// its well-known code, since a subnet's option-data can specify either form
+// (see is_custom_dhcp4_option's own comment on the same ambiguity) -- a
+// value written by name must still be found here even though this project's
+// own writes always use "name", not "code".
 fn parse_subnet_entry(subnet: &Value) -> Subnet {
+    // Only the first pool range is read back (Kea allows multiple pools per
+    // subnet, but add_subnet/update_subnet only ever write one), in the
+    // exact "start - end" format build_subnet_value writes it in.
     let pool = subnet
         .get("pools")
         .and_then(|p| p.get(0))
@@ -2365,6 +2700,10 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
         dns_primary: dns_servers.first().cloned().unwrap_or_default(),
         dns_secondary: dns_servers.get(1).cloned().unwrap_or_default(),
         ntp_servers,
+        // 86400 (24h) matches Kea's own compiled-in default valid-lifetime;
+        // this project's own writes always set this field explicitly, so
+        // the fallback only matters for a subnet from a hand-edited or
+        // externally-managed config that omitted it.
         lease_time: subnet
             .get("valid-lifetime")
             .and_then(|v| v.as_u64())
@@ -2407,6 +2746,11 @@ fn compatible_reservations_for_subnet(
         .unwrap_or_default())
 }
 
+// Converts one Kea reservation JSON entry into the Reservation read-model.
+// Always returns Some (never None) despite the Option return type -- kept
+// as Option to match fetch_reservations_from_config's filter_map call site,
+// which is written generically enough to skip an entry in the future if a
+// stricter reservation shape check is ever added here.
 fn parse_reservation_entry(subnet_id: u32, reservation: &Value) -> Option<Reservation> {
     Some(Reservation {
         subnet_id,
@@ -2428,6 +2772,9 @@ fn parse_reservation_entry(subnet_id: u32, reservation: &Value) -> Option<Reserv
     })
 }
 
+// Same "create the array if it's the first entry" pattern as
+// subnet_options_mut, but for a subnet's reservations array instead of its
+// options.
 fn subnet_reservations_mut(subnet: &mut Value) -> Result<&mut Vec<Value>, &'static str> {
     let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
     if !subnet.contains_key("reservations") {
@@ -2439,6 +2786,13 @@ fn subnet_reservations_mut(subnet: &mut Value) -> Result<&mut Vec<Value>, &'stat
         .ok_or("reservations not an array")
 }
 
+// Called from add_reservation: updates an existing reservation in place if
+// one already exists for this MAC (so re-submitting the add-reservation
+// form for the same device edits it rather than creating a duplicate
+// entry), otherwise appends a new one. Only hw-address/ip-address/hostname
+// are touched on an update -- any other fields Kea itself keeps on the
+// entry (e.g. option-data, client-classes) are left as-is rather than
+// overwritten with the freshly-built entry's empty ones.
 fn upsert_reservation(
     reservations: &mut Vec<Value>,
     reservation: Value,
@@ -2481,6 +2835,10 @@ fn upsert_reservation(
     Ok(())
 }
 
+// Silently does nothing if no reservation matches -- remove_reservation
+// doesn't distinguish "removed" from "wasn't there", both redirect back to
+// /dhcp the same way, since the end state an operator cares about (no
+// reservation for this MAC) is identical either way.
 fn remove_reservation_entry(reservations: &mut Vec<Value>, mac: &str) {
     let normalized = normalize_mac(mac);
     reservations.retain(|reservation| {
@@ -2499,6 +2857,9 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
+    // Wraps validate_dhcp_form's 8-field DhcpFormValidation struct literal
+    // so individual tests below can call it with plain positional
+    // arguments instead of repeating every field name at each call site.
     macro_rules! validate_test_dhcp_form {
         (
             $subnet:expr,
@@ -2523,6 +2884,12 @@ mod tests {
         };
     }
 
+    // A scripted step for the mock `post` closure tests below feed into
+    // kea_config_modify_with_post: either a canned Kea JSON response
+    // (Response) or a simulated transport-level failure (Transport, e.g. a
+    // dropped connection) -- letting a test simulate exactly which of the
+    // function's config-get/config-test/config-set/config-write/rollback
+    // calls fails and how, without a real Kea Control Agent.
     #[derive(Debug)]
     enum MockStep {
         Response(Value),
@@ -2705,6 +3072,12 @@ mod tests {
         assert_eq!(lease_time.unwrap(), 86400);
     }
 
+    // The two tests above establish the accepted baseline (a normal subnet,
+    // and one with DNS servers routed outside it -- explicitly allowed
+    // since an operator's DNS server doesn't have to live on the LAN
+    // segment being configured). Everything below flips exactly one field
+    // away from that baseline to confirm each individual geometry check
+    // actually rejects on its own.
     #[test]
     fn rejects_pool_outside_subnet() {
         let lease_time = validate_test_dhcp_form!(
@@ -2737,6 +3110,10 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // From here down: the CIDR/pool/gateway geometry checks above all pass
+    // with a fixed valid lease_time, and these tests instead hold the
+    // network geometry fixed to isolate lease_time's own parsing and bounds
+    // checking.
     #[test]
     fn rejects_invalid_lease_time() {
         let lease_time = validate_test_dhcp_form!(
@@ -2785,6 +3162,11 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // MIN_LEASE_TIME/MAX_LEASE_TIME are inclusive bounds (`(MIN..=MAX).contains`
+    // in validate_dhcp_form), so the exact boundary values themselves (60,
+    // 604800) must be accepted, not just values safely inside the range --
+    // this group and the one below pin both the inside-the-line and
+    // one-past-the-line cases for each bound.
     #[test]
     fn rejects_zero_lease_time() {
         let lease_time = validate_test_dhcp_form!(
@@ -2817,6 +3199,9 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // Paired with rejects_lease_time_below_minimum above: 59 rejected, 60
+    // accepted -- confirms MIN_LEASE_TIME's boundary sits exactly where the
+    // constant says it does, not off-by-one in either direction.
     #[test]
     fn accepts_lease_time_at_minimum() {
         let lease_time = validate_test_dhcp_form!(
@@ -2865,6 +3250,12 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // Distinct from rejects_lease_time_above_maximum: this value is not just
+    // over MAX_LEASE_TIME, it's large enough to matter for
+    // apply_subnet_value's own `lease_time.checked_mul(2)` -- confirming
+    // validate_dhcp_form's own bounds check already rejects it here means
+    // that overflow-prone doubling can never actually be reached with an
+    // attacker/typo-supplied huge value.
     #[test]
     fn rejects_huge_lease_time() {
         let lease_time = validate_test_dhcp_form!(
@@ -2917,6 +3308,9 @@ mod tests {
             }
         });
 
+        // Four scripted success responses, one per step of the real chain:
+        // config-get, config-test, config-set, config-write -- all succeed,
+        // so this exercises the plain happy path with no retry/rollback.
         let (result, calls) = run_kea_config_modify_with_steps(
             vec![
                 MockStep::Response(kea_config_get_response(initial_config)),
@@ -2946,6 +3340,9 @@ mod tests {
         assert_eq!(calls[1]["command"], "config-test");
         assert_eq!(calls[2]["command"], "config-set");
         assert_eq!(calls[3]["command"], "config-write");
+        // Confirms config-test is called with the SAME modified config
+        // config-set then applies -- config-test must validate exactly what
+        // will be set, not the pre-modify config or some other value.
         assert_eq!(calls[1]["arguments"], expected_modified);
         assert_eq!(calls[2]["arguments"], expected_modified);
     }
@@ -3091,6 +3488,9 @@ mod tests {
         );
     }
 
+    // config-write's response itself reports failure (result != 0) -- a
+    // ConfirmedFailure, not ambiguous -- so this must roll back on the
+    // very first attempt, with no retry in between.
     #[tokio::test]
     async fn kea_config_modify_rolls_back_on_confirmed_write_failure() {
         let initial_config = json!({
@@ -3118,6 +3518,9 @@ mod tests {
             }
         });
 
+        // 5 scripted steps: config-get, config-test, config-set both
+        // succeed, but config-write (4th) fails outright, triggering a 5th
+        // call -- the rollback's own config-set.
         let (result, calls) = run_kea_config_modify_with_steps(
             vec![
                 MockStep::Response(kea_config_get_response(initial_config.clone())),
@@ -3149,12 +3552,20 @@ mod tests {
         assert_eq!(calls.len(), 5);
         assert_eq!(calls[0]["command"], "config-get");
         assert_eq!(calls[3]["command"], "config-write");
+        // The rollback's own config-set (call 5) must carry the ORIGINAL
+        // pre-modify config, restoring exactly what was there before this
+        // request, not some other value.
         assert_eq!(calls[4]["command"], "config-set");
         assert_eq!(calls[4]["arguments"], initial_config);
         assert_eq!(calls[1]["arguments"], expected_modified);
         assert_eq!(calls[2]["arguments"], expected_modified);
     }
 
+    // First config-write is a Transport failure (AmbiguousFailure), so a
+    // retry is attempted before any rollback decision; the retry succeeds,
+    // so the overall result must be Ok with NO config-set rollback call at
+    // all -- confirming an ambiguous-then-successful outcome is treated as
+    // a real success, not "success but still roll back to be safe".
     #[tokio::test]
     async fn kea_config_modify_accepts_successful_write_retry_after_ambiguous_failure() {
         let initial_config = json!({
@@ -3182,6 +3593,9 @@ mod tests {
             }
         });
 
+        // Step 4 is a Transport failure (the ambiguous case), step 5 is the
+        // retry -- both are config-write attempts, no rollback config-set
+        // step exists in this list at all.
         let (result, calls) = run_kea_config_modify_with_steps(
             vec![
                 MockStep::Response(kea_config_get_response(initial_config.clone())),
@@ -3211,6 +3625,9 @@ mod tests {
         assert_eq!(calls[0]["command"], "config-get");
         assert_eq!(calls[3]["command"], "config-write");
         assert_eq!(calls[4]["command"], "config-write");
+        // No config-set call anywhere in the whole call log carries the
+        // original pre-modify config -- i.e. rollback genuinely never ran,
+        // not just that its result was overwritten by the later success.
         assert!(
             !calls.iter().any(|cmd| cmd["command"] == "config-set"
                 && cmd.get("arguments") == Some(&initial_config)),
@@ -3220,6 +3637,12 @@ mod tests {
         assert_eq!(calls[2]["arguments"], expected_modified);
     }
 
+    // First config-write is ambiguous (Transport failure), the retry gets a
+    // definite Kea rejection -- kea_config_modify_with_post's own comment on
+    // this exact case says not to roll back blindly here, since a config
+    // that failed once ambiguously and then failed for real on retry could
+    // still be sitting applied-but-unconfirmed at Kea; this locks in that
+    // the function reports the error instead of guessing and rolling back.
     #[tokio::test]
     async fn kea_config_modify_does_not_rollback_when_write_retry_confirms_failure() {
         let initial_config = json!({
@@ -3233,6 +3656,8 @@ mod tests {
             }
         });
 
+        // Step 4 (first config-write) is Transport, step 5 (the retry) is a
+        // real Kea rejection -- both attempts made, neither succeeded.
         let (result, calls) = run_kea_config_modify_with_steps(
             vec![
                 MockStep::Response(kea_config_get_response(initial_config.clone())),
@@ -3271,6 +3696,11 @@ mod tests {
         );
     }
 
+    // Both the first config-write AND its retry are Transport failures --
+    // the worst case, where it's never confirmed either way whether Kea
+    // ever actually wrote the config. Still no rollback: rolling back here
+    // could clobber a write that silently succeeded despite the transport
+    // error, which is exactly the risk AmbiguousFailure exists to avoid.
     #[tokio::test]
     async fn kea_config_modify_does_not_rollback_on_ambiguous_write_failure() {
         let initial_config = json!({
@@ -3284,6 +3714,9 @@ mod tests {
             }
         });
 
+        // Both config-write attempts (step 4 and its retry, step 5) are
+        // Transport failures -- Kea's own verdict on the write is never
+        // learned either time.
         let (result, calls) = run_kea_config_modify_with_steps(
             vec![
                 MockStep::Response(kea_config_get_response(initial_config.clone())),
@@ -3405,6 +3838,9 @@ mod tests {
         assert_eq!(reservations[0]["option-data"][0]["data"], "pxelinux.0");
         assert_eq!(reservations[0]["client-classes"][0], "known");
 
+        // Removal is looked up by the same hyphenated MAC form used for the
+        // upsert above, confirming remove_reservation_entry normalizes its
+        // own `mac` argument rather than requiring an exact stored-form match.
         {
             let reservations = subnet_reservations_mut(&mut subnet).expect("reservations array");
             remove_reservation_entry(reservations, "AA-BB-CC-DD-EE-FF");
@@ -3514,6 +3950,11 @@ mod tests {
             "relay": {"ip-addresses": ["10.0.0.1"]}
         });
 
+        // preserved_subnet_options is called BEFORE apply_subnet_value, on
+        // the original subnet -- mirroring how update_subnet itself must
+        // capture the existing custom options before overwriting the entry,
+        // since apply_subnet_value has no other way to see what was there
+        // beforehand.
         let preserved_options = preserved_subnet_options(&subnet);
 
         apply_subnet_value(
@@ -3542,6 +3983,11 @@ mod tests {
         assert_eq!(subnet["ddns-qualifying-suffix"], "lan");
         assert_eq!(subnet["relay"]["ip-addresses"][0], "10.0.0.1");
 
+        // The three assertion groups below: (1) the old dhcp4-space
+        // UI-managed entries (by name or by code 3/15/119) are gone, (2)
+        // the vendor-space code-3 entry survives untouched despite sharing
+        // a code with "routers", and (3) fresh UI-managed entries reflect
+        // this save's new form values.
         let options = subnet["option-data"].as_array().expect("option-data array");
         assert!(!options
             .iter()
