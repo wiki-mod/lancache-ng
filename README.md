@@ -622,7 +622,6 @@ LANCACHE_STATE_DIR=/opt/lancache-ng
 
 CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512
-NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
 PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
 
@@ -639,7 +638,7 @@ LANCACHE_IMAGE_CHANNEL=latest
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to — defaulting to `8.8.8.8 8.8.4.4` (Google Public DNS) is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. It is **not** read from `deploy/prod/.env.local` — `deploy/prod/docker-compose.yml`'s `proxy` service only loads it via `env_file: ../../config/prod/proxy.env`, with no `${NGINX_UPSTREAM_RESOLVER}` interpolation in that service's `environment:` list, so an override placed in `.env.local` has no effect on this variable. Edit `config/prod/proxy.env` directly, then recreate the `proxy` container (`docker compose up -d proxy`) to pick up the change. The default there — `8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844` (Google Public DNS, both IPv4 and IPv6) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
