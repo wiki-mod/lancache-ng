@@ -677,7 +677,8 @@ If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 DDNS_TSIG_KEY=<generate-a-secret>
 NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
-NATS_DNS_READER_PASSWORD=<generate-a-secret>
+NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
+NATS_CALLOUT_PASSWORD=<generate-a-secret>
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 ```
 

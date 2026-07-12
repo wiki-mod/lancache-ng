@@ -1,11 +1,14 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
-//! Admin UI secondary-node routes: lists registered secondaries, issues and
-//! rotates their shared NATS reader credentials, handles removal, and keeps the
-//! shared `nats.conf` write/reload contract intact for the v0.1.0 shared-token
-//! model.
+//! Admin UI secondary-node routes: lists registered secondaries, issues each
+//! one its own unique NATS auth-callout credential on registration (issue
+//! #583), rotates or revokes that one secondary's credential without
+//! touching any other secondary, and generates the static `nats.conf` (UI/
+//! DNS-writer/DNS-replica/callout-bypass roles plus the `auth_callout {}`
+//! stanza) at process startup only -- see `nats_auth_callout.rs` for why
+//! register/rotate/remove no longer need to rewrite that file or restart NATS.
 
-use crate::{docker_client, nats_config, AppState};
+use crate::{docker_client, nats_auth_callout, nats_config, AppState};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
@@ -15,6 +18,7 @@ use std::path::Path as FsPath;
 use std::process;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use tera::Context;
 
 #[derive(Deserialize)]
@@ -33,7 +37,6 @@ pub struct RegisterResponse {
     pub nats_url: String,
     pub nats_user: String,
     pub nats_password: String,
-    pub nats_token: String,
     pub consumer_name: String,
     pub proxy_ip: String,
     pub pdns_api_key: String,
@@ -41,6 +44,15 @@ pub struct RegisterResponse {
     pub image_prefix: String,
     pub image_channel: String,
     pub image_tag: String,
+}
+
+// Generates a fresh, high-entropy per-secondary NATS password: 32 CSPRNG
+// bytes, hex-encoded. Mirrors `load_or_create_session_secret`'s secret
+// generation in main.rs. Never stored in plaintext -- callers persist only
+// `nats_auth_callout::hash_nats_password(&this)`.
+fn generate_nats_password() -> String {
+    let bytes: [u8; 32] = rand::random();
+    hex::encode(bytes)
 }
 
 #[derive(Serialize, Clone)]
@@ -104,7 +116,15 @@ pub async fn register_secondary(
     if state.config.secondary_registration_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if form.token != state.config.secondary_registration_token {
+    // Constant-time comparison so a byte-by-byte timing side-channel can't be
+    // used to recover the registration token one character at a time. Matches
+    // the same idiom used for the CSRF token (routes/mod.rs) and the NATS
+    // password hash (nats_auth_callout.rs).
+    if !bool::from(
+        form.token
+            .as_bytes()
+            .ct_eq(state.config.secondary_registration_token.as_bytes()),
+    ) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -119,39 +139,44 @@ pub async fn register_secondary(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Secondaries use the read-only NATS role credential.
-    let nats_user = state.config.nats_dns_reader_user.clone();
-    let nats_token = state.config.nats_dns_reader_password.clone();
+    // Issue #583: each secondary gets its own NATS identity now, not the old
+    // shared DNS-reader credential. `name` doubles as the NATS username --
+    // it already passed the same alphanumeric+dash charset check NATS
+    // usernames require (see nats_config::validate_nats_username), and it's
+    // already the table's primary key, so no separate uniqueness check is
+    // needed. Only the password's hash is ever persisted; the plaintext is
+    // returned exactly once, here, and never stored.
+    let nats_user = form.name.clone();
+    let nats_password = generate_nats_password();
+    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password);
     let consumer_name = form.name.clone();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
-    // INSERT OR REPLACE INTO secondaries
+    // INSERT OR REPLACE INTO secondaries. `nats_token` is a vestigial NOT
+    // NULL column from the pre-#583 shared-token model (see
+    // main.rs::migrate_secondaries_table_for_auth_callout) -- nothing reads
+    // it anymore, but it must still be supplied to satisfy the column
+    // constraint on both fresh and upgraded databases.
     {
         let db = state
             .db
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         db.execute(
-            "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, registered_at, last_seen)
-             VALUES (?1, ?2, ?3, ?4, NULL)",
-            rusqlite::params![form.name, consumer_name, nats_token, now],
+            "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, nats_user, nats_password_hash, registered_at, last_seen)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, NULL)",
+            rusqlite::params![form.name, consumer_name, nats_user, nats_password_hash, now],
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    // Keep the shared NATS config write/reload path exercised for v0.1.0.
-    reload_nats_conf(&state)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     Ok(Json(RegisterResponse {
         nats_url: state.config.nats_url.clone(),
         nats_user,
-        nats_password: nats_token.clone(),
-        nats_token,
+        nats_password,
         consumer_name,
         proxy_ip: state.config.standard_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
@@ -182,11 +207,10 @@ pub async fn remove_secondary(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Keep the shared NATS config write/reload path exercised for v0.1.0.
-    reload_nats_conf(&state)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    // No nats.conf rewrite or NATS restart needed (issue #583): the
+    // auth-callout responder re-checks this table on every connection
+    // attempt, so deleting the row alone revokes this secondary's access on
+    // its very next reconnect, with zero effect on any other secondary.
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -201,23 +225,33 @@ pub async fn rotate_token(
     if state.config.secondary_registration_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if form.token != state.config.secondary_registration_token {
+    // Constant-time comparison, same rationale as register_secondary above.
+    if !bool::from(
+        form.token
+            .as_bytes()
+            .ct_eq(state.config.secondary_registration_token.as_bytes()),
+    ) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Secondaries use the read-only NATS role credential.
-    let nats_user = state.config.nats_dns_reader_user.clone();
-    let nats_token = state.config.nats_dns_reader_password.clone();
+    // Issue #583: actually regenerates this ONE secondary's own NATS
+    // credential (the endpoint's name finally matches its behavior -- see
+    // #433's history of `rotate_token` returning an unchanged shared value).
+    // `nats_user` (== name) never changes on rotation, only the password;
+    // the old password's hash is overwritten in the same UPDATE, so it stops
+    // working the instant this commits -- no separate revocation step.
+    let nats_user = name.clone();
+    let nats_password = generate_nats_password();
+    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password);
 
-    // Update the secondary's stored token and verify the secondary exists
     let rows_affected = {
         let db = state
             .db
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         db.execute(
-            "UPDATE secondaries SET nats_token = ? WHERE name = ?",
-            [nats_token.clone(), name.clone()],
+            "UPDATE secondaries SET nats_password_hash = ? WHERE name = ?",
+            [nats_password_hash, name.clone()],
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
@@ -227,23 +261,21 @@ pub async fn rotate_token(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Keep the shared NATS config write/reload path exercised for v0.1.0.
-    reload_nats_conf(&state)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     Ok(Json(serde_json::json!({
         "nats_user": nats_user,
-        "nats_password": nats_token.clone(),
-        "nats_token": nats_token
+        "nats_password": nats_password
     })))
 }
 
 // ─── Helper Functions ───
-// Secondary registration changes must keep NATS credentials, the shared
-// `nats.conf`, and the running NATS process in sync. Docker exec is banned, so
-// the safe reload path is: write the full config atomically, then restart only
-// the predeclared NATS container through the narrowed Docker proxy.
+// nats.conf is now static for the lifetime of the process (issue #583):
+// it's written once at startup (see main.rs) with the UI/DNS-writer/
+// DNS-replica/callout-bypass static roles plus the `auth_callout {}` stanza,
+// then never touched again. Registering, rotating, or removing a secondary
+// only ever writes to the `secondaries` table -- the auth-callout responder
+// (nats_auth_callout.rs) reads that table live on every connection attempt,
+// so there is nothing in nats.conf that could need to change per secondary.
+// `reload_nats_conf`/`update_nats_conf` remain as the one-time startup path.
 
 pub async fn reload_nats_conf(
     state: &AppState,
@@ -260,13 +292,101 @@ pub async fn update_nats_conf(
     nats_config::validate_runtime_nats_credentials(&state.config)?;
 
     let nats_conf = format!(
-        "jetstream {{\n  store_dir: /data\n}}\n\nauthorization {{\n  users = [\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\"lancache.dns.record\", \"lancache.dns.flush\"]\n      }}\n    }}\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\n          \"lancache.dns.record\",\n          \"$JS.API.STREAM.INFO.LANCACHE_DNS\",\n          \"$JS.API.STREAM.CREATE.LANCACHE_DNS\",\n          \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\",\n          \"$JS.ACK.LANCACHE_DNS.>\"\n        ]\n        subscribe = [\"lancache.dns.>\", \"_INBOX.>\"]\n      }}\n    }}\n    {{\n      user: \"{}\"\n      password: \"{}\"\n      permissions = {{\n        publish = [\n          \"$JS.API.STREAM.INFO.LANCACHE_DNS\",\n          \"$JS.API.STREAM.CREATE.LANCACHE_DNS\",\n          \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\",\n          \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\",\n          \"$JS.ACK.LANCACHE_DNS.>\"\n        ]\n        subscribe = [\"lancache.dns.>\", \"_INBOX.>\"]\n      }}\n    }}\n  ]\n}}\n",
-        state.config.nats_ui_user,
-        state.config.nats_ui_password,
-        state.config.nats_dns_writer_user,
-        state.config.nats_dns_writer_password,
-        state.config.nats_dns_reader_user,
-        state.config.nats_dns_reader_password
+        r#"jetstream {{
+  store_dir: /data
+}}
+
+authorization {{
+  users = [
+    {{
+      user: "{ui_user}"
+      password: "{ui_password}"
+      permissions = {{
+        publish = ["lancache.dns.record", "lancache.dns.flush"]
+      }}
+    }}
+    {{
+      user: "{writer_user}"
+      password: "{writer_password}"
+      permissions = {{
+        publish = [
+          "lancache.dns.record",
+          "$JS.API.STREAM.INFO.LANCACHE_DNS",
+          "$JS.API.STREAM.CREATE.LANCACHE_DNS",
+          "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
+          "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
+          "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
+          "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
+          "$JS.ACK.LANCACHE_DNS.>"
+        ]
+        subscribe = ["lancache.dns.>", "_INBOX.>"]
+      }}
+    }}
+    {{
+      # The primary's own co-located dns-ssl container -- always exactly one
+      # instance, so a static credential is fine here (see config.rs's
+      # nats_dns_replica_user docs for why this is NOT the same role external
+      # secondaries used to share).
+      user: "{replica_user}"
+      password: "{replica_password}"
+      permissions = {{
+        publish = [
+          "$JS.API.STREAM.INFO.LANCACHE_DNS",
+          "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
+          "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
+          "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
+          "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
+          "$JS.ACK.LANCACHE_DNS.>"
+        ]
+        subscribe = ["lancache.dns.>", "_INBOX.>"]
+      }}
+    }}
+    {{
+      # This process's own connection for answering auth-callout requests
+      # (see nats_auth_callout.rs).
+      user: "{callout_user}"
+      password: "{callout_password}"
+    }}
+  ]
+  auth_callout {{
+    issuer: "{issuer_public_key}"
+    # Every static user above must be listed here, not just the callout
+    # responder itself: nats-server only checks a connecting user's password
+    # against the static `users` list above for names in this list. Any
+    # username *not* listed here -- including one that happens to match a
+    # static entry above -- is routed through the callout instead (verified
+    # against a real nats-server 2.14.3; see nats_auth_callout.rs's module
+    # docs). Only external secondaries, which are deliberately absent from
+    # both this list and the static `users` list above, are meant to go
+    # through the callout.
+    auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}"]
+  }}
+}}
+"#,
+        // .as_deref().unwrap_or_default() below is defensive only: the
+        // validate_runtime_nats_credentials call above already guarantees
+        // every one of these is Some by the time this format! runs.
+        ui_user = state.config.nats_ui_user,
+        ui_password = state.config.nats_ui_password.as_deref().unwrap_or_default(),
+        writer_user = state.config.nats_dns_writer_user,
+        writer_password = state
+            .config
+            .nats_dns_writer_password
+            .as_deref()
+            .unwrap_or_default(),
+        replica_user = state.config.nats_dns_replica_user,
+        replica_password = state
+            .config
+            .nats_dns_replica_password
+            .as_deref()
+            .unwrap_or_default(),
+        callout_user = state.config.nats_callout_user,
+        callout_password = state
+            .config
+            .nats_callout_password
+            .as_deref()
+            .unwrap_or_default(),
+        issuer_public_key = state.nats_issuer_public_key,
     );
 
     write_nats_conf_atomically(&state.config.nats_conf_path, &nats_conf)
@@ -315,12 +435,24 @@ mod tests {
     }
 
     #[test]
+    fn generate_nats_password_is_high_entropy_and_never_repeats() {
+        let a = generate_nats_password();
+        let b = generate_nats_password();
+        // 32 random bytes hex-encoded is exactly 64 hex characters.
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(
+            a, b,
+            "two consecutive calls produced the same password -- CSPRNG source is broken"
+        );
+    }
+
+    #[test]
     fn register_response_serializes_image_tag_for_secondary_setup() {
         let response = RegisterResponse {
             nats_url: "nats://primary:4222".to_string(),
-            nats_user: "lancache-dns-reader".to_string(),
-            nats_password: "reader-secret".to_string(),
-            nats_token: "reader-secret".to_string(),
+            nats_user: "secondary-a".to_string(),
+            nats_password: "per-secondary-secret".to_string(),
             consumer_name: "secondary-a".to_string(),
             proxy_ip: "192.168.1.100".to_string(),
             pdns_api_key: "pdns-secret".to_string(),

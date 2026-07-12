@@ -125,8 +125,8 @@ services:
               }
             }
             {
-              user: "__NATS_DNS_READER_USER__"
-              password: "__NATS_DNS_READER_PASSWORD__"
+              user: "__NATS_DNS_REPLICA_USER__"
+              password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
@@ -147,8 +147,8 @@ services:
           -e "s|__NATS_UI_PASSWORD__|$$(escape_sed "$$NATS_UI_PASSWORD")|g" \
           -e "s|__NATS_DNS_WRITER_USER__|$$(escape_sed "$$NATS_DNS_WRITER_USER")|g" \
           -e "s|__NATS_DNS_WRITER_PASSWORD__|$$(escape_sed "$$NATS_DNS_WRITER_PASSWORD")|g" \
-          -e "s|__NATS_DNS_READER_USER__|$$(escape_sed "$$NATS_DNS_READER_USER")|g" \
-          -e "s|__NATS_DNS_READER_PASSWORD__|$$(escape_sed "$$NATS_DNS_READER_PASSWORD")|g" \
+          -e "s|__NATS_DNS_REPLICA_USER__|$$(escape_sed "$$NATS_DNS_REPLICA_USER")|g" \
+          -e "s|__NATS_DNS_REPLICA_PASSWORD__|$$(escape_sed "$$NATS_DNS_REPLICA_PASSWORD")|g" \
           /tmp/nats.conf.template > "$$tmp_nats_conf"
         chown 10001:10001 "$$tmp_nats_conf"
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
@@ -159,8 +159,8 @@ services:
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
-      - NATS_DNS_READER_USER=${NATS_DNS_READER_USER:?NATS_DNS_READER_USER is required}
-      - NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD:?NATS_DNS_READER_PASSWORD is required}
+      - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
     volumes:
       - nats-data:/data
       - nats-conf:/etc/nats
@@ -381,8 +381,8 @@ services:
       - PROXY_IP=${IP_SSL}
       - LOG_QUERIES=0
       - NATS_URL=nats://nats:4222
-      - NATS_USER=${NATS_DNS_READER_USER:?NATS_DNS_READER_USER is required}
-      - NATS_PASSWORD=${NATS_DNS_READER_PASSWORD:?NATS_DNS_READER_PASSWORD is required}
+      - NATS_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
+      - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
       - NATS_CONSUMER=dns-ssl
       - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
@@ -622,8 +622,10 @@ services:
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
-      - NATS_DNS_READER_USER=${NATS_DNS_READER_USER:?NATS_DNS_READER_USER is required}
-      - NATS_DNS_READER_PASSWORD=${NATS_DNS_READER_PASSWORD:?NATS_DNS_READER_PASSWORD is required}
+      - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
