@@ -228,6 +228,7 @@ runs on the host's real network interface by default:
 |---|---|---|---|
 | **Conflict discovery** (`services/ui/dhcp-probe.sh`) | Does *any* DHCP server answer on this LAN segment (broadcast discover via `nmap`), and does a client dry-run on the host's own detected default interface also succeed? | Admin UI DHCP page, on demand | The client dry-run leg uses `dhclient -sf /bin/true` so it never applies the negotiated lease to the host interface, but it does run against the host's real detected interface. |
 | **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container and a throwaway client container, both on a dedicated Docker bridge network the script creates and destroys itself. Neither container's interface, nor any host interface, is ever configured with the negotiated lease. |
+| **Kea Control Agent mutation round-trip** (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
 
 The second check exists because the first only tells you a DHCP server
 answered -- it does not prove ours behaves correctly, and it does not report
@@ -240,9 +241,10 @@ offered value explicitly so a wrong option is easy to spot.
 its own design -- see the script's header comment for the full rationale):
 
 - Static host reservations (a known MAC address receiving its reserved,
-  out-of-pool address) -- tracked separately in issue #557.
+  out-of-pool address) -- now covered by the Kea Control Agent mutation
+  round-trip below, not this script.
 - DHCP-DDNS lease-event follow-through (a granted lease producing a real
-  PowerDNS record via TSIG-authenticated DDNS) -- also issue #557.
+  PowerDNS record via TSIG-authenticated DDNS) -- issue #557.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path
   (`services/dhcp-proxy`), not exercised by this script at all.
 
@@ -250,3 +252,23 @@ It has no invasive/host-interface mode: both the Kea server and the DHCP
 client involved always run inside their own throwaway, isolated Docker
 network, so there was nothing that needed gating behind an explicit opt-in
 flag beyond the job itself only running on manual dispatch.
+
+`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh` (issue #634) closes the
+static-reservation gap left open above: it drives a real static host
+reservation add/remove through the Admin UI's actual `/dhcp/static/add` and
+`/dhcp/static/remove` HTTP routes -- the same `kea_config_modify()` Rust code
+path a real operator's browser would hit -- against a real Kea Control Agent,
+and confirms both a follow-up `config-get` and a subsequent real DHCP lease
+request for the same MAC address reflect each change. This is what would have
+caught #630 (Kea 2.6.3's `config-get` response including a `hash` field that
+`config-test`/`config-set` reject) automatically instead of needing a human
+to hit it in production: every existing `cargo test` for that function mocks
+Kea's response and none of those mocks omitted the fix once written, so they
+prove the fix works, not that the assumed response shape is still accurate.
+**What it does NOT verify**: subnet/custom-option mutation routes beyond
+reservations (same underlying `kea_config_modify()` code path, so this is
+representative coverage of that function, not route-by-route exhaustive),
+DHCP-DDNS lease-event follow-through (issue #557), and the `dnsmasq-proxy`
+mode (entirely different code path, no Kea/Admin-UI Control Agent interaction
+at all). Also has no invasive/host-interface mode, for the same reason as the
+lease-flow simulation above.
