@@ -75,11 +75,19 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 client_tool_image="${DHCP_CTRL_AGENT_CLIENT_IMAGE:?DHCP_CTRL_AGENT_CLIENT_IMAGE is required (an image providing dhclient/curl/jq, e.g. the build-tools image)}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 
-# Same fixed compose project/network/IPs as scripts/ui-nats-dns-integration-simulation.sh
-# and scripts/ssl-mitm-cache-simulation.sh -- safe because full-setup-validate.yml
-# chains all of these jobs serially (`needs:`/`if: always()`) on the same
-# self-hosted runner tier, so they never run concurrently with each other.
-compose_project="lancache-ng-validation"
+# COMPOSE_PROJECT_NAME is derived per-workflow-run by full-setup-validate.yml's
+# compute-validation-network job (#661/#690) and threaded into this job's env
+# by the workflow, exactly like scripts/ssl-mitm-cache-simulation.sh and
+# scripts/ui-nats-dns-integration-simulation.sh already consume it -- two
+# different, concurrent workflow_dispatch runs sharing one of the self-hosted
+# runner hosts then get distinct compose project names instead of fighting
+# over the same fixed one (#623). The fallback below only matters for a local,
+# outside-CI invocation of this script.
+# The 172.30.99.0/24 addresses below are still fixed, not per-run derived,
+# matching the current (not yet fully derived) state of those same sibling
+# scripts -- full per-run subnet/IP derivation for this shared compose file,
+# not just its project name, is tracked separately in #703.
+compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
 ui_ip="172.30.99.9"
 # .2-.9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/netdata/nats/ui
@@ -106,6 +114,20 @@ ui_container="lancache-ng-dhcp634-ui-$$"
 work_dir="$repo_root/.dhcp-kea-ctrl-agent-mutation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
+# Bind-mounted onto BOTH the Kea and Admin UI containers below at
+# /var/lib/kea, exactly like deploy/dev/docker-compose.yml and
+# deploy/prod/docker-compose.yml share their own kea-data volume between
+# those two services. Needed so the Admin UI's known-good-config-snapshot
+# write (services/ui/src/kea_snapshots.rs, #614) after each successful
+# mutation actually succeeds here instead of only in those two compose
+# stacks: services/dhcp/entrypoint.sh (run as root, see the Kea container
+# below) creates and chowns config-snapshots/ under /var/lib/kea to the
+# Admin UI's fixed unprivileged uid (10001) on every start -- without this
+# shared mount the Admin UI's own default KEA_CONFIG_SNAPSHOT_DIR
+# (/var/lib/kea/config-snapshots) does not exist at all in its own
+# container and its write fails, silently logging a warning rather than
+# failing this test outright.
+mkdir -p "$work_dir/kea-data"
 
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 
@@ -156,6 +178,7 @@ echo "== Starting a real Kea container on the same compose network ($network_nam
 docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
+    -v "$work_dir/kea-data:/var/lib/kea" \
     -e DHCP_SUBNET="172.30.99.0/24" \
     -e DHCP_RANGE_START="$pool_start" \
     -e DHCP_RANGE_END="$pool_end" \
@@ -199,6 +222,7 @@ echo "== Starting the real Admin UI (published $image_tag image) pointed at this
 # curl client below reaches it over the compose network directly, exactly
 # like ui-nats-dns-integration-simulation.sh already does for $ui_ip:8080.
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" run -d --name "$ui_container" \
+    -v "$work_dir/kea-data:/var/lib/kea" \
     -e DHCP_MODE=kea \
     -e DHCP_API_URL="http://$kea_ip:8000" \
     -e DHCP_API_TOKEN="$kea_ctrl_token" \
@@ -384,6 +408,38 @@ if [[ "$reservation_gone" != "yes" ]]; then
     exit 1
 fi
 echo "Kea's live config-get confirms the reservation for $test_mac is gone."
+
+# Removing the reservation from Kea's config above (verified by config-get
+# just now) does not expire or delete the ALREADY-ACTIVE lease for
+# $reserved_ip that the "post-add" lease request created earlier -- that's a
+# separate, real entry in Kea's lease database, not part of the reservation
+# config that was just removed. Kea prefers renewing a client's own
+# still-valid lease, so without deleting it here the THIRD request below
+# could still be offered $reserved_ip straight out of the lease database,
+# failing the assertion that removal took effect even though the Admin UI's
+# remove mutation and the config-get check above both genuinely succeeded.
+# Uses Kea's own lease4-del control command directly against the Control
+# Agent (matching this script's existing direct config-get calls above), not
+# the Admin UI's /dhcp/lease/release route (release_lease() in
+# services/ui/src/routes/dhcp.rs) -- that route is a distinct code path this
+# script isn't exercising, this is just cleanup to make the next assertion
+# valid.
+echo "== Clearing the now-orphaned active Kea lease for $reserved_ip before the next request =="
+lease_del_result="$(docker exec "$kea_container" sh -c '
+    curl -sf -u "admin:$1" -H "Content-Type: application/json" \
+        -d "{\"command\":\"lease4-del\",\"service\":[\"dhcp4\"],\"arguments\":{\"ip-address\":\"$2\"}}" \
+        "http://127.0.0.1:8000/" | jq -r ".[0].result"
+' -- "$kea_ctrl_token" "$reserved_ip")"
+# 0 = deleted, 3 = Kea's CONTROL_RESULT_EMPTY (no matching lease -- e.g. it
+# already expired on its own) -- both leave $reserved_ip with no active
+# lease, which is all the next assertion actually requires. Anything else is
+# a genuine Control Agent failure, matching kea_lease_del_result()'s own
+# result-code handling in services/ui/src/routes/dhcp.rs.
+if [[ "$lease_del_result" != "0" && "$lease_del_result" != "3" ]]; then
+    echo "::error::lease4-del for $reserved_ip returned unexpected Kea result code '$lease_del_result'." >&2
+    exit 1
+fi
+echo "Active lease for $reserved_ip cleared from Kea's lease database (lease4-del result: $lease_del_result)."
 
 echo "== Requesting a THIRD lease for $test_mac: must be back in the dynamic pool =="
 post_remove_address="$(request_lease "post-remove" "client-state-post-remove")"

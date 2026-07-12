@@ -611,9 +611,27 @@ jobs:
     # the shared self-hosted runner tier rather than introducing new
     # concurrency here.
     name: DHCP Kea Control Agent mutation simulation
-    needs: nats-auth-callout-simulation
+    needs: [compute-validation-network, nats-auth-callout-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      # Threaded through so this job's own compose project name matches the
+      # rest of this workflow's per-run derivation (#661/#690) instead of the
+      # script's old hardcoded default -- see this job's own script,
+      # scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh, for why the
+      # underlying 172.30.99.0/24 addresses are still fixed (#703).
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      # Paired with COMPOSE_PROJECT_NAME here even though this job's own
+      # standalone Admin UI container never publishes a host port (started
+      # via `compose run` without --service-ports, per this job's own
+      # script) -- matching ssl-mitm-cache-simulation and
+      # nats-secondary-auth-callout-simulation, which set this same pair for
+      # every job that references deploy/full-setup/docker-compose.yml under
+      # this shared compose project, regardless of whether that job's own
+      # script happens to use the "ui" service's published port. Keeps
+      # `docker compose down` below from parsing the shared compose file's
+      # ui service with this variable unset.
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
