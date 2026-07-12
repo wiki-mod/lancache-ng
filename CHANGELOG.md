@@ -61,6 +61,9 @@ Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06).
 
 ### Changed
 
+- Recorded completion of the #135 review-gate cleanup stream so remaining
+  work can continue as ordinary `v0.2.0` development instead of blocking the
+  closed review umbrella.
 - CI: `build-push`, `codeql`, and `build-tools` workflows now also trigger on
   PRs/pushes targeting `v0.2.0`, not just `master` (#503).
 - The CodeQL Rust job now reports CodeQL's own extraction-quality
