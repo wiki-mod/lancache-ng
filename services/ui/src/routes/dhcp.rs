@@ -3386,7 +3386,7 @@ mod tests {
                 lease_time: 7200,
                 editable_options: preserved_options,
                 reservations: None,
-                },
+            },
         )
         .expect("apply subnet value");
 
