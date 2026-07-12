@@ -236,6 +236,13 @@ jobs:
               echo "::error::$service is not running (state: $container_status)"
               failed=1
             elif (( restart_count > 1 )); then
+              # > 1, not > 0: a single restart during normal startup
+              # ordering (e.g. waiting on a dependency that wasn't healthy
+              # yet) is expected and not itself a crash loop. This same
+              # threshold is what watchtower-update-simulation.sh's own
+              # comment relies on staying tolerant of a legitimate single
+              # restart after a Watchtower-driven container recreation --
+              # tightening this to > 0 here would make that job misfire.
               echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
               failed=1
             fi
@@ -293,6 +300,15 @@ jobs:
     # IPs, so it must not run concurrently with that job -- confirmed
     # directly during #403/#594 that two jobs binding the same fixed
     # addresses on this shared runner tier collide.
+    #
+    # `needs:` here exists purely to serialize onto the shared runner tier
+    # and avoid the network/port collision above -- it is NOT expressing a
+    # real success dependency on full-setup-validate's own result. `if:
+    # always()` is what keeps that distinction real: without it, a failure
+    # in full-setup-validate would cascade-skip this job (GitHub Actions'
+    # default), silently losing this job's own independent diagnostic
+    # signal for a completely unrelated part of the stack. Every later job
+    # in this file chains the same way for the same reason.
     name: SSL MITM cache simulation
     needs: [compute-validation-network, full-setup-validate]
     if: always()
@@ -304,6 +320,14 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve build-tools image
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true: this job's own client checks
+        # (dig/curl) only need tools that already exist in every published
+        # build-tools image, so it can and should fail loudly if that image
+        # is somehow unavailable rather than silently falling back to a
+        # branch-local build -- unlike setup-cli-simulation/
+        # dhcp-kea-lease-flow-simulation below, which genuinely need a tool
+        # added to tools/build-tools/Dockerfile only on this branch and so
+        # deliberately omit this flag (see their own comments).
         id: build-tools-image
         run: |
           set -euo pipefail
@@ -343,6 +367,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve build-tools image
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true: same reasoning as
+        # ssl-mitm-cache-simulation's own step above.
         id: build-tools-image
         run: |
           set -euo pipefail
@@ -539,6 +565,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve build-tools image
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true: same reasoning as
+        # ssl-mitm-cache-simulation's own step above.
         id: build-tools-image
         run: |
           set -euo pipefail
