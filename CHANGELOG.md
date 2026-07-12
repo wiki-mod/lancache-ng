@@ -14,6 +14,20 @@ is real, live, running code, not just work sitting in source control.
 
 ### Added
 
+- Added the repeat-run/idempotence test that was still missing for NATS's
+  static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
+  Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config
+  (`tests/bats/dns_config_snapshot_idempotence.bats`), and the watchdog
+  (`tests/bats/watchdog_idempotence.bats`) already had this coverage from
+  their own #614/#615 implementation PRs and the #456 audit itself; NATS's
+  `update_nats_conf()` (per #583's per-secondary-identity decision) did not,
+  so its config-rendering logic was pulled out into a pure `render_nats_conf`
+  function and a test now drives the render → atomic-write pipeline twice in
+  a row, proving it converges to byte-identical output for an unchanged
+  config. Also added `scripts/check-idempotence-test-coverage.sh`, a small CI
+  guard (with its own `tests/bats/check_idempotence_test_coverage.bats`
+  fixture coverage) that fails the build if any of these five known
+  config-writer entrypoints loses its repeat-run test.
 - Added a known-good configuration snapshot mechanism for the nginx proxy and
   dnsmasq `dhcp-proxy` adapters: generated config is validated (`nginx -t`,
   `dnsmasq --test`) before being snapshotted to a persistent, service-owned
