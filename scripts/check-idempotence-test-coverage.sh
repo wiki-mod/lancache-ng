@@ -66,15 +66,31 @@ has_bats_repeat_test() {
 
 has_rust_repeat_test() {
     local file="$1"
-    # Rust test attributes and the `fn` they annotate can be several lines
-    # apart in this codebase's style (attribute, then a doc-comment-free
-    # blank line is rare but not guaranteed), so this matches on the
-    # attribute and function name independently: any #[test]/#[tokio::test]
-    # line followed (not necessarily immediately) by a fn whose name carries
-    # the marker. -P (PCRE) with -z (NUL-separated) lets `.` cross newlines
-    # so a test's attribute and its fn signature can be matched as one unit
-    # even when a line of `#[should_panic]` or similar sits between them.
-    grep -Pzoq "(?s)#\[(test|tokio::test)\][^\n]*(\n[^\n]*)*?\n\s*(async )?fn [a-z0-9_]*${MARKER_REGEX}[a-z0-9_]*\s*\(" "$file"
+    # Rust test attributes and the `fn` they annotate can be a line or two
+    # apart in this codebase's style (an attribute, then occasionally another
+    # attribute like #[should_panic], then the fn line), so this is a small
+    # awk state machine rather than a single-line regex: `pending` latches on
+    # any #[test]/#[tokio::test] line and stays set across any lines that
+    # follow (including other attributes) until the next `fn NAME(` line,
+    # whose name is then checked for the marker; `pending` clears there
+    # either way, so an unrelated non-matching test in between two matching
+    # ones can never leak a stale match forward. Deliberately POSIX awk only
+    # (no gawk-specific IGNORECASE, no PCRE/`-z` grep) -- a PCRE+null-data
+    # `grep -Pzo` version of this same check worked on a GNU grep with PCRE
+    # support but silently failed (falsely reporting no test found) on this
+    # project's self-hosted CI runners, whose `grep` does not support `-P`.
+    awk -v marker="$MARKER_REGEX" '
+        /#\[test\]/ || /#\[tokio::test\]/ { pending = 1; next }
+        pending && /fn[ \t]+[A-Za-z0-9_]+[ \t]*\(/ {
+            name = $0
+            sub(/^.*fn[ \t]+/, "", name)
+            sub(/[ \t]*\(.*$/, "", name)
+            lname = tolower(name)
+            if (lname ~ marker) { found = 1 }
+            pending = 0
+        }
+        END { exit (found ? 0 : 1) }
+    ' "$file"
 }
 
 for pair in "${WRITER_TEST_EVIDENCE[@]}"; do
