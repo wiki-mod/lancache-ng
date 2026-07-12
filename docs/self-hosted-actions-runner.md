@@ -130,6 +130,16 @@ sudo ./svc.sh install
 sudo ./svc.sh start
 ```
 
+If the runner will also execute CodeQL workflows, add the `codeql` label:
+
+```bash
+./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-heavy,codeql
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+CodeQL requires the `codeql` label to match the `runs-on` configuration in `.github/workflows/codeql.yml`.
+
 ## Local Docker build cache
 
 The build and build-tools workflows use a local Buildx cache under

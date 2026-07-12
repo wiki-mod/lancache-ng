@@ -139,7 +139,7 @@ by configuring which DNS server IP they point to:
 docker compose -f deploy/dev/docker-compose.yml up --build
 
 # Production
-docker compose -f deploy/prod/docker-compose.yml up -d --build
+docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
 ## First-time Setup
