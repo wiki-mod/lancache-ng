@@ -83,6 +83,10 @@ services:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-standard:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
+      # Known-good pdns.conf/recursor.conf snapshots (#615): must be a
+      # persistent, service-owned volume, not the ephemeral container layer,
+      # so rollback survives container restarts/recreates.
+      - pdns-config-snapshots-standard:/var/lib/lancache-dns
     ports:
       # NOTE (Windows): Port 53 is used by the Windows DNS client.
       # Stop "DNS Client" in services.msc, or test the proxy directly:
@@ -122,6 +126,7 @@ services:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - pdns-data-ssl:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
+      - pdns-config-snapshots-ssl:/var/lib/lancache-dns
     ports:
       - "${IP_SSL}:5353:53/udp"
       - "${IP_SSL}:5353:53/tcp"
@@ -649,9 +654,13 @@ networks:
 volumes:
   proxy-cache:
   proxy-logs:
-  # Known-good config snapshots (#415), one persistent volume per adapter.
+  # Known-good config snapshots (#415, #615), one persistent volume per
+  # adapter. dns-standard and dns-ssl are separate containers with
+  # independently-generated config, so each gets its own snapshot history.
   proxy-config-snapshots:
   dhcp-proxy-config-snapshots:
+  pdns-config-snapshots-standard:
+  pdns-config-snapshots-ssl:
   watchdog-status:
   kea-data:
   nats-data:
