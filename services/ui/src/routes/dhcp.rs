@@ -272,6 +272,25 @@ pub struct UpdateDhcpProxyForm {
     pub dhcp_dns_primary: String,
     pub dhcp_dns_secondary: String,
     pub upstream_dhcp_ip: String,
+    // Issue #450: additional optional dnsmasq relay/proxy fields. All are
+    // allowed to be empty (the feature they configure is simply not
+    // rendered into dnsmasq.conf, see entrypoint.sh's
+    // `_dhcp_proxy_render_optional_directives`); only non-empty values are
+    // validated for shape.
+    #[serde(default)]
+    pub dhcp_proxy_interface: String,
+    #[serde(default)]
+    pub dhcp_proxy_router: String,
+    #[serde(default)]
+    pub dhcp_ntp_servers: String,
+    #[serde(default)]
+    pub dhcp_proxy_domain: String,
+    #[serde(default)]
+    pub dhcp_proxy_boot_filename: String,
+    #[serde(default)]
+    pub dhcp_proxy_boot_server: String,
+    #[serde(default)]
+    pub dhcp_proxy_custom_options: String,
 }
 
 #[derive(Deserialize)]
@@ -302,6 +321,13 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let dhcp_ntp_servers = state.config.effective_dhcp_ntp_servers();
     let dhcp_proxy_subnet_start = state.config.effective_dhcp_proxy_subnet_start();
     let dhcp_upstream_dhcp_ip = state.config.effective_dhcp_upstream_dhcp_ip();
+    let dhcp_proxy_interface = state.config.effective_dhcp_proxy_interface();
+    let dhcp_proxy_router = state.config.effective_dhcp_proxy_router();
+    let dhcp_proxy_domain = state.config.effective_dhcp_proxy_domain();
+    let dhcp_proxy_boot_filename = state.config.effective_dhcp_proxy_boot_filename();
+    let dhcp_proxy_boot_server = state.config.effective_dhcp_proxy_boot_server();
+    let dhcp_proxy_custom_options_form =
+        custom_options_storage_to_form(&state.config.effective_dhcp_proxy_custom_options());
     ctx.insert("active_page", "dhcp");
     ctx.insert("dhcp_mode", &dhcp_mode.as_str());
     ctx.insert("dhcp_has_kea", &dhcp_has_kea);
@@ -311,6 +337,15 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert("dhcp_ntp_servers", &dhcp_ntp_servers);
     ctx.insert("dhcp_proxy_subnet_start", &dhcp_proxy_subnet_start);
     ctx.insert("dhcp_upstream_dhcp_ip", &dhcp_upstream_dhcp_ip);
+    ctx.insert("dhcp_proxy_interface", &dhcp_proxy_interface);
+    ctx.insert("dhcp_proxy_router", &dhcp_proxy_router);
+    ctx.insert("dhcp_proxy_domain", &dhcp_proxy_domain);
+    ctx.insert("dhcp_proxy_boot_filename", &dhcp_proxy_boot_filename);
+    ctx.insert("dhcp_proxy_boot_server", &dhcp_proxy_boot_server);
+    ctx.insert(
+        "dhcp_proxy_custom_options_form",
+        &dhcp_proxy_custom_options_form,
+    );
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     if kea_api_available(
@@ -418,6 +453,12 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
         "DHCP_DNS_SECONDARY",
         "UPSTREAM_DHCP_IP",
         "DHCP_NTP_SERVERS",
+        "DHCP_PROXY_INTERFACE",
+        "DHCP_PROXY_ROUTER",
+        "DHCP_PROXY_DOMAIN",
+        "DHCP_PROXY_BOOT_FILENAME",
+        "DHCP_PROXY_BOOT_SERVER",
+        "DHCP_PROXY_CUSTOM_OPTIONS",
     ] {
         if let Some(value) = map.get(key) {
             content.push_str(key);
@@ -488,6 +529,30 @@ pub async fn update_dhcp_mode(
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -513,6 +578,77 @@ pub async fn update_dhcp_proxy(
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
 
+    // Issue #450: additional optional fields. Each is only validated when
+    // non-empty -- leaving one blank simply means entrypoint.sh renders no
+    // directive for it (see `_dhcp_proxy_render_optional_directives`), it is
+    // never a form error. This is friendly early feedback only; the
+    // authoritative fail-closed gate is still `dnsmasq --test` plus the
+    // known-good-snapshot rollback in services/dhcp-proxy/entrypoint.sh.
+    if !form.dhcp_proxy_interface.trim().is_empty()
+        && !is_valid_interface_name(&form.dhcp_proxy_interface)
+    {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid relay/proxy listen interface: use only letters, digits, '.', '-', or '_'.",
+        ));
+    }
+    if !form.dhcp_proxy_router.trim().is_empty() && parse_ipv4(&form.dhcp_proxy_router).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid router/gateway option: must be a valid IPv4 address.",
+        ));
+    }
+    if !form.dhcp_ntp_servers.trim().is_empty()
+        && !form
+            .dhcp_ntp_servers
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .all(|s| parse_ipv4(s).is_some())
+    {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid NTP servers option: must be a comma-separated list of IPv4 addresses.",
+        ));
+    }
+    if !form.dhcp_proxy_domain.trim().is_empty() && !is_valid_domain_name(&form.dhcp_proxy_domain) {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid domain option: use a plain DNS domain name (letters, digits, '-', '.').",
+        ));
+    }
+    if !form.dhcp_proxy_boot_filename.trim().is_empty()
+        && !is_valid_boot_filename(&form.dhcp_proxy_boot_filename)
+    {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid PXE boot filename: no whitespace, commas, or control characters.",
+        ));
+    }
+    if !form.dhcp_proxy_boot_server.trim().is_empty()
+        && parse_ipv4(&form.dhcp_proxy_boot_server).is_none()
+    {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid PXE boot server address: must be a valid IPv4 address.",
+        ));
+    }
+    if !form.dhcp_proxy_boot_server.trim().is_empty()
+        && form.dhcp_proxy_boot_filename.trim().is_empty()
+    {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "A PXE boot server address requires a boot filename; a server address alone is not meaningful.",
+        ));
+    }
+    let custom_options_storage = parse_custom_options_form(&form.dhcp_proxy_custom_options)
+        .map_err(|message| {
+            DhcpError::new(
+                StatusCode::BAD_REQUEST,
+                format!("Invalid custom DHCP option: {message}"),
+            )
+        })?;
+
     persist_ui_settings(
         &state,
         &[
@@ -524,13 +660,129 @@ pub async fn update_dhcp_proxy(
             ("DHCP_DNS_PRIMARY", form.dhcp_dns_primary),
             ("DHCP_DNS_SECONDARY", form.dhcp_dns_secondary),
             ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            ("DHCP_NTP_SERVERS", form.dhcp_ntp_servers.trim().to_string()),
             (
-                "DHCP_NTP_SERVERS",
-                state.config.effective_dhcp_ntp_servers(),
+                "DHCP_PROXY_INTERFACE",
+                form.dhcp_proxy_interface.trim().to_string(),
             ),
+            (
+                "DHCP_PROXY_ROUTER",
+                form.dhcp_proxy_router.trim().to_string(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                form.dhcp_proxy_domain.trim().to_string(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                form.dhcp_proxy_boot_filename.trim().to_string(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                form.dhcp_proxy_boot_server.trim().to_string(),
+            ),
+            ("DHCP_PROXY_CUSTOM_OPTIONS", custom_options_storage),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
+}
+
+// ─── dnsmasq relay/proxy field validators (issue #450) ───
+
+// Network interface names are short host-controlled identifiers (e.g.
+// `eth0`, `br-lan.100`), never arbitrary text -- reject anything containing
+// characters that would be meaningless (or unsafe to place unquoted into
+// dnsmasq's `interface=` directive).
+fn is_valid_interface_name(raw: &str) -> bool {
+    let name = raw.trim();
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+fn is_valid_domain_name(raw: &str) -> bool {
+    let name = raw.trim();
+    !name.is_empty()
+        && name.len() <= 253
+        && name
+            .split('.')
+            .all(|label| !label.is_empty() && label.len() <= 63 && is_valid_dns_label(label))
+}
+
+fn is_valid_dns_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    let alnum_or_hyphen = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
+    bytes.iter().all(|&b| alnum_or_hyphen(b))
+        && !bytes.first().is_some_and(|&b| b == b'-')
+        && !bytes.last().is_some_and(|&b| b == b'-')
+}
+
+// PXE boot filenames are paths like `pxelinux.0` or `efi/bootx64.efi`. They
+// are rendered straight into `dhcp-boot=<filename>,,<server>`, a comma-
+// delimited directive, so a comma in the filename would silently misparse
+// into the server-name field instead of erroring -- reject it explicitly
+// rather than let that happen. Newlines are rejected as they are elsewhere
+// in this file (would corrupt the rendered config file).
+fn is_valid_boot_filename(raw: &str) -> bool {
+    let name = raw.trim();
+    !name.is_empty()
+        && name.len() <= 255
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c == ',' || c.is_control())
+}
+
+// Parses the Admin UI's one-entry-per-line custom option textarea
+// (`CODE:VALUE` per line) into the `;`-separated single-line form persisted
+// to DHCP_PROXY_CUSTOM_OPTIONS (env/settings files are simple `KEY=value`
+// lines with no embedded newlines, matching the constraint
+// `validate_custom_dhcp_option_data` already enforces for Kea's per-subnet
+// custom options). Reuses the exact same code/data validators as Kea's
+// custom subnet options, including the exclusion of codes 3/6/15/42/119 --
+// those are already covered by this page's dedicated router/DNS/domain/NTP
+// fields, so routing them through the free-form custom list instead would
+// create two divergent ways to set the same option.
+fn parse_custom_options_form(raw: &str) -> Result<String, String> {
+    let mut rendered = Vec::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (code_raw, data_raw) = line
+            .split_once(':')
+            .ok_or_else(|| format!("line {}: expected CODE:VALUE", line_no + 1))?;
+        let code = parse_custom_dhcp_option_code(code_raw)
+            .map_err(|message| format!("line {}: {message}", line_no + 1))?;
+        let data = validate_custom_dhcp_option_data(data_raw)
+            .map_err(|message| format!("line {}: {message}", line_no + 1))?;
+        // ';' is the top-level entry separator for the persisted
+        // DHCP_PROXY_CUSTOM_OPTIONS value (see the storage format doc
+        // comment above and entrypoint.sh's `_dhcp_proxy_render_custom_options`);
+        // allowing it inside a value would let one entry's data silently
+        // split into two entries on the shell side.
+        if data.contains(';') {
+            return Err(format!(
+                "line {}: option data must not contain ';' (used as the entry separator)",
+                line_no + 1
+            ));
+        }
+        rendered.push(format!("{code}:{data}"));
+    }
+    Ok(rendered.join(";"))
+}
+
+// Inverse of the storage join above, for redisplaying the persisted value in
+// the Admin UI's textarea as one CODE:VALUE per line.
+fn custom_options_storage_to_form(stored: &str) -> String {
+    stored
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub async fn add_subnet(
@@ -3361,6 +3613,78 @@ mod tests {
         assert!(validate_custom_dhcp_option_data("pxelinux.0").is_ok());
         assert!(validate_custom_dhcp_option_data("").is_err());
         assert!(validate_custom_dhcp_option_data("line\nbreak").is_err());
+    }
+
+    // ─── Issue #450: dnsmasq relay/proxy field validators ───
+
+    #[test]
+    fn interface_name_validator_accepts_typical_names_and_rejects_junk() {
+        assert!(is_valid_interface_name("eth0"));
+        assert!(is_valid_interface_name("br-lan.100"));
+        assert!(is_valid_interface_name("eno1_2"));
+        assert!(!is_valid_interface_name(""));
+        assert!(!is_valid_interface_name("eth0;rm -rf /"));
+        assert!(!is_valid_interface_name("eth 0"));
+        assert!(!is_valid_interface_name(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn domain_name_validator_accepts_typical_domains_and_rejects_junk() {
+        assert!(is_valid_domain_name("lan.local"));
+        assert!(is_valid_domain_name("example.com"));
+        assert!(is_valid_domain_name("a"));
+        assert!(!is_valid_domain_name(""));
+        assert!(!is_valid_domain_name("-lan.local"));
+        assert!(!is_valid_domain_name("lan-.local"));
+        assert!(!is_valid_domain_name("lan..local"));
+        assert!(!is_valid_domain_name("lan local"));
+    }
+
+    #[test]
+    fn boot_filename_validator_accepts_paths_and_rejects_whitespace_or_commas() {
+        assert!(is_valid_boot_filename("pxelinux.0"));
+        assert!(is_valid_boot_filename("efi/bootx64.efi"));
+        assert!(!is_valid_boot_filename(""));
+        assert!(!is_valid_boot_filename("pxelinux 0"));
+        assert!(!is_valid_boot_filename("pxelinux.0,evil"));
+        // Trailing/leading whitespace is trimmed before the check (same as
+        // is_valid_domain_name), so an *embedded* newline is the meaningful
+        // rejection case, not a merely-trailing one.
+        assert!(!is_valid_boot_filename("pxelinux\n.0"));
+    }
+
+    #[test]
+    fn custom_options_form_parses_valid_lines_and_round_trips_through_storage() {
+        let storage = parse_custom_options_form("60:PXEClient\n93:0\n\n").unwrap();
+        assert_eq!(storage, "60:PXEClient;93:0");
+
+        let form = custom_options_storage_to_form(&storage);
+        assert_eq!(form, "60:PXEClient\n93:0");
+    }
+
+    #[test]
+    fn custom_options_form_rejects_managed_codes_and_malformed_lines() {
+        assert!(
+            parse_custom_options_form("3:10.0.0.1").is_err(),
+            "router code is managed by a dedicated field"
+        );
+        assert!(parse_custom_options_form("60").is_err(), "missing colon");
+        assert!(
+            parse_custom_options_form("abc:foo").is_err(),
+            "non-numeric code"
+        );
+        assert!(parse_custom_options_form("60:").is_err(), "empty data");
+        assert!(
+            parse_custom_options_form("60:foo;bar").is_err(),
+            "';' inside option data must be rejected -- it is the entry separator in storage"
+        );
+    }
+
+    #[test]
+    fn custom_options_form_empty_input_yields_empty_storage() {
+        assert_eq!(parse_custom_options_form("").unwrap(), "");
+        assert_eq!(parse_custom_options_form("   \n  \n").unwrap(), "");
+        assert_eq!(custom_options_storage_to_form(""), "");
     }
 
     #[test]

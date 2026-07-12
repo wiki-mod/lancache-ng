@@ -35,7 +35,23 @@ fi
 : "${KEEP_KNOWN_GOOD_CONFIGS:=3}"
 : "${DHCP_PROXY_CONFIG_SNAPSHOT_DIR:=/var/lib/lancache-dhcp-proxy/config-snapshots}"
 
+# Issue #450: additional *optional* dnsmasq relay/proxy options. Every one of
+# these defaults to empty/unset -- ProxyDHCP mode keeps working with only the
+# four required vars above, exactly as before this issue. None of these are
+# templated into dnsmasq.conf.template via envsubst: an unset value must
+# produce *no line at all* (an empty `dhcp-option-pxe=3,` would itself be an
+# invalid config), so they are appended conditionally below instead.
+: "${DHCP_PROXY_INTERFACE:=}"
+: "${DHCP_PROXY_ROUTER:=}"
+: "${DHCP_NTP_SERVERS:=}"
+: "${DHCP_PROXY_DOMAIN:=}"
+: "${DHCP_PROXY_BOOT_FILENAME:=}"
+: "${DHCP_PROXY_BOOT_SERVER:=}"
+: "${DHCP_PROXY_CUSTOM_OPTIONS:=}"
+
 export DHCP_SUBNET_START DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY UPSTREAM_DHCP_IP
+export DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN
+export DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS
 
 # ────────────────────────────────────────────────────────────────────────────
 # Known-good configuration snapshot library (#415)
@@ -255,6 +271,132 @@ kgs_snapshot_apply() {
 # END known-good-snapshot library
 
 envsubst < /etc/dnsmasq.conf.template > /etc/dnsmasq.conf
+
+# _dhcp_proxy_render_optional_directives <dest_conf>
+#
+# Appends the issue #450 optional dnsmasq relay/proxy directives to
+# <dest_conf>, one `echo >>` per configured value, so an unset/empty
+# variable produces no line at all instead of an empty or malformed one.
+#
+# All of these ride the same supplemental ProxyDHCP/PXE exchange as the
+# existing DNS option (dhcp-option-pxe=6,...): they are visible to
+# PXE/network-boot-aware clients, not to ordinary DHCP clients, whose lease
+# and options remain entirely owned by UPSTREAM_DHCP_IP. See
+# docs/dhcp-modes.md for the full explanation of what is and is not
+# delivered in this mode. Lease-time is intentionally not configurable here:
+# ProxyDHCP mode never issues a lease of its own, so a lease-time value would
+# have no effect (dnsmasq --test does not reject one, it is just silently
+# ignored at runtime, which is worse than not offering the field at all).
+#
+# Deliberately light validation: this function only rejects input shapes
+# that would either be silently ignored (making the operator think a value
+# is active when it is not, e.g. an out-of-range custom option code) or that
+# would corrupt the file (embedded newlines). Everything else is left to
+# `dnsmasq --test` immediately after this runs, which is the authoritative
+# fail-closed gate shared with every other value in this file -- a failure
+# there still goes through the existing known-good-snapshot rollback path
+# below, it does not abort the container outright.
+_dhcp_proxy_render_optional_directives() {
+    local dest_conf="$1"
+
+    if [ -n "$DHCP_PROXY_INTERFACE" ]; then
+        printf 'interface=%s\n' "$DHCP_PROXY_INTERFACE" >> "$dest_conf"
+    fi
+
+    if [ -n "$DHCP_PROXY_ROUTER" ]; then
+        printf 'dhcp-option-pxe=3,%s\n' "$DHCP_PROXY_ROUTER" >> "$dest_conf"
+    fi
+
+    if [ -n "$DHCP_NTP_SERVERS" ]; then
+        # Option 42 (NTP servers). DHCP_NTP_SERVERS is a comma-separated IPv4
+        # list, matching the Kea-mode field of the same name and the Admin
+        # UI's shared validation for it.
+        printf 'dhcp-option-pxe=42,%s\n' "$DHCP_NTP_SERVERS" >> "$dest_conf"
+    fi
+
+    if [ -n "$DHCP_PROXY_DOMAIN" ]; then
+        # Option 15 (domain name).
+        printf 'dhcp-option-pxe=15,%s\n' "$DHCP_PROXY_DOMAIN" >> "$dest_conf"
+    fi
+
+    if [ -n "$DHCP_PROXY_BOOT_FILENAME" ]; then
+        # dnsmasq's dedicated boot-info directive (BOOTP/PXE filename,
+        # server-name, server-address) rather than raw options 66/67: this is
+        # the directive the dnsmasq man page documents as working together
+        # with ProxyDHCP mode ("it is possible, and useful, to configure
+        # dnsmasq as both a PXE proxy-DHCP server and a DHCP relay"), and it
+        # is what the existing services/dhcp-probe.sh-adjacent PXE tooling
+        # expects. Server-name is left empty; only filename and (optionally)
+        # server-address are operator-configurable here.
+        printf 'dhcp-boot=%s,,%s\n' "$DHCP_PROXY_BOOT_FILENAME" "$DHCP_PROXY_BOOT_SERVER" >> "$dest_conf"
+    elif [ -n "$DHCP_PROXY_BOOT_SERVER" ]; then
+        echo "WARNING: DHCP_PROXY_BOOT_SERVER is set without DHCP_PROXY_BOOT_FILENAME; a boot server address alone is not meaningful to PXE clients, so no dhcp-boot line was rendered." >&2
+    fi
+
+    if [ -n "$DHCP_PROXY_CUSTOM_OPTIONS" ]; then
+        _dhcp_proxy_render_custom_options "$dest_conf" "$DHCP_PROXY_CUSTOM_OPTIONS"
+    fi
+}
+
+# _dhcp_proxy_render_custom_options <dest_conf> <spec>
+#
+# <spec> is a `;`-separated list of `<code>:<value>` pairs (matching what the
+# Admin UI persists). Each entry is rendered as its own
+# `dhcp-option-pxe=<code>,<value>` line. An entry that isn't structurally
+# `<code>:<value>` (no colon, or an empty code/value) is skipped with an
+# actionable WARNING rather than written verbatim, since a malformed entry
+# here is operator input error, not something `dnsmasq --test` can attribute
+# back to a specific setting. The DHCP option code range (1-254) is checked
+# here too: an out-of-range numeric code passes `dnsmasq --test` but is
+# silently never sent (confirmed live), which would otherwise look like a
+# working config that quietly does nothing.
+_dhcp_proxy_render_custom_options() {
+    local dest_conf="$1" spec="$2"
+    local -a entries=()
+    local entry code value
+
+    IFS=';' read -r -a entries <<< "$spec"
+
+    for entry in "${entries[@]}"; do
+        # Trim leading/trailing whitespace only (not `xargs`, which would
+        # also collapse repeated internal whitespace inside the option
+        # value, silently altering values that intentionally contain it).
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [ -n "$entry" ] || continue
+
+        case "$entry" in
+            *:*)
+                code="${entry%%:*}"
+                value="${entry#*:}"
+                ;;
+            *)
+                echo "WARNING: ignoring malformed DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}' (expected CODE:VALUE)." >&2
+                continue
+                ;;
+        esac
+
+        if [ -z "$code" ] || [ -z "$value" ]; then
+            echo "WARNING: ignoring malformed DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}' (expected CODE:VALUE, both non-empty)." >&2
+            continue
+        fi
+
+        case "$code" in
+            '' | *[!0-9]*)
+                echo "WARNING: ignoring DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}': option code must be numeric." >&2
+                continue
+                ;;
+        esac
+        if [ "$code" -lt 1 ] || [ "$code" -gt 254 ]; then
+            echo "WARNING: ignoring DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}': option code ${code} is outside the valid DHCP option range (1-254) and would be silently dropped by dnsmasq." >&2
+            continue
+        fi
+
+        printf 'dhcp-option-pxe=%s,%s\n' "$code" "$value" >> "$dest_conf"
+    done
+}
+
+_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf
 
 # _dhcp_proxy_validate_snapshot_or_rollback <file...>
 # Factored into its own function (rather than inline top-level script code)

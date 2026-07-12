@@ -108,20 +108,27 @@ deliberately limited. It is **proxy-DHCP / PXE only**:
 
 - No static reservations.
 - No lease listing or lease ownership (the upstream server owns leases).
-- No richer per-subnet DHCP options, gateway management, or NTP options.
-- No guarantee that ordinary clients accept the DNS option — proxy-DHCP DNS
-  options are primarily honored by PXE/proxy-DHCP-aware clients, and a normal
-  client's DNS setting from its regular DHCP lease may win instead.
+- No lease-time control: dnsmasq never issues a lease of its own in this
+  mode, so there is nothing for a lease-time value to apply to.
+- No guarantee that ordinary clients accept *any* option offered here —
+  router, DNS, NTP, domain, and custom options are all delivered only
+  through the supplemental ProxyDHCP/PXE exchange (RFC 4388), which
+  PXE/network-boot-aware clients query in addition to their normal DHCP
+  transaction. An ordinary client's router/DNS/NTP/domain settings come
+  entirely from its real DHCP lease from the upstream server, never from
+  dnsmasq, regardless of what is configured below.
 
 The Admin UI reflects this: when `dnsmasq-proxy` is active it shows the live
 proxy values and hides the Kea-only subnet/reservation/lease editors, with a
 note that those features require Kea mode. Kea's capabilities are not removed —
 they are simply inactive while proxy mode is selected.
 
-If you need LanCache NG to reliably control the DNS servers that ordinary
-clients receive, use `kea` mode (or set the DNS server on the router/clients
-directly). `dnsmasq-proxy` is an experimental helper for the constrained case
-above, not a full replacement for router DHCP.
+If you need LanCache NG to reliably control the DNS, router, NTP, or domain
+settings that ordinary clients receive, use `kea` mode (or set them on the
+router/clients directly). `dnsmasq-proxy` is an experimental helper for the
+constrained case above — supplementing PXE/network-boot info alongside an
+upstream DHCP server that cannot be replaced — not a full replacement for
+router DHCP.
 
 ## Configuring dnsmasq-proxy mode
 
@@ -129,18 +136,53 @@ above, not a full replacement for router DHCP.
 them, and writes them to `.env`. They can also be edited later from the Admin UI
 DHCP page.
 
+### Required
+
 | Key | Meaning | Example |
 |---|---|---|
-| `UPSTREAM_DHCP_IP` | IP of the existing DHCP server (usually your router/gateway) that keeps owning leases. dnsmasq proxies alongside it. | `10.0.0.1` |
+| `UPSTREAM_DHCP_IP` | IP of the existing DHCP server (usually your router/gateway) that keeps owning leases. **Documentation only** — see the note below; ProxyDHCP mode does not need to contact this server to function. | `10.0.0.1` |
 | `DHCP_SUBNET_START` | Network base address of the LAN dnsmasq serves. Must end in `.0`. | `10.0.0.0` |
 | `DHCP_DNS_PRIMARY` | Primary DNS server offered to proxy/PXE clients — normally the LanCache NG standard DNS IP. | `10.0.0.10` |
 | `DHCP_DNS_SECONDARY` | Secondary DNS server. Leave empty to reuse `DHCP_DNS_PRIMARY`. | `10.0.0.11` |
 
-`setup.sh update` and the container entrypoint both fail closed: if any
-required value is missing or invalid, setup refuses to continue and the
-container refuses to start, rather than silently running with broken DHCP
-configuration. Existing non-empty values in your local `.env` are preserved and
-never overwritten on update.
+> **A note on `UPSTREAM_DHCP_IP` (issue #450):** an earlier revision of
+> `services/dhcp-proxy/dnsmasq.conf.template` fed this value into dnsmasq's
+> `dhcp-proxy=<ip>` directive. Per `dnsmasq --help`, that flag means "use
+> these DHCP relays as full proxies" (an RFC 5107 serverid-override) — it
+> only does anything when paired with dnsmasq's separate `--dhcp-relay=`
+> feature, which this service never configures. It was a no-op, confirmed
+> against a live `dnsmasq --help`/`--test`, not a functioning link to the
+> upstream server. It has been removed; `UPSTREAM_DHCP_IP` is kept purely so
+> you and the Admin UI's DHCP conflict check agree on which server is
+> expected to answer.
+
+### Optional (issue #450)
+
+Every option below is only delivered to PXE/network-boot-aware clients via
+the supplemental ProxyDHCP/PXE exchange (the same mechanism the DNS option
+above already uses) — never to ordinary DHCP clients. Leave any of these
+empty to skip it; entrypoint.sh omits the corresponding line entirely rather
+than rendering an empty or invalid one.
+
+| Key | Meaning | Example |
+|---|---|---|
+| `DHCP_PROXY_INTERFACE` | Bind dnsmasq to one host network interface instead of all of them. | `eth0` |
+| `DHCP_PROXY_ROUTER` | Router/gateway option (DHCP option 3), PXE-scoped. | `10.0.0.1` |
+| `DHCP_NTP_SERVERS` | NTP servers option (DHCP option 42), PXE-scoped. Comma-separated IPv4 list. | `10.0.0.20,10.0.0.21` |
+| `DHCP_PROXY_DOMAIN` | Domain name option (DHCP option 15), PXE-scoped. | `lan.local` |
+| `DHCP_PROXY_BOOT_FILENAME` | PXE boot filename, via dnsmasq's `dhcp-boot` directive — the directive the dnsmasq man page documents as intended for this exact "ProxyDHCP server alongside a real DHCP server" case. | `pxelinux.0` |
+| `DHCP_PROXY_BOOT_SERVER` | Boot server address for `dhcp-boot`. Requires `DHCP_PROXY_BOOT_FILENAME`; defaults to dnsmasq's own address if left empty while a filename is set. | `10.0.0.5` |
+| `DHCP_PROXY_CUSTOM_OPTIONS` | Additional safe custom options as `CODE:VALUE`, one per line in the Admin UI (stored as `;`-separated `CODE:VALUE` pairs). Codes already covered by the dedicated fields above (3, 6, 15, 42) are rejected here to avoid two conflicting ways to set the same option. | `60:PXEClient` |
+
+`setup.sh update` and the container entrypoint both fail closed for the
+*required* values: if any is missing or invalid, setup refuses to continue
+and the container refuses to start, rather than silently running with
+broken DHCP configuration. The optional values above are validated only when
+non-empty (empty is the supported "not using this option" state); a
+structurally invalid optional value (e.g. an out-of-range custom option
+code) is skipped with an explicit warning in the container logs rather than
+silently accepted or crash the container. Existing non-empty values in your
+local `.env` are preserved and never overwritten on update.
 
 ## Verifying that clients receive LanCache NG DNS
 

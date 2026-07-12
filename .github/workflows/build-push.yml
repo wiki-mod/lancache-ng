@@ -855,6 +855,38 @@ jobs:
           validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
+          # Issue #450: dnsmasq relay/proxy optional-option surface. Guards
+          # against silently dropping the new keys from any layer of the
+          # env-file -> entrypoint -> template pipeline.
+          dhcp_proxy_optional_keys=(
+            DHCP_PROXY_INTERFACE
+            DHCP_PROXY_ROUTER
+            DHCP_NTP_SERVERS
+            DHCP_PROXY_DOMAIN
+            DHCP_PROXY_BOOT_FILENAME
+            DHCP_PROXY_BOOT_SERVER
+            DHCP_PROXY_CUSTOM_OPTIONS
+          )
+          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+            for key in "${dhcp_proxy_optional_keys[@]}"; do
+              grep -Eq "^${key}=" "$env_file" \
+                || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the dnsmasq relay/proxy optional-option surface added by issue #450."; exit 1; }
+            done
+          done
+          grep -F 'DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}' deploy/quickstart/docker-compose.yml >/dev/null \
+            || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_INTERFACE like the other optional dnsmasq relay/proxy keys."; exit 1; }
+          grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
+            || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
+
+          grep -F '_dhcp_proxy_render_optional_directives()' services/dhcp-proxy/entrypoint.sh >/dev/null \
+            || { echo "::error::services/dhcp-proxy/entrypoint.sh must render the issue #450 optional dnsmasq relay/proxy directives."; exit 1; }
+          grep -F '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' services/dhcp-proxy/entrypoint.sh >/dev/null \
+            || { echo "::error::services/dhcp-proxy/entrypoint.sh must call _dhcp_proxy_render_optional_directives before validating dnsmasq.conf."; exit 1; }
+          if grep -F 'dhcp-proxy=${UPSTREAM_DHCP_IP}' services/dhcp-proxy/dnsmasq.conf.template >/dev/null; then
+            echo "::error::services/dhcp-proxy/dnsmasq.conf.template must not reintroduce 'dhcp-proxy=\${UPSTREAM_DHCP_IP}': that flag means \"treat these DHCP-relay agents as full proxies\" (RFC 5107), it does nothing without --dhcp-relay=, and this service never configures one. Confirmed against a live dnsmasq --help/--test; see docs/dhcp-modes.md."
+            exit 1
+          fi
+
           if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
             echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
             exit 1
