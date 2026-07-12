@@ -621,16 +621,15 @@ jobs:
       # scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh, for why the
       # underlying 172.30.99.0/24 addresses are still fixed (#703).
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      # Paired with COMPOSE_PROJECT_NAME here even though this job's own
+      # Paired with COMPOSE_PROJECT_NAME here purely for consistency with
+      # ssl-mitm-cache-simulation and nats-secondary-auth-callout-simulation,
+      # which set this same pair for every job that references
+      # deploy/full-setup/docker-compose.yml under this shared compose
+      # project -- not because this job's own script actually needs it: its
       # standalone Admin UI container never publishes a host port (started
       # via `compose run` without --service-ports, per this job's own
-      # script) -- matching ssl-mitm-cache-simulation and
-      # nats-secondary-auth-callout-simulation, which set this same pair for
-      # every job that references deploy/full-setup/docker-compose.yml under
-      # this shared compose project, regardless of whether that job's own
-      # script happens to use the "ui" service's published port. Keeps
-      # `docker compose down` below from parsing the shared compose file's
-      # ui service with this variable unset.
+      # script), and the compose file's own `${VALIDATION_UI_PORT:-9090}`
+      # default already makes an unset value harmless either way.
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
