@@ -17,6 +17,9 @@ services:
       - NATS_PASSWORD=${NATS_PASSWORD}
       - NATS_CONSUMER=${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
+      # Known-good pdns.conf/recursor.conf snapshot retention (#615), same
+      # variable/default as the primary's config/{dev,prod}/dns-standard.env.
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state

@@ -40,6 +40,7 @@ adapter) is:
    | proxy (nginx) | `/var/lib/lancache-proxy/config-snapshots` | `proxy-config-snapshots` |
    | dhcp-proxy (dnsmasq) | `/var/lib/lancache-dhcp-proxy/config-snapshots` | `dhcp-proxy-config-snapshots` |
    | dns-standard, dns-ssl (PowerDNS recursor + auth) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots-standard`, `pdns-config-snapshots-ssl` |
+   | dns-secondary (remote secondary node, same image/entrypoint) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots` |
    | dhcp (Kea) | `/var/lib/kea/config-snapshots` — see "Kea" below | `kea-data` (shared with the `dhcp` service) |
 
 4. **Rollback refuses invalid snapshots.** When a candidate config fails
@@ -221,12 +222,24 @@ same shape of problem as nginx/dnsmasq — file-based, deterministically
 regenerated — and reuses the exact same generic contract, but the two files
 belong to two independent daemons (the recursor and the authoritative
 server) with two independently-generated configs, so each is validated,
-snapshotted, and rolled back **separately**: a broken `recursor.conf` never
-blocks a still-good `pdns.conf` from starting, and vice versa. Both live
+snapshotted, and rolled back **separately**: a broken `recursor.conf` does
+not block a still-good `pdns.conf` from starting, and vice versa, *as long
+as rollback succeeds* — i.e. a known-good snapshot exists for the failing
+side. The entrypoint validates the recursor first
+(`_dns_recursor_validate_snapshot_or_rollback ... || exit 1`) and, on a fresh
+install or once snapshot history is exhausted, that call returns 1 and the
+container exits before ever reaching `pdns.conf` generation/validation — so
+on those two occasions a broken `recursor.conf` genuinely does prevent the
+authoritative server from starting too. Both live
 under one persistent volume per `dns-standard`/`dns-ssl` container
 (`pdns-config-snapshots-standard`, `pdns-config-snapshots-ssl`, mounted at
 `/var/lib/lancache-dns`), in separate `recursor/` and `auth/` subdirectories
-so the two independent snapshot histories never collide.
+so the two independent snapshot histories never collide. A remote secondary
+DNS node (`setup.sh secondary`, `deploy/secondary/docker-compose.yml`) runs
+the same `dns` image and entrypoint, so it gets the identical
+`/var/lib/lancache-dns/config-snapshots/{recursor,auth}` layout too — its own
+persistent volume there is named `pdns-config-snapshots` (one node, so no
+`-standard`/`-ssl` suffix is needed).
 
 **recursor.conf: pure pre-start check, like `nginx -t`.** Debian Trixie's
 `pdns-recursor` package (5.2.x) ships a genuine, side-effect-free check-only
