@@ -2552,6 +2552,10 @@ mod tests {
         json!([{ "result": 0, "arguments": config }])
     }
 
+    // The probe's two result markers (conflict scan, dhclient dry-run) are
+    // parsed independently and can disagree (e.g. a conflict found but the
+    // client check still passes) -- overall_status() must reflect whichever
+    // signal is worse, not just the last one parsed.
     #[test]
     fn parses_dual_dhcp_probe_report_with_conflict_and_client_success() {
         let report = parse_dhcp_probe_report(
@@ -2573,6 +2577,10 @@ mod tests {
         }
     }
 
+    // A probe run that never reaches the dhclient stage (e.g. the container
+    // crashed after the conflict scan) must render as "unavailable", not as
+    // a silent pass -- an operator must not read a missing client check as
+    // "no problems found".
     #[test]
     fn parses_dual_dhcp_probe_report_marks_missing_client_summary_unavailable() {
         let report = parse_dhcp_probe_report("__LANCACHE_DHCP_PROBE_START__ 1\n");
@@ -2585,6 +2593,10 @@ mod tests {
         ));
     }
 
+    // Every DHCP-mutating route calls require_kea_mode() first; if this
+    // guard ever accepted DnsmasqProxy/Disabled mode or an empty API URL, a
+    // mutation route would try to POST to Kea's control agent with no
+    // reachable target instead of failing with a clear "wrong mode" error.
     #[test]
     fn kea_mutation_guard_requires_kea_mode_and_api_url() {
         assert!(kea_api_available(
@@ -2620,6 +2632,15 @@ mod tests {
         assert_eq!(parse_dhcp_mode_input(""), None);
     }
 
+    // validate_dhcp_form's containment/range checks are exactly the kind of
+    // logic an off-by-one silently breaks (an inclusive bound written as
+    // exclusive, or vice versa) without any compiler help to catch it. This
+    // group exhaustively pins every boundary: pool/gateway must sit inside
+    // the subnet CIDR, the pool range must not be reversed, and
+    // MIN_LEASE_TIME/MAX_LEASE_TIME are both inclusive bounds (60s avoids
+    // renewal-storm-inducing leases that are too short; 7 days avoids a
+    // lease outliving an operator's ability to reclaim an address from a
+    // now-offline device).
     #[test]
     fn accepts_valid_dhcp_form() {
         let lease_time = validate_test_dhcp_form!(
@@ -2828,6 +2849,15 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // This test opens the cluster covering kea_config_modify_with_post's
+    // whole write-outcome state machine: a confirmed failure (Kea's own
+    // error response) always rolls back, but an ambiguous failure (the
+    // request itself errored, so it's unknown whether Kea actually applied
+    // it) gets a retry first -- rolling back on an ambiguous failure risks
+    // reverting a config-write that actually succeeded, and never retrying
+    // risks leaving a genuinely-failed write unconfirmed forever. Each test
+    // in this cluster pins one path through that decision tree via the mock
+    // command sequence it feeds in.
     #[tokio::test]
     async fn kea_config_modify_succeeds_without_rollback() {
         let initial_config = json!({
@@ -3260,6 +3290,11 @@ mod tests {
         );
     }
 
+    // Reservations live nested inside each subnet4 entry in Kea's config, not
+    // in one flat top-level list -- this pins that fetch_reservations_from_config
+    // flattens across every subnet (including one with none at all) while
+    // still tagging each result with its owning subnet_id, and that a
+    // missing hostname renders as "" rather than panicking.
     #[test]
     fn collect_reservations_reads_nested_subnet_entries() {
         let config = json!({
@@ -3294,6 +3329,12 @@ mod tests {
         assert_eq!(reservations[1].hostname, "");
     }
 
+    // add_reservation's "update by MAC" path (upsert_reservation) must
+    // preserve fields it doesn't itself set (option-data, client-classes)
+    // when overwriting an existing entry's ip-address/hostname -- otherwise
+    // editing a reservation through the Admin UI would silently drop any
+    // manually-added Kea options on that host. Matching is by normalized
+    // MAC, so "AA-BB-..." must still find "aa:bb:...".
     #[test]
     fn reservation_upsert_and_remove_keep_subnet_state_consistent() {
         let mut subnet = json!({
@@ -3344,6 +3385,11 @@ mod tests {
         assert!(reservations.is_empty());
     }
 
+    // max-valid-lifetime must never be computed as double the requested
+    // lease time when that would overflow past this project's own
+    // MAX_LEASE_TIME cap -- Kea accepts max-valid-lifetime > valid-lifetime,
+    // so an uncapped doubling would silently let leases renew past the
+    // operator-intended maximum instead of erroring or clamping.
     #[test]
     fn build_subnet_value_clamps_max_valid_lifetime_to_lease_time_cap() {
         let subnet = build_subnet_value(SubnetValue {
@@ -3366,6 +3412,11 @@ mod tests {
         assert_eq!(subnet["max-valid-lifetime"], MAX_LEASE_TIME);
     }
 
+    // build_subnet_value is only called from add_subnet (new subnet, always
+    // reservations: None) and update_subnet (existing subnet, reservations
+    // carried through from compatible_reservations_for_subnet) -- this pins
+    // that the Some(...) path actually writes the given reservations into
+    // the built JSON rather than silently dropping them on update.
     #[test]
     fn build_subnet_value_preserves_reservations_when_present() {
         let reservations = vec![json!({
@@ -3395,6 +3446,14 @@ mod tests {
         assert_eq!(subnet["reservations"], Value::Array(reservations));
     }
 
+    // update_subnet only ever sends the fields the Admin UI's edit form
+    // actually exposes -- anything Kea/an operator set outside that form
+    // (ddns-qualifying-suffix, relay, a vendor-space option, reservations)
+    // must survive an unrelated edit untouched, not get silently erased by
+    // this function rewriting the whole subnet object from scratch. The
+    // vendor-space option (code 3 under "vendor-foo", not "dhcp4") is the
+    // key case: it shares a numeric code with the UI-managed "routers"
+    // option but must never be treated as the same option.
     #[test]
     fn apply_subnet_value_preserves_unmanaged_kea_fields_and_options() {
         let mut subnet = json!({
@@ -3482,6 +3541,11 @@ mod tests {
             .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan"));
     }
 
+    // Kea's own config-get response identifies well-known options by numeric
+    // code, not the human-readable "name" the Admin UI writes -- parse_subnet_entry
+    // must recognize both forms, or a subnet fetched straight from Kea (as
+    // opposed to one this project itself just wrote) would render its
+    // gateway/DNS/NTP/domain fields as empty on the settings page.
     #[test]
     fn parse_subnet_entry_reads_managed_options_by_numeric_code() {
         let subnet = json!({
@@ -3506,6 +3570,11 @@ mod tests {
         assert_eq!(parsed.domain, "lan.example");
     }
 
+    // Companion to the numeric-code test above: a vendor-space option that
+    // happens to share code 3 (or the "domain-name" name) with a managed
+    // dhcp4 option must NOT be misread as that managed option -- otherwise
+    // an unrelated vendor option's data could silently overwrite the parsed
+    // gateway/domain shown in the Admin UI.
     #[test]
     fn parse_subnet_entry_ignores_non_dhcp4_matching_option_codes() {
         let subnet = json!({
@@ -3527,6 +3596,11 @@ mod tests {
         assert_eq!(parsed.domain, "lan.example");
     }
 
+    // build_subnet_value starts from an empty editable_options list (unlike
+    // apply_subnet_value, which is handed the PREVIOUS subnet's preserved
+    // options) -- a fresh subnet must only ever get the fields its own form
+    // submitted (here: no NTP servers were given, so no ntp-servers option
+    // should appear), never carry over state from an unrelated subnet.
     #[test]
     fn build_subnet_value_does_not_inherit_unmanaged_options_from_other_subnets() {
         let subnet = build_subnet_value(SubnetValue {
@@ -3557,6 +3631,10 @@ mod tests {
         assert!(!options.iter().any(|option| option["name"] == "ntp-servers"));
     }
 
+    // editable_options (custom, non-UI-managed options like boot-file-name
+    // or an arbitrary vendor option) must pass through build_subnet_value
+    // unchanged, on top of the UI-managed fields the form itself sets --
+    // proves the two option sources are merged, not mutually exclusive.
     #[test]
     fn build_subnet_value_preserves_editable_extra_option_data() {
         let subnet = build_subnet_value(SubnetValue {
@@ -3590,6 +3668,10 @@ mod tests {
             .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4"));
     }
 
+    // The custom-option form (add_subnet_option) must refuse the 5 codes
+    // the dedicated gateway/DNS/domain/NTP fields already own -- otherwise
+    // an operator could set the same option two conflicting ways, and
+    // whichever write happened last would silently win.
     #[test]
     fn custom_dhcp_option_validation_rejects_managed_codes() {
         for code in ["3", "6", "15", "42", "119"] {
@@ -3606,6 +3688,15 @@ mod tests {
     }
 
     // ─── Issue #450: dnsmasq relay/proxy field validators ───
+    //
+    // These three validators are this project's only defense before an
+    // operator-submitted value is rendered unquoted into dnsmasq.conf
+    // directives -- the "junk" cases in each test below (a shell metachar,
+    // an embedded space/comma/newline) are exactly the inputs that could
+    // otherwise corrupt the generated config or, worse, inject a second
+    // directive. `dnsmasq --test` is still the authoritative fail-closed
+    // gate (see entrypoint.sh), but these validators exist so the Admin UI
+    // gives immediate feedback instead of a config-write failure much later.
 
     #[test]
     fn interface_name_validator_accepts_typical_names_and_rejects_junk() {
@@ -3643,6 +3734,11 @@ mod tests {
         assert!(!is_valid_boot_filename("pxelinux\n.0"));
     }
 
+    // The Admin UI's textarea (one CODE:VALUE per line) and the persisted
+    // DHCP_PROXY_CUSTOM_OPTIONS storage format (';'-joined single line) are
+    // two different shapes for the same data -- this proves converting
+    // form -> storage -> form is lossless, and that blank lines in the
+    // textarea are simply skipped rather than producing an empty entry.
     #[test]
     fn custom_options_form_parses_valid_lines_and_round_trips_through_storage() {
         let storage = parse_custom_options_form("60:PXEClient\n93:0\n\n").unwrap();
@@ -3670,6 +3766,9 @@ mod tests {
         );
     }
 
+    // An operator who has never used the custom-option textarea (or clears
+    // it entirely) must get back an empty DHCP_PROXY_CUSTOM_OPTIONS value,
+    // not an error or a spurious single empty entry.
     #[test]
     fn custom_options_form_empty_input_yields_empty_storage() {
         assert_eq!(parse_custom_options_form("").unwrap(), "");
@@ -3677,6 +3776,14 @@ mod tests {
         assert_eq!(custom_options_storage_to_form(""), "");
     }
 
+    // The Admin UI's "custom options" list must show exactly the options
+    // this project doesn't already manage through a dedicated field or a
+    // different space -- excludes the "routers" name-managed option and a
+    // non-dhcp4-space option (vendor-foo), and only ever includes entries
+    // that carry an explicit numeric dhcp4 "code": a name-only entry like
+    // this fixture's "boot-file-name" (no "code" field at all) never shows
+    // up here as if it were a free custom option. Code 66, unmanaged by any
+    // dedicated field, IS expected to show through.
     #[test]
     fn custom_subnet_options_only_expose_free_dhcp4_code_options() {
         let subnet = json!({
@@ -3696,6 +3803,11 @@ mod tests {
         assert_eq!(options[0].data, "10.0.0.20");
     }
 
+    // add/remove_custom_subnet_option must operate on option-data as a
+    // shared array without disturbing entries neither call touches (the
+    // managed "routers" option, and a different custom option this call
+    // isn't removing) -- and adding the exact same code+data twice must be
+    // rejected, not silently duplicated.
     #[test]
     fn custom_subnet_option_add_and_remove_preserve_managed_options() {
         let mut subnet = json!({
@@ -3722,6 +3834,11 @@ mod tests {
         assert!(!raw_options.iter().any(|option| option["code"] == 67));
     }
 
+    // Pins kea_lease_del_result's own documented distinction: Kea's
+    // CONTROL_RESULT_EMPTY (3) means "no matching lease" -- an ordinary
+    // race, not a server error -- and must map to a different outcome than
+    // a genuine error response, so release_lease can return 404 instead of
+    // 500 for the empty case.
     #[test]
     fn kea_lease_del_result_reports_success_not_found_and_error_distinctly() {
         let success = json!([{"result": 0, "text": "Lease deleted."}]);
@@ -3737,6 +3854,11 @@ mod tests {
         );
     }
 
+    // Exercises compatible_reservations_for_subnet's own documented contract
+    // (see that function's comment): an in-range reservation is kept, an
+    // out-of-range one is dropped, and the client-id-only entry (no
+    // ip-address at all) is kept unconditionally since there is nothing to
+    // check it against the new CIDR.
     #[test]
     fn compatible_reservations_drop_addresses_outside_new_subnet() {
         let subnet = json!({
