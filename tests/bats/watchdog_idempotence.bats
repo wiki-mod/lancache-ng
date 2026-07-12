@@ -5,14 +5,14 @@
 # functions: check_and_maybe_restart() (per-container failure counter +
 # restart trigger) and write_status() (atomic dashboard status JSON writer).
 #
-# The #456 audit reviewed this file and concluded the design "looks
-# convergent/idempotent by construction" (the failure counter resets after a
-# restart, and write_status uses a .tmp + rename) but found no fixture or
-# simulation test actually proving that repeated unhealthy/healthy cycles
-# converge to the same restart/status behavior every time, rather than e.g.
-# an ever-incrementing counter that never resets, or a restart threshold that
-# silently drifts across cycles. This file closes that gap: it sources the
-# real functions from watchdog.sh (not a reimplementation) via
+# A prior convergence/idempotence audit of this file concluded the design
+# "looks convergent/idempotent by construction" (the failure counter resets
+# after a restart, and write_status uses a .tmp + rename) but found no
+# fixture or simulation test actually proving that repeated unhealthy/healthy
+# cycles converge to the same restart/status behavior every time, rather than
+# e.g. an ever-incrementing counter that never resets, or a restart threshold
+# that silently drifts across cycles. This file closes that gap: it sources
+# the real functions from watchdog.sh (not a reimplementation) via
 # helpers/watchdog-helpers.sh, drives them through realistic multi-cycle
 # health sequences, and asserts the counter/restart/status behavior on a
 # second identical cycle is indistinguishable from the first.
@@ -95,10 +95,10 @@ run_one_cycle() {
     drive_health_sequence "${seq[@]}"
 }
 
-# This is the core convergence guarantee the #456 audit flagged as unproven:
-# if the failure counter did NOT reset after triggering a restart (or reset
-# to the wrong value), a second identical unhealthy/healthy cycle would
-# either restart on a different failure count than the first cycle, restart
+# This is the core convergence guarantee that a prior audit flagged as
+# unproven: if the failure counter did NOT reset after triggering a restart
+# (or reset to the wrong value), a second identical unhealthy/healthy cycle
+# would either restart on a different failure count than the first cycle, restart
 # more than once per cycle, or never restart again -- any of which would be a
 # real operational bug (e.g. a container stuck unhealthy forever without ever
 # getting restarted again after its first recovery-restart).
@@ -151,9 +151,13 @@ run_one_cycle() {
 # never observes a half-written file. This test proves both halves of that
 # claim hold across repeated writes: no .tmp file is ever left behind, and
 # the JSON emitted for an unchanged input state is structurally identical
-# run to run (only the "updated" timestamp field is expected to differ) --
-# not just "some JSON came out," which would miss a bug where repeated writes
-# drift (e.g. a stale failure count from a previous call leaking through).
+# run to run. The comparison strips "updated" (a fresh timestamp every call
+# by design) and "disk" (df's live filesystem-usage percentage, which is
+# real and could in principle tick between two calls milliseconds apart on a
+# busy CI host, independent of anything write_status itself does) -- neither
+# omission weakens the assertion that actually matters here, which is that
+# the "services" block (failure counts and health strings) written by this
+# function is stable, not just "some JSON came out."
 @test "write_status converges to structurally identical JSON across repeated writes of unchanged state" {
     F_PROXY=0
     H_PROXY="healthy"
@@ -163,15 +167,15 @@ run_one_cycle() {
     [ ! -f "${status_file}.tmp" ]
     run jq empty "$status_file"
     [ "$status" -eq 0 ]
-    first_without_ts=$(jq 'del(.updated)' "$status_file")
+    first_services=$(jq 'del(.updated, .disk)' "$status_file")
 
     write_status
     [ ! -f "${status_file}.tmp" ]
     run jq empty "$status_file"
     [ "$status" -eq 0 ]
-    second_without_ts=$(jq 'del(.updated)' "$status_file")
+    second_services=$(jq 'del(.updated, .disk)' "$status_file")
 
-    [ "$first_without_ts" = "$second_without_ts" ]
+    [ "$first_services" = "$second_services" ]
 
     run jq -e '.services["lancache-proxy"].health == "healthy"' "$status_file"
     [ "$status" -eq 0 ]
@@ -196,13 +200,13 @@ run_one_cycle() {
     write_status
     run jq empty "$status_file"
     [ "$status" -eq 0 ]
-    first_without_ts=$(jq 'del(.updated)' "$status_file")
+    first_services=$(jq 'del(.updated, .disk)' "$status_file")
     run jq -e '.services["lancache-dns-ssl"]' "$status_file"
     [ "$status" -eq 0 ]
 
     write_status
-    second_without_ts=$(jq 'del(.updated)' "$status_file")
-    [ "$first_without_ts" = "$second_without_ts" ]
+    second_services=$(jq 'del(.updated, .disk)' "$status_file")
+    [ "$first_services" = "$second_services" ]
 }
 
 # End-to-end convergence across the full monitor+status pipeline: two
