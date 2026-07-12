@@ -26,7 +26,7 @@ work_dir="$repo_root/.nats-auth-callout-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
 
-compose_project="lancache-ng-validation-auth-callout"
+compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}-auth-callout"
 network_name="${compose_project}_validation"
 ui_ip="172.30.99.9"
 registration_token="validation-secondary-registration-token"

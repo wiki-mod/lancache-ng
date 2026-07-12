@@ -38,7 +38,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-compose_project="lancache-ng-validation"
+compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 compose_file="deploy/full-setup/docker-compose.yml"
 compose=(docker compose -p "$compose_project" -f "$compose_file")
 
