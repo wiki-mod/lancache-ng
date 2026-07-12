@@ -47,6 +47,8 @@ jobs:
       netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
       nats_ip: ${{ steps.derive.outputs.nats_ip }}
       ui_ip: ${{ steps.derive.outputs.ui_ip }}
+      project_name: ${{ steps.derive.outputs.project_name }}
+      ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Derive validation network
@@ -68,6 +70,8 @@ jobs:
       VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
       VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
       VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -114,13 +118,13 @@ jobs:
           set -euo pipefail
           target_subnet="${VALIDATION_SUBNET:-172.30.99.0/24}"
           conflict="$(python3 - "$target_subnet" <<'PYEOF'
-          import ipaddress, subprocess, sys
+          import ipaddress, os, subprocess, sys
           target = ipaddress.ip_network(sys.argv[1])
           # A leftover network from our own project (e.g. an aborted prior run
           # that never reached the teardown step) is not a real collision --
           # docker compose reuses/recreates it by name. Only flag networks
           # that aren't ours.
-          own_prefix = "lancache-ng-validation"
+          own_prefix = os.environ.get("COMPOSE_PROJECT_NAME", "lancache-ng-validation")
 
           # Docker-managed networks only cover Docker's own view. A route or
           # interface address already on the host (another NIC, a VPN, a
@@ -290,9 +294,12 @@ jobs:
     # directly during #403/#594 that two jobs binding the same fixed
     # addresses on this shared runner tier collide.
     name: SSL MITM cache simulation
-    needs: full-setup-validate
+    needs: [compute-validation-network, full-setup-validate]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -326,9 +333,12 @@ jobs:
     # compose project name and fixed validation-network IPs as
     # full-setup-validate, so it must not run concurrently with either.
     name: UI/NATS/DNS integration simulation
-    needs: ssl-mitm-cache-simulation
+    needs: [compute-validation-network, ssl-mitm-cache-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -357,9 +367,12 @@ jobs:
     # this test drives docker/docker compose directly on the runner, the
     # same as full-setup-validate's own steps.
     name: Watchtower update simulation
-    needs: ui-nats-dns-integration-simulation
+    needs: [compute-validation-network, ui-nats-dns-integration-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -516,9 +529,12 @@ jobs:
     # concurrency here (matching dhcp-kea-lease-flow-simulation's own rationale
     # for being chained rather than parallel).
     name: NATS auth-callout simulation
-    needs: dhcp-kea-lease-flow-simulation
+    needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
