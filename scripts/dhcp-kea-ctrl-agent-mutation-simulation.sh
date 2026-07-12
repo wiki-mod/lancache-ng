@@ -275,12 +275,18 @@ request_lease() {
     done
     docker rm -f "$client_container" >/dev/null 2>&1 || true
 
-    echo "::group::$label: raw dhclient output"
-    cat "$work_dir/$state_subdir/dhclient.out" 2>/dev/null || echo "(no client output captured)"
-    echo "::endgroup::"
+    # Redirected to stderr, not stdout: this function's stdout is captured
+    # via command substitution by every caller (the offered address is the
+    # only thing that must appear there) -- diagnostic output on stdout would
+    # silently corrupt that capture with multiple lines instead of one.
+    {
+        echo "::group::$label: raw dhclient output"
+        cat "$work_dir/$state_subdir/dhclient.out" 2>/dev/null || echo "(no client output captured)"
+        echo "::endgroup::"
+    } >&2
 
     if [[ "$lease_obtained" -ne 1 ]]; then
-        echo "::error::$label: dhclient never obtained a lease within ${lease_deadline}s." >&2
+        echo "::error::$label: dhclient never obtained a lease within 30s." >&2
         return 1
     fi
 

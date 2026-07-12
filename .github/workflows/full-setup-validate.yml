@@ -570,7 +570,7 @@ jobs:
         id: build-tools-image
         run: |
           set -euo pipefail
-          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          image="$(bash scripts/select-build-tools-image.sh)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run NATS auth-callout simulation
