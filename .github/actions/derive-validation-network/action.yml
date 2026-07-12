@@ -39,6 +39,12 @@ outputs:
   ui_ip:
     description: ui service IP
     value: ${{ steps.derive.outputs.ui_ip }}
+  project_name:
+    description: Compose project name (derived for per-run isolation)
+    value: ${{ steps.derive.outputs.project_name }}
+  ui_port:
+    description: Admin UI host port (derived to avoid port collisions)
+    value: ${{ steps.derive.outputs.ui_port }}
 
 runs:
   using: composite
@@ -88,6 +94,16 @@ runs:
         subnet="172.30.${octet}.0/24"
         echo "Derived validation subnet ${subnet} from run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}."
 
+        # Derive per-run compose project name for isolation (GitHub's run_id
+        # and run_attempt are globally unique, no collision with other runs).
+        # Uses octet as a human-readable suffix for debugging.
+        project_name="lancache-ng-validation-${octet}"
+
+        # Derive per-run host port for the Admin UI (9000 + octet gives a
+        # collision-free range 9002–9253, avoiding the standard 9090 that
+        # could collide when two runs on the same host use the same port).
+        ui_port=$((9000 + octet))
+
         {
           echo "octet=${octet}"
           echo "subnet=${subnet}"
@@ -100,4 +116,6 @@ runs:
           echo "netdata_ip=172.30.${octet}.7"
           echo "nats_ip=172.30.${octet}.8"
           echo "ui_ip=172.30.${octet}.9"
+          echo "project_name=${project_name}"
+          echo "ui_port=${ui_port}"
         } >> "$GITHUB_OUTPUT"

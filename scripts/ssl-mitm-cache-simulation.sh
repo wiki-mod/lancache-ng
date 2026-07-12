@@ -37,7 +37,7 @@ work_dir="$repo_root/.ssl-mitm-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
 
-compose_project="lancache-ng-validation"
+compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
 proxy_ip="172.30.99.2"
 dns_standard_ip="172.30.99.3"
