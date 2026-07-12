@@ -331,4 +331,77 @@ bash setup.sh update "$install_dir"
 wait_for_stack_healthy
 echo "setup.sh update recovered the stack once the .env was restored to its last-known-good state."
 
-echo "setup.sh CLI simulation passed: fresh install, update/migration, and rollback safety all verified against the real CLI."
+echo "== Phase 4: setup.sh restore re-converges .env (issue #639) =="
+
+# Phase 4a: restoring an already-converged backup must be a no-op for .env,
+# mirroring AG-OP-011's "repeat run changes nothing" property for update.
+echo "-- Phase 4a: restoring an already-converged backup is a no-op for .env --"
+bash setup.sh backup --config "$install_dir" --dest "$backup_root"
+noop_backup="$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' | sort | tail -1)"
+[[ -n "$noop_backup" ]] \
+    || { echo "::error::No config backup was found to test restore no-op convergence." >&2; exit 1; }
+
+cp "$install_dir/.env" "$install_dir/.env.before-noop-restore"
+bash setup.sh restore "$noop_backup" "$install_dir"
+diff -q \
+    <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.before-noop-restore") \
+    <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
+    || { echo "::error::setup.sh restore changed .env while restoring an already-converged backup -- expected a no-op (issue #639)." >&2; exit 1; }
+wait_for_stack_healthy
+echo "Restoring an already-converged backup left .env unchanged and the stack healthy."
+
+# Phase 4b: a backup from an older install can carry a legacy-format .env
+# (split cache keys, a stale strict security mode) captured verbatim at
+# backup time. cmd_backup only ever archives the *current*, already-migrated
+# .env, so the only way to reproduce a real legacy backup here is to take a
+# known-good archive and rewrite its embedded .env to the pre-#456 shape --
+# the same fixture shape tests/bats/setup_update_idempotence.bats and Phase 2
+# above already use against migrate_env_for_update() directly, reused here
+# against the real `setup.sh restore` CLI instead of the extracted function.
+echo "-- Phase 4b: restoring a legacy-format backup converges .env the same way setup.sh update does --"
+legacy_backup_root="$repo_root/.setup-cli-simulation-tmp/legacy-backup"
+rm -rf "$legacy_backup_root"
+mkdir -p "$legacy_backup_root"
+tar -C "$legacy_backup_root" -xzf "$noop_backup"
+legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d | head -1)"
+[[ -n "$legacy_stamp_dir" ]] \
+    || { echo "::error::Could not extract the synthetic legacy backup fixture." >&2; exit 1; }
+legacy_env_path="$legacy_stamp_dir/rootfs${install_dir}/.env"
+[[ -f "$legacy_env_path" ]] \
+    || { echo "::error::Could not locate .env inside the synthetic legacy backup fixture." >&2; exit 1; }
+
+# Point the split legacy keys at the install's real, already-populated cache
+# directory instead of an arbitrary path: after migrate_env_for_update()
+# collapses them back into CACHE_DIR, the post-restore stack actually mounts
+# this path, so an arbitrary non-existent path would fail the health check
+# below for an unrelated reason and mask what this phase is testing.
+real_cache_dir=$(grep '^CACHE_DIR=' "$legacy_env_path" | head -1 | cut -d= -f2-)
+[[ -n "$real_cache_dir" ]] \
+    || { echo "::error::Synthetic legacy backup fixture has no CACHE_DIR to seed the legacy split keys from." >&2; exit 1; }
+sed -i \
+    -e '/^CACHE_DIR=/d' \
+    -e "\$a CACHE_DIR_STANDARD=${real_cache_dir}" \
+    -e "\$a CACHE_DIR_SSL=${real_cache_dir}" \
+    -e 's/^PROXY_SECURITY_MODE=.*/PROXY_SECURITY_MODE=strict/' \
+    -e 's/^PROXY_ALLOWED_CLIENT_CIDRS=.*/PROXY_ALLOWED_CLIENT_CIDRS=/' \
+    "$legacy_env_path"
+grep -qF 'PROXY_SECURITY_MODE=strict' "$legacy_env_path" \
+    || { echo "::error::Could not seed the synthetic legacy backup's PROXY_SECURITY_MODE=strict fixture." >&2; exit 1; }
+
+legacy_archive="$repo_root/.setup-cli-simulation-tmp/lancache-ng-config-legacy-restore-test.tar.gz"
+tar -C "$legacy_backup_root" -czf "$legacy_archive" "$(basename "$legacy_stamp_dir")"
+
+bash setup.sh restore "$legacy_archive" "$install_dir"
+
+grep -qF "CACHE_DIR=${real_cache_dir}" "$install_dir/.env" \
+    || { echo "::error::setup.sh restore did not collapse legacy CACHE_DIR_STANDARD/CACHE_DIR_SSL into CACHE_DIR (issue #639)." >&2; exit 1; }
+grep -q '^CACHE_DIR_STANDARD=' "$install_dir/.env" \
+    && { echo "::error::setup.sh restore left the legacy CACHE_DIR_STANDARD key behind (issue #639)." >&2; exit 1; }
+grep -qF 'PROXY_SECURITY_MODE=lazy' "$install_dir/.env" \
+    || { echo "::error::setup.sh restore did not migrate the legacy PROXY_SECURITY_MODE=strict value back to lazy (issue #639)." >&2; exit 1; }
+wait_for_stack_healthy
+echo "setup.sh restore converged a legacy-format backup's .env the same way setup.sh update does (issue #639)."
+
+rm -rf "$legacy_backup_root" "$legacy_archive"
+
+echo "setup.sh CLI simulation passed: fresh install, update/migration, rollback safety, and restore convergence all verified against the real CLI."

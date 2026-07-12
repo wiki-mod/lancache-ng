@@ -2559,6 +2559,22 @@ EOF
 # under the archived install directory are skipped in the generic copy loop
 # and handled separately first, since they need the path-remap/sed rewrite
 # rather than a literal restore to their original absolute path.
+#
+# A restored archive can carry a legacy or otherwise unconverged .env (older
+# split cache keys, a stale strict security mode, keys a later release added)
+# because it was captured verbatim at backup time -- unlike cmd_update, which
+# always runs migrate_env_for_update + validate_compose_config before it lets
+# the stack come back up. Issue #639: after files/volumes are restored, this
+# function runs that same convergence path so a restore never leaves an
+# install silently un-migrated, requiring an undocumented manual
+# `setup.sh update` afterward. Following AG-OP-010 (validate before restart
+# when a failed validation would leave the install worse off), a migration or
+# validation failure here is fail-closed: stack_stopped is cleared before
+# die() runs so the already-stopped stack is left stopped instead of being
+# started against a config that failed to converge or validate. The restored
+# files/volumes and whatever migrate_env_for_update managed to write to .env
+# before failing are left on disk either way; rerun `setup.sh update` once the
+# reported problem is fixed.
 cmd_restore() {
     local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
     install_dir=$(realpath -m "$install_dir")
@@ -2625,6 +2641,17 @@ cmd_restore() {
     done < "$backup_dir/manifest.txt"
     restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
     print_ok "Files restored from $archive"
+
+    # Run in a subshell so a die() inside either helper is caught here instead
+    # of unwinding straight past the stack_stopped=0 line below -- both
+    # helpers already wrote whatever they could to the on-disk .env before
+    # die()ing, and that partial progress is intentionally left in place for
+    # the operator to inspect/finish via setup.sh update.
+    if ! ( migrate_env_for_update "$install_dir" && validate_compose_config "$install_dir" ); then
+        stack_stopped=0
+        die "Restore could not converge or validate the restored .env. The stack was left stopped instead of starting on an unconverged/invalid configuration. Fix the reported problem, then run: setup.sh update $install_dir"
+    fi
+
     restore_cleanup
 }
 
@@ -2727,7 +2754,11 @@ EOF
 Usage: ./setup.sh restore <backup.tar.gz> [install-dir]
 
 Restores a setup-script backup. Files from the archived install directory are
-remapped to [install-dir] when it differs from the original path.
+remapped to [install-dir] when it differs from the original path. After
+restoring, runs the same .env convergence and Compose validation as
+setup.sh update, then starts the stack. If convergence or validation fails,
+the stack is left stopped instead of starting on an unconverged config; fix
+the reported problem and run setup.sh update.
 EOF
             ;;
         *)

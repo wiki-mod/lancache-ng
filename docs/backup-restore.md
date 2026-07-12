@@ -70,12 +70,36 @@ The backup command stops the compose stack before copying mutable databases and 
 
 If Watchtower changed an optional helper image, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same helper image is not pulled immediately. If the failure was caused by a bad first-party image, inspect the restored backup's `image-revisions.txt` and pin `LANCACHE_IMAGE_TAG` to the previous `sha-*`, release candidate, or stable release tag before restarting the affected service.
 
+## Restore also re-converges `.env`
+
+`restore` restores exactly what a backup archive captured, including whatever
+shape `.env` had at backup time. A backup taken from an older install can
+therefore carry legacy keys (split `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL`, a
+stale `PROXY_SECURITY_MODE=strict` with no allowlist), a placeholder secret,
+or keys a later release added that the archived install never had. After
+restoring files and Docker volumes, `restore` runs the exact same `.env`
+convergence path `update` uses (`migrate_env_for_update`, then
+`validate_compose_config`) before starting the stack, so a legacy or
+incomplete backup converges to the current expected `.env` shape
+automatically. Restoring a backup that is already fully converged is a no-op:
+convergence never rewrites values that already match the current expected
+shape, so it does not require and no longer relies on running `setup.sh
+update` by hand afterward.
+
+If convergence or validation fails after a restore (for example, an
+unresolvable legacy value, or a compose configuration that fails to validate),
+`restore` fails closed: it reports the error, leaves the restored files and
+Docker volumes on disk exactly as restored, and leaves the stack **stopped**
+instead of starting it against an unconverged or invalid configuration. Fix
+the reported problem in `.env`, then run `setup.sh update [install-dir]` to
+finish converging and start the stack.
+
 ## Restore testing
 
 Test restores periodically on a spare host or VM:
 
-1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored active runtime env file are rewritten for migrations. Backups created from `deploy/prod` also remap the archived repository-root runtime inputs to the new checkout root instead of restoring them to stale absolute paths. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped.
-2. Start the stack.
+1. Restore the backup to the target install directory. Install files from the archived install path are remapped to the `[install-dir]` argument instead of always being written back to the original path, and matching absolute install-path references in the restored active runtime env file are rewritten for migrations. Backups created from `deploy/prod` also remap the archived repository-root runtime inputs to the new checkout root instead of restoring them to stale absolute paths. If the backup contains Docker named volumes, Docker and the compose project must be available during restore so those volumes can be loaded instead of silently skipped. `restore` then converges `.env` and validates the compose configuration itself (see "Restore also re-converges `.env`" above) and starts the stack as its last step, so no separate manual update pass is required.
+2. Confirm the stack is running (`restore` starts it automatically after a successful convergence; if it reports a convergence/validation failure, the stack is intentionally left stopped -- fix `.env`, then run `setup.sh update [install-dir]`).
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.
 5. Confirm HTTP cache traffic on port 80.
