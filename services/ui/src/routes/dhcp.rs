@@ -1190,8 +1190,8 @@ pub async fn add_reservation(
     }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
-        // Codex review finding on this same PR: if an operator has hand-edited
-        // the *global* Dhcp4.host-reservation-identifiers list to something
+        // If an operator has hand-edited the *global*
+        // Dhcp4.host-reservation-identifiers list to something
         // that excludes "hw-address" (e.g. ["client-id"]), Kea would accept
         // this config-set call but then silently never match the reservation
         // we're about to add -- config-set succeeds, the form redirects as if
@@ -4716,9 +4716,9 @@ mod tests {
         }
     }
 
-    // Regression coverage for a Codex review finding on this same PR: removing
-    // the per-subnet write (above) means correctness now depends entirely on
-    // the *global* Dhcp4.host-reservation-identifiers list still including
+    // Regression coverage: removing the per-subnet write (above) means
+    // correctness now depends entirely on the *global*
+    // Dhcp4.host-reservation-identifiers list still including
     // "hw-address". This project's own shipped config never sets that key
     // (relies on Kea's compiled-in default), but nothing stopped an operator
     // from hand-editing it to something narrower -- these three cases pin the
@@ -4747,9 +4747,9 @@ mod tests {
 
     // End-to-end: add_reservation's guard must reject the request *before*
     // ever sending config-test/config-set -- otherwise the write would still
-    // race Kea's own silent (non-)matching behavior the Codex finding warned
-    // about. Only a config-get call should happen; asserting `calls.len()`
-    // pins that config-test/config-set are never reached.
+    // race Kea's own silent (non-)matching behavior described above. Only a
+    // config-get call should happen; asserting `calls.len()` pins that
+    // config-test/config-set are never reached.
     #[tokio::test]
     async fn kea_config_modify_rejects_reservation_add_when_global_identifiers_exclude_hw_address()
     {
