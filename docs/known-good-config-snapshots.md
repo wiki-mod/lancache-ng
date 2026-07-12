@@ -209,9 +209,9 @@ documented contract, in `services/ui/src/kea_snapshots.rs`:
 ## PowerDNS
 
 PowerDNS's state splits into two very different categories, and only the
-first is in scope for the generic file-snapshot mechanism (#615). The
-second is explicitly deferred; see "Zones, records, and TSIG/DDNS metadata
-(deferred)" below.
+first reuses the generic file-snapshot mechanism (#615). The second needs
+its own mechanism, described in its own terms below; see "Zones, records,
+and TSIG/DDNS metadata" below.
 
 ### Static service config — `pdns.conf` / `recursor.conf` (implemented, #615)
 
@@ -310,29 +310,106 @@ restart re-generates and re-rejects the same broken candidate until the
 underlying input is fixed. The `WARNING`/`ERROR` `[lancache-dns]` log lines
 at fallback time are the only current signal.
 
-### Zones, records, and TSIG/DDNS metadata (deferred)
+### Zones, records, and TSIG/DDNS metadata
 
 Authoritative over `pdns.sqlite3` and mutated live via `pdnsutil`, the
 Admin UI's DDNS/NATS sync path, and dynamic DNS updates from Kea. This is
-API/database-backed state, not a config file. A blind file-level
+API/database-backed state, not a config file, so it cannot reuse the
+generic file-snapshot contract (#615) as-is: a blind file-level
 snapshot/restore of `pdns.sqlite3` while the daemon is live risks capturing
 an inconsistent database file, and "rolling back" zone/record data has
 completely different implications than rolling back a static config file —
 it can silently undo legitimate client DHCP leases, DDNS-driven hostname
 records, or secondary-node reconciliation state that changed after the
-snapshot was taken. Restoring database state safely needs the database
-backend either stopped or in a supported hot-backup mode, an explicit
-decision about which zones are in scope (LAN zones vs. the CDN RPZ zone,
-which is fully regenerated from `cdn-domains.txt` on every start and
-therefore does not need snapshotting at all), and a clear answer for what
-"invalid" even means for record data (there is no equivalent of
-`nginx -t` for "is this zone file consistent with what NATS/DHCP expect
-right now"). Rushing this into the generic file-snapshot contract would
-violate the issue's explicit warning against blind file rollback for
-API/database-backed state. This stays out of scope of the generic
-file-snapshot mechanism entirely and needs its own explicit
-export/validate/apply/verify design in a dedicated follow-up issue before
-any implementation.
+snapshot was taken. Issue #628 tracks this gap; this section is that
+issue's design. No snapshot/rollback code exists yet for zone/record data —
+everything below is the scoped design an implementation PR should follow,
+not a description of running behavior.
+
+**Scope decision.** Looking at what `services/dns/entrypoint.sh` actually
+does on every start narrows the problem a lot:
+
+- The RPZ zone (`rpz.`) is fully regenerated from `cdn-domains.txt` on
+  every start (see "Generate RPZ Zone from cdn-domains.txt" in the
+  entrypoint) and is never mutated any other way. It needs no snapshot at
+  all — restoring `cdn-domains.txt` (already covered by
+  `setup.sh backup`/`restore`, see
+  [backup-restore.md](backup-restore.md)) is sufficient to reproduce it
+  exactly.
+- TSIG key material and the `TSIG-ALLOW-DNSUPDATE` zone metadata are also
+  fully reproducible: `configure_ddns_tsig()` runs unconditionally on every
+  start, re-importing the key from `DDNS_TSIG_KEY`/`DDNS_TSIG_NAME`/
+  `DDNS_TSIG_ALGORITHM` and re-setting the metadata on every zone in
+  `DDNS_UPDATE_ZONES`. There is nothing here that a restart doesn't already
+  reconstruct from environment variables, so this metadata also needs no
+  snapshot of its own.
+- `lan.` / `local.lan.` and the private reverse zones (`PRIVATE_REVERSE_ZONES`
+  in the entrypoint) are created idempotently (`create-zone ... || true`)
+  but never repopulated — their *record* contents come entirely from
+  DDNS updates (Kea leases, hostname registrations) and NATS-driven
+  secondary reconciliation applied afterward.
+
+So the only state that genuinely needs a snapshot/rollback story is the
+**dynamic record data inside `lan.`, `local.lan.`, and the private reverse
+zones** — not the zone list, not TSIG, not RPZ.
+
+**Snapshot mechanism.** For each in-scope zone, use `pdnsutil list-zone
+<zone>` to export the zone's current records as BIND-format zone-file text
+(a plain, reviewable text export, not a raw copy of `pdns.sqlite3`, so this
+never risks an inconsistent binary file the way a live SQLite file-copy
+would). The existing `kgs_snapshot_create` / `kgs_list_snapshots` /
+`kgs_snapshot_prune` primitives in `scripts/lib/known-good-snapshots.sh`
+already operate on arbitrary files identified only by path and basename —
+nothing about them assumes a config file — so they can be reused directly
+against these per-zone export files, one `snapshot_root` per zone (e.g.
+`${DNS_CONFIG_SNAPSHOT_DIR}/zones/<zone>`), with the same
+`KEEP_KNOWN_GOOD_CONFIGS` retention default as every other adapter.
+
+**Trigger point.** There is no container-startup moment analogous to "a
+freshly generated file either validates or it doesn't" for live record
+data — records change continuously via DDNS and NATS, not once per start.
+The natural trigger is therefore inside `services/dns/nats-subscriber`,
+immediately after it applies and confirms a batch of record changes to the
+PowerDNS API (the same point where it already knows the write succeeded):
+export and snapshot the affected zone right after that confirmation, so
+every snapshot corresponds to a point where the zone was known to reflect
+a successfully applied update.
+
+**Validation.** `pdnsutil check-zone <zone>` is the closest equivalent to
+`nginx -t` for zone data: it validates zone-file structure (SOA serial
+sanity, dangling CNAME targets, delegation consistency). Run it against a
+candidate export before accepting it as a known-good snapshot, and again
+against a candidate rollback target before applying it, mirroring the
+generic contract's "validate before snapshotting" / "rollback refuses
+invalid snapshots" rules. `check-zone` is structural only — it has no way
+to know whether a zone's contents are semantically consistent with what
+Kea's current DHCP leases or NATS's current reconciliation state expect
+right now. That gap is exactly why the next point below matters.
+
+**Applying a rollback stays operator-selected, never automatic.** Because
+`check-zone` cannot judge semantic correctness, and because restoring an
+older zone snapshot can undo real client leases or hostnames created since
+that snapshot, this follows the same pattern already documented above for
+Kea: an operator picks a specific timestamped snapshot for a specific zone
+from the Admin UI, `pdnsutil load-zone <zone> <exported-file>` replaces
+that zone's records, and `check-zone` re-runs afterward as a sanity
+confirmation. No automatic startup-time rollback is ever attempted for
+zone data, unlike the nginx/dnsmasq/PowerDNS static-config adapters above.
+
+**Secondary nodes and NATS replication.** Every DNS node (primary and each
+remote secondary from `setup.sh secondary`) runs its own
+`nats-subscriber` consuming the same JetStream stream and applying updates
+to its own local PowerDNS instance independently — record data is
+replicated through NATS messages, not through file or database copying
+between nodes. An implementation PR must confirm how a rollback on one
+node interacts with this: applying `load-zone` locally changes only that
+node's own database, so a rollback on the primary needs an explicit answer
+for whether/how it re-publishes the restored state onto the NATS stream so
+secondaries converge to the same records, rather than leaving the primary
+and its secondaries silently holding different data for the rolled-back
+zone. This is called out here as a design question the implementation PR
+must resolve, since JetStream's own message history is itself a form of
+replay log for these changes and may turn out to be part of the answer.
 
 ## Manual recovery
 
