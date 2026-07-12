@@ -291,6 +291,9 @@ pub async fn update_nats_conf(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     nats_config::validate_runtime_nats_credentials(&state.config)?;
 
+    // .as_deref().unwrap_or_default() below is defensive only: the
+    // validate_runtime_nats_credentials call above already guarantees every
+    // one of these is Some by the time render_nats_conf runs.
     let nats_conf = render_nats_conf(
         &state.config.nats_ui_user,
         state.config.nats_ui_password.as_deref().unwrap_or_default(),
