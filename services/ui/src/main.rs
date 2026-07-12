@@ -67,6 +67,18 @@ const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 
+// Known placeholder value for SECONDARY_REGISTRATION_TOKEN, copied verbatim
+// from deploy/prod/.env's checked-in default (this fix's issue #659 scope),
+// which uses the CHANGE_ME_* form to match KEA_CTRL_TOKEN/PDNS_API_KEY's
+// existing convention in that same file. Recognized as unset by setup.sh's
+// own placeholder detector (see env_key_has_usable_secret in setup.sh). If
+// this literal ships untouched, it is public knowledge readable straight out
+// of this repo, so validate_secondary_registration_token below must reject
+// it exactly like an empty token -- see services/dns/entrypoint.sh's
+// analogous CHANGE_ME_* rejection for PDNS_API_KEY.
+const SECONDARY_REGISTRATION_TOKEN_PLACEHOLDERS: &[&str] =
+    &["CHANGE_ME_SECONDARY_REGISTRATION_TOKEN"];
+
 // Persists the CSRF/session-signing secret across restarts so existing
 // sessions don't get invalidated on every container recreate. `create_new`
 // makes the write atomic and exclusive (no lost-update race if two processes
@@ -562,8 +574,52 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
     Ok(())
 }
 
+// SECONDARY_REGISTRATION_TOKEN gates the one route
+// (`POST /api/secondary/register`) that lets a new secondary DNS node join
+// this primary -- see routes/secondaries.rs's own empty-token and
+// constant-time comparison checks, which enforce the same invariant again on
+// every request as defense in depth. This boot-time check exists so a
+// misconfigured token fails loud at startup instead of silently accepting
+// registrations against a guessable value:
+// - an empty token was the original vulnerability (flagged on PR #195):
+//   an unset configured token compared equal to an unset/empty request
+//   token, so any client could register.
+// - a known placeholder is the same problem restated: its value is public,
+//   readable straight out of this repository's checked-in deploy/prod/.env.
+//
+// Registering a secondary DNS node is an opt-in feature -- most single-node
+// installs never use it -- but the token itself is not opt-in: setup.sh
+// already generates a real SECONDARY_REGISTRATION_TOKEN unconditionally for
+// every install, in the same ensure_secret_env_key pipeline as
+// PDNS_API_KEY and DDNS_TSIG_KEY, regardless of whether the operator ever
+// registers a secondary (see setup.sh's `ensure_secret_env_key
+// SECONDARY_REGISTRATION_TOKEN`). Manual installs that copy
+// deploy/prod/.env by hand get the same requirement via that file's
+// CHANGE_ME_* default rather than an empty value, so this check -- like
+// UI_AUTH_USER/UI_AUTH_PASSWORD's resolve_admin_ui_auth_mode above -- fails
+// closed with a clear message rather than starting in a silently insecure
+// state (issue #659).
+fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        return Err(
+            "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
+             Generate one with: openssl rand -hex 32"
+                .to_string(),
+        );
+    }
+    if SECONDARY_REGISTRATION_TOKEN_PLACEHOLDERS.contains(&token) {
+        return Err(format!(
+            "SECONDARY_REGISTRATION_TOKEN is still set to the default placeholder \
+             ('{token}') — refusing to start. Generate a real secret with: \
+             openssl rand -hex 32"
+        ));
+    }
+    Ok(())
+}
+
 fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
     validate_ui_session_ttl_seconds(cfg.ui_session_ttl_seconds)?;
+    validate_secondary_registration_token(&cfg.secondary_registration_token)?;
     nats_config::validate_runtime_nats_credentials(cfg)?;
     Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
 }
@@ -584,16 +640,6 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
-
-    // SECONDARY_REGISTRATION_TOKEN must be non-empty; an empty token allows
-    // unauthenticated registration (empty string matches empty string).
-    if cfg.secondary_registration_token.is_empty() {
-        tracing::error!(
-            "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
-             Generate one with: openssl rand -hex 32"
-        );
-        std::process::exit(1);
-    }
 
     // Validate before the retry loop and secret creation so bad env overrides
     // fail closed without waiting on NATS or creating durable session state.
@@ -952,6 +998,22 @@ mod tests {
         assert!(resolve_admin_ui_auth_mode(None, None, false).is_err());
         assert!(resolve_admin_ui_auth_mode(Some("admin"), None, true).is_err());
         assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
+    }
+
+    #[test]
+    fn secondary_registration_token_rejects_empty_and_known_placeholders() {
+        assert!(validate_secondary_registration_token("").is_err());
+        for placeholder in SECONDARY_REGISTRATION_TOKEN_PLACEHOLDERS {
+            assert!(
+                validate_secondary_registration_token(placeholder).is_err(),
+                "expected placeholder {placeholder:?} to be rejected"
+            );
+        }
+        // A real generated secret (openssl rand -hex 32 shape) must pass.
+        assert!(validate_secondary_registration_token(
+            "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
+        )
+        .is_ok());
     }
 
     #[test]
