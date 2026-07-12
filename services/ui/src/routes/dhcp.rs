@@ -165,7 +165,9 @@ enum DhcpConflictCheckStatus {
         details: Vec<DhcpProbeDetail>,
     },
     NotFound,
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 // One nmap broadcast-dhcp-discover field (e.g. `label: "Router", value:
