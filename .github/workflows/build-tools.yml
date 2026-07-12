@@ -44,12 +44,38 @@ on:
 permissions:
   contents: read
   packages: write
+  # id-token/attestations/artifact-metadata are needed at the workflow level
+  # (not just on the individual publish/merge jobs below) because GitHub only
+  # lets a job narrow the workflow-level default, never widen it -- any job
+  # that signs or reads build provenance for this image needs all three
+  # already granted here, or its own `permissions:` block would be capped at
+  # `none` for that scope regardless of what it declares locally.
   id-token: write
   attestations: write
   artifact-metadata: write
 
+# Serializes overlapping runs the same way build-push.yml's own concurrency
+# group does: the weekly schedule, a manual workflow_dispatch, and a
+# qualifying push can all trigger this workflow for the same commit, and
+# every one of those non-pull_request triggers can reach the mutable
+# sha-<short_sha>/branch/latest tags this workflow writes below. Queuing
+# them behind one "<workflow>-publish" group (rather than cancelling, so a
+# publish never gets torn down mid-write) keeps two runs from ever
+# interleaving their reads and writes of those tags. pull_request runs never
+# touch those tags, so they get their own per-ref group instead of queuing
+# behind publish runs they have no interaction with.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  cancel-in-progress: false
+
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  # run_id-run_attempt suffixed, not a fixed name: build-tools and
+  # build-tools-arm64 each load a *local* scan image onto their own runner's
+  # Docker daemon, and the self-hosted amd64 runner in particular is reused
+  # across overlapping/retried runs -- a fixed local tag could let one run's
+  # cleanup ("Remove local scan image") delete or overwrite an image a
+  # concurrently-running job on the same host is still scanning.
   BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
   BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
 
@@ -137,6 +163,15 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      # BUILDX_CACHE_ROOT is a fixed path shared by every run on this
+      # self-hosted amd64 runner (Buildx cache only pays off if it persists
+      # across runs), so a snapshot-then-copy without locking could read a
+      # half-written cache_dir from a concurrently-running job's own "Rotate
+      # local Buildx cache" step. The read-side copy happens under the same
+      # flock a rotation takes, so a read always sees either the pre- or
+      # post-rotation cache, never a partial one; BUILDX_CACHE_READ/DEST
+      # themselves live under runner.temp (already per-job-unique) so the
+      # actual build step's cache-from/cache-to never need locking.
       - name: Prepare local Buildx cache
         id: buildx-cache
         env:
@@ -222,6 +257,13 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      # This tool list mirrors AG-VAL-017's (.github/AGENTS.md) required
+      # build-tools contents exactly -- this step is the executable check
+      # that enforces that governance rule, not an arbitrary sanity list.
+      # `command -v` catches a tool missing from PATH; the `--version`/
+      # `--help` calls below additionally catch one that's on PATH but
+      # broken/mis-linked (e.g. a dynamic library the image forgot to
+      # install), which `command -v` alone would not.
       - name: Smoke-test acceleration-infrastructure tools
         run: |
           set -euo pipefail
@@ -270,6 +312,15 @@ jobs:
           docker compose version
           '
 
+      # This build-tools workflow is the only place bats/shellspec ever run
+      # against the LOCALLY built candidate image before it's published --
+      # build-push.yml's own dns_test/ui_test/etc. jobs pull the already-
+      # published build-tools:edge, so they'd never catch a fixture
+      # regression introduced by a change to this Dockerfile itself. Running
+      # the project's real test suites here doubles as this job's own proof
+      # that the image it just built can actually execute them, not just
+      # that `bats`/`shellspec` are present on PATH (which "Smoke-test
+      # acceleration-infrastructure tools" above already checked).
       - name: Run Bats setup fixtures
         run: |
           set -euo pipefail
@@ -371,6 +422,16 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+      # `always()` so a later, unrelated step failing (e.g. a Trivy finding)
+      # doesn't throw away cache from a build that itself succeeded --
+      # the cache's own validity only depends on local-build-amd64, not on
+      # anything downstream of it. `steps.build` only runs at all on
+      # non-pull_request (see its own `if:` above), so gating on its outcome
+      # unconditionally would make this step never rotate on pull_request
+      # runs even though those runs did real, cacheable compilation via
+      # local-build-amd64 -- the `github.event_name == 'pull_request'` arm
+      # accepts that local build's own cache instead of requiring a `build`
+      # step outcome that pull_request never produces.
       - name: Rotate local Buildx cache
         if: >-
           ${{
@@ -467,6 +528,10 @@ jobs:
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
 
+      # Same tool list and same AG-VAL-017 rationale as build-tools's own
+      # identically-named step above -- kept as two copies rather than one
+      # shared step because this job runs on a separate GitHub-hosted
+      # runner with no access to that job's local image/cache.
       - name: Smoke-test acceleration-infrastructure tools
         run: |
           set -euo pipefail
@@ -598,11 +663,17 @@ jobs:
         needs['determine-publish-scope'].outputs.should-publish == 'true'
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # A job-level permissions block replaces the workflow-level default
+    # above entirely rather than merging with it, so artifact-metadata:
+    # write has to be repeated here too -- omitting it left this job with
+    # only `none` for that scope, same as build-push.yml's own
+    # attest-performing jobs already carry both scopes together.
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -682,7 +753,20 @@ jobs:
           push-to-registry: true
 
       - name: Promote mutable tags
-        # Neither imagetools create below passes --annotation. $SOURCE_TAG
+        # Promotes from the digest resolved and attested by the two steps
+        # above (merged-digest / "Attest merged build-tools manifest
+        # provenance"), not from the mutable $SOURCE_TAG
+        # (sha-<short_sha>) tag itself: build-push.yml's own merge-manifests
+        # job writes that exact same ghcr.io/<repo>/build-tools:sha-<short_sha>
+        # tag for the same commit whenever its build/build-arm64 matrix
+        # includes a build-tools leg. If that write lands between this job's
+        # attestation and this promotion step, reading the mutable tag here
+        # could carbon-copy a manifest this job never verified onto the
+        # branch/latest tags. Pinning to the digest this job itself just
+        # attested closes that window regardless of what else touches the
+        # mutable tag afterward.
+        #
+        # Neither imagetools create below passes --annotation. The digest
         # already carries the org.opencontainers.image.description index
         # annotation from the merge step above, and a plain
         # --prefer-index=false carbon copy of an already-annotated OCI index
@@ -692,7 +776,7 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
-          SOURCE_TAG: ${{ steps.merge.outputs.source-tag }}
+          MERGED_DIGEST: ${{ steps.merged-digest.outputs.digest }}
         run: |
           set -euo pipefail
 
@@ -702,7 +786,9 @@ jobs:
             exit 1
           fi
 
-          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$SOURCE_TAG"
+          source_ref="${BUILD_TOOLS_IMAGE}@${MERGED_DIGEST}"
+
+          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$SOURCE_TAG"
+            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
           fi
