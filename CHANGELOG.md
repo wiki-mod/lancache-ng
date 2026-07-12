@@ -245,6 +245,24 @@ is real, live, running code, not just work sitting in source control.
   disk for the harness to read back. Made that per-run temp directory
   world-writable so dhclient's post-privilege-drop identity can write the
   lease file the harness's option-verification depends on (#712).
+- Fixed Kea's Control Agent rejecting `lease4-del` with result code 2
+  (`CONTROL_RESULT_COMMAND_UNSUPPORTED`) because `services/dhcp/kea-dhcp4.conf`
+  never loaded the `lease_cmds` hook library that command requires. This
+  broke the Admin UI's "release lease" button (`release_lease()` in
+  `services/ui/src/routes/dhcp.rs`, `POST /dhcp/lease/release`) in
+  production on every real Kea instance, not just the new mutation test that
+  surfaced it — every release attempt returned an error instead of freeing
+  the lease. Fixed by adding a `hooks-libraries` entry for
+  `libdhcp_lease_cmds.so` (shipped by `kea-common`, already a hard
+  dependency of `kea-dhcp4-server` in `services/dhcp/Dockerfile`, so no new
+  package is needed) (#694, Codex review finding).
+  **Follow-up needed:** this fixes fresh installs (first-boot config
+  render) and the new test, but `services/dhcp/entrypoint.sh`'s
+  `migrate_dhcp4_config` does not add `hooks-libraries` to an existing
+  runtime `kea-dhcp4.conf` on upgrade, so already-deployed installs stay
+  broken after a plain image update until that migration is also patched or
+  the Kea data volume is reset — tracked as a separate production fix, not
+  included in this change.
 
 ## [0.1.0] - 2026-07-06
 
