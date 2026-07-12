@@ -150,9 +150,33 @@ fn html_escape(s: &str) -> String {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpConflictCheckStatus {
-    Found { output: String },
+    // `output` stays the bare Server Identifier IP for backward compatibility
+    // with the existing `data.conflict.output` usage in dhcp.html. `details`
+    // is additive (#644): the extra identifying fields nmap's
+    // broadcast-dhcp-discover script reports for the same offer (Router,
+    // DNS, lease time, ...), so the Admin UI can show an operator the same
+    // "who is this other server" context that was previously only visible
+    // by reading the raw probe container logs. Populated by
+    // extract_dhcp_offer_details; empty (never absent, so the frontend
+    // never has to null-check the field itself) when the full nmap text
+    // had none of the known labels.
+    Found {
+        output: String,
+        details: Vec<DhcpProbeDetail>,
+    },
     NotFound,
     Unavailable { reason: String },
+}
+
+// One nmap broadcast-dhcp-discover field (e.g. `label: "Router", value:
+// "192.168.1.1"`), serialized as-is for the Admin UI's details list. Kept as
+// a plain label/value pair rather than named struct fields per known label,
+// since the set of fields present varies per DHCP server and the frontend
+// only ever needs to render "label: value" rows in order.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct DhcpProbeDetail {
+    label: String,
+    value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1944,8 +1968,15 @@ fn parse_dhcp_probe_report(output: &str) -> DhcpCheckReport {
 fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
     if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CONFLICT_RESULT_MARKER) {
         return match status {
+            // `output` (the full multi-line container log, not `detail`,
+            // which is only the marker line's single-word IP) is scanned
+            // again here for the richer field list -- it still holds the
+            // raw `cat "$nmap_out"` text services/ui/dhcp-probe.sh printed
+            // before its own marker line (see current_probe_output, which
+            // preserves everything after the run's start marker).
             "found" if !detail.is_empty() => DhcpConflictCheckStatus::Found {
                 output: detail.to_string(),
+                details: extract_dhcp_offer_details(output),
             },
             "not_found" => DhcpConflictCheckStatus::NotFound,
             "unavailable" => DhcpConflictCheckStatus::Unavailable {
@@ -1966,12 +1997,99 @@ fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
         if let Some(rest) = line.strip_prefix("Server Identifier:") {
             let ip = rest.trim().to_string();
             if !ip.is_empty() {
-                return DhcpConflictCheckStatus::Found { output: ip };
+                return DhcpConflictCheckStatus::Found {
+                    output: ip,
+                    details: extract_dhcp_offer_details(output),
+                };
             }
         }
     }
 
     DhcpConflictCheckStatus::NotFound
+}
+
+// Known field labels nmap's broadcast-dhcp-discover script prints for a
+// DHCPOFFER response, in the order the Admin UI should list them (not the
+// order they happen to appear on the wire, which nmap does not guarantee is
+// stable) -- see extract_dhcp_offer_details.
+const DHCP_OFFER_DETAIL_LABELS: &[&str] = &[
+    "Server Identifier",
+    "IP Offered",
+    "DHCP Message Type",
+    "IP Address Lease Time",
+    "Renewal Time Value",
+    "Rebinding Time Value",
+    "Subnet Mask",
+    "Router",
+    "Domain Name Server",
+    "Domain Name",
+    "Broadcast Address",
+    "TFTP Server Name",
+    "Vendor Class Identifier",
+];
+
+// Pulls the known identifying fields (see DHCP_OFFER_DETAIL_LABELS) nmap's
+// broadcast-dhcp-discover script reports for a DHCPOFFER out of the probe
+// container's full log text, so the Admin UI can show an operator more than
+// just the bare Server Identifier IP already in DhcpConflictCheckStatus::
+// Found's `output` field (#644). Only the first response block is scanned:
+// nmap prints one "Response N of M:" block per answering DHCP server when
+// more than one replies, and mixing fields from a second, different server
+// into one details list would misattribute e.g. its Router to the first
+// server's Subnet Mask. Output that never has a "Response" line at all (the
+// overwhelmingly common single-rogue-server case) has no such boundary and
+// is scanned in full. First occurrence of each label wins, same as
+// server_identifier's "take the first match" rule elsewhere in this file.
+fn extract_dhcp_offer_details(output: &str) -> Vec<DhcpProbeDetail> {
+    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
+    let mut response_blocks_seen = 0u32;
+
+    for line in output.lines() {
+        let line = normalize_nmap_line(line);
+
+        if let Some(rest) = line.strip_prefix("Response ") {
+            if rest.contains(" of ") {
+                response_blocks_seen += 1;
+                if response_blocks_seen > 1 {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        // `.iter().copied()` (not a bare `for label in DHCP_OFFER_DETAIL_LABELS`)
+        // deliberately keeps `label` a single `&str` rather than `&&str` --
+        // `str::strip_prefix` below needs a `Pattern`, which `&str` (but not
+        // `&&str`) implements, and using the same single-reference type for
+        // both the BTreeMap key and the Pattern argument avoids relying on
+        // implicit deref coercion at either call site.
+        for label in DHCP_OFFER_DETAIL_LABELS.iter().copied() {
+            if found.contains_key(label) {
+                continue;
+            }
+            if let Some(value) = line
+                .strip_prefix(label)
+                .and_then(|rest| rest.strip_prefix(':'))
+            {
+                let value = value.trim();
+                if !value.is_empty() {
+                    found.insert(label, value.to_string());
+                }
+                break;
+            }
+        }
+    }
+
+    DHCP_OFFER_DETAIL_LABELS
+        .iter()
+        .copied()
+        .filter_map(|label| {
+            found.get(label).map(|value| DhcpProbeDetail {
+                label: label.to_string(),
+                value: value.clone(),
+            })
+        })
+        .collect()
 }
 
 // Same marker-line-first strategy as parse_conflict_probe_result, but for
@@ -2986,7 +3104,12 @@ mod tests {
 
         assert_eq!(report.overall_status(), "conflict_found");
         match report.conflict {
-            DhcpConflictCheckStatus::Found { output } => assert_eq!(output, "192.168.1.1"),
+            DhcpConflictCheckStatus::Found { output, details } => {
+                assert_eq!(output, "192.168.1.1");
+                // No extra nmap fields in this fixture's single-line input --
+                // details must default to empty, not panic or fabricate data.
+                assert!(details.is_empty());
+            }
             other => panic!("unexpected conflict result: {:?}", other),
         }
         match report.client {
@@ -2995,6 +3118,109 @@ mod tests {
             }
             other => panic!("unexpected client result: {:?}", other),
         }
+    }
+
+    // #644: a real dhcp-probe.sh run prints the full `cat "$nmap_out"` text
+    // before its own result marker, so this fixture mirrors that -- the
+    // marker line alone only carries the bare Server Identifier IP, but the
+    // Admin UI should also get the surrounding nmap fields out of the same
+    // container log text.
+    #[test]
+    fn parses_dhcp_probe_report_extracts_offer_details_alongside_marker_ip() {
+        let report = parse_dhcp_probe_report(
+            "__LANCACHE_DHCP_PROBE_START__ 1\n\
+             Pre-scan script results:\n\
+             | broadcast-dhcp-discover: \n\
+             |   IP Offered: 192.168.1.50\n\
+             |   DHCP Message Type: DHCPOFFER\n\
+             |   Server Identifier: 192.168.1.1\n\
+             |   IP Address Lease Time: 1d00h00m00s\n\
+             |   Subnet Mask: 255.255.255.0\n\
+             |   Router: 192.168.1.1\n\
+             |_  Domain Name Server: 192.168.1.1\n\
+             __LANCACHE_DHCP_CONFLICT_RESULT__ found 192.168.1.1\n\
+             __LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
+        );
+
+        match report.conflict {
+            DhcpConflictCheckStatus::Found { output, details } => {
+                assert_eq!(output, "192.168.1.1");
+                assert_eq!(
+                    details,
+                    vec![
+                        DhcpProbeDetail {
+                            label: "Server Identifier".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "IP Offered".to_string(),
+                            value: "192.168.1.50".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "DHCP Message Type".to_string(),
+                            value: "DHCPOFFER".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "IP Address Lease Time".to_string(),
+                            value: "1d00h00m00s".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Subnet Mask".to_string(),
+                            value: "255.255.255.0".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Router".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Domain Name Server".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("unexpected conflict result: {:?}", other),
+        }
+    }
+
+    // Two answering DHCP servers (nmap's "Response N of M:" block separator)
+    // must not have their fields merged -- only the first server's details
+    // may end up in the list, even though both blocks contain fields this
+    // parser knows how to extract.
+    #[test]
+    fn extract_dhcp_offer_details_stops_at_second_response_block() {
+        let details = extract_dhcp_offer_details(
+            "| broadcast-dhcp-discover: \n\
+             |   Response 1 of 2: \n\
+             |     Server Identifier: 192.168.1.1\n\
+             |     Router: 192.168.1.1\n\
+             |   Response 2 of 2: \n\
+             |     Server Identifier: 10.0.0.1\n\
+             |_    Router: 10.0.0.1\n",
+        );
+
+        assert_eq!(
+            details,
+            vec![
+                DhcpProbeDetail {
+                    label: "Server Identifier".to_string(),
+                    value: "192.168.1.1".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Router".to_string(),
+                    value: "192.168.1.1".to_string(),
+                },
+            ]
+        );
+    }
+
+    // No known label present anywhere in the input (e.g. a probe run that
+    // never got far enough to print nmap's field breakdown) must yield an
+    // empty list, not a panic -- the caller (DhcpConflictCheckStatus::Found)
+    // relies on this being a safe default.
+    #[test]
+    fn extract_dhcp_offer_details_returns_empty_for_unrelated_text() {
+        assert!(extract_dhcp_offer_details("some unrelated log line\n").is_empty());
     }
 
     // A probe run that never reaches the dhclient stage (e.g. the container
