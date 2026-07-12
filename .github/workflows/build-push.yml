@@ -2204,8 +2204,6 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # This job resolves its own build-tools image rather than reusing
@@ -2360,13 +2358,45 @@ jobs:
             coverage-dns/tarpaulin-report.json
             coverage-ui/tarpaulin-report.json
           retention-days: 30
+      # The badge JSON is handed off as an artifact rather than pushed from this
+      # job directly: this job runs on every trigger including same-repo pull_request
+      # runs that execute PR-controlled test code (cargo tarpaulin), and a job-level
+      # `permissions: contents: write` would apply to that untrusted code too --
+      # GitHub Actions has no step-level permissions to scope the write down to just
+      # the publish step. publish_coverage_badge below is the only job with write
+      # access, and it only ever runs on trusted push events.
+      - name: Upload coverage badge data
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
+        with:
+          name: rust-coverage-badge
+          path: coverage-badge/rust.json
+          retention-days: 1
+
+  publish_coverage_badge:
+    # Split out of rust_coverage (see the comment on its "Upload coverage badge
+    # data" step) so the contents:write token this job needs is never present
+    # during the coverage measurement steps that execute PR-controlled code.
+    name: publish rust coverage badge
+    needs: rust_coverage
+    if: needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Download coverage badge data
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rust-coverage-badge
+          path: coverage-badge
       - name: Publish Rust coverage badge endpoint
         # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
         # so pushes to master and to the active vX.Y.Z integration branch don't
         # overwrite each other's badge data -- the workflow-level concurrency
         # group only serializes writes, it doesn't stop two different branches
         # from racing to own the same file.
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
         env:
           BADGE_BRANCH: badges
           BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
@@ -2385,9 +2415,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin "$BADGE_BRANCH" || true
+          # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
+          # sparse fetch config only tracks the ref it originally checked out, so fetching a
+          # different branch by name alone lands only in FETCH_HEAD, never in
+          # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
+          # report "not found" and take the orphan-branch path even when badges already exists,
+          # and the final push would be rejected as non-fast-forward.
+          git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
           if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
-            git switch --create "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
+            # -C (not --create): this is a self-hosted runner, so a local badges branch left
+            # over from a previous job on the same workspace makes a plain --create fail with
+            # "a branch named 'badges' already exists". -C resets it to origin's tip instead.
+            git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
           else
             git switch --orphan "$BADGE_BRANCH"
             git rm -rf . >/dev/null 2>&1 || true
