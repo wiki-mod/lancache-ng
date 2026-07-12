@@ -50,8 +50,18 @@ WRITER_TEST_EVIDENCE=(
 # the file -- e.g. a doc comment that happens to mention "idempotent" must
 # not satisfy this check on its own, or the guard would pass on a file that
 # talks about idempotence without ever testing it twice.
-MARKER_REGEX='(repeat|idempoten|converge)'
-
+#
+# Deliberately implemented with plain bash string operations (parameter
+# expansion, `case` globs) rather than any regex engine (grep -P/-z, or
+# even a dynamic-alternation `~` match in awk): a `grep -Pzo` version of the
+# Rust check below worked against a GNU grep with PCRE support but silently
+# failed (falsely reporting no test found, exit 2 misread as "no match") on
+# this project's self-hosted CI runners. A follow-up POSIX-awk rewrite using
+# `lname ~ marker` with marker as a runtime alternation string still failed
+# the same way there, most likely because the runner's `awk` is not a full
+# POSIX/gawk implementation either. Bash's own `case` glob matching has no
+# such engine-dependent alternation and is guaranteed identical everywhere
+# this script's own `#!/usr/bin/env bash` shebang already requires.
 failures=0
 
 fail() {
@@ -59,38 +69,87 @@ fail() {
     failures=$((failures + 1))
 }
 
+# name_has_marker <test-name>
+# True if <test-name> (already known to be one @test title or one Rust test
+# fn name) contains repeat/idempoten/converge, case-insensitively.
+name_has_marker() {
+    local name
+    name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$name" in
+        *repeat*|*idempoten*|*converge*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# extract_bats_test_titles <file>
+# Prints one line per `@test "..."` title in a bats file, using only bash
+# parameter expansion (no sed/grep regex dependency) so this cannot drift
+# from name_has_marker's own plain-bash matching style.
+extract_bats_test_titles() {
+    local file="$1" line rest
+    while IFS= read -r line; do
+        case "$line" in
+            *'@test "'*)
+                rest="${line#*@test \"}"
+                printf '%s\n' "${rest%%\"*}"
+                ;;
+        esac
+    done < "$file"
+}
+
 has_bats_repeat_test() {
-    local file="$1"
-    grep -Eiq "@test \"[^\"]*${MARKER_REGEX}[^\"]*\"" "$file"
+    local file="$1" title
+    while IFS= read -r title; do
+        name_has_marker "$title" && return 0
+    done < <(extract_bats_test_titles "$file")
+    return 1
+}
+
+# extract_rust_test_fn_names <file>
+# Prints one line per test function name in a Rust file. Rust test
+# attributes and the `fn` they annotate can be a line or two apart in this
+# codebase's style (an attribute, then occasionally another attribute like
+# #[should_panic], then the fn line), so this is a small state machine:
+# `pending` latches on any #[test]/#[tokio::test] line and stays set across
+# whatever follows (including other attributes) until the next line
+# containing `fn NAME(`, whose name is then printed; `pending` clears there
+# either way, so an unrelated non-matching test in between two real ones can
+# never leak a stale match forward.
+extract_rust_test_fn_names() {
+    local file="$1" line pending=0 rest name
+    while IFS= read -r line; do
+        case "$line" in
+            *'#[test]'*|*'#[tokio::test]'*)
+                pending=1
+                continue
+                ;;
+        esac
+        if [ "$pending" -eq 1 ]; then
+            case "$line" in
+                *'fn '*'('*)
+                    rest="${line#*fn }"
+                    name="${rest%%(*}"
+                    # Trailing generics/whitespace before the parenthesis
+                    # (e.g. "fn foo<T>(" or "fn foo (") are not a shape any
+                    # test fn in this codebase actually uses, but strip
+                    # trailing whitespace defensively so a stray space
+                    # before "(" can't produce a name that silently never
+                    # matches name_has_marker's glob.
+                    name="${name%%[[:space:]]*}"
+                    printf '%s\n' "$name"
+                    pending=0
+                    ;;
+            esac
+        fi
+    done < "$file"
 }
 
 has_rust_repeat_test() {
-    local file="$1"
-    # Rust test attributes and the `fn` they annotate can be a line or two
-    # apart in this codebase's style (an attribute, then occasionally another
-    # attribute like #[should_panic], then the fn line), so this is a small
-    # awk state machine rather than a single-line regex: `pending` latches on
-    # any #[test]/#[tokio::test] line and stays set across any lines that
-    # follow (including other attributes) until the next `fn NAME(` line,
-    # whose name is then checked for the marker; `pending` clears there
-    # either way, so an unrelated non-matching test in between two matching
-    # ones can never leak a stale match forward. Deliberately POSIX awk only
-    # (no gawk-specific IGNORECASE, no PCRE/`-z` grep) -- a PCRE+null-data
-    # `grep -Pzo` version of this same check worked on a GNU grep with PCRE
-    # support but silently failed (falsely reporting no test found) on this
-    # project's self-hosted CI runners, whose `grep` does not support `-P`.
-    awk -v marker="$MARKER_REGEX" '
-        /#\[test\]/ || /#\[tokio::test\]/ { pending = 1; next }
-        pending && /fn[ \t]+[A-Za-z0-9_]+[ \t]*\(/ {
-            name = $0
-            sub(/^.*fn[ \t]+/, "", name)
-            sub(/[ \t]*\(.*$/, "", name)
-            lname = tolower(name)
-            if (lname ~ marker) { found = 1 }
-            pending = 0
-        }
-        END { exit (found ? 0 : 1) }
-    ' "$file"
+    local file="$1" name
+    while IFS= read -r name; do
+        name_has_marker "$name" && return 0
+    done < <(extract_rust_test_fn_names "$file")
+    return 1
 }
 
 for pair in "${WRITER_TEST_EVIDENCE[@]}"; do
