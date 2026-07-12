@@ -1332,24 +1332,64 @@ jobs:
           grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
-          # Guards issue #704: build-tools.yml's "Promote mutable tags" step
-          # writes a branch-name-derived mutable tag, and this repo has a
-          # branch literally named "v0.2.0" -- without the "branch-" prefix,
-          # a push to that branch would publish build-tools:v0.2.0, the
-          # exact tag build-push.yml's own promote job below writes as the
-          # real, immutable vX.Y.Z stable-release tag for the same GHCR
-          # package once that version is actually tagged. A pin check alone
-          # (grepping for the literal "branch-${sanitized_ref}" text) would
-          # pass even if a future edit kept that literal string but added a
-          # conditional bypass elsewhere, so this also proves the *behavior*:
-          # it re-derives the tag build-tools.yml's own logic would produce
-          # for a representative set of real and adversarial ref names --
-          # including "v0.2.0" itself and other vX.Y.Z-shaped branch names --
-          # and fails if any of them come out shaped like a real release tag.
+          # build-tools.yml's "Promote mutable tags" step writes a
+          # branch-name-derived mutable tag, and this repo has a branch
+          # literally named "v0.2.0" -- without the "branch-" prefix, a push
+          # to that branch would publish build-tools:v0.2.0, the exact tag
+          # build-push.yml's own promote job below writes as the real,
+          # immutable vX.Y.Z stable-release tag for the same GHCR package
+          # once that version is actually tagged. A pin check alone
+          # (grepping for the literal "branch_tag=\"branch-${sanitized_ref}\""
+          # text) would pass even if a future edit kept that literal string
+          # in place but then overwrote branch_tag again afterward for a
+          # release-shaped ref, so the grep alone cannot catch that. Instead
+          # of retyping the derivation logic here (which could quietly drift
+          # from the real thing), extract build-tools.yml's actual "Promote
+          # mutable tags" run script -- everything from its tag derivation
+          # up to (not including) the docker buildx call that consumes it --
+          # and execute those exact lines under a representative set of real
+          # and adversarial ref names, including "v0.2.0" itself and other
+          # vX.Y.Z-shaped branch names, failing if any of them come out
+          # shaped like a real release tag. Because this runs the real
+          # script text, a bypass added anywhere in that extracted range
+          # (not just a changed literal) is caught too.
           grep -F 'branch_tag="branch-${sanitized_ref}"' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::build-tools.yml's branch-tag promotion must prefix every derived tag with 'branch-' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
+          # Anchored on the plain substring "sanitized_ref=" (no regex
+          # metacharacters) rather than a fuller literal match: this awk
+          # script must behave identically on CI's mawk and on gawk used
+          # for local testing, and mid-pattern "$" escaping is exactly where
+          # those implementations are known to diverge in ERE mode.
+          promote_tags_script="$(awk '
+            /name: Promote mutable tags/ { in_step = 1 }
+            in_step && /sanitized_ref=/ { capture = 1 }
+            in_step && capture && /docker buildx imagetools create/ { exit }
+            in_step && capture { print }
+          ' .github/workflows/build-tools.yml)"
+          if [ -z "$promote_tags_script" ]; then
+            echo "::error::Could not extract build-tools.yml's \"Promote mutable tags\" derivation logic -- its step name or tag-derivation lines may have moved; update the extraction markers in build-push.yml's guard alongside them."
+            exit 1
+          fi
+          # Write the extracted lines to a real script file rather than a
+          # bash -c string: the extracted text already contains its own
+          # quotes and a multi-line comment, and re-quoting that safely as a
+          # single -c argument would need error-prone escaping. A file
+          # avoids that entirely and lets bash run the exact extracted text
+          # unmodified, with a trailing line that prints the result.
+          guard_script="$(mktemp)"
+          trap 'rm -f "$guard_script"' EXIT
+          {
+            printf '%s\n' 'set -euo pipefail'
+            printf '%s\n' "$promote_tags_script"
+            printf '%s\n' 'printf '\''%s'\'' "$branch_tag"'
+          } > "$guard_script"
           for candidate_ref in v0.2.0 v1.2.3 v10.20.30 master feature/x; do
-            derived_tag="branch-$(printf '%s' "$candidate_ref" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+            derived_tag="$(
+              REF_NAME="$candidate_ref" \
+              BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools \
+              MERGED_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000 \
+              bash "$guard_script"
+            )"
             if printf '%s' "$derived_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
               echo "::error::build-tools.yml's branch-tag derivation must never be able to emit a release-shaped tag; ref '$candidate_ref' produced '$derived_tag'."
               exit 1

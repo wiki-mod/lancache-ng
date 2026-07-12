@@ -786,10 +786,10 @@ jobs:
             exit 1
           fi
 
-          # Always "branch-"-prefixed, never the bare sanitized ref name
-          # (issue #704): this job runs for whichever ref triggered the
-          # workflow, and this repo already has a branch literally named
-          # "v0.2.0" (the long-lived integration branch touched on every
+          # Always "branch-"-prefixed, never the bare sanitized ref name:
+          # this job runs for whichever ref triggered the workflow, and
+          # this repo already has a branch literally named "v0.2.0" (the
+          # long-lived integration branch touched on every
           # patch/hotfix). A bare branch tag from that branch would publish
           # ghcr.io/<repo>/build-tools:v0.2.0 -- the exact same tag string
           # build-push.yml's own promote job writes as the real, immutable
