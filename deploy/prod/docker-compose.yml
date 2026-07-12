@@ -251,6 +251,14 @@ services:
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
+      # dnsmasq's ProxyDHCP/PXE reply path needs a raw broadcast socket;
+      # without NET_ADMIN, dnsmasq passes its own config self-test but then
+      # fails to actually start ("process is missing required capability
+      # NET_ADMIN"), confirmed live with a real dnsmasq build against the
+      # pre-issue-#450 four-variable config alone -- this was already
+      # broken before this issue's new options existed. Matches the dhcp
+      # (Kea) service's cap_add above, which needs it for the same reason.
+      - NET_ADMIN
     profiles:
       - dhcp-proxy
     restart: always

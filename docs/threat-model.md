@@ -449,6 +449,14 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
 - The mode is documented as a deliberately limited helper for networks whose
   router DHCP cannot be disabled; the Admin UI's DHCP check probes for competing
   servers and DNS-option override.
+- Issue #450 added an optional-option surface (router/NTP/domain/PXE-boot/
+  custom options via `dhcp-option-pxe`), documented in `docs/dhcp-modes.md`
+  as carrying the exact same limitation as the pre-existing DNS option: all
+  of it rides the supplemental ProxyDHCP/PXE exchange, never the ordinary
+  client's real lease. A structurally malformed optional value is skipped
+  with a warning by `_dhcp_proxy_render_optional_directives` rather than
+  silently accepted; the rendered config is still validated by
+  `dnsmasq --test` before dnsmasq starts, same as every other value here.
 
 **Residual risk**: Medium — by design the upstream DHCP server's DNS option can
 win, causing cache bypass. Not a security compromise, but a correctness/coverage

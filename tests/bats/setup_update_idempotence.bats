@@ -35,7 +35,13 @@ setup() {
 # A fresh, fully-converged install's .env: every key migrate_env_for_update()
 # expects already present with a valid, non-placeholder value, and a pinned
 # (non-network) image tag so resolve_lancache_image_tag() never needs to
-# `docker pull` a channel pointer image.
+# `docker pull` a channel pointer image. Includes DHCP_PROXY_INTERFACE/
+# DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
+# DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
+# (#450): migrate_env_for_update() append_env_key_if_missing's all seven of
+# these unconditionally, so a fixture predating that feature would no longer
+# be "fully converged" and would make the no-op test below fail on its first
+# run, not just its second.
 write_converged_env_fixture() {
     printf '%s\n' \
         'IP_STANDARD=192.0.2.10' \
@@ -69,6 +75,13 @@ write_converged_env_fixture() {
         'DHCP_DNS_PRIMARY=192.0.2.10' \
         'DHCP_DNS_SECONDARY=192.0.2.11' \
         'UPSTREAM_DHCP_IP=' \
+        'DHCP_PROXY_INTERFACE=' \
+        'DHCP_PROXY_ROUTER=' \
+        'DHCP_NTP_SERVERS=' \
+        'DHCP_PROXY_DOMAIN=' \
+        'DHCP_PROXY_BOOT_FILENAME=' \
+        'DHCP_PROXY_BOOT_SERVER=' \
+        'DHCP_PROXY_CUSTOM_OPTIONS=' \
         'KEA_CTRL_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
         'DDNS_TSIG_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
         'PDNS_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \

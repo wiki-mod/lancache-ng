@@ -116,11 +116,15 @@ proxy restart.
 ## dnsmasq / dhcp-proxy
 
 `services/dhcp-proxy/entrypoint.sh` renders `/etc/dnsmasq.conf` from
-`dnsmasq.conf.template` and env vars (`DHCP_SUBNET_START`,
-`DHCP_DNS_PRIMARY`, `DHCP_DNS_SECONDARY`, `UPSTREAM_DHCP_IP`) on every start.
-This mode has no live/UI-driven config mutation, so, like nginx, the only
-meaningful trigger for rollback is "the config this container is about to
-start with is invalid":
+`dnsmasq.conf.template` (via envsubst, for the four required env vars
+`DHCP_SUBNET_START`, `DHCP_DNS_PRIMARY`, `DHCP_DNS_SECONDARY`,
+`UPSTREAM_DHCP_IP`) plus the issue #450 optional dnsmasq relay/proxy options
+(router/NTP/domain/PXE-boot/custom options, appended conditionally by
+`_dhcp_proxy_render_optional_directives` rather than templated, since an
+unset optional value must produce no line at all -- see
+`docs/dhcp-modes.md`) on every start. This mode has no live/UI-driven config
+mutation, so, like nginx, the only meaningful trigger for rollback is "the
+config this container is about to start with is invalid":
 
 - `dnsmasq --test -C /etc/dnsmasq.conf` validates the generated config
   before dnsmasq actually starts.

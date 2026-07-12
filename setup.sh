@@ -93,6 +93,33 @@ is_dnsmasq_subnet_start() {
     is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
 }
 
+# Issue #450: light shape validation for the optional dnsmasq relay/proxy
+# fields, mirroring services/ui/src/routes/dhcp.rs's Rust-side validators of
+# the same name/intent (is_valid_interface_name, is_valid_domain_name,
+# is_valid_boot_filename) so a hand-edited .env fails just as closed as an
+# Admin UI submission would. All three are optional -- callers only invoke
+# them when the value is non-empty.
+is_valid_dhcp_proxy_interface() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
+}
+
+is_valid_dhcp_proxy_domain() {
+    local domain="${1:-}"
+    [[ -n "$domain" && "${#domain}" -le 253 ]] || return 1
+    local label
+    local -a labels
+    IFS='.' read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+is_valid_dhcp_proxy_boot_filename() {
+    local filename="${1:-}"
+    [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
+    [[ "$filename" != *[[:space:],]* ]]
+}
+
 # Two-tier detection for a secondary node's own LAN IP: prefer the source
 # address the kernel would actually use to reach the internet (most accurate
 # on multi-homed hosts), then fall back to the first non-loopback,
@@ -2138,6 +2165,22 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    # Issue #450: additional optional dnsmasq relay/proxy fields. Unlike the
+    # four values above, none of these are required in dnsmasq-proxy mode --
+    # an empty value just means entrypoint.sh renders no directive for it.
+    append_env_key_if_missing DHCP_PROXY_INTERFACE "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_ROUTER "" "$env_file"
+    append_env_key_if_missing DHCP_NTP_SERVERS "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_DOMAIN "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
+    dhcp_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$env_file")
+    dhcp_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$env_file")
+    dhcp_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$env_file")
+    dhcp_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$env_file")
+    dhcp_proxy_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$env_file")
+    dhcp_proxy_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$env_file")
 
     case "$dhcp_mode" in
         dnsmasq-proxy)
@@ -2153,6 +2196,26 @@ migrate_env_for_update() {
             fi
             is_valid_ipv4 "$upstream_dhcp_ip" \
                 || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
+            # Optional fields: only validated when non-empty, since leaving
+            # them empty is the supported "not using this option" state.
+            [[ -z "$dhcp_proxy_interface" ]] || is_valid_dhcp_proxy_interface "$dhcp_proxy_interface" \
+                || die "DHCP_PROXY_INTERFACE in $env_file must be a valid interface name (letters, digits, '.', '-', '_') or empty."
+            [[ -z "$dhcp_proxy_router" ]] || is_valid_ipv4 "$dhcp_proxy_router" \
+                || die "DHCP_PROXY_ROUTER in $env_file must be a valid IPv4 address or empty."
+            if [[ -n "$dhcp_ntp_servers" ]]; then
+                IFS=',' read -r -a _dhcp_ntp_check <<< "$dhcp_ntp_servers"
+                for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
+                    _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
+                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" \
+                        || die "DHCP_NTP_SERVERS in $env_file must be a comma-separated list of valid IPv4 addresses."
+                done
+            fi
+            [[ -z "$dhcp_proxy_domain" ]] || is_valid_dhcp_proxy_domain "$dhcp_proxy_domain" \
+                || die "DHCP_PROXY_DOMAIN in $env_file must be a valid DNS domain name or empty."
+            [[ -z "$dhcp_proxy_boot_filename" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_boot_filename" \
+                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace or commas."
+            [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
+                || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             ;;
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
@@ -2166,6 +2229,12 @@ migrate_env_for_update() {
     set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
     set_env_key DHCP_DNS_SECONDARY "$dhcp_dns_secondary" "$env_file"
     set_env_key UPSTREAM_DHCP_IP "$upstream_dhcp_ip" "$env_file"
+    set_env_key DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" "$env_file"
+    set_env_key DHCP_PROXY_ROUTER "$dhcp_proxy_router" "$env_file"
+    set_env_key DHCP_NTP_SERVERS "$dhcp_ntp_servers" "$env_file"
+    set_env_key DHCP_PROXY_DOMAIN "$dhcp_proxy_domain" "$env_file"
+    set_env_key DHCP_PROXY_BOOT_FILENAME "$dhcp_proxy_boot_filename" "$env_file"
+    set_env_key DHCP_PROXY_BOOT_SERVER "$dhcp_proxy_boot_server" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -3417,6 +3486,15 @@ DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_STANDARD"
 DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
+# Issue #450: additional optional dnsmasq relay/proxy fields, all left empty
+# unless the operator opts in below.
+DHCP_PROXY_INTERFACE=""
+DHCP_PROXY_ROUTER=""
+DHCP_NTP_SERVERS=""
+DHCP_PROXY_DOMAIN=""
+DHCP_PROXY_BOOT_FILENAME=""
+DHCP_PROXY_BOOT_SERVER=""
+DHCP_PROXY_CUSTOM_OPTIONS=""
 
 if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
@@ -3497,6 +3575,84 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
         print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
     done
+
+    # Issue #450: additional optional dnsmasq relay/proxy options. All are
+    # skippable (empty = not configured); this whole block is only offered
+    # if the operator explicitly wants it, so a plain Enter through the
+    # required prompts above still gets a working minimal proxy setup with
+    # no behavior change from before this issue.
+    print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
+    print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/dhcp-modes.md."
+    if confirm "Configure additional dnsmasq relay/proxy options now? [y/N]" "N"; then
+        ask "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE"
+        while true; do
+            DHCP_PROXY_INTERFACE="$REPLY"
+            [[ -z "$DHCP_PROXY_INTERFACE" ]] && break
+            is_valid_dhcp_proxy_interface "$DHCP_PROXY_INTERFACE" && break
+            print_error "Invalid interface name: $DHCP_PROXY_INTERFACE"
+            ask "Listen interface (blank = listen on all interfaces)" ""
+        done
+
+        ask "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER"
+        while true; do
+            DHCP_PROXY_ROUTER="$REPLY"
+            [[ -z "$DHCP_PROXY_ROUTER" ]] && break
+            is_valid_ipv4 "$DHCP_PROXY_ROUTER" && break
+            print_error "Invalid IPv4 address: $DHCP_PROXY_ROUTER"
+            ask "Router/gateway option, PXE-scoped (blank = skip)" ""
+        done
+
+        ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" "$DHCP_NTP_SERVERS"
+        while true; do
+            DHCP_NTP_SERVERS="$REPLY"
+            if [[ -z "$DHCP_NTP_SERVERS" ]]; then
+                break
+            fi
+            _dhcp_ntp_ok=1
+            IFS=',' read -r -a _dhcp_ntp_check <<< "$DHCP_NTP_SERVERS"
+            for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
+                _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
+                [[ -z "$_dhcp_ntp_ip" ]] && continue
+                is_valid_ipv4 "$_dhcp_ntp_ip" || _dhcp_ntp_ok=0
+            done
+            [[ "$_dhcp_ntp_ok" = "1" ]] && break
+            print_error "Invalid NTP servers list (must be comma-separated IPv4 addresses): $DHCP_NTP_SERVERS"
+            ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" ""
+        done
+
+        ask "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN"
+        while true; do
+            DHCP_PROXY_DOMAIN="$REPLY"
+            [[ -z "$DHCP_PROXY_DOMAIN" ]] && break
+            is_valid_dhcp_proxy_domain "$DHCP_PROXY_DOMAIN" && break
+            print_error "Invalid domain name: $DHCP_PROXY_DOMAIN"
+            ask "Domain option, PXE-scoped (blank = skip)" ""
+        done
+
+        ask "PXE boot filename (blank = skip PXE boot info)" "$DHCP_PROXY_BOOT_FILENAME"
+        while true; do
+            DHCP_PROXY_BOOT_FILENAME="$REPLY"
+            [[ -z "$DHCP_PROXY_BOOT_FILENAME" ]] && break
+            is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_BOOT_FILENAME" && break
+            print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_BOOT_FILENAME"
+            ask "PXE boot filename (blank = skip PXE boot info)" ""
+        done
+
+        if [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]]; then
+            ask "PXE boot server address (blank = this host's own address)" "$DHCP_PROXY_BOOT_SERVER"
+            while true; do
+                DHCP_PROXY_BOOT_SERVER="$REPLY"
+                [[ -z "$DHCP_PROXY_BOOT_SERVER" ]] && break
+                is_valid_ipv4 "$DHCP_PROXY_BOOT_SERVER" && break
+                print_error "Invalid IPv4 address: $DHCP_PROXY_BOOT_SERVER"
+                ask "PXE boot server address (blank = this host's own address)" ""
+            done
+        else
+            DHCP_PROXY_BOOT_SERVER=""
+        fi
+
+        print_ok "Additional dnsmasq relay/proxy options configured. Custom safe options (DHCP_PROXY_CUSTOM_OPTIONS) can be added later from the Admin UI DHCP page."
+    fi
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
 else
@@ -3607,6 +3763,13 @@ validate_env_values_for_initial_write \
     "DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}" \
     "DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}" \
     "UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}" \
+    "DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}" \
+    "DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER}" \
+    "DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS}" \
+    "DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}" \
+    "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
+    "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
+    "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -3678,6 +3841,17 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
+
+# Issue #450: additional optional dnsmasq relay/proxy options, all empty by
+# default. Delivered only via the supplemental ProxyDHCP/PXE exchange to
+# PXE/network-boot-aware clients -- see docs/dhcp-modes.md.
+DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}
+DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER}
+DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS}
+DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}
+DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
+DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
+DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
@@ -3809,6 +3983,11 @@ else
 fi
 if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     printf "  %-26s %s\n" "DHCP proxy subnet start:" "$DHCP_SUBNET_START"
+    [[ -n "$DHCP_PROXY_INTERFACE" ]] && printf "  %-26s %s\n" "  Listen interface:" "$DHCP_PROXY_INTERFACE"
+    [[ -n "$DHCP_PROXY_ROUTER" ]] && printf "  %-26s %s\n" "  Router option (PXE-scoped):" "$DHCP_PROXY_ROUTER"
+    [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
+    [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
+    [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
 fi
 if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
     printf "  %-26s %s\n" "Watchtower:"              "enabled for helper updates (daily at 04:00)"

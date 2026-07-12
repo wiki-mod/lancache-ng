@@ -855,6 +855,38 @@ jobs:
           validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
+          # Issue #450: dnsmasq relay/proxy optional-option surface. Guards
+          # against silently dropping the new keys from any layer of the
+          # env-file -> entrypoint -> template pipeline.
+          dhcp_proxy_optional_keys=(
+            DHCP_PROXY_INTERFACE
+            DHCP_PROXY_ROUTER
+            DHCP_NTP_SERVERS
+            DHCP_PROXY_DOMAIN
+            DHCP_PROXY_BOOT_FILENAME
+            DHCP_PROXY_BOOT_SERVER
+            DHCP_PROXY_CUSTOM_OPTIONS
+          )
+          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+            for key in "${dhcp_proxy_optional_keys[@]}"; do
+              grep -Eq "^${key}=" "$env_file" \
+                || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the dnsmasq relay/proxy optional-option surface added by issue #450."; exit 1; }
+            done
+          done
+          grep -F 'DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}' deploy/quickstart/docker-compose.yml >/dev/null \
+            || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_INTERFACE like the other optional dnsmasq relay/proxy keys."; exit 1; }
+          grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
+            || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
+
+          grep -F '_dhcp_proxy_render_optional_directives()' services/dhcp-proxy/entrypoint.sh >/dev/null \
+            || { echo "::error::services/dhcp-proxy/entrypoint.sh must render the issue #450 optional dnsmasq relay/proxy directives."; exit 1; }
+          grep -F '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' services/dhcp-proxy/entrypoint.sh >/dev/null \
+            || { echo "::error::services/dhcp-proxy/entrypoint.sh must call _dhcp_proxy_render_optional_directives before validating dnsmasq.conf."; exit 1; }
+          if grep -F 'dhcp-proxy=${UPSTREAM_DHCP_IP}' services/dhcp-proxy/dnsmasq.conf.template >/dev/null; then
+            echo "::error::services/dhcp-proxy/dnsmasq.conf.template must not reintroduce 'dhcp-proxy=\${UPSTREAM_DHCP_IP}': that flag means \"treat these DHCP-relay agents as full proxies\" (RFC 5107), it does nothing without --dhcp-relay=, and this service never configures one. Confirmed against a live dnsmasq --help/--test; see docs/dhcp-modes.md."
+            exit 1
+          fi
+
           if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
             echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
             exit 1
@@ -2272,13 +2304,16 @@ jobs:
                 --out json \
                 --output-dir /coverage-ui'
       - name: Merge coverage reports and check threshold
+        id: coverage
         run: |
           set -euo pipefail
 
+          mkdir -p coverage-badge
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -v "$PWD:/work:ro" \
+            -v "$PWD/coverage-badge:/coverage-badge" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
@@ -2320,7 +2355,32 @@ jobs:
                 exit 1
               fi
 
+              # Badge generation reuses this same containerized jq instead of
+              # assuming a host-installed jq, matching why the coverage
+              # extraction above already runs in here (issue #566).
+              ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
+              dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
+              badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
+              badge_color=yellow
+              if awk -v ui="$ui_coverage" -v dns="$dns_coverage" "BEGIN { exit !(ui >= 80 && dns >= 80) }"; then
+                badge_color=brightgreen
+              fi
+
+              jq -n \
+                --arg message "$badge_message" \
+                --arg color "$badge_color" \
+                "{schemaVersion: 1, label: \"rust coverage\", message: \$message, color: \$color}" \
+                > /coverage-badge/rust.json
+
+              {
+                printf "ui=%s\n" "$ui_coverage_display"
+                printf "dns=%s\n" "$dns_coverage_display"
+                printf "message=%s\n" "$badge_message"
+              } > /coverage-badge/output.env
+
               echo "Coverage check passed"'
+
+          cat coverage-badge/output.env >> "$GITHUB_OUTPUT"
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
@@ -2330,6 +2390,101 @@ jobs:
             coverage-dns/tarpaulin-report.json
             coverage-ui/tarpaulin-report.json
           retention-days: 30
+      # The badge JSON is handed off as an artifact rather than pushed from this
+      # job directly: this job runs on every trigger including same-repo pull_request
+      # runs that execute PR-controlled test code (cargo tarpaulin), and a job-level
+      # `permissions: contents: write` would apply to that untrusted code too --
+      # GitHub Actions has no step-level permissions to scope the write down to just
+      # the publish step. publish_coverage_badge below is the only job with write
+      # access, and it only ever runs on trusted push events.
+      - name: Upload coverage badge data
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
+        with:
+          name: rust-coverage-badge
+          path: coverage-badge/rust.json
+          retention-days: 1
+
+  publish_coverage_badge:
+    # Split out of rust_coverage (see the comment on its "Upload coverage badge
+    # data" step) so the contents:write token this job needs is never present
+    # during the coverage measurement steps that execute PR-controlled code.
+    #
+    # `if:` must start with an explicit status-check function, not a bare
+    # `needs.rust_coverage.result == ...` -- same trap documented on promote's
+    # `if:` below. A bare condition gets an implicit `&& success()` appended by
+    # GitHub Actions, and that success() walks the WHOLE transitive needs graph
+    # (publish_coverage_badge -> rust_coverage -> detect-changes, which is
+    # `if: github.event_name == 'pull_request'` and therefore always skipped on
+    # push), not just this job's own direct `needs: rust_coverage`. Confirmed
+    # live: this job skipped on the actual push that merged it (run 29184177783)
+    # because of exactly this.
+    name: publish rust coverage badge
+    needs: rust_coverage
+    if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Download coverage badge data
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rust-coverage-badge
+          path: coverage-badge
+      - name: Publish Rust coverage badge endpoint
+        # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
+        # so pushes to master and to the active vX.Y.Z integration branch don't
+        # overwrite each other's badge data -- the workflow-level concurrency
+        # group only serializes writes, it doesn't stop two different branches
+        # from racing to own the same file.
+        env:
+          BADGE_BRANCH: badges
+          BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          : "${GITHUB_TOKEN:?GITHUB_TOKEN is required to publish the coverage badge endpoint}"
+          : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
+          : "${BADGE_FILE:?BADGE_FILE is required}"
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          cp coverage-badge/rust.json "$tmp_dir/rust.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
+          # sparse fetch config only tracks the ref it originally checked out, so fetching a
+          # different branch by name alone lands only in FETCH_HEAD, never in
+          # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
+          # report "not found" and take the orphan-branch path even when badges already exists,
+          # and the final push would be rejected as non-fast-forward.
+          git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
+          if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
+            # -C (not --create): this is a self-hosted runner, so a local badges branch left
+            # over from a previous job on the same workspace makes a plain --create fail with
+            # "a branch named 'badges' already exists". -C resets it to origin's tip instead.
+            git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
+          else
+            git switch --orphan "$BADGE_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "$(dirname "$BADGE_FILE")"
+          cp "$tmp_dir/rust.json" "$BADGE_FILE"
+          git add "$BADGE_FILE"
+
+          if git diff --cached --quiet; then
+            echo "::notice::Rust coverage badge endpoint already up to date."
+            exit 0
+          fi
+
+          git commit -m "chore: update rust coverage badge"
+          git push origin "$BADGE_BRANCH"
 
   watchdog_test:
     # Watchdog has its own small shell runtime and therefore its own scoped
