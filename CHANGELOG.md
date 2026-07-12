@@ -42,9 +42,18 @@ is real, live, running code, not just work sitting in source control.
   packaged binaries that `pdns_server` supports this too, even though its
   `--help` output doesn't document it the way `pdns_recursor`'s does). Both
   configs are validated and rolled back independently per
-  `dns-standard`/`dns-ssl` container. Zone/record/database rollback
-  (`pdns.sqlite3`) remains explicitly out of scope, per #415's own guidance;
-  see `docs/known-good-config-snapshots.md` (#615).
+  `dns-standard`/`dns-ssl` container, and the same mechanism now also covers
+  the remote secondary DNS node (`setup.sh secondary`), including a
+  `KEEP_KNOWN_GOOD_CONFIGS` retention knob wired through the generated
+  secondary compose/`.env` the same way as the primary. A failed
+  `recursor.conf` rollback now warns explicitly when the restored snapshot's
+  `PDNS_API_KEY` no longer matches the live environment, since that leaves the
+  recursor's REST API authenticating with a stale key while pdns.conf, the
+  Admin UI, and `nats-subscriber` keep using the current one. Zone/record/
+  database rollback (`pdns.sqlite3`) remains explicitly out of scope, per
+  #415's own guidance — it *is* still covered by the regular
+  `setup.sh backup`/`restore` flow, which is unrelated to this snapshot
+  mechanism; see `docs/known-good-config-snapshots.md` (#615).
 - Completed the `dnsmasq-proxy` DHCP mode: documentation guide, DHCP
   mode-selection tests, the Kea/dnsmasq mutual-exclusion invariant test,
   dnsmasq template rendering coverage, and Compose validation for both DHCP

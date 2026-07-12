@@ -383,6 +383,24 @@ _dns_recursor_validate_snapshot_or_rollback() {
     if selected_id="$(kgs_snapshot_apply "${DNS_CONFIG_SNAPSHOT_DIR}/recursor" "dns-recursor" "pdns_recursor --config=check --config-dir='${config_dir}'" "$recursor_conf")"; then
         echo "[lancache-dns] WARNING: recursor is starting from known-good snapshot ${selected_id}, NOT the newly generated config." >&2
         echo "[lancache-dns] WARNING: check PDNS_API_KEY/LOG_QUERIES and restart to pick up the intended change." >&2
+        # This function only ever rolls back recursor.conf, never pdns.conf
+        # (deliberately -- see the comment at this pair's call site). That
+        # split means a *partial* rollback -- recursor.conf falls back here
+        # while pdns.conf, validated separately below, still passes -- can
+        # leave the two daemons with different PDNS_API_KEY values: recursor
+        # keeps whatever key was baked into the restored snapshot, while
+        # pdns.conf and every out-of-process caller (Admin UI, nats-
+        # subscriber) use the current environment's key. This isn't specific
+        # to a YAML-breaking key value -- it happens any time recursor.conf
+        # fails validation for some other reason on a restart where
+        # PDNS_API_KEY also changed. Detected here, not assumed: compare
+        # what's actually on disk after the restore against the live env,
+        # so this only fires when the two are genuinely out of sync.
+        local restored_api_key
+        restored_api_key=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf" | head -n1)
+        if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
+            echo "[lancache-dns] WARNING: the restored recursor.conf's api_key does not match the current PDNS_API_KEY. The recursor's REST API (port 8082) is now authenticating with a stale key while pdns.conf, the Admin UI, and nats-subscriber use the current one -- packet-cache flush calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
+        fi
         return 0
     fi
 
