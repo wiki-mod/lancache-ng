@@ -241,7 +241,13 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     for path in unique_paths([standard_log, ssl_log]) {
         let Ok(file) = File::open(path) else { continue };
         let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
+        // Handle each line's Result explicitly instead of `map_while(Result::ok)`:
+        // that combinator stops the whole iterator dead at the first Err (e.g. a
+        // line with invalid UTF-8, which raw/unescaped request paths or user-agents
+        // in nginx access logs can produce), silently undercounting every request
+        // after it. `continue`-ing past a bad line keeps the aggregate scan going.
+        for line in reader.lines() {
+            let Ok(line) = line else { continue };
             let Some(caps) = re.captures(&line) else {
                 continue;
             };
@@ -412,6 +418,47 @@ mod tests {
         let stats = get_log_stats(&path, &path);
         assert_eq!(stats.total_requests, 1);
         assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 0);
+
+        fs::remove_file(path).expect("remove temp log");
+    }
+
+    // Reproduces the bug from issue #663: `reader.lines().map_while(Result::ok)`
+    // stops the ENTIRE scan at the first line BufRead can't decode as UTF-8, so
+    // every valid line after a single corrupt one used to go uncounted. nginx
+    // access logs can contain raw, unescaped bytes in request paths/user-agents,
+    // so a mid-file invalid-UTF-8 line is a realistic occurrence, not an edge case.
+    #[test]
+    fn bad_line_in_middle_does_not_truncate_stats() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("lancache-ui-badline-log-{unique}.log"));
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(
+            b"127.0.0.1 - [29/Jun/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 100 \"HIT\" \"example.com\"\n",
+        );
+        // Invalid UTF-8 bytes (0xFF, 0xFE are never valid anywhere in UTF-8),
+        // simulating a raw byte sequence nginx can log verbatim from a request.
+        bytes.extend_from_slice(b"127.0.0.1 - [29/Jun/2026:00:00:01 +0000] \"GET /\xFF\xFE HTTP/1.1\" 200 200 \"MISS\" \"example.com\"\n");
+        bytes.extend_from_slice(
+            b"127.0.0.1 - [29/Jun/2026:00:00:02 +0000] \"GET /b HTTP/1.1\" 200 300 \"HIT\" \"example.com\"\n",
+        );
+        bytes.extend_from_slice(
+            b"127.0.0.1 - [29/Jun/2026:00:00:03 +0000] \"GET /c HTTP/1.1\" 200 400 \"EXPIRED\" \"example.com\"\n",
+        );
+        std::fs::write(&path, &bytes).expect("write temp log with invalid utf-8 line");
+
+        let path = path.to_string_lossy().to_string();
+        let stats = get_log_stats(&path, &path);
+
+        // Only 3 of the 4 lines are decodable; the invalid-UTF-8 line is skipped,
+        // but the two valid lines written AFTER it must still be counted.
+        assert_eq!(stats.total_requests, 3);
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.expired, 1);
         assert_eq!(stats.misses, 0);
 
         fs::remove_file(path).expect("remove temp log");
