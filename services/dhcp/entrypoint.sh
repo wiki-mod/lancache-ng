@@ -154,11 +154,24 @@ case "$DDNS_TSIG_KEY" in
         ;;
 esac
 
+# Kea's lease_cmds hook (needed for lease4-del, used by the Admin UI's
+# release-lease route and by this container's own upgrade migration below)
+# ships under Debian's arch-specific multiarch lib directory, e.g.
+# /usr/lib/x86_64-linux-gnu on amd64 vs /usr/lib/aarch64-linux-gnu on arm64
+# (this service is built for both, see RELEASE_PLATFORMS). Resolve the actual
+# installed path at startup instead of hardcoding either one, so the same
+# template/migration works unmodified on every built architecture.
+KEA_LEASE_CMDS_HOOK_PATH="$(find /usr/lib -maxdepth 5 -name libdhcp_lease_cmds.so 2>/dev/null | head -n1)"
+if [ -z "$KEA_LEASE_CMDS_HOOK_PATH" ]; then
+    echo "ERROR: libdhcp_lease_cmds.so not found under /usr/lib. Kea's lease_cmds hook is required for lease4-del (used by the Admin UI's release-lease route)."
+    exit 1
+fi
+
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH
 
 # shellcheck disable=SC2016
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}'
 
 render_kea_config() {
     local template=$1 target=$2
@@ -237,6 +250,7 @@ migrate_dhcp4_config() {
         --argjson lease_time "$DHCP_LEASE_TIME" \
         --argjson max_lease_time "$DHCP_MAX_LEASE_TIME" \
         --argjson ntp_migration_map "$ntp_migration_map" \
+        --arg lease_cmds_hook_path "$KEA_LEASE_CMDS_HOOK_PATH" \
         '
         def is_ipv4:
           type == "string"
@@ -275,6 +289,8 @@ migrate_dhcp4_config() {
             end;
 
         .Dhcp4["control-socket"]["socket-name"] = "/run/kea/kea4.sock"
+        |
+        .Dhcp4["hooks-libraries"] = ((.Dhcp4["hooks-libraries"] // []) | if any(.[]; .library == $lease_cmds_hook_path) then . else . + [{"library": $lease_cmds_hook_path}] end)
         |
         .Dhcp4["multi-threading"] = ({"enable-multi-threading": false} + (.Dhcp4["multi-threading"] // {}))
         | .Dhcp4["dhcp-ddns"] = ({

@@ -565,9 +565,19 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve build-tools image
-        # BUILD_TOOLS_REQUIRE_PUBLISHED=true: same reasoning as
-        # ssl-mitm-cache-simulation's own step above.
+        # Unlike dhcp-kea-lease-flow-simulation (which genuinely needs
+        # isc-dhcp-client/dhclient, not yet present in any published
+        # build-tools image), this job's own script
+        # (scripts/nats-secondary-auth-callout-simulation.sh) only drives
+        # curl/awk-style HTTP checks against the real Admin UI/nats-server/
+        # nats-subscriber containers it starts -- confirmed directly by
+        # reading that script. It has no unpublished-tool dependency, so
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true is safe here and avoids an
+        # unnecessary full branch-local tools/build-tools Docker build on
+        # every workflow_dispatch run of this otherwise lightweight job.
         id: build-tools-image
+        env:
+          BUILD_TOOLS_REQUIRE_PUBLISHED: "true"
         run: |
           set -euo pipefail
           image="$(bash scripts/select-build-tools-image.sh)"
