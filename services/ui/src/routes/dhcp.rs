@@ -112,6 +112,14 @@ fn html_escape(s: &str) -> String {
 
 // ─── Data Structures ───
 
+// These two enums are the exact response shape of GET /api/dhcp/check (see
+// check_dhcp_conflict below): the `tag = "status"` serde attribute means each
+// variant serializes as e.g. `{"status": "found", "output": "..."}`, so the
+// frontend can discriminate on one flat "status" string instead of
+// interpreting a nested Rust-shaped enum. Conflict and client are separate
+// enums (not one shared status type) because they come from two independent
+// checks the probe container runs (a network DHCP-conflict scan and a
+// dhclient dry-run) that can disagree with each other.
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpConflictCheckStatus {
@@ -135,6 +143,13 @@ struct DhcpCheckReport {
 }
 
 impl DhcpCheckReport {
+    // Match arm order IS the priority order, most severe first: a found
+    // conflict always wins regardless of the client check's own result
+    // (a rogue DHCP server on the LAN matters even if this host's own
+    // dhclient dry-run happened to pass), and either check being
+    // "unavailable" (the probe container itself failed) outranks a merely
+    // "failed" client check, since an operator can't trust a failed result
+    // they can't distinguish from "never actually ran".
     fn overall_status(&self) -> &'static str {
         match (&self.conflict, &self.client) {
             (DhcpConflictCheckStatus::Found { .. }, _) => "conflict_found",
@@ -146,6 +161,13 @@ impl DhcpCheckReport {
     }
 }
 
+// Subnet/DhcpOption/Lease/Reservation are the read-model shown on the
+// /dhcp settings page -- parsed out of Kea's own JSON config/lease shape by
+// parse_subnet_entry/fetch_leases/parse_reservation_entry further down, not
+// a direct deserialization of it. Kea's real JSON is far richer
+// (option-data arrays keyed by name-or-code, nested pool ranges, etc.);
+// these structs only carry what the Admin UI template actually renders via
+// Tera's Serialize-based context (see dhcp_page's ctx.insert calls below).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Subnet {
     pub id: u32,
@@ -185,6 +207,16 @@ pub struct Reservation {
 }
 
 // ─── Form Structs ───
+//
+// Every field arrives (and is kept) as a raw String, even ones with an
+// obvious typed meaning like lease_time -- deserializing straight to u32
+// would make axum's Form extractor reject a malformed value with a bare
+// 422 before this code ever runs, instead of validate_dhcp_form's own
+// specific, uniform BAD_REQUEST handling further down. AddSubnetForm and
+// UpdateSubnetForm are separate structs (not one form with an
+// Option<id>) because only an update targets an existing subnet id; a new
+// subnet's id is assigned by add_subnet itself (see its "next_id" logic),
+// never supplied by the operator.
 
 #[derive(Deserialize)]
 pub struct AddSubnetForm {
