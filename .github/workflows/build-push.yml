@@ -213,6 +213,27 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: bash scripts/validate-pr-template.sh
 
+  pr-template-check-hosted:
+    # Same zero-LAN-dependency property as file-headers-hosted: this check
+    # only reads github.event.pull_request context and runs a plain bash
+    # script, so it keeps the self-hosted job's own `if:` guard directly
+    # (not a needs:-based dependency on another job's result) -- see
+    # docs/ci-github-hosted-fallback-decision.md for why that distinction
+    # matters for GitHub-hosted fallback jobs.
+    name: PR template validation (GitHub-hosted fallback)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Validate PR template completeness
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: bash scripts/validate-pr-template.sh
+
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -261,11 +282,15 @@ jobs:
       - name: Check tracked files use Unix (LF) line endings
         run: bash scripts/check-line-endings.sh
 
-  # GitHub-hosted fallback is deliberately limited to cheap lint jobs (this
-  # one, shellcheck-hosted, ci_scope_policy-hosted). Rust builds, image scans,
-  # and publish paths stay on self-hosted runners because they still depend
-  # on the shared build-tools image, sccache/distcc acceleration, or registry
-  # credentials that do not have a safe hosted equivalent yet.
+  # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs
+  # with no LAN dependency of their own: file-headers-hosted,
+  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted, and
+  # watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
+  # self-hosted runners because they still depend on the shared build-tools
+  # image, sccache/distcc acceleration, or registry credentials that do not
+  # have a safe hosted equivalent yet -- see
+  # docs/ci-github-hosted-fallback-decision.md for the full reasoning and
+  # recommendation per job class.
   #
   # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
   # second acceptance criterion): NOT feasible as a real fallback today, and
@@ -2512,6 +2537,28 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: test (watchdog)
+        run: |
+          bash -n services/watchdog/watchdog.sh
+          test -x services/watchdog/watchdog.sh
+
+  watchdog_test-hosted:
+    # Unlike watchdog_test above, this fallback deliberately does not gate on
+    # detect-changes/validate-compose (both self-hosted-only). Depending on
+    # them here would reintroduce the same trap that ruled out a
+    # ci_scope_policy-hosted job elsewhere in this file: if self-hosted
+    # runners are genuinely unavailable (the scenario this fallback exists
+    # for), a needs: dependency on a self-hosted-only job would just sit
+    # queued forever. The check itself (bash -n plus an executable-bit test
+    # on one small script) is cheap enough to run unconditionally every time,
+    # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
+    name: test (watchdog) (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: test (watchdog)
         run: |
           bash -n services/watchdog/watchdog.sh
