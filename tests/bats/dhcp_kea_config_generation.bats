@@ -34,6 +34,12 @@ setup() {
     export KEA_CTRL_HOST="0.0.0.0"
     export DDNS_TSIG_KEY="dGVzdC10c2lnLWtleS1iYXNlNjQtZW5jb2RlZA=="
     export DHCP_NTP_OPTION=""
+    # Fake but plausible: matches the real amd64 multiarch path
+    # entrypoint.sh's `find /usr/lib -maxdepth 5 -name
+    # libdhcp_lease_cmds.so` resolves at container startup. Only the
+    # rendering/substitution behavior is under test here, not the `find`
+    # discovery itself, so a fixed literal is fine.
+    export KEA_LEASE_CMDS_HOOK_PATH="/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"
 
     # Must mirror entrypoint.sh's own ENVSUBST_VARS exactly (see
     # render_kea_config() there). Passing an explicit variable list to
@@ -44,7 +50,7 @@ setup() {
     # by whatever happens to be in the shell environment. If this list
     # drifts from entrypoint.sh's, the test stops exercising the real
     # rendering behavior.
-    export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
+    export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}'
 }
 
 # is_ipv4 is the fail-fast address-format gate used by the NTP-resolution
@@ -256,6 +262,19 @@ setup() {
     run jq -e '.Dhcp4.subnet4[0].pools[0].pool' "$dhcp4_output"
     [ "$status" -eq 0 ]
     [[ "$output" == '"10.0.0.128 - 10.0.0.254"' ]]
+
+    # Proves KEA_LEASE_CMDS_HOOK_PATH is actually substituted into
+    # hooks-libraries[0].library, not left as the literal
+    # "${KEA_LEASE_CMDS_HOOK_PATH}" placeholder string. `jq empty` above only
+    # checks JSON syntax -- an unsubstituted placeholder is still valid JSON
+    # (just a string containing "$" and "{}"), so without this assertion CI
+    # would keep passing even if this variable were dropped from
+    # entrypoint.sh's ENVSUBST_VARS (or this test's own mirror above),
+    # silently regressing to the arch-hardcoded/missing-hook bug this
+    # variable fixed (#694).
+    run jq -e '.Dhcp4["hooks-libraries"][0].library' "$dhcp4_output"
+    [ "$status" -eq 0 ]
+    [ "$output" = '"/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"' ]
 }
 
 @test "DHCP4 config contains NTP server data in option-data" {

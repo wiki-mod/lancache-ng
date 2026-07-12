@@ -255,14 +255,15 @@ is real, live, running code, not just work sitting in source control.
   the lease. Fixed by adding a `hooks-libraries` entry for
   `libdhcp_lease_cmds.so` (shipped by `kea-common`, already a hard
   dependency of `kea-dhcp4-server` in `services/dhcp/Dockerfile`, so no new
-  package is needed) (#694, Codex review finding).
-  **Follow-up needed:** this fixes fresh installs (first-boot config
-  render) and the new test, but `services/dhcp/entrypoint.sh`'s
-  `migrate_dhcp4_config` does not add `hooks-libraries` to an existing
-  runtime `kea-dhcp4.conf` on upgrade, so already-deployed installs stay
-  broken after a plain image update until that migration is also patched or
-  the Kea data volume is reset — tracked as a separate production fix, not
-  included in this change.
+  package is needed) (#694, Codex review finding). The hook's install path
+  is architecture-specific (Debian's multiarch lib directory differs
+  between amd64 and arm64), so `services/dhcp/entrypoint.sh` resolves it
+  dynamically at startup (`find /usr/lib -maxdepth 5 -name
+  libdhcp_lease_cmds.so`) instead of hardcoding either path, and
+  `migrate_dhcp4_config` now also adds this `hooks-libraries` entry to an
+  already-deployed installation's runtime `kea-dhcp4.conf` on upgrade, so
+  existing Kea data volumes gain `lease_cmds` on the next container start
+  without an operator having to reset the volume.
   **Note:** an earlier version of this fix documented the rationale above
   with a `//` WHY-comment directly inside `services/dhcp/kea-dhcp4.conf`.
   Kea's own config parser tolerates `//` line comments, but
