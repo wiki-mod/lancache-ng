@@ -18,20 +18,20 @@ When working across this repository's documentation and governance stack, confli
 
 When an agent encounters a real inconsistency or conflict between two governance/documentation sources, apply this precedence order to determine which source takes priority:
 
-1. **Executable checks and current code behavior** — What the code actually does today and what the CI checks actually enforce today are the ground truth. If documentation claims behavior that contradicts what the code or CI verifiably does, the documentation is stale.
-2. **`AGENTS.md` (this file)** — Repository-wide hard rules for agent behavior, workflow, validation, and governance apply to all work in this repository, except where a more specific source lower in this list carries scoped precedence within its own area — for example, the area-specific AGENTS files in item 3 take precedence over this file's general guidance once you have identified that your work falls into that area, as item 3 itself states.
-3. **Area-specific AGENTS files** (e.g., `.github/AGENTS.md` for GitHub Actions work) — Specialized guidance for specific areas takes precedence over general guidance once you have identified that your work falls into that area.
-4. **`SECURITY.md`** — Security-specific behavior and constraints are documented separately and take precedence for security-relevant work.
-5. **Architecture and release documentation** (e.g., `docs/architecture-ng.md`, `docs/release-versioning.md`, `docs/release-external-images.md`, `docs/threat-model.md`) — System design and release procedures are documented here with rationale.
-6. **`README.md` and user-facing documentation** (e.g., `docs/install-ca-cert.md`) — End-user guides and high-level project descriptions are placed last because they are more likely to lag behind operational or technical changes.
+1. **[AG-DOC-002] Executable checks and current code behavior** — What the code actually does today and what the CI checks actually enforce today are the ground truth. If documentation claims behavior that contradicts what the code or CI verifiably does, the documentation is stale.
+2. **[AG-DOC-003] `AGENTS.md` (this file)** — Repository-wide hard rules for agent behavior, workflow, validation, and governance apply to all work in this repository, except where a more specific source lower in this list carries scoped precedence within its own area — for example, the area-specific AGENTS files in item 3 (Rule-Ref: AG-DOC-004) take precedence over this file's general guidance once you have identified that your work falls into that area, as item 3 itself states.
+3. **[AG-DOC-004] Area-specific AGENTS files** (e.g., `.github/AGENTS.md` for GitHub Actions work) — Specialized guidance for specific areas takes precedence over general guidance once you have identified that your work falls into that area.
+4. **[AG-DOC-005] `SECURITY.md`** — Security-specific behavior and constraints are documented separately and take precedence for security-relevant work.
+5. **[AG-DOC-006] Architecture and release documentation** (e.g., `docs/architecture-ng.md`, `docs/release-versioning.md`, `docs/release-external-images.md`, `docs/threat-model.md`) — System design and release procedures are documented here with rationale.
+6. **[AG-DOC-007] `README.md` and user-facing documentation** (e.g., `docs/install-ca-cert.md`) — End-user guides and high-level project descriptions are placed last because they are more likely to lag behind operational or technical changes.
 
 **Surfacing and resolving conflicts:**
 
 When an agent finds a real conflict between two of these sources (not a misreading, but a genuine inconsistency that reflects stale documentation or outdated guidance):
 
-- **Do not silently pick a side and proceed.** This masks the problem and allows drift to accumulate.
-- **Surface the conflict explicitly** — note it in a PR comment, a dedicated issue, or a follow-up task description. Explain which sources disagree and what real-world behavior you observed.
-- **Fix one side of the conflict or ask for guidance** — either update the stale documentation to match reality, or update the code/CI if the documentation is more correct. Only ask for guidance when the correct behavior is genuinely ambiguous or depends on a user decision. Per the user-context rule (see "Agent Autonomy and User-Context Rule" below), agents are expected to make technical decisions independently; guidance is only needed when there is real operational impact (hardware, cost, network topology) or when the correct target behavior is not determinable from code and documentation alone.
+- **[AG-DOC-008] Do not silently pick a side and proceed.** This masks the problem and allows drift to accumulate.
+- **[AG-DOC-009] Surface the conflict explicitly** — note it in a PR comment, a dedicated issue, or a follow-up task description. Explain which sources disagree and what real-world behavior you observed.
+- **[AG-DOC-010] Fix one side of the conflict or ask for guidance** — either update the stale documentation to match reality, or update the code/CI if the documentation is more correct. Only ask for guidance when the correct behavior is genuinely ambiguous or depends on a user decision. Per the user-context rule (see "Agent Autonomy and User-Context Rule" below), agents are expected to make technical decisions independently; guidance is only needed when there is real operational impact (hardware, cost, network topology) or when the correct target behavior is not determinable from code and documentation alone.
 
 This precedence order exists because this project touches DNS, DHCP, TLS interception, Docker startup behavior, cache correctness, and local network availability — all areas where documentation drift is not a stylistic gap but a real operational risk.
 
@@ -275,7 +275,7 @@ reading the document for anything that needs human judgment.
 
 Hard rules in this governance exist to prevent real failures — runtime crashes, security exposures, documentation drift, stale CI gates, and cascading operational risk. A rule must be clearly broken only when there is a documented reason, and exceptions must state that reason explicitly, name what still must be validated despite the exception, and be narrowly scoped.
 
-Every documented exception must follow this format:
+**[AG-DOC-011]** Every documented exception must follow this format:
 
 - **Scope**: What the exception narrows (e.g., "Rust builder images for service X" or "CodeQL analysis for auto-generated code in path Y").
 - **Reason**: Why the normal rule does not apply in this case (e.g., "generator output is deterministic and pre-audited," or "this image must use rust:latest because...").
@@ -283,7 +283,7 @@ Every documented exception must follow this format:
 - **Validation**: What validation is still required despite the exception. Omitting validation because "the exception lets us skip it" misses the point — the exception narrows the rule, but safety verification must land somewhere else.
 - **Non-Expansion**: What the exception explicitly does NOT cover (e.g., "this exception applies only to service X, not to other services" or "only to CodeQL analysis, not to other security checks").
 
-### Example: Rust Macro Expansion and CodeQL Analysis (issue #394)
+### [AG-VAL-021] Example: Rust Macro Expansion and CodeQL Analysis (issue #394)
 
 - **Scope**: CodeQL analysis of Rust code generated by macros that expand to large intermediate representations.
 - **Reason**: Rust procedural macros can generate code that CodeQL reports as overly complex or unreachable, even though the actual compiled binary and test behavior are correct. The generated code is not human-readable and is not part of the reviewable source surface. Blocking on CodeQL false positives in generated code delays legitimate security fixes.
