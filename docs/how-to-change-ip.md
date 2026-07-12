@@ -10,6 +10,30 @@ The LAN cache binds to one or two IP addresses on your server. You may need to c
 
 ---
 
+## Quickest way: use setup.sh (recommended)
+
+If you installed using the setup script, use this to reconfigure the IP addresses:
+
+```bash
+sudo /opt/lancache-ng/setup.sh update-ip
+```
+
+Or equivalently:
+
+```bash
+sudo /opt/lancache-ng/setup.sh --reconfigure
+```
+
+The setup script will ask you for the new IP(s), update all necessary config files automatically, restart the services, and verify the change worked.
+
+---
+
+## Manual method (if not using setup.sh)
+
+If you installed manually or need direct control over the config, follow the steps below. This is a fallback for edge cases; `setup.sh update-ip` is the recommended path for most setups.
+
+---
+
 ## Which IPs does lancache use?
 
 | Mode | Variable | Purpose |

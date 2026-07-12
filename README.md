@@ -205,8 +205,7 @@ software and update CDN downloads that you intentionally route through the cache
 The nginx cache key intentionally uses the host and path, not the full request URI with the
 query string. Many CDN download URLs include per-request signatures or expiry tokens in the
 query string. Including those values in the cache key would make each signed URL look like a
-different object and would greatly reduce cache hits. The full request URI is still forwarded
-to the upstream CDN for validation; only the local cache key ignores the query string.
+different object and would greatly reduce cache hits. On a cache miss (or once the cached entry has expired), the full request URI including the query string is forwarded to the upstream CDN for validation. Cache hits within the configured validity window are served directly from the local cache without contacting upstream.
 
 For the same reason, LanCache NG intentionally ignores selected upstream cache headers such as
 `Cache-Control`, `Expires`, `Vary` and `Set-Cookie` for cached download responses. Do not use
@@ -303,6 +302,8 @@ The update command can:
 Setup and update always consume prebuilt runtime images. They do not build the
 production stack locally, so host-side build acceleration is never a runtime
 or install dependency.
+
+**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/backup-restore.md` for rollback options.
 
 Create a manual backup with:
 
@@ -681,6 +682,21 @@ NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
 NATS_CALLOUT_PASSWORD=<generate-a-secret>
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 ```
+
+### Secret generation and persistence
+
+Secrets in `.env` follow a simple rule: they are generated once on first install (or first update), and never rotated by later updates as long as a real value already exists. The `setup.sh` script provides a `get_or_generate_secret` helper that checks each secret key:
+
+- If the value is a placeholder (empty or the literal string `<generate-a-secret>`), a new secret is generated.
+- If a real value is already present, it is preserved unchanged — even across multiple updates.
+
+Secret formats vary by key:
+
+- `*_KEY` secrets (e.g. `DDNS_TSIG_KEY`): 32 hex characters
+- `*_PASSWORD` secrets (e.g. `NATS_UI_PASSWORD`): 32 base64 characters
+- `SECONDARY_REGISTRATION_TOKEN`: 20 alphanumeric characters
+
+Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 
 Create directories:
 
