@@ -197,10 +197,18 @@ setup() {
     ntp_opt="$(build_ntp_option)" || skip "NTP option building failed"
     export DHCP_NTP_OPTION="$ntp_opt"
 
-    # Render the template
-    run envsubst "$ENVSUBST_VARS" < "$dhcp4_template" > "$dhcp4_output"
-    [ "$status" -eq 0 ]
-    [ -f "$dhcp4_output" ]
+    # Deliberately NOT `run envsubst ... > "$dhcp4_output"`: Bats' `run`
+    # captures a command's stdout internally (via its own command
+    # substitution) to populate $output, so an external `>` redirect on a
+    # `run`-wrapped command writes an empty file, not the rendered content --
+    # the JSON-validity check below would then trivially pass on 0 bytes of
+    # input regardless of whether the template is actually valid. Running
+    # the command directly (capturing $? by hand) and asserting the output
+    # file is genuinely non-empty is what makes this test load-bearing.
+    envsubst "$ENVSUBST_VARS" < "$dhcp4_template" > "$dhcp4_output"
+    render_status=$?
+    [ "$render_status" -eq 0 ]
+    [ -s "$dhcp4_output" ]
 
     # `jq empty` parses without producing output -- it's the standard way to
     # check "is this syntactically valid JSON" without asserting on content.
@@ -281,10 +289,13 @@ setup() {
     # test above: this template carries KEA_CTRL_TOKEN/KEA_CTRL_HOST
     # substitutions of its own, so it needs its own independent JSON-validity
     # check rather than assuming the DHCP4 template's pass implies this one
-    # is fine too.
-    run envsubst "$ENVSUBST_VARS" < "$ctrl_agent_template" > "$ctrl_agent_output"
-    [ "$status" -eq 0 ]
-    [ -f "$ctrl_agent_output" ]
+    # is fine too. Not `run`-wrapped for the same reason as the DHCP4 test:
+    # `run cmd > file` would leave $ctrl_agent_output empty and make the
+    # jq check below trivially pass on 0 bytes.
+    envsubst "$ENVSUBST_VARS" < "$ctrl_agent_template" > "$ctrl_agent_output"
+    render_status=$?
+    [ "$render_status" -eq 0 ]
+    [ -s "$ctrl_agent_output" ]
 
     run jq empty "$ctrl_agent_output"
     [ "$status" -eq 0 ]
@@ -340,10 +351,14 @@ setup() {
     # Third and last template with its own JSON-validity check (DHCP4,
     # Control Agent above) -- this one carries the TSIG/DDNS substitutions
     # (DDNS_TSIG_KEY, DHCP_DNS_SERVER_IP(_SSL), DHCP_DDNS_PORT), the
-    # densest set of secrets/networking values of the three templates.
-    run envsubst "$ENVSUBST_VARS" < "$ddns_template" > "$ddns_output"
-    [ "$status" -eq 0 ]
-    [ -f "$ddns_output" ]
+    # densest set of secrets/networking values of the three templates. Not
+    # `run`-wrapped for the same reason as the other two: `run cmd > file`
+    # would leave $ddns_output empty and make the jq check below trivially
+    # pass on 0 bytes.
+    envsubst "$ENVSUBST_VARS" < "$ddns_template" > "$ddns_output"
+    render_status=$?
+    [ "$render_status" -eq 0 ]
+    [ -s "$ddns_output" ]
 
     run jq empty "$ddns_output"
     [ "$status" -eq 0 ]
