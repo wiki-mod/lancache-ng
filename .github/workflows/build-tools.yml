@@ -48,6 +48,20 @@ permissions:
   attestations: write
   artifact-metadata: write
 
+# Serializes overlapping runs the same way build-push.yml's own concurrency
+# group does: the weekly schedule, a manual workflow_dispatch, and a
+# qualifying push can all trigger this workflow for the same commit, and
+# every one of those non-pull_request triggers can reach the mutable
+# sha-<short_sha>/branch/latest tags this workflow writes below. Queuing
+# them behind one "<workflow>-publish" group (rather than cancelling, so a
+# publish never gets torn down mid-write) keeps two runs from ever
+# interleaving their reads and writes of those tags. pull_request runs never
+# touch those tags, so they get their own per-ref group instead of queuing
+# behind publish runs they have no interaction with.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  cancel-in-progress: false
+
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
   BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
@@ -598,11 +612,17 @@ jobs:
         needs['determine-publish-scope'].outputs.should-publish == 'true'
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # A job-level permissions block replaces the workflow-level default
+    # above entirely rather than merging with it, so artifact-metadata:
+    # write has to be repeated here too -- omitting it left this job with
+    # only `none` for that scope, same as build-push.yml's own
+    # attest-performing jobs already carry both scopes together.
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -682,7 +702,20 @@ jobs:
           push-to-registry: true
 
       - name: Promote mutable tags
-        # Neither imagetools create below passes --annotation. $SOURCE_TAG
+        # Promotes from the digest resolved and attested by the two steps
+        # above (merged-digest / "Attest merged build-tools manifest
+        # provenance"), not from the mutable $SOURCE_TAG
+        # (sha-<short_sha>) tag itself: build-push.yml's own merge-manifests
+        # job writes that exact same ghcr.io/<repo>/build-tools:sha-<short_sha>
+        # tag for the same commit whenever its build/build-arm64 matrix
+        # includes a build-tools leg. If that write lands between this job's
+        # attestation and this promotion step, reading the mutable tag here
+        # could carbon-copy a manifest this job never verified onto the
+        # branch/latest tags. Pinning to the digest this job itself just
+        # attested closes that window regardless of what else touches the
+        # mutable tag afterward.
+        #
+        # Neither imagetools create below passes --annotation. The digest
         # already carries the org.opencontainers.image.description index
         # annotation from the merge step above, and a plain
         # --prefer-index=false carbon copy of an already-annotated OCI index
@@ -692,7 +725,7 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
-          SOURCE_TAG: ${{ steps.merge.outputs.source-tag }}
+          MERGED_DIGEST: ${{ steps.merged-digest.outputs.digest }}
         run: |
           set -euo pipefail
 
@@ -702,7 +735,9 @@ jobs:
             exit 1
           fi
 
-          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$SOURCE_TAG"
+          source_ref="${BUILD_TOOLS_IMAGE}@${MERGED_DIGEST}"
+
+          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$SOURCE_TAG"
+            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
           fi
