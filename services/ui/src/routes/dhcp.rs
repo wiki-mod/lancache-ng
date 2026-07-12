@@ -2139,6 +2139,12 @@ fn is_ui_managed_subnet_option_code(code: u16) -> bool {
     matches!(code, 3 | 6 | 15 | 42 | 119)
 }
 
+// Kea's own convention: an option-data entry inside a Dhcp4 subnet with no
+// explicit "space" field implicitly belongs to the "dhcp4" space (that's the
+// only space that makes sense there). Absence must default to true, not
+// false, or every option this project itself writes without an explicit
+// "space" (see build_subnet_options) would be misclassified as non-dhcp4 by
+// this same check the moment it reads its own output back.
 fn is_dhcp4_option_space(option: &Value) -> bool {
     option
         .get("space")
@@ -2336,6 +2342,14 @@ fn parse_subnet_entry(subnet: &Value) -> Subnet {
     }
 }
 
+// Called from update_subnet when an operator narrows/moves a subnet's CIDR:
+// drops any reservation whose static IP would fall outside the new range,
+// since Kea rejects a subnet whose own reservations aren't contained in it.
+// A reservation with no parseable `ip-address` (e.g. a client-id-only entry
+// with no fixed address of its own) has nothing to check against the new
+// CIDR, so `.unwrap_or(true)` keeps it rather than dropping it -- there is
+// no "outside the subnet" for an entry that was never tied to a specific
+// address to begin with.
 fn compatible_reservations_for_subnet(
     subnet: &Value,
     cidr: &str,
