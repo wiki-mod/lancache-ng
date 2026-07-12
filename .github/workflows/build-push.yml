@@ -4364,10 +4364,12 @@ jobs:
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
 
-          # Same helper (and same quote-stripping) as promote's own
-          # digest_for_image below -- kept duplicated per job rather than
-          # shared, matching how build/build-tools-base-digests and promote
-          # already each keep their own local copy in this file.
+          # Duplicated rather than factored into a shared script/action:
+          # GitHub Actions workflow YAML has no import mechanism for shell
+          # functions across job steps, and this file's own convention (see
+          # build/build-tools-base-digests and promote's copies of this same
+          # helper) is a local copy per job over introducing a new composite
+          # action just for one function. Same quote-stripping as those.
           digest_for_image() {
             local image=$1
             local digest
@@ -4541,10 +4543,10 @@ jobs:
           subject-digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest }}
           push-to-registry: true
 
-      # Same seven services, this time for the PR staging manifest created
-      # above. Fork PRs self-skip: build/build-arm64 never push a fork PR's
-      # per-arch legs, so create-pr-staging-manifests' own loop never emits
-      # these outputs for a fork PR, and every step below is gated off.
+      # Fork PRs self-skip here without any extra guard needed: build/build-arm64
+      # never push a fork PR's per-arch legs, so create-pr-staging-manifests'
+      # own loop above never emits these *_digest outputs for a fork PR, and
+      # every one of these seven steps is gated off by its own `if:` as a result.
       - name: Attest proxy PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.proxy_digest != ''
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
@@ -4897,6 +4899,18 @@ jobs:
             bash scripts/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
           done
 
+      # Patches (rather than overwrites) an existing release body: the
+      # image_notes_start/end HTML-comment markers bound exactly the
+      # auto-generated section, so any text a maintainer added by hand
+      # outside those markers survives a re-run of this job (e.g. a manual
+      # `workflow_dispatch` re-promotion of the same tag, or a rerun after a
+      # transient failure). A brand-new release has no existing body to
+      # preserve, so its notes are just the auto-generated section verbatim.
+      # The prerelease-state check further down exists because GitHub's
+      # PATCH endpoint for releases would otherwise happily flip a release's
+      # prerelease flag to match whatever this run computes -- silently
+      # promoting/demoting a release that a maintainer may have already
+      # published deliberately.
       - name: Create or update GitHub release for built images
         shell: bash
         env:
