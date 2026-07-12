@@ -832,7 +832,6 @@ pub async fn add_subnet(
             lease_time,
             editable_options: Vec::new(),
             reservations: None,
-            reservation_identifiers: default_reservation_identifiers(),
         })?);
         Ok(())
     })
@@ -875,7 +874,6 @@ pub async fn update_subnet(
             .find(|s| s["id"].as_u64() == Some(subnet_id as u64))
             .ok_or("subnet not found")?;
         let reservations = compatible_reservations_for_subnet(entry, &form.subnet)?;
-        let reservation_identifiers = reservation_identifiers_for_subnet(entry, &reservations);
         apply_subnet_value(
             entry,
             SubnetValue {
@@ -891,7 +889,6 @@ pub async fn update_subnet(
                 lease_time,
                 editable_options: preserved_subnet_options(entry),
                 reservations: Some(reservations),
-                reservation_identifiers,
             },
         )?;
         Ok(())
@@ -1008,7 +1005,12 @@ pub async fn add_reservation(
             .iter_mut()
             .find(|s| s["id"].as_u64() == Some(form.subnet_id as u64))
             .ok_or("subnet not found")?;
-        ensure_subnet_reservation_identifier(subnet, "hw-address")?;
+        // No per-subnet `host-reservation-identifiers` write here (there
+        // used to be one): real Kea rejects that parameter at subnet scope
+        // outright (see apply_subnet_value's own comment on this), and
+        // Kea's compiled-in global default already includes "hw-address" --
+        // the only identifier type this form ever submits -- so hw-address
+        // reservations already match without this code touching anything.
         let reservations = subnet_reservations_mut(subnet)?;
         upsert_reservation(
             reservations,
@@ -1968,7 +1970,6 @@ struct SubnetValue {
     lease_time: u32,
     editable_options: Vec<Value>,
     reservations: Option<Vec<Value>>,
-    reservation_identifiers: Vec<Value>,
 }
 
 fn build_subnet_value(input: SubnetValue) -> Result<Value, &'static str> {
@@ -2006,17 +2007,25 @@ fn apply_subnet_value(entry: &mut Value, input: SubnetValue) -> Result<(), &'sta
     );
     entry.insert("valid-lifetime".to_string(), json!(input.lease_time));
     entry.insert("max-valid-lifetime".to_string(), json!(max_valid_lifetime));
-    let reservation_identifiers = if input.reservation_identifiers.is_empty() {
-        default_reservation_identifiers()
-    } else {
-        input.reservation_identifiers
-    };
-    entry.insert(
-        "host-reservation-identifiers".to_string(),
-        Value::Array(reservation_identifiers),
-    );
     entry.remove("default-lease-time");
     entry.remove("max-lease-time");
+    // `host-reservation-identifiers` is a Dhcp4-GLOBAL-only parameter in real
+    // Kea (confirmed directly against Kea 2.6.3, the version this project
+    // ships): setting it here, on the per-subnet object, makes Kea reject
+    // the whole config-test/config-set call outright with "spurious
+    // 'host-reservation-identifiers' parameter" -- every add_subnet/
+    // update_subnet call was broken against real Kea until this was removed.
+    // Nothing needs to be written in its place: Kea's own compiled-in
+    // global default already includes "hw-address" (confirmed via a live
+    // config-get), which is the only identifier type this project's
+    // reservation form ever uses, and `kea_config_modify`'s config-get ->
+    // config-set round trip already carries that default straight through
+    // untouched. The explicit `remove` below is defense-in-depth in case a
+    // config ever has this key at subnet scope (e.g. a hand-edited file, or
+    // a future regression reintroducing the old write) -- Kea would reject
+    // an update to that subnet either way, so stripping it here keeps
+    // add_subnet/update_subnet self-healing instead of permanently stuck.
+    entry.remove("host-reservation-identifiers");
 
     if let Some(reservations) = input.reservations {
         entry.insert("reservations".to_string(), Value::Array(reservations));
@@ -2310,74 +2319,6 @@ fn compatible_reservations_for_subnet(
                 .collect()
         })
         .unwrap_or_default())
-}
-
-fn default_reservation_identifiers() -> Vec<Value> {
-    vec![json!("hw-address")]
-}
-
-fn reservation_identifiers_for_subnet(subnet: &Value, reservations: &[Value]) -> Vec<Value> {
-    let mut identifiers = subnet
-        .get("host-reservation-identifiers")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    for (field, identifier) in [
-        ("hw-address", "hw-address"),
-        ("duid", "duid"),
-        ("client-id", "client-id"),
-        ("circuit-id", "circuit-id"),
-    ] {
-        if reservations
-            .iter()
-            .any(|reservation| reservation.get(field).is_some())
-        {
-            push_identifier_once(&mut identifiers, identifier);
-        }
-    }
-
-    if identifiers.is_empty() {
-        default_reservation_identifiers()
-    } else {
-        identifiers
-    }
-}
-
-fn ensure_subnet_reservation_identifier(
-    subnet: &mut Value,
-    identifier: &str,
-) -> Result<(), &'static str> {
-    let inferred_identifiers = reservation_identifiers_for_subnet(
-        subnet,
-        subnet
-            .get("reservations")
-            .and_then(|value| value.as_array())
-            .map(|reservations| reservations.as_slice())
-            .unwrap_or(&[]),
-    );
-    let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
-    if !subnet.contains_key("host-reservation-identifiers") {
-        subnet.insert(
-            "host-reservation-identifiers".to_string(),
-            Value::Array(inferred_identifiers),
-        );
-    }
-    let identifiers = subnet
-        .get_mut("host-reservation-identifiers")
-        .and_then(|value| value.as_array_mut())
-        .ok_or("host-reservation-identifiers not an array")?;
-    push_identifier_once(identifiers, identifier);
-    Ok(())
-}
-
-fn push_identifier_once(identifiers: &mut Vec<Value>, identifier: &str) {
-    if !identifiers
-        .iter()
-        .any(|value| value.as_str() == Some(identifier))
-    {
-        identifiers.push(json!(identifier));
-    }
 }
 
 fn parse_reservation_entry(subnet_id: u32, reservation: &Value) -> Option<Reservation> {
@@ -3364,7 +3305,6 @@ mod tests {
             lease_time: MAX_LEASE_TIME,
             editable_options: Vec::new(),
             reservations: None,
-            reservation_identifiers: default_reservation_identifiers(),
         })
         .expect("subnet value");
 
@@ -3392,7 +3332,6 @@ mod tests {
             lease_time: 3600,
             editable_options: Vec::new(),
             reservations: Some(reservations.clone()),
-            reservation_identifiers: default_reservation_identifiers(),
         })
         .expect("subnet value");
 
@@ -3447,8 +3386,7 @@ mod tests {
                 lease_time: 7200,
                 editable_options: preserved_options,
                 reservations: None,
-                reservation_identifiers: default_reservation_identifiers(),
-            },
+                },
         )
         .expect("apply subnet value");
 
@@ -3550,7 +3488,6 @@ mod tests {
             lease_time: 3600,
             editable_options: Vec::new(),
             reservations: None,
-            reservation_identifiers: default_reservation_identifiers(),
         })
         .expect("subnet value");
 
@@ -3584,7 +3521,6 @@ mod tests {
                 json!({"name": "vendor-foo", "data": "keep-me"}),
             ],
             reservations: None,
-            reservation_identifiers: default_reservation_identifiers(),
         })
         .expect("subnet value");
 
@@ -3772,67 +3708,132 @@ mod tests {
             .any(|reservation| reservation["client-id"] == "01:02:03"));
     }
 
+    // Regression coverage for a real bug found by driving real Kea 2.6.3
+    // (not a mock): a previous version of apply_subnet_value wrote a
+    // "host-reservation-identifiers" array directly onto the per-subnet
+    // JSON object. Confirmed live against Kea's actual Control Agent that
+    // this is rejected outright -- "spurious 'host-reservation-identifiers'
+    // parameter" -- because that parameter only exists at Dhcp4-GLOBAL
+    // scope in Kea's real schema, never per subnet. Every existing test for
+    // this function mocked Kea's config-test/config-set responses as a bare
+    // `{"result": 0}` regardless of what was actually sent, so none of them
+    // could have caught a schema violation like this -- mirroring exactly
+    // how the earlier `hash`-field regression in kea_config_modify_with_post
+    // went undetected the same way (a mocked config-get response that never
+    // included that field). This test asserts directly on the built subnet
+    // JSON (not through a mock), matching the shape a real Kea instance
+    // would receive and validate.
     #[test]
-    fn reservation_identifiers_keep_existing_and_present_reservation_types() {
-        let subnet = json!({
-            "host-reservation-identifiers": ["client-id"],
-        });
-        let reservations = vec![
-            json!({"hw-address": "aa:bb:cc:dd:ee:ff"}),
-            json!({"duid": "00:01:00:01"}),
-        ];
+    fn build_subnet_value_never_sets_host_reservation_identifiers_at_subnet_scope() {
+        let subnet = build_subnet_value(SubnetValue {
+            id: 6,
+            subnet: "10.0.4.0/24".to_string(),
+            pool_start: "10.0.4.10".to_string(),
+            pool_end: "10.0.4.200".to_string(),
+            gateway: "10.0.4.1".to_string(),
+            dns_primary: "10.0.4.2".to_string(),
+            dns_secondary: "10.0.4.3".to_string(),
+            ntp_servers: "10.0.4.4".to_string(),
+            domain: "lan.example".to_string(),
+            lease_time: 3600,
+            editable_options: Vec::new(),
+            reservations: Some(vec![json!({
+                "hw-address": "aa:bb:cc:dd:ee:ff",
+                "ip-address": "10.0.4.50"
+            })]),
+        })
+        .expect("subnet value");
 
-        let identifiers = reservation_identifiers_for_subnet(&subnet, &reservations);
-
-        assert_eq!(identifiers[0], "client-id");
-        assert!(identifiers
-            .iter()
-            .any(|identifier| identifier.as_str() == Some("hw-address")));
-        assert!(identifiers
-            .iter()
-            .any(|identifier| identifier.as_str() == Some("duid")));
+        assert!(
+            subnet.get("host-reservation-identifiers").is_none(),
+            "subnet4 entries must never carry host-reservation-identifiers -- \
+             real Kea rejects it at subnet scope"
+        );
     }
 
+    // Same regression, but for an existing subnet that already (incorrectly,
+    // from before this fix) has the key set at subnet scope -- apply_subnet_value
+    // must actively strip it, not just avoid adding a new one, so an
+    // operator's next edit through the Admin UI self-heals instead of
+    // staying permanently broken.
     #[test]
-    fn ensure_subnet_reservation_identifier_adds_hw_address_for_mac_reservations() {
+    fn apply_subnet_value_strips_pre_existing_host_reservation_identifiers_at_subnet_scope() {
         let mut subnet = json!({
-            "host-reservation-identifiers": ["client-id"]
+            "id": 6,
+            "host-reservation-identifiers": ["hw-address"]
         });
 
-        ensure_subnet_reservation_identifier(&mut subnet, "hw-address")
-            .expect("reservation identifier");
+        apply_subnet_value(
+            &mut subnet,
+            SubnetValue {
+                id: 6,
+                subnet: "10.0.4.0/24".to_string(),
+                pool_start: "10.0.4.10".to_string(),
+                pool_end: "10.0.4.200".to_string(),
+                gateway: "10.0.4.1".to_string(),
+                dns_primary: "10.0.4.2".to_string(),
+                dns_secondary: "10.0.4.3".to_string(),
+                ntp_servers: "10.0.4.4".to_string(),
+                domain: "lan.example".to_string(),
+                lease_time: 3600,
+                editable_options: Vec::new(),
+                reservations: None,
+            },
+        )
+        .expect("apply subnet value");
 
-        let identifiers = subnet["host-reservation-identifiers"]
-            .as_array()
-            .expect("identifiers");
-        assert!(identifiers
-            .iter()
-            .any(|identifier| identifier.as_str() == Some("client-id")));
-        assert!(identifiers
-            .iter()
-            .any(|identifier| identifier.as_str() == Some("hw-address")));
+        assert!(subnet.get("host-reservation-identifiers").is_none());
     }
 
-    #[test]
-    fn ensure_subnet_reservation_identifier_preserves_implicit_identifiers() {
-        let mut subnet = json!({
-            "reservations": [
-                {"client-id": "01:02:03", "ip-address": "10.0.0.50"},
-                {"duid": "00:01:00:01", "ip-address": "10.0.0.51"},
-                {"circuit-id": "uplink-1", "ip-address": "10.0.0.52"}
-            ]
-        });
+    // End-to-end regression through the exact real Kea command sequence
+    // add_reservation drives (config-get -> config-test -> config-set ->
+    // config-write), asserting neither config-test's nor config-set's
+    // request body ever contains host-reservation-identifiers on the
+    // subnet -- the same assertion style
+    // kea_config_modify_strips_hash_from_config_get_before_reuse already
+    // uses for the `hash`-field regression, applied to this bug instead.
+    #[tokio::test]
+    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope(
+    ) {
+        let config_get_response = kea_config_get_response(json!({
+            "Dhcp4": {
+                "subnet4": [{"id": 1, "reservations": []}]
+            }
+        }));
 
-        ensure_subnet_reservation_identifier(&mut subnet, "hw-address")
-            .expect("reservation identifier");
+        let (result, calls) = run_kea_config_modify_with_steps(
+            vec![
+                MockStep::Response(config_get_response),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+                MockStep::Response(kea_success_response()),
+            ],
+            |config| {
+                let subnets = dhcp4_subnets_mut(config)?;
+                let subnet = subnets
+                    .iter_mut()
+                    .find(|s| s["id"].as_u64() == Some(1))
+                    .ok_or("subnet not found")?;
+                let reservations = subnet_reservations_mut(subnet)?;
+                upsert_reservation(
+                    reservations,
+                    json!({"hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.0.4.50"}),
+                )?;
+                Ok(())
+            },
+        )
+        .await;
 
-        let identifiers = subnet["host-reservation-identifiers"]
-            .as_array()
-            .expect("identifiers");
-        for expected in ["client-id", "duid", "circuit-id", "hw-address"] {
-            assert!(identifiers
-                .iter()
-                .any(|identifier| identifier.as_str() == Some(expected)));
+        assert!(result.is_ok());
+        assert_eq!(calls[1]["command"], "config-test");
+        assert_eq!(calls[2]["command"], "config-set");
+        for call in &calls[1..=2] {
+            let subnet = &call["arguments"]["Dhcp4"]["subnet4"][0];
+            assert!(
+                subnet.get("host-reservation-identifiers").is_none(),
+                "{} must not send host-reservation-identifiers on the subnet -- real Kea rejects it there",
+                call["command"]
+            );
         }
     }
 }
