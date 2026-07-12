@@ -23,8 +23,8 @@ load_proxy_cert_helpers() {
         # before ever reaching _sign_cert's definition.
         #
         # The awk program below runs a single pass over entrypoint.sh and
-        # tracks two independent on/off flags to pull out those two disjoint
-        # ranges in one go, printing a line whenever either flag is on:
+        # tracks three independent on/off flags to pull out those disjoint
+        # ranges in one go, printing a line whenever any flag is on:
         #   - `capture` toggles on at the `_is_valid_domain_label()` line and
         #     back off at the `_load_public_suffix_list()` line. Because awk
         #     evaluates every pattern against a line before moving to the
@@ -40,15 +40,25 @@ load_proxy_cert_helpers() {
         #     down the file: it turns on at the exact (4-space-indented)
         #     `_sign_cert() {` line and stays on until the matching 4-space
         #     `}` that closes it, at which point that closing line is printed
-        #     too (print rules for a line run before the `exit` check) and
-        #     `exit` stops awk from reading the rest of the file.
+        #     too (print rules for a line run before the next check runs).
+        #   - `in_needs_regen` mirrors `in_sign_cert` for the very next
+        #     function, `_default_cert_needs_regen`, which entrypoint.sh
+        #     defines immediately after `_sign_cert` closes and which is
+        #     self-contained (only reads $CERT_DIR/$IP_SSL, calls no other
+        #     helper), so it needs no extra capture range beyond its own
+        #     body. `exit` after its matching `}` stops awk from reading the
+        #     rest of the file (the startup script body that calls these
+        #     functions against real container paths).
         awk '
             /^_is_valid_domain_label\(\)/ { capture = 1 }
             /^_load_public_suffix_list\(\)/ { capture = 0 }
             capture { print }
             /^    _sign_cert\(\) {/ { in_sign_cert = 1 }
             in_sign_cert { print }
-            in_sign_cert && /^    \}$/ { exit }
+            in_sign_cert && /^    \}$/ { in_sign_cert = 0 }
+            /^    _default_cert_needs_regen\(\) {/ { in_needs_regen = 1 }
+            in_needs_regen { print }
+            in_needs_regen && /^    \}$/ { exit }
         ' "$repo_root/services/proxy/entrypoint.sh"
     } > "$helper_file"
 

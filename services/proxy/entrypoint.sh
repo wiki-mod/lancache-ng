@@ -599,7 +599,11 @@ if [ "${SSL_ENABLED}" = "1" ]; then
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -extfile <(printf "%s" "$ext") \
                 -out "$crt"; then
-                rm -f /tmp/lancache-cert.csr
+                # Clean up the key and any partial output, not just the CSR: a
+                # failed sign otherwise leaves an orphaned private key (and a
+                # possibly truncated $crt from an interrupted/full-disk write)
+                # on disk (#655).
+                rm -f /tmp/lancache-cert.csr "$key" "$crt"
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
@@ -608,7 +612,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
                 -in /tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -out "$crt"; then
-                rm -f /tmp/lancache-cert.csr
+                rm -f /tmp/lancache-cert.csr "$key" "$crt"
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
@@ -629,7 +633,15 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         san=$(openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null)
         echo "$san" | grep -q "DNS:" || return 0
         if [ -n "${IP_SSL}" ]; then
-            echo "$san" | grep -q "IP Address:${IP_SSL}" || return 0
+            # `grep -q "IP Address:${IP_SSL}"` would be an unanchored substring
+            # match: if IP_SSL migrates from 192.168.1.11 to 192.168.1.1, the
+            # search string is still found inside the old SAN, so a stale cert
+            # for the old IP would be kept (#655). Anchor on the trailing edge
+            # (dots escaped so they match literally, and the char right after
+            # the address must not be another digit/dot) so only an exact IP
+            # match counts; a comma, whitespace, or end of string may follow.
+            local ip_pattern="${IP_SSL//./\\.}"
+            [[ "$san" =~ IP\ Address:${ip_pattern}([^0-9.]|$) ]] || return 0
         fi
         return 1
     }
