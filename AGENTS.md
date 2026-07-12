@@ -309,7 +309,7 @@ A closing report must document:
 
 6. **Known open risks** — Anything that feels incomplete, partially implemented, or dependent on follow-up work must be stated (e.g., "admin UI does not yet expose the new feature" or "the exception needs re-evaluation once upstream macro behavior changes"). Acknowledge what's outstanding rather than implying the task is fully shipped.
 
-7. **Documentation checked/updated for drift** — Did you read the relevant documentation (README.md, threat-model.md, architecture docs) to verify it still describes the code behavior correctly? If you found drift, did you fix it? If not, why not? (Reference rule **[AG-DOC-001]** — documentation drift is a defect.) State explicitly whether documentation was checked or skipped, and if skipped, why (e.g., "documentation changes are out of scope for this PR and tracked in issue #XXX").
+7. **Documentation checked/updated for drift** — Did you read the relevant documentation (README.md, threat-model.md, architecture docs) to verify it still describes the code behavior correctly? If you found drift, did you fix it? If not, why not? (Reference rule Rule-Ref: AG-DOC-001 — documentation drift is a defect.) State explicitly whether documentation was checked or skipped, and if skipped, why (e.g., "documentation changes are out of scope for this PR and tracked in issue #XXX").
 
 8. **Follow-up issue reference or explicit "none"** — If this work creates or depends on a follow-up task, cite it (e.g., "depends on #500 being merged first" or "follow-up: #502 will add Admin UI support for this feature"). If there is no follow-up work, state "no follow-up required" explicitly, rather than omitting it. An omission looks like incomplete thought; an explicit statement closes the loop.
 
