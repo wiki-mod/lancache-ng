@@ -47,11 +47,15 @@ setup() {
     export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
 }
 
-# is_ipv4 gates every DHCP_*_IP/DHCP_*_SERVER value before it reaches a Kea
-# JSON template. Catching a malformed address here fails fast with a clear
-# test/entrypoint error; letting it through would either produce invalid JSON
-# (caught much later, at Kea startup) or silently valid-looking JSON with a
-# wrong address baked in (not caught at all).
+# is_ipv4 is the fail-fast address-format gate used by the NTP-resolution
+# helpers (resolve_ntp_server / is_ipv4_csv) and by the legacy NTP-servers
+# migration path in migrate_dhcp4_config -- it is not invoked for every
+# DHCP_*_IP/DHCP_*_SERVER value. DHCP_DNS_PRIMARY, DHCP_DNS_SECONDARY,
+# DHCP_DNS_SERVER_IP, and DHCP_DNS_SERVER_IP_SSL are exported straight into
+# the Kea templates in services/dhcp/entrypoint.sh with no is_ipv4 call at
+# all; these values are not currently validated at startup, so a malformed
+# one there would only surface later as a broken DNS/DDNS target, not as a
+# fail-fast error here.
 @test "IPv4 validation accepts valid addresses" {
     run is_ipv4 "192.168.1.1"
     [ "$status" -eq 0 ]
@@ -451,6 +455,29 @@ setup() {
     # actually active, so Kea keeps both DNS instances' zone data in sync
     # even if only one is presently serving traffic.
     run jq -e '.DhcpDdns["forward-ddns"]["ddns-domains"][0]["dns-servers"] | length' "$ddns_output"
+    [ "$status" -eq 0 ]
+    [ "$output" = "2" ]
+}
+
+@test "DHCP-DDNS config reverse-ddns references TSIG key" {
+    ddns_template="$repo_root/services/dhcp/kea-dhcp-ddns.conf"
+    ddns_output="$test_config_dir/kea-dhcp-ddns-reverse.conf"
+
+    envsubst "$ENVSUBST_VARS" < "$ddns_template" > "$ddns_output"
+
+    # Same authentication link as forward-ddns above, but for PTR/reverse-zone
+    # updates: a reverse-ddns entry with no key-name (or one that drifts from
+    # tsig-keys[0].name above) would make Kea send unsigned or wrongly-signed
+    # PTR updates, which PowerDNS would then reject -- silently, since a
+    # missing/wrong reverse key-name does not affect forward-ddns at all.
+    run jq -e '.DhcpDdns["reverse-ddns"]["ddns-domains"][0]["key-name"]' "$ddns_output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == '"lancache-ddns-key"' ]]
+
+    # Same two-entry invariant as forward-ddns: both the standard-mode and
+    # SSL-mode DNS containers are kept in sync for reverse/PTR updates too,
+    # regardless of which mode is presently active.
+    run jq -e '.DhcpDdns["reverse-ddns"]["ddns-domains"][0]["dns-servers"] | length' "$ddns_output"
     [ "$status" -eq 0 ]
     [ "$output" = "2" ]
 }
