@@ -263,6 +263,16 @@ is real, live, running code, not just work sitting in source control.
   broken after a plain image update until that migration is also patched or
   the Kea data volume is reset — tracked as a separate production fix, not
   included in this change.
+  **Note:** an earlier version of this fix documented the rationale above
+  with a `//` WHY-comment directly inside `services/dhcp/kea-dhcp4.conf`.
+  Kea's own config parser tolerates `//` line comments, but
+  `migrate_dhcp4_config` and `tests/bats/dhcp_kea_config_generation.bats`
+  both parse that same file with `jq`, which does not support any comment
+  syntax and aborted on it (`jq: parse error: Invalid numeric literal`,
+  caught by a live `full-setup-validate` run before this change merged).
+  `kea-dhcp4.conf` must stay comment-free, unlike Kea's own runtime files,
+  for exactly this reason — do not re-add a `//` comment to it; put such
+  rationale in this CHANGELOG or the commit message instead.
 
 ## [0.1.0] - 2026-07-06
 
