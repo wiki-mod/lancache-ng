@@ -2377,9 +2377,19 @@ jobs:
     # Split out of rust_coverage (see the comment on its "Upload coverage badge
     # data" step) so the contents:write token this job needs is never present
     # during the coverage measurement steps that execute PR-controlled code.
+    #
+    # `if:` must start with an explicit status-check function, not a bare
+    # `needs.rust_coverage.result == ...` -- same trap documented on promote's
+    # `if:` below. A bare condition gets an implicit `&& success()` appended by
+    # GitHub Actions, and that success() walks the WHOLE transitive needs graph
+    # (publish_coverage_badge -> rust_coverage -> detect-changes, which is
+    # `if: github.event_name == 'pull_request'` and therefore always skipped on
+    # push), not just this job's own direct `needs: rust_coverage`. Confirmed
+    # live: this job skipped on the actual push that merged it (run 29184177783)
+    # because of exactly this.
     name: publish rust coverage badge
     needs: rust_coverage
-    if: needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
     permissions:
       contents: write
