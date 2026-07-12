@@ -5,6 +5,7 @@
 # lancache-ng
 
 [![Build & Push](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml/badge.svg)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml)
+[![Rust coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwiki-mod%2Flancache-ng%2Fbadges%2Fcoverage%2Frust-master.json)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml?query=branch%3Amaster)
 
 LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.
 
@@ -25,7 +26,7 @@ Some internal paths, root elements and service details may still change while th
 
 ### Test coverage
 
-The build badge above reflects the status of the primary CI pipeline, which includes Rust test coverage validation. On every push, the `rust_coverage` job runs `cargo tarpaulin` against the `services/dns/nats-subscriber` and `services/ui` crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber` currently has a 0% threshold because its existing tests only cover its data model, not its subscribe/forward logic (tracked in #504). Each crate's threshold is raised independently as that crate gains real coverage.
+The Rust coverage badge above is a Shields endpoint backed by `coverage/rust-master.json` on the repository's `badges` branch -- this README is only ever viewed on `master` (GitHub always renders the default branch's README on the repo homepage), so the badge here specifically tracks `master`'s own coverage rather than whatever integration branch happens to be active. On trusted branch pushes, the `rust_coverage`/`publish_coverage_badge` jobs write the latest measured `services/ui` and `services/dns/nats-subscriber` percentages to a branch-scoped file (`coverage/rust-<branch>.json`, so master and the active `vX.Y.Z` integration branch don't overwrite each other's numbers); pull requests measure and gate coverage but do not publish badge JSON. The same coverage job runs `cargo tarpaulin` against both Rust crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber` currently has a 0% threshold because its existing tests only cover its data model, not its subscribe/forward logic (tracked in #504). Each crate's threshold is raised independently as that crate gains real coverage.
 
 ## What this project does
 
