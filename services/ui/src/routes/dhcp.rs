@@ -863,6 +863,13 @@ fn is_valid_domain_name(raw: &str) -> bool {
             .all(|label| !label.is_empty() && label.len() <= 63 && is_valid_dns_label(label))
 }
 
+// RFC 1123 label syntax: letters/digits/hyphens only, and a hyphen may not
+// open or close a label (`-lan` / `lan-` are not valid DNS labels, even
+// though every individual character in them is allowed). Enforced here
+// because this validator's caller only checks character set and length per
+// label -- rejecting a bad leading/trailing hyphen must happen per-label,
+// not on the domain as a whole, since `is_valid_domain_name` calls this once
+// per `.`-separated segment.
 fn is_valid_dns_label(label: &str) -> bool {
     let bytes = label.as_bytes();
     let alnum_or_hyphen = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
@@ -2951,6 +2958,20 @@ mod tests {
         json!([{ "result": 0, "arguments": config }])
     }
 
+    // Real on-disk snapshot root for the repeat-run idempotence tests below
+    // (`kea_config_modify_repeat_*`), which exercise the real
+    // `kea_snapshots::create_snapshot`/`list_snapshot_ids`/`read_snapshot`
+    // trio instead of the no-op sink the other tests in this module use --
+    // mirrors `kea_snapshots.rs`'s own `temp_dir` test helper (nanosecond-
+    // stamped, so parallel test runs never collide on the same path).
+    fn temp_snapshot_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lancache-ng-dhcp-rs-{name}-{stamp}"))
+    }
+
     // The probe's two result markers (conflict scan, dhclient dry-run) are
     // parsed independently and can disagree (e.g. a conflict found but the
     // client check still passes) -- overall_status() must reflect whichever
@@ -3432,6 +3453,210 @@ mod tests {
             sink_calls.lock().unwrap().is_empty(),
             "a rolled-back config-write must never be recorded as a known-good snapshot"
         );
+    }
+
+    // Repeat-run idempotence proof for the Kea snapshot adapter, mirroring
+    // `tests/bats/setup_update_idempotence.bats`'s pattern (drive the real
+    // writer twice against a realistic fixture, including a deliberately
+    // broken candidate, and assert the on-disk store is unaffected) --
+    // translated to Rust since Kea's snapshot adapter is Rust-native, not a
+    // shell entrypoint function like the nginx/dnsmasq/PowerDNS adapters
+    // (see `kea_snapshots.rs`'s module doc comment). Unlike this module's
+    // existing `..._does_not_invoke_snapshot_sink_on_rollback` test
+    // (single run, no-op sink, no on-disk store), this drives the REAL
+    // `kea_snapshots::create_snapshot`/`list_snapshot_ids` against a real
+    // temp directory, twice in a row, to prove the invariant holds on repeat
+    // runs and not just once.
+    //
+    // A candidate that fails `config-test` must never reach the
+    // `on_write_success` snapshot sink at all (the function returns via `?`
+    // before Step 6's config-write/sink call), so the snapshot store must
+    // stay completely empty -- not just "no new entries", but genuinely
+    // untouched (no root directory even created) -- across repeated attempts
+    // to persist the same broken candidate. This is the load-bearing
+    // invariant `list_snapshot_ids`' "newest snapshot" contract depends on:
+    // if a rejected candidate ever got snapshotted, the newest entry could
+    // no longer be assumed valid.
+    #[tokio::test]
+    async fn kea_config_modify_repeat_broken_candidate_never_snapshots_and_store_stays_empty() {
+        let root = temp_snapshot_root("broken-candidate");
+        let initial_config = json!({"Dhcp4": {"subnet4": [{"id": 1, "valid-lifetime": 3600}]}});
+        let keep_n = 3u32;
+
+        let broken_candidate_steps = || {
+            vec![
+                MockStep::Response(kea_config_get_response(initial_config.clone())),
+                // config-test rejects the candidate -- the real-world analog
+                // of PDNS's `--config=check` failing on a deliberately broken
+                // candidate config.
+                MockStep::Response(json!([{
+                    "result": 1,
+                    "text": "subnet4: invalid prefix length"
+                }])),
+            ]
+        };
+        let break_the_candidate = |config: &mut Value| {
+            config["Dhcp4"]["subnet4"]
+                .as_array_mut()
+                .ok_or("subnet4 not an array")?
+                .push(json!({"id": 2, "subnet": "not-a-valid-cidr"}));
+            Ok(())
+        };
+        let root_for_sink = root.clone();
+        let real_snapshot_sink = move |applied: &Value| {
+            let _ = kea_snapshots::create_snapshot(&root_for_sink, keep_n, applied);
+        };
+
+        // Run 1: attempt to persist the broken candidate.
+        let (result_1, _calls) = run_kea_config_modify_with_steps_and_sink(
+            broken_candidate_steps(),
+            break_the_candidate,
+            real_snapshot_sink.clone(),
+        )
+        .await;
+        assert!(
+            result_1.is_err(),
+            "config-test must reject the broken candidate"
+        );
+        assert!(
+            !root.exists(),
+            "a rejected candidate must never even create the snapshot root, \
+             since the sink (and therefore create_snapshot) must never run"
+        );
+        assert_eq!(
+            kea_snapshots::list_snapshot_ids(&root).unwrap(),
+            Vec::<String>::new(),
+            "snapshot store must be empty after the first rejected attempt"
+        );
+
+        // Run 2: repeat the exact same broken candidate. The store must be
+        // byte-for-byte unchanged -- still nonexistent/empty, not just "no
+        // growth" -- proving this is stable across repeat runs, not a
+        // first-run artifact.
+        let (result_2, _calls) = run_kea_config_modify_with_steps_and_sink(
+            broken_candidate_steps(),
+            break_the_candidate,
+            real_snapshot_sink,
+        )
+        .await;
+        assert!(
+            result_2.is_err(),
+            "config-test must reject the broken candidate again on the repeat run"
+        );
+        assert!(
+            !root.exists(),
+            "the repeat run must not create the snapshot root either"
+        );
+        assert_eq!(
+            kea_snapshots::list_snapshot_ids(&root).unwrap(),
+            Vec::<String>::new(),
+            "snapshot store must still be empty after the second rejected attempt"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // Second half of the Kea repeat-run idempotence proof: a valid
+    // mutation followed by a rollback to that same known-good snapshot,
+    // repeated twice. Unlike PDNS's automatic startup rescan (where a
+    // no-op re-run leaves the snapshot store byte-for-byte identical), Kea's
+    // rollback is operator-selected and itself goes through
+    // `kea_config_modify`, which mints a brand-new snapshot on every
+    // confirmed `config-write` success (see `kea_snapshots::create_snapshot`'s
+    // doc comment: no content-dedup, a fresh nanosecond id every call). So
+    // repeating the same rollback twice deliberately grows the store by one
+    // entry each time -- that is correct, expected behavior, not a bug this
+    // test should paper over.
+    //
+    // What must stay invariant across both runs is the snapshotted CONTENT:
+    // every snapshot created from applying the same known-good config must
+    // be byte-for-byte identical to the original, regardless of how many
+    // times the rollback is repeated or what id it lands under. That is the
+    // property "rollback lands on the byte-identical known-good config"
+    // actually asserts for an adapter with no content-dedup.
+    #[tokio::test]
+    async fn kea_config_modify_repeat_rollback_lands_on_byte_identical_known_good_config() {
+        let root = temp_snapshot_root("rollback-repeat");
+        let keep_n = 3u32;
+        let starting_config = json!({"Dhcp4": {"subnet4": [{"id": 1, "valid-lifetime": 3600}]}});
+
+        let root_for_sink = root.clone();
+        let real_snapshot_sink = move |applied: &Value| {
+            let _ = kea_snapshots::create_snapshot(&root_for_sink, keep_n, applied);
+        };
+
+        // Step 1: a valid mutation creates the known-good baseline snapshot.
+        let (result, _calls) = run_kea_config_modify_with_steps_and_sink(
+            vec![
+                MockStep::Response(kea_config_get_response(starting_config.clone())),
+                MockStep::Response(kea_success_response()), // config-test
+                MockStep::Response(kea_success_response()), // config-set
+                MockStep::Response(kea_success_response()), // config-write
+            ],
+            |config| {
+                config["Dhcp4"]["subnet4"]
+                    .as_array_mut()
+                    .ok_or("subnet4 not an array")?
+                    .push(json!({"id": 2, "valid-lifetime": 7200}));
+                Ok(())
+            },
+            real_snapshot_sink.clone(),
+        )
+        .await;
+        assert!(result.is_ok(), "the baseline mutation must succeed");
+
+        let ids_after_baseline = kea_snapshots::list_snapshot_ids(&root).unwrap();
+        assert_eq!(ids_after_baseline.len(), 1, "exactly one baseline snapshot");
+        let known_good = kea_snapshots::read_snapshot(&root, &ids_after_baseline[0]).unwrap();
+
+        // Roll back to that known-good snapshot twice in a row, exactly the
+        // way `rollback_kea_snapshot` does: a config-get for "current" state
+        // (assumed here to be the same known-good config, since nothing else
+        // changed the runtime config between rollbacks), then re-apply the
+        // stored snapshot verbatim.
+        for attempt in 1..=2 {
+            let known_good_for_modify = known_good.clone();
+            let (rollback_result, _calls) = run_kea_config_modify_with_steps_and_sink(
+                vec![
+                    MockStep::Response(kea_config_get_response(known_good.clone())),
+                    MockStep::Response(kea_success_response()), // config-test
+                    MockStep::Response(kea_success_response()), // config-set
+                    MockStep::Response(kea_success_response()), // config-write
+                ],
+                move |config| {
+                    *config = known_good_for_modify;
+                    Ok(())
+                },
+                real_snapshot_sink.clone(),
+            )
+            .await;
+            assert!(
+                rollback_result.is_ok(),
+                "rollback attempt {attempt} must succeed"
+            );
+        }
+
+        let ids_after_rollbacks = kea_snapshots::list_snapshot_ids(&root).unwrap();
+        assert_eq!(
+            ids_after_rollbacks.len(),
+            3,
+            "baseline + two rollbacks = three distinct snapshots (no content-dedup by design)"
+        );
+
+        // The invariant this test exists for: every one of those three
+        // snapshots, despite having three different (nanosecond-id) names,
+        // carries byte-for-byte identical content -- the rollback always
+        // lands on the exact same known-good config, whether it is the first
+        // or the second repeat.
+        for id in &ids_after_rollbacks {
+            let content = kea_snapshots::read_snapshot(&root, id).unwrap();
+            assert_eq!(
+                content, known_good,
+                "snapshot {id} must be byte-for-byte identical to the known-good baseline"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     // Regression test for a bug found via live verification against a real
