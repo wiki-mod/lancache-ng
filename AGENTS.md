@@ -49,6 +49,7 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 - Issues should also carry labels, an issue Type, a Milestone when one applies, and Project-board assignment; use GitHub's native parent/sub-issue relationship (not just a title convention) when an issue is genuinely a sub-task of a tracking issue. An issue left as an unclassified note without these fields is not fully triaged.
 - **[AG-GH-003]** Pull requests must reference their tracking issue in the PR body whenever possible.
 - Every pull request body must include a changelog-style summary: what changed, user-visible impact, how it was validated, known risk, and any follow-up work. A PR without this cannot be called integration-ready regardless of CI status.
+- **[AG-GH-008]** Pull requests must carry the same labels and Milestone as the issue they close or reference, and must be added to the repository's Project board — mirroring the issue-metadata requirement above. A PR with correct code and green CI but no labels, no Milestone, and no Project-board entry is not properly filed; do not treat "the code is right" as equivalent to "the tracking metadata is complete."
 - **[AG-GH-004]** Use closing keywords such as `Fixes #123` or `Closes #123` only when merging the PR should close the issue.
 - **[AG-GH-005]** Use non-closing references such as `Refs #123` for parent trackers, design discussions, drafts, or partial follow-up work.
 - Scaffold or partial-fix PRs must say they are scaffold or partial in the title/body, must name the remaining open tracker with `Refs #123`, and must not use `Fixes #123` / `Closes #123` for the unresolved remainder.
@@ -344,6 +345,7 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-GH-005 | Non-closing Refs for drafts | Manual review |
 | AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
 | AG-GH-007 | Project-facing text is English | Manual review |
+| AG-GH-008 | PRs carry issue's labels/Milestone/Project | Manual review (no automated check currently; see enforcement notes) |
 | AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
 | AG-WF-002 | Separate worktree per PR | Manual review |
 | AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
@@ -443,5 +445,7 @@ This matrix maps the hard rules defined above to how they are currently enforced
 - **AG-DOC-001** (Documentation drift): No automated script yet checks whether docs match code. This is a manual review burden. A future CI job could parse documentation headers, extract key terms (e.g., "PowerDNS," "Admin UI authentication required," "console domains excluded from DNS"), and compare them against corresponding code values. Until then, the rule exists as guidance; enforcement is manual.
 
 - **AG-GH-001 and related language rules**: Enforced by human reviewers reading PRs, not by an automated language detector. An automated spell-checker or language-detection tool could help, but none is currently integrated.
+
+- **AG-GH-008**: No CI check currently blocks merge on missing labels/Milestone/Project-board placement. A full v0.2.0-era backlog audit (2026-07-13) found 38 of 41 open PRs had zero labels, zero Milestone, and zero Project-board entry despite otherwise-correct content — this rule exists because that gap was silent and large, not hypothetical. Until an automated check exists, treat this as a mandatory manual step at PR-creation time, not a later cleanup pass.
 
 - Several operational rules (AG-OP-*) and comment style rules (AG-CODE-*) rely entirely on manual code review. No linting tools currently enforce these at CI time.
