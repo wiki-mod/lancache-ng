@@ -517,6 +517,14 @@ _collect_domain_rows() {
 
 _collect_domain_rows
 
+# set -f (noglob) around this loop: NGINX_UPSTREAM_RESOLVER is intentionally
+# expanded unquoted below so its whitespace-separated tokens split into
+# multiple resolver entries, but a bracketed IPv6 literal such as
+# [2001:4860:4860::8888] is also a valid bash bracket-glob (matches any
+# single character in the set). Without noglob, bash would silently replace
+# that token with a matching filename from the cwd if one ever existed,
+# instead of comparing the literal resolver value.
+set -f
 for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
     resolver="$(_normalize_resolver_token "$resolver")"
     if [ "$resolver" = "$IP_STANDARD" ] || { [ -n "$IP_SSL" ] && [ "$resolver" = "$IP_SSL" ]; }; then
@@ -525,6 +533,7 @@ for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
         exit 1
     fi
 done
+set +f
 
 case "$PROXY_SECURITY_MODE" in
     lazy|strict) ;;
