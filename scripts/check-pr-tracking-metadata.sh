@@ -33,6 +33,11 @@
 #   should not silently disable the project-board gate. Only a genuine
 #   infrastructure hiccup (other non-200 statuses, an unparseable-but-non-
 #   error response) still degrades to a warning.
+#   PR_IS_FORK (true/false), set by the workflow by comparing the PR head
+#   repo to the base repo, distinguishes "no token configured" from "token
+#   withheld because this run is from a forked repository" when GH_TOKEN is
+#   empty -- GitHub does not pass repository secrets to pull_request runs
+#   from forks regardless of whether PROJECT_AUTOMATION_PAT is set.
 #
 # Runs inside the build-tools container in CI (per AG-VAL-016 -- python3
 # and curl below must not be host-local tools), not directly on the runner;
@@ -65,7 +70,18 @@ fi
 # rather than failing every PR check on an org-level permission gap that has
 # nothing to do with the PR itself.
 if [ -z "${GH_TOKEN:-}" ]; then
-    warnings+=("Project-board membership not checked: no read:project-scoped token configured (GH_TOKEN unset). See AGENTS.md AG-GH-008 enforcement notes.")
+    if [ "${PR_IS_FORK:-false}" = "true" ]; then
+        # GitHub withholds repository secrets (other than the read-only
+        # GITHUB_TOKEN) from pull_request-triggered runs originating from a
+        # forked repository -- GH_TOKEN is empty here regardless of whether
+        # PROJECT_AUTOMATION_PAT is configured for same-repo PRs. Say so
+        # explicitly instead of implying the secret is simply missing;
+        # labels and milestone above are unaffected since those come from
+        # the webhook payload, not a secret.
+        warnings+=("Project-board membership not checked: PROJECT_AUTOMATION_PAT (even if configured) is not passed to pull_request runs from forked repositories -- this is a GitHub Actions security restriction, not a missing secret. Labels and milestone are still fully enforced. A maintainer must add this PR to the project board manually: gh project item-add $project_number --owner $project_owner --url <pr-url>. See AGENTS.md AG-GH-008 enforcement notes.")
+    else
+        warnings+=("Project-board membership not checked: no read:project-scoped token configured (GH_TOKEN unset). See AGENTS.md AG-GH-008 enforcement notes.")
+    fi
 else
     repo_name="${repo#*/}"
     query=$(python3 -c '

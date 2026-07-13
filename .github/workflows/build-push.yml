@@ -283,6 +283,14 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          # GitHub does not pass repository secrets (other than the
+          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
+          # forked repository, so GH_TOKEN above is empty for every external
+          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
+          # Telling the script whether this run is from a fork lets it warn
+          # with the right explanation instead of implying the secret is
+          # simply unconfigured -- see check-pr-tracking-metadata.sh.
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -euo pipefail
           docker run --rm \
@@ -295,6 +303,7 @@ jobs:
             -e PR_NUMBER \
             -e REPO \
             -e GH_TOKEN \
+            -e PR_IS_FORK \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
@@ -327,6 +336,14 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          # GitHub does not pass repository secrets (other than the
+          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
+          # forked repository, so GH_TOKEN above is empty for every external
+          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
+          # Telling the script whether this run is from a fork lets it warn
+          # with the right explanation instead of implying the secret is
+          # simply unconfigured -- see check-pr-tracking-metadata.sh.
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -euo pipefail
           docker run --rm \
@@ -339,6 +356,7 @@ jobs:
             -e PR_NUMBER \
             -e REPO \
             -e GH_TOKEN \
+            -e PR_IS_FORK \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
