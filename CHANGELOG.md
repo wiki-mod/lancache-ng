@@ -153,6 +153,19 @@ is real, live, running code, not just work sitting in source control.
   document on whether/how the harder Rust build/test and image build/push
   job classes could get a GitHub-hosted fallback path, with follow-up issues
   filed for both (#491).
+- Added a storage-budget retention engine for the central syslog-ng log
+  store (#633, follow-up to #453): `watchdog.sh`'s new `maybe_prune_syslog()`
+  is modeled directly on the existing cache-purge function (rate-limited via
+  its own stamp file, untrusted numeric input clamped to a safe default,
+  every deletion explicitly logged). Opt-in via `SYSLOG_ENABLED=true`;
+  age-based deletion (`SYSLOG_RETENTION_DAYS`, default 30) runs first, then
+  — only if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB`
+  (default 10) — the oldest remaining files are deleted next regardless of
+  age, until back under budget. Wired into all 3 compose files
+  (`dev`/`prod`/`quickstart`) as a read-write mount of the existing
+  `logs-syslog-ng` volume into the `watchdog` service; documented as
+  commented samples in `deploy/prod/.env`, matching the existing
+  `SYSLOG_MAX_FILE_MB` precedent.
 
 ### Changed
 
