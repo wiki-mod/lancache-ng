@@ -2667,8 +2667,20 @@ cmd_backup() {
     # --remove-orphans` mid-backup and restart the stack we just stopped for
     # a consistent copy (#669 #2).
     if [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" != "1" ]]; then
-        pause_lancache_convergence_for_update
+        # Set the cleanup flag BEFORE calling the mutating pause helper, not
+        # after: pause_lancache_convergence_for_update can `die` partway
+        # through (e.g. it stops lancache-converge.timer successfully but
+        # then fails to `systemctl disable` it), and `die` exits, which
+        # fires backup_cleanup via the EXIT trap above immediately. If the
+        # flag were only set on a successful return from the helper, that
+        # trap would see backup_paused_convergence=0 and skip resume
+        # entirely, leaving convergence disabled after a failed backup
+        # attempt. cmd_update's own UPDATE_CONVERGENCE_PAUSED=1 (set before
+        # its call to the same helper) already establishes this
+        # set-before-call ordering as the pattern for this script (PR #748
+        # review).
         backup_paused_convergence=1
+        pause_lancache_convergence_for_update
     fi
 
     print_step "Creating $mode backup"
@@ -2770,8 +2782,19 @@ cmd_restore() {
                 # state. Whatever files did get copied stay in place for
                 # inspection; the operator decides when it's safe to bring
                 # the stack back up (#669 #4).
+                #
+                # The printed recovery command must pass the same
+                # --env-file that compose_stack_start uses elsewhere in this
+                # script: a manual deploy/prod checkout that runs on
+                # .env.local (see runtime_env_file_for_install_dir) would
+                # otherwise have `docker compose up -d` silently fall back to
+                # the tracked .env template, restarting with the wrong
+                # IPs/secrets on top of an already-partial restore (PR #748
+                # review).
+                local recovery_env_file
+                recovery_env_file=$(runtime_env_file_for_install_dir "$install_dir")
                 print_warn "Restore failed; leaving the stack stopped at $install_dir for manual recovery."
-                print_warn "Investigate the error above, then run: cd \"$install_dir\" && docker compose up -d"
+                print_warn "Investigate the error above, then run: cd \"$install_dir\" && docker compose --env-file \"$recovery_env_file\" up -d"
             fi
         fi
         rm -rf "$tmp"
@@ -2800,8 +2823,14 @@ cmd_restore() {
     # fresh install-dir, and either way it is only relevant here as a name
     # lookup, not as the thing being restored. See
     # guard_restore_shared_project_volumes's own comment for why this matters
-    # (#669 #6).
-    archived_project=$(compose_project_name "$root/$rel_install" "$root/$rel_install/.env")
+    # (#669 #6). Resolved via runtime_env_file_for_install_dir rather than a
+    # hardcoded ".env": a manual deploy/prod archive whose active runtime
+    # config was .env.local (backup_manifest archives that file separately
+    # from the tracked .env template, so it lands at this same extracted
+    # path) can carry its own COMPOSE_PROJECT_NAME override. Reading only
+    # .env would silently fall back to the tracked template's name and make
+    # the guard check the wrong project's running containers (PR #748 review).
+    archived_project=$(compose_project_name "$root/$rel_install" "$(runtime_env_file_for_install_dir "$root/$rel_install")")
     guard_restore_shared_project_volumes "$install_dir" "$archived_project"
 
     # Captured before compose_stack_stop so restore_cleanup only restarts the
