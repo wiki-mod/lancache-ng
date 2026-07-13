@@ -568,6 +568,57 @@ async fn reconcile_dhcp_mode(
     Ok(())
 }
 
+// Best-effort pre-flight check that update_dhcp_mode runs BEFORE
+// reconcile_dhcp_mode (i.e. before any dhcp/dhcp-proxy container is actually
+// stopped/started). It exercises the exact same directory the later
+// persist_ui_settings write will target -- create the parent dir, write a
+// throwaway probe file into it, remove the probe file -- without touching
+// the real settings file, so a full or read-only `ui-data` volume (the
+// common failure mode from #671) is caught up front instead of surfacing
+// only after the Docker mutation already happened.
+//
+// This does not fully close the gap: the filesystem can still fail between
+// this check and persist_ui_settings' real write (e.g. the volume fills up
+// in that exact window), which is why update_dhcp_mode also treats a
+// persist_ui_settings failure as a trigger to roll the Docker mutation back
+// (see the `rollback` handling there) rather than relying on this check
+// alone.
+fn check_settings_dir_writable(target: &Path) -> Result<(), DhcpError> {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| {
+        DhcpError::config_error(format!(
+            "DHCP settings directory {} is not writable: {}",
+            parent.display(),
+            err
+        ))
+    })?;
+
+    // Nanosecond-stamped alongside the process id so concurrent requests (or
+    // a leftover probe file from a killed process) never collide on the same
+    // probe filename within this directory.
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let probe_path = parent.join(format!(
+        ".dhcp-mode-write-check-{}-{}",
+        std::process::id(),
+        stamp
+    ));
+    fs::write(&probe_path, b"").map_err(|err| {
+        DhcpError::config_error(format!(
+            "DHCP settings file {} is not writable: {}",
+            target.display(),
+            err
+        ))
+    })?;
+    // Cleanup is best-effort: leaving a stray zero-byte probe file behind on
+    // the rare removal failure is harmless and must not turn a successful
+    // writability check into a reported error.
+    let _ = fs::remove_file(&probe_path);
+    Ok(())
+}
+
 // Writes the whole-stack DHCP settings (mode, dnsmasq-proxy fields) to the
 // UI's own settings file, which entrypoint.sh reads on container start to
 // decide what to run. Only non-empty values are written, so a field the
@@ -576,6 +627,15 @@ async fn reconcile_dhcp_mode(
 // can never leave a half-written settings file behind for entrypoint.sh to
 // read on the next start.
 fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<(), DhcpError> {
+    write_ui_settings_file(Path::new(&state.config.ui_settings_file), values)
+}
+
+// Pure filesystem half of persist_ui_settings, split out so unit tests can
+// exercise the real write/rename behavior against a temp path without
+// needing a full AppState (which otherwise requires a live Docker
+// connection to construct -- see the docker_client-backed reconcile_dhcp_mode
+// this file also defines).
+fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<(), DhcpError> {
     let mut map = BTreeMap::new();
     for (key, value) in values {
         let trimmed = value.trim();
@@ -615,7 +675,6 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
         }
     }
 
-    let target = Path::new(&state.config.ui_settings_file);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             DhcpError::config_error(format!(
@@ -647,6 +706,20 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
 // persists the new mode plus every other current DHCP setting so a later
 // container restart comes back up in the same mode instead of reverting to
 // whatever DHCP_MODE was in the original env file.
+//
+// Ordering here is deliberate and has two guards against the two ways this
+// can go wrong (#671):
+//   1. Before reconcile_dhcp_mode runs at all, check_settings_dir_writable
+//      catches the common failure mode (full/read-only ui-data volume, bad
+//      permissions) up front, so no Docker container is touched for a save
+//      that can't possibly complete.
+//   2. If persist_ui_settings still fails afterward (e.g. the volume filled
+//      up in the window between the check and the real write), the DHCP
+//      containers have already switched to the new mode but
+//      effective_dhcp_mode() would keep reporting the previous one. Rather
+//      than leave that divergence for an operator to notice, this
+//      best-effort rolls the Docker mutation back to the previous mode and
+//      surfaces both errors if the rollback attempt itself also fails.
 pub async fn update_dhcp_mode(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -656,13 +729,19 @@ pub async fn update_dhcp_mode(
     let mode = parse_dhcp_mode_input(&form.dhcp_mode)
         .ok_or_else(|| DhcpError::conflict("Invalid DHCP mode requested."))?;
 
+    // Captured before any mutation so a later rollback (if persist still
+    // fails despite the pre-check below) knows what to reconcile back to.
+    let previous_mode = state.config.effective_dhcp_mode();
+
+    check_settings_dir_writable(Path::new(&state.config.ui_settings_file))?;
+
     reconcile_dhcp_mode(&state, mode).await?;
     // Re-persists every DHCP setting, not just DHCP_MODE: persist_ui_settings
     // overwrites the whole settings file each call, so any field left out
     // here would be dropped from it (and fall back to its original env
     // default on the next container start) even though the operator never
     // touched that field on this particular save.
-    persist_ui_settings(
+    let persist_result = persist_ui_settings(
         &state,
         &[
             ("DHCP_MODE", mode.as_str().to_string()),
@@ -715,7 +794,30 @@ pub async fn update_dhcp_mode(
                 state.config.effective_dhcp_proxy_custom_options(),
             ),
         ],
-    )?;
+    );
+
+    if let Err(persist_err) = persist_result {
+        // mode == previous_mode only when the operator re-submits the mode
+        // they're already on; reconcile_dhcp_mode is then a no-op repeat of
+        // the current state, so there is nothing to roll back to and doing
+        // so would just repeat the exact same persist failure.
+        if mode != previous_mode {
+            if let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await {
+                return Err(DhcpError::config_error(format!(
+                    "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
+                     back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
+                     are now running in '{}' mode but the UI may still report '{}' until this is \
+                     resolved manually.",
+                    mode.as_str(),
+                    previous_mode.as_str(),
+                    mode.as_str(),
+                    previous_mode.as_str()
+                )));
+            }
+        }
+        return Err(persist_err);
+    }
+
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -5229,5 +5331,94 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(calls.len(), 1, "only config-get should have been called");
         assert_eq!(calls[0]["command"], "config-get");
+    }
+
+    // check_settings_dir_writable is update_dhcp_mode's #671 pre-flight
+    // guard: it must succeed for an ordinary writable directory, leaving no
+    // trace of the probe file it wrote to test that.
+    #[test]
+    fn check_settings_dir_writable_succeeds_and_leaves_no_probe_file_behind() {
+        let dir = temp_snapshot_root("dhcp-mode-write-check-ok");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = check_settings_dir_writable(&target);
+        assert!(
+            result.is_ok(),
+            "a fresh writable temp dir must pass: {result:?}"
+        );
+
+        let leftover_probes: Vec<_> = fs::read_dir(&dir)
+            .expect("temp dir must have been created by the check")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".dhcp-mode-write-check-")
+            })
+            .collect();
+        assert!(
+            leftover_probes.is_empty(),
+            "probe file(s) were not cleaned up: {leftover_probes:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // This must not touch reconcile_dhcp_mode (Docker) at all: the whole
+    // point of #671's fix is catching an unwritable settings location BEFORE
+    // any container is stopped/started. Using a target whose parent path is
+    // blocked by an existing regular file (rather than toggling permission
+    // bits) keeps this test portable across CI environments that may run as
+    // root, where read-only permission bits alone would not reproduce a
+    // write failure.
+    #[test]
+    fn check_settings_dir_writable_rejects_when_parent_path_is_not_a_directory() {
+        let base = temp_snapshot_root("dhcp-mode-write-check-blocked");
+        fs::write(&base, b"this is a file, not a directory")
+            .expect("create blocking file at the would-be parent dir path");
+        let target = base.join("lancache-ui-settings.env");
+
+        let result = check_settings_dir_writable(&target);
+
+        fs::remove_file(&base).ok();
+
+        assert!(
+            result.is_err(),
+            "a settings directory path blocked by a regular file must be reported as not writable"
+        );
+    }
+
+    // Exercises the actual round-trip write_ui_settings_file/persist_ui_settings
+    // uses in production (temp-file-then-rename), confirming the extraction
+    // for #671 didn't change its on-disk behavior: only non-empty values are
+    // written, in the fixed key order, and the temp file is gone afterward.
+    #[test]
+    fn write_ui_settings_file_writes_only_nonempty_values_in_fixed_order() {
+        let dir = temp_snapshot_root("dhcp-mode-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(
+            &target,
+            &[
+                ("DHCP_MODE", "kea".to_string()),
+                ("DHCP_DNS_PRIMARY", "".to_string()),
+                ("UPSTREAM_DHCP_IP", "192.168.1.1".to_string()),
+            ],
+        );
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content, "DHCP_MODE=kea\nUPSTREAM_DHCP_IP=192.168.1.1\n",
+            "empty DHCP_DNS_PRIMARY must be omitted, remaining keys in the fixed key-list order"
+        );
+        assert!(
+            !target.with_extension("tmp").exists(),
+            "temp-file-then-rename must not leave the .tmp file behind"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
