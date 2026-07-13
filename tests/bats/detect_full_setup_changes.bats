@@ -124,3 +124,14 @@ val() {
     [ "$(val dns_image)" = "true" ]
     [ "$(val should_run)" = "true" ]
 }
+
+@test "cdn-domains.txt-only change also sets proxy=true (#771)" {
+    # services/proxy/Dockerfile COPYs this exact file into the proxy image
+    # (the dns-domains named build context), so a domain-list-only change
+    # must force a proxy rebuild too, not just dns_image -- otherwise the
+    # proxy image's baked-in /etc/nginx/cdn-domains.txt goes stale.
+    run_detect "services/dns/cdn-domains.txt"
+    [ "$(val proxy)" = "true" ]
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val should_run)" = "true" ]
+}
