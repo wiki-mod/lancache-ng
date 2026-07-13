@@ -99,10 +99,11 @@ is real, live, running code, not just work sitting in source control.
   a second, not-yet-fixed instance of the same problem
   (`actions/download-artifact`, #802), fixed in the same PR since the new
   guard would otherwise fail on its own pre-existing pin. The
-  `actions/upload-artifact` pin itself is intentionally left untouched here
-  -- that fix is #800's, still open at the time this PR was opened, so this
-  guard's own CI run stays red on that one pin until #800 merges and this
-  branch rebases; not a bug in the guard. Also adds an optional local
+  `actions/upload-artifact` pin itself was intentionally left untouched at
+  first -- that fix was #800's, still open when this PR was opened, so this
+  guard's own CI run stayed red on that one pin until #800 merged; now that
+  #800 has landed and this branch is rebased onto it, the pin is current
+  (`v7.0.1`) and the guard passes cleanly. Also adds an optional local
   `.githooks/pre-push` hook that runs the same script before a push touching
   any workflow file, as an early warning only -- the
   `shellcheck`/`shellcheck-hosted` CI jobs remain the actual enforcement (see
