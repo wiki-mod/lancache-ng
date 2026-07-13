@@ -39,30 +39,53 @@ mkdir -p "$work_dir"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
-proxy_ip="172.30.99.2"
-dns_standard_ip="172.30.99.3"
-dns_ssl_ip="172.30.99.5"
+# Same env vars/defaults as deploy/full-setup/docker-compose.yml and
+# scripts/full-setup-client-simulation.sh -- not just cosmetic: a run that
+# sets VALIDATION_PROXY_IP/VALIDATION_DNS_STANDARD_IP/VALIDATION_DNS_SSL_IP
+# to avoid a subnet collision with a concurrent run (see the
+# compute-validation-network job, #623) would otherwise have this script's
+# DNS/HTTP assertions check the wrong (default) IPs while the actual
+# containers came up on the overridden ones.
+proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"
+dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
+dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
+compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 
 cleanup() {
     local status=$?
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-        down -v --remove-orphans >/dev/null 2>&1 || true
+    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     rm -rf "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
 
+# A cancelled/crashed prior run only gets cleaned up by the EXIT trap above,
+# which never runs if the process was killed rather than exited normally.
+# That can leave the fixed-name "${compose_project}_proxy-cache" volume
+# behind with entries from that earlier run, so this run's supposedly fresh
+# first request would come back a false HIT instead of the expected MISS.
+# Clearing it before `up -d` guarantees every run starts from an empty cache.
+echo "== Clearing any leftover state from a previous run =="
+"${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+
+echo "== Pulling the published $image_tag images =="
+
+# Without an explicit pull, Compose's pull_policy: missing (see
+# deploy/full-setup/docker-compose.yml) would silently reuse whatever image
+# is already cached locally under this tag instead of the one actually
+# published for this run -- matching the pull step the full-setup-validate
+# job in the same workflow already runs before its own `up -d`.
+LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" pull --quiet proxy dns-standard dns-ssl nats
+
 echo "== Starting proxy/dns-standard/dns-ssl/nats from the published $image_tag images =="
 
-LANCACHE_IMAGE_TAG="$image_tag" \
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-    up -d proxy dns-standard dns-ssl nats
+LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d proxy dns-standard dns-ssl nats
 
 # Mirrors the health-wait pattern already proven in full-setup-validate.yml
-# and scripts/setup-cli-simulation.sh.
-compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
+# and scripts/setup-cli-simulation.sh. ("compose" is already defined above,
+# reused here for the health checks and later cleanup.)
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
@@ -149,15 +172,47 @@ for label_ip in "dns-standard:$dns_standard_ip" "dns-ssl:$dns_ssl_ip"; do
     echo "$label correctly resolves $test_domain to the proxy."
 done
 
+# --connect-timeout/--max-time: same flags scripts/full-setup-client-simulation.sh
+# already uses for its own external-facing curl calls, so a hung connection
+# or an origin that never responds fails fast with a clear error instead of
+# hanging the job until the runner-level timeout. --max-time is higher here
+# (30s, vs. that script's 10s) because these two requests are real fetches
+# through the proxy out to deb.debian.org on a MISS, not a same-host health
+# check -- a slow CI network path fetching a real file needs more headroom
+# than a loopback health probe does.
+#
+# -w appends the actual HTTP status code after the headers so it can be
+# asserted below alongside X-Cache-Status: services/proxy also caches 3xx
+# responses (see CLAUDE.md), so a redirect could otherwise produce a
+# plausible-looking MISS-then-HIT pair without ever fetching real content.
+#
+# The -w argument's single quotes must stay inline in each run_client
+# command string below rather than living in a shared array/variable:
+# run_client's "$1" is re-parsed by a *second*, inner bash (inside the
+# container), and only quote characters that survive into that string
+# literally are honored there. A shared curl_opts array flattened with
+# "${curl_opts[*]}" loses its quoting in the outer bash before the inner
+# bash ever sees it, leaving an unquoted "\n" that bash's own unquoted
+# backslash-escaping then strips down to a bare "n" -- confirmed directly:
+# curl received "nHTTP_STATUS:%{http_code}n" with no quotes and no
+# newlines, so the assertion below could never match. Only inline,
+# still-quoted text like the pre-existing -H 'Host: ...' below survives
+# this same round trip correctly.
+curl_timeouts="-sS --connect-timeout 5 --max-time 30"
+
 echo "== Standard mode: HTTP MISS then HIT for a real file =="
 
-http_status_1="$(run_client "curl -sS -o /shared/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
+http_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
 grep -qi '^X-Cache-Status: MISS' <<<"$http_status_1" \
     || { echo "::error::First standard-mode HTTP request was not a MISS." >&2; echo "$http_status_1" >&2; exit 1; }
+grep -q '^HTTP_STATUS:200$' <<<"$http_status_1" \
+    || { echo "::error::First standard-mode HTTP request did not return HTTP 200." >&2; echo "$http_status_1" >&2; exit 1; }
 
-http_status_2="$(run_client "curl -sS -o /shared/body2 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
+http_status_2="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body2 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
 grep -qi '^X-Cache-Status: HIT' <<<"$http_status_2" \
     || { echo "::error::Second standard-mode HTTP request was not a HIT." >&2; echo "$http_status_2" >&2; exit 1; }
+grep -q '^HTTP_STATUS:200$' <<<"$http_status_2" \
+    || { echo "::error::Second standard-mode HTTP request did not return HTTP 200." >&2; echo "$http_status_2" >&2; exit 1; }
 
 cmp -s "$work_dir/shared/body1" "$work_dir/shared/body2" \
     || { echo "::error::Standard-mode MISS and HIT responses had different bodies." >&2; exit 1; }
@@ -167,13 +222,17 @@ echo "Standard mode: MISS then HIT confirmed, with identical real file content o
 
 echo "== SSL mode: HTTPS MITM MISS then HIT for a real file =="
 
-https_status_1="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$ssl_test_path'")"
+https_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$ssl_test_path'")"
 grep -qi '^X-Cache-Status: MISS' <<<"$https_status_1" \
     || { echo "::error::First SSL-mode HTTPS request was not a MISS." >&2; echo "$https_status_1" >&2; exit 1; }
+grep -q '^HTTP_STATUS:200$' <<<"$https_status_1" \
+    || { echo "::error::First SSL-mode HTTPS request did not return HTTP 200." >&2; echo "$https_status_1" >&2; exit 1; }
 
-https_status_2="$(run_client "curl -sS --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$ssl_test_path'")"
+https_status_2="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$proxy_ip --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$ssl_test_path'")"
 grep -qi '^X-Cache-Status: HIT' <<<"$https_status_2" \
     || { echo "::error::Second SSL-mode HTTPS request was not a HIT." >&2; echo "$https_status_2" >&2; exit 1; }
+grep -q '^HTTP_STATUS:200$' <<<"$https_status_2" \
+    || { echo "::error::Second SSL-mode HTTPS request did not return HTTP 200." >&2; echo "$https_status_2" >&2; exit 1; }
 
 cmp -s "$work_dir/shared/sbody1" "$work_dir/shared/sbody2" \
     || { echo "::error::SSL-mode MISS and HIT responses had different bodies." >&2; exit 1; }
