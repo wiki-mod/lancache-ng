@@ -6,7 +6,14 @@ description: >-
   matching gateway/service IPs) from the current workflow run ID and
   attempt. Used by the full-setup validation jobs so two different,
   concurrent workflow runs sharing a self-hosted runner host never fight
-  over the same fixed bridge subnet (see issue #623).
+  over the same fixed bridge subnet (see issue #623). This action's own
+  hash-only derivation alone still leaves a check-then-create race between
+  two concurrent runs that derive the same candidate (#703) -- the
+  `subnet`/`gateway`/`*_ip` outputs below are only the STARTING candidate;
+  full-setup-validate.yml's own "Reserve a validation subnet and start the
+  stack" step is what makes the actually-used subnet collision-safe, via a
+  host-local flock plus retry loop (scripts/lib/reserve-validation-subnet.sh)
+  if that starting candidate turns out to be locked or in use.
 
 outputs:
   subnet:
