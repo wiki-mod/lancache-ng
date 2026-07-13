@@ -104,6 +104,33 @@ run_client() {
         "$build_tools_image" bash -c "$1"
 }
 
+# Both dns-standard and dns-ssl are asserted against the SAME $proxy_ip here
+# (issue #668). This intentionally does not mirror prod's DNS answers: prod's
+# config/prod/dns-standard.env and dns-ssl.env point at two genuinely
+# different LAN addresses (IP_STANDARD, IP_SSL), because prod's single proxy
+# container is reachable at two separate host NIC IPs, each Docker-port-
+# published to a different container port (IP_STANDARD:443 -> container
+# 8443, the SNI-passthrough stream listener; IP_SSL:443 -> container 443,
+# the TLS-interception listener; see services/proxy/entrypoint.sh's "Docker
+# routes IP_SSL:443->container:443 and IP_STANDARD:443->container:8443"
+# comment). That host-IP-scoped port-publish translation only applies to
+# traffic entering through the Docker host's published ports -- it has no
+# effect on this validation harness's containers, which all talk to the
+# proxy directly over the `validation` bridge network and therefore always
+# reach its real listening ports (80, 443, 8443) regardless of which address
+# they dialed. nginx itself listens on 0.0.0.0 for all three and does not
+# branch on destination IP, so giving the proxy container a second bridge
+# address here would not exercise any additional code path -- it would just
+# be a second name for the same listener. This DNS check can therefore pass
+# even if dns-ssl's PROXY_IP were wrongly wired to the standard-mode
+# address, and the HTTPS leg below only exercises the TLS-interception
+# listener (container port 443), never the SNI-passthrough listener
+# (container port 8443) that prod's IP_STANDARD:443 forwards to. Faithfully
+# distinguishing the two would require reproducing prod's host-level
+# secondary-IP port-publish setup rather than plain container-to-container
+# bridge traffic, which is out of scope for this lightweight harness. See
+# https://github.com/wiki-mod/lancache-ng/issues/668 for the full
+# discussion.
 echo "== DNS: verifying $test_domain resolves to the proxy on both dns-standard and dns-ssl =="
 
 for label_ip in "dns-standard:$dns_standard_ip" "dns-ssl:$dns_ssl_ip"; do
