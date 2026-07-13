@@ -152,7 +152,7 @@ fn html_escape(s: &str) -> String {
 enum DhcpConflictCheckStatus {
     // `output` stays the bare Server Identifier IP for backward compatibility
     // with the existing `data.conflict.output` usage in dhcp.html. `details`
-    // is additive (#644): the extra identifying fields nmap's
+    // is additive: the extra identifying fields nmap's
     // broadcast-dhcp-discover script reports for the same offer (Router,
     // DNS, lease time, ...), so the Admin UI can show an operator the same
     // "who is this other server" context that was previously only visible
@@ -2034,7 +2034,7 @@ const DHCP_OFFER_DETAIL_LABELS: &[&str] = &[
 // broadcast-dhcp-discover script reports for a DHCPOFFER out of the probe
 // container's full log text, so the Admin UI can show an operator more than
 // just the bare Server Identifier IP already in DhcpConflictCheckStatus::
-// Found's `output` field (#644). Only the first response block is scanned:
+// Found's `output` field. Only the first response block is scanned:
 // nmap prints one "Response N of M:" block per answering DHCP server when
 // more than one replies, and mixing fields from a second, different server
 // into one details list would misattribute e.g. its Router to the first
@@ -3122,7 +3122,7 @@ mod tests {
         }
     }
 
-    // #644: a real dhcp-probe.sh run prints the full `cat "$nmap_out"` text
+    // A real dhcp-probe.sh run prints the full `cat "$nmap_out"` text
     // before its own result marker, so this fixture mirrors that -- the
     // marker line alone only carries the bare Server Identifier IP, but the
     // Admin UI should also get the surrounding nmap fields out of the same

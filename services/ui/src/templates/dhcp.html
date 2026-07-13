@@ -157,7 +157,7 @@
         <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
         <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
         <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
-        {# #644: lists the extra nmap broadcast-dhcp-discover fields (Router, DNS, lease time, ...) for a
+        {# Lists the extra nmap broadcast-dhcp-discover fields (Router, DNS, lease time, ...) for a
            found conflicting server, alongside the address already shown above in check-conflict-status.
            Hidden by default/on every re-check; only populated+shown by checkDhcpConflict() itself when
            data.conflict.status === 'found' and details are present, see script below. #}
@@ -577,7 +577,7 @@ async function checkDhcpConflict() {
   // Reset the details list on every run (button re-click or the
   // DOMContentLoaded auto-run further down), not just when a conflict is
   // found below -- otherwise a later "no conflict" re-check would still
-  // show a stale server's fields from a previous run (#644).
+  // show a stale server's fields from a previous run.
   conflictDetailsEl.replaceChildren();
   conflictDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
@@ -601,7 +601,7 @@ async function checkDhcpConflict() {
     if (data.conflict?.status === 'found') {
       conflictEl.className = 'text-sm text-yellow-400';
       conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
-      // #644: label/value pairs come straight from the rogue DHCP server's
+      // Label/value pairs come straight from the rogue DHCP server's
       // own DHCPOFFER response (untrusted network input relayed via the
       // probe container), so each row is built with textContent, never
       // innerHTML -- a malicious value must never be interpreted as markup.
