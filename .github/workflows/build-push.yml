@@ -20,6 +20,23 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master, "v[0-9]*"]
+    # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
+    # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
+    # the github.event.pull_request webhook snapshot for this run (see that job's
+    # own comment) -- with only the default types, a label added by labeler.yml or
+    # a human, a milestone set later, or a draft marked ready-for-review would never
+    # re-trigger this workflow, leaving a stale pass/fail on the Checks tab until
+    # someone pushes another commit. Adding these four extra types re-evaluates the
+    # metadata check (and everything else in this monolithic workflow) whenever PR
+    # metadata actually changes. `edited` is deliberately excluded -- it fires on
+    # title/body/base-ref edits, which are unrelated to labels/milestone and would
+    # add much higher-frequency reruns of the full heavy pipeline for no metadata
+    # benefit. Yes, this reruns build/test/scan jobs too on a bare label/milestone
+    # change (they have no metadata-only fast path -- see AG-GH-008 Enforcement
+    # Notes for why that tradeoff was accepted rather than building one): labels
+    # and milestones are set rarely per PR (usually once, by a human or the
+    # labeler), unlike commits, so the added self-hosted-runner cost is bounded.
+    types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
