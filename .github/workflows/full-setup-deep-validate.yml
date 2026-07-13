@@ -758,6 +758,70 @@ jobs:
           set -euo pipefail
           bash scripts/nats-secondary-auth-callout-simulation.sh
 
+  dns-zone-rollback-simulation:
+    # Real end-to-end test (#628) of the PowerDNS zone/record known-good
+    # snapshot + rollback mechanism: makes two real DNS writes through the
+    # real UI/NATS path, calls the new rollback listener
+    # (services/dns/nats-subscriber/src/rollback_listener.rs, port 8083)
+    # directly over HTTP with the real X-API-Key, and confirms via real
+    # `dig` queries that PowerDNS's data and dns-standard's own recursor
+    # cache were both actually rolled back -- see
+    # scripts/dns-zone-rollback-simulation.sh's header comment for why this
+    # is needed alongside the crate's unit tests (they cannot exercise a
+    # live PowerDNS/recursor round-trip). Pulls the real dns/ui/nats images,
+    # so it threads the PR staging tag to test the PR's own code.
+    name: DNS zone/record rollback simulation
+    needs: [plan, compute-validation-network, ensure-pr-staging-images, nats-auth-callout-simulation]
+    if: >-
+      always() &&
+      needs.plan.outputs.should_run == 'true' &&
+      needs['compute-validation-network'].result != 'failure' &&
+      needs['compute-validation-network'].result != 'cancelled' &&
+      needs['ensure-pr-staging-images'].result != 'failure' &&
+      needs['ensure-pr-staging-images'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+      # See ssl-mitm-cache-simulation's identical block above: this job's own
+      # `docker compose up proxy docker-socket-proxy dns-standard dns-ssl
+      # nats ui` call (in scripts/dns-zone-rollback-simulation.sh) needs
+      # these to land on this run's derived subnet.
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
+      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
+      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
+      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
+      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
+      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
+      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
+      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
+      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Resolve build-tools image
+        # See ssl-mitm-cache-simulation's identical step above for why a
+        # same-PR build-tools change prefers the confirmed PR staging tag.
+        # BUILD_TOOLS_REQUIRE_PUBLISHED: this job's dig/curl/jq client checks
+        # only need tools already in every published build-tools image.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
+            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
+          else
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run DNS zone/record rollback simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/dns-zone-rollback-simulation.sh
+
   # THE REQUIRED CHECK. Always runs (even when the suite was skipped for a
   # docs-only PR, or a sim failed), so branch protection always sees a real
   # conclusion from a job named "deep full-setup validation" -- never a
@@ -777,6 +841,7 @@ jobs:
       - setup-cli-simulation
       - dhcp-kea-lease-flow-simulation
       - nats-auth-callout-simulation
+      - dns-zone-rollback-simulation
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
@@ -793,6 +858,7 @@ jobs:
           SETUP_RESULT: ${{ needs['setup-cli-simulation'].result }}
           DHCP_RESULT: ${{ needs['dhcp-kea-lease-flow-simulation'].result }}
           NATS_RESULT: ${{ needs['nats-auth-callout-simulation'].result }}
+          DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
         run: |
           set -euo pipefail
 
@@ -844,6 +910,7 @@ jobs:
           check "setup-cli-simulation" "$SETUP_RESULT"
           check "dhcp-kea-lease-flow-simulation" "$DHCP_RESULT"
           check "nats-auth-callout-simulation" "$NATS_RESULT"
+          check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
 
           if [[ "$overall" -ne 0 ]]; then
             echo "::error::Deep full-setup validation failed -- see the failing job(s) above."

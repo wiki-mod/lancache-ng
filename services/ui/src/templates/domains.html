@@ -40,6 +40,10 @@
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
       Settings
     </button>
+    <button type="button" data-dns-tab="zones"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      Zone-Snapshots
+    </button>
   </div>
 
   <div class="space-y-6">
@@ -198,6 +202,82 @@
         {% endif %}
       </p>
     </section>
+
+    {# Zone/record known-good snapshot rollback (#628). Populated by
+       routes/dns_snapshots.rs::fetch_zone_snapshot_groups, a thin HTTP call
+       to nats-subscriber's own listener -- the actual snapshot storage/
+       retention/rollback logic all lives there, not in the Admin UI. Mirrors
+       templates/dhcp.html's Kea snapshot table. #}
+    <section data-dns-panel="zones" class="card flex flex-col gap-4 hidden">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="font-semibold text-slate-200">Zone-Snapshots &amp; Rollback</h2>
+          <p class="text-xs text-slate-500 mt-0.5">
+            PowerDNS-Zonen (lan., local.lan., private Reverse-Zonen) werden nach jeder
+            Änderung automatisch gesichert. Ein Rollback ersetzt den aktuellen Stand
+            einer Zone durch einen früheren Snapshot -- danach seit dem Snapshot
+            hinzugekommene Records können verloren gehen.
+          </p>
+        </div>
+        <span class="text-xs text-slate-400 flex-shrink-0">Aufbewahrung: {{ zone_snapshot_retention }}</span>
+      </div>
+
+      {% if zone_snapshot_groups %}
+      <div class="space-y-4">
+        {% for group in zone_snapshot_groups %}
+        <div class="border border-slate-700 rounded-lg p-3">
+          <h3 class="font-mono text-sm text-slate-300 mb-2">{{ group.zone }}</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="border-b border-slate-700">
+                <tr>
+                  <th class="text-left py-2 text-slate-300">Erstellt</th>
+                  <th class="text-left py-2 text-slate-300">Aktion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for snapshot in group.snapshots %}
+                <tr class="border-b border-slate-700 hover:bg-slate-700">
+                  <td class="py-2 text-white">
+                    <time class="js-epoch" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</time>
+                  </td>
+                  <td class="py-2">
+                    {# group.zone only ever comes from the fixed ROLLBACK_ZONES
+                       whitelist (services/dns/nats-subscriber/src/
+                       zone_snapshots.rs) -- letters/digits/dots/hyphens only,
+                       so direct interpolation into this JS string literal is
+                       safe (no quote/escaping concerns, unlike arbitrary
+                       operator input). #}
+                    <form method="POST" action="/domains/zones/rollback" class="inline"
+                          onsubmit="return confirm('Zone {{ group.zone }} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Records können dabei verloren gehen.')">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <input type="hidden" name="zone" value="{{ group.zone }}">
+                      <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
+                      <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                        Zurückrollen
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+                {% endfor %}
+                {% if group.snapshots | length == 0 %}
+                <tr>
+                  <td colspan="2" class="py-3 text-slate-500 text-center">Noch keine Snapshots für diese Zone</td>
+                </tr>
+                {% endif %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-slate-500 text-sm px-3 py-2">
+        Keine Zonen-Snapshots verfügbar (nats-subscriber momentan nicht erreichbar, oder
+        noch kein Snapshot erstellt).
+      </p>
+      {% endif %}
+    </section>
   </div>
 
   <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 text-sm text-blue-300">
@@ -232,10 +312,38 @@
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
   }
 
+  // Zone-snapshot timestamps (#628): same Intl.DateTimeFormat-based helper
+  // as templates/secondaries.html's own .js-epoch handling -- each template
+  // keeps its own small copy rather than a shared JS file, matching this
+  // project's existing per-template convention (no shared static JS asset
+  // exists for this yet).
+  function formatEpochSeconds(epochSeconds) {
+    const date = new Date(Number(epochSeconds) * 1000);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    return new Intl.DateTimeFormat('de-DE', {
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+      hour12: false,
+    }).format(date);
+  }
+
+  function formatEpochCells() {
+    document.querySelectorAll('.js-epoch').forEach((element) => {
+      const formatted = formatEpochSeconds(element.dataset.epoch);
+      if (formatted) {
+        element.textContent = formatted;
+      }
+    });
+  }
+
   document.querySelectorAll('.dns-tab-btn').forEach((button) => {
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
 
   setActiveDnsTab('cdn');
+  formatEpochCells();
 </script>
 {% endblock %}

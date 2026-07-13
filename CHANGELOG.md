@@ -14,6 +14,53 @@ is real, live, running code, not just work sitting in source control.
 
 ### Added
 
+- Added a known-good snapshot/rollback mechanism for PowerDNS zone/record
+  data (#628, the zone/record design #615/#625 deliberately deferred --
+  see `docs/known-good-config-snapshots.md`'s "Zones, records, and
+  TSIG/DDNS metadata" section for the full design). `services/dns/
+  nats-subscriber` gained its own Rust reimplementation of the snapshot
+  retention primitives (`zone_snapshots.rs`, mirroring `services/ui/src/
+  kea_snapshots.rs`'s pattern): after every NATS-applied record write
+  (`handle_dns_record`'s post-`PATCH` hook) and on a new unconditional
+  60-second periodic export-and-diff watcher (covering Kea's
+  direct-to-PowerDNS DDNS writes, which bypass NATS entirely), the current
+  data rrsets (SOA/NS excluded) for `lan.`, `local.lan.`, and the private
+  reverse zones are exported and snapshotted under
+  `${DNS_CONFIG_SNAPSHOT_DIR}/zones/<zone>`, skipping the write when
+  content is unchanged from the most recent snapshot so periodic
+  reconciler republishes don't burn through retention. A new local HTTP
+  listener (`rollback_listener.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, default
+  `0.0.0.0:8083`, `X-API-Key`-authenticated with `PDNS_API_KEY`) lets the
+  Admin UI list snapshots per zone and trigger an operator-selected
+  rollback: diffs the snapshot against the live zone, issues the
+  equivalent `REPLACE`/`DELETE` `PATCH`, re-runs `pdnsutil check-zone` as a
+  post-apply sanity check, flushes every changed name from both
+  recursors' packet caches (via `lancache.dns.flush`, reaching both
+  `dns-standard` and `dns-ssl`), and -- for `lan.` only, since it is the
+  one zone with existing NATS replication -- re-publishes the restored
+  records so secondaries converge immediately rather than waiting on the
+  next reconciler tick. `local.lan.`/the private reverse zones are not
+  NATS-replicated today (a pre-existing gap, not something this PR
+  extends), so `dns-secondary` nodes do not converge for those zones
+  either after a rollback; this is documented rather than silently
+  assumed. The Admin UI's new `/domains` "Zone-Snapshots" tab
+  (`services/ui/src/routes/dns_snapshots.rs`, mirroring the existing Kea
+  snapshot list/rollback UI) is scoped to `dns-standard` only for now,
+  matching `PDNS_AUTH_URL`/`PDNS_REC_URL`'s existing single-primary
+  convention. Rollback stays operator-selected, never automatic on
+  startup, same as the Kea adapter. Known gap carried over unchanged from
+  #730: this whole mechanism assumes the `dns-standard`/`dns-ssl`
+  container is reachable, which is not guaranteed in the crash-loop
+  scenario it exists to help recover from -- tracked separately as #763.
+  Also added a real end-to-end CI test (`scripts/dns-zone-rollback-
+  simulation.sh`, wired into `.github/workflows/full-setup-deep-
+  validate.yml`'s `dns-zone-rollback-simulation` job) that drives two real
+  DNS writes through the actual UI/NATS path, calls the rollback listener's
+  real HTTP endpoints (auth, list, rollback) against a live `dns-standard`
+  container, and confirms via real `dig` queries that both PowerDNS's data
+  and the recursor's cache were actually rolled back -- proving the
+  PATCH/DELETE round-trip and cache-flush behavior the crate's unit tests
+  cannot exercise against a live PowerDNS instance.
 - Added the repeat-run/idempotence test that was still missing for NATS's
   static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
   Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config

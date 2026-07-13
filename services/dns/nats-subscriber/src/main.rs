@@ -1,15 +1,21 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! NATS JetStream subscriber: consumes DNS record updates and applies them to PowerDNS API.
 
+mod nats_publish;
+mod rollback_listener;
+mod zone_snapshots;
+
 use async_nats::jetstream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct DNSRecord {
@@ -45,6 +51,140 @@ struct ZoneUpdate {
 #[derive(Debug, Serialize, Deserialize)]
 struct ZoneInfo {
     rrsets: Vec<RRset>,
+}
+
+/// Shared configuration + coordination for the zone/record known-good
+/// snapshot adapter (#628). `lock` is held for the whole
+/// read-modify-snapshot sequence by every caller (the post-PATCH trigger in
+/// `handle_dns_record`, the periodic `zone_snapshot_watcher`, and
+/// `rollback_listener.rs`'s rollback handler) so a snapshot-creation tick
+/// and an in-progress rollback for the same zone never interleave -- see
+/// `zone_snapshots.rs`'s module doc comment for why that matters
+/// (concurrent `create_snapshot` calls would otherwise race retention
+/// pruning and could emit spurious FATAL log lines).
+#[derive(Clone)]
+struct SnapshotContext {
+    base_dir: PathBuf,
+    keep_n: u32,
+    lock: Arc<AsyncMutex<()>>,
+}
+
+// Missing/non-numeric/non-positive KEEP_KNOWN_GOOD_CONFIGS falls back to
+// `default` here at the env-parsing boundary; `zone_snapshots::
+// prune_snapshots`'s own `clamp_keep_n` re-clamps a raw 0 as a second,
+// belt-and-suspenders guard for any future caller that constructs a
+// SnapshotContext without going through this function.
+fn env_u32_clamped(key: &str, default: u32) -> u32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(default)
+}
+
+/// Exports the current data rrsets (SOA/NS excluded, see
+/// `zone_snapshots::filter_data_rrsets`) for `zone` (canonical, dotted form)
+/// from PowerDNS's own API and records a fresh known-good snapshot if the
+/// content differs from the most recently stored one. Used by both
+/// snapshot triggers the design requires: the post-PATCH hook in
+/// `handle_dns_record` (the NATS-applied path) and `zone_snapshot_watcher`
+/// (the periodic export-and-diff trigger covering Kea's direct-to-PowerDNS
+/// DDNS updates, which bypass NATS/this consumer entirely). Every failure
+/// path here is logged via `zone_snapshots::kgs_log` and otherwise swallowed
+/// -- non-fatal by design (docs/known-good-config-snapshots.md): a snapshot
+/// failure must never turn an already-applied, already-confirmed PowerDNS
+/// write into a NATS redelivery loop.
+async fn maybe_snapshot_zone(
+    zone: &str,
+    http_client: &Client,
+    pdns_api_key: &str,
+    ctx: &SnapshotContext,
+) {
+    if !zone_snapshots::is_rollback_zone(zone) {
+        return;
+    }
+
+    let url = format!(
+        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
+        zone_snapshots::zone_api_id(zone)
+    );
+    let resp = match http_client
+        .get(&url)
+        .header("X-API-Key", pdns_api_key)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            zone_snapshots::kgs_log(
+                "FATAL",
+                &format!(
+                    "failed to export zone {zone} for snapshotting: PowerDNS returned {}",
+                    r.status()
+                ),
+            );
+            return;
+        }
+        Err(e) => {
+            zone_snapshots::kgs_log(
+                "FATAL",
+                &format!("failed to export zone {zone} for snapshotting: {e}"),
+            );
+            return;
+        }
+    };
+
+    let body: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            zone_snapshots::kgs_log(
+                "FATAL",
+                &format!("failed to decode zone {zone} export for snapshotting: {e}"),
+            );
+            return;
+        }
+    };
+    let rrsets = body
+        .get("rrsets")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let data_rrsets = zone_snapshots::filter_data_rrsets(&rrsets);
+
+    let _guard = ctx.lock.lock().await;
+    let root = zone_snapshots::zone_snapshot_root(&ctx.base_dir, zone);
+    if zone_snapshots::matches_latest_snapshot(&root, &data_rrsets) {
+        return;
+    }
+    if let Err(e) = zone_snapshots::create_snapshot(&root, ctx.keep_n, &data_rrsets) {
+        zone_snapshots::kgs_log("FATAL", &format!("failed to snapshot zone {zone}: {e}"));
+    }
+}
+
+/// Periodic export-and-diff trigger (docs/known-good-config-snapshots.md's
+/// "Trigger point"): Kea's DDNS updates (`services/dhcp/kea-dhcp-ddns.conf`)
+/// go straight to PowerDNS over TSIG-authenticated DNS UPDATE, bypassing
+/// NATS and this process's own consumer loop entirely, for every zone in
+/// `zone_snapshots::ROLLBACK_ZONES` (not just `local.lan.`/the reverse
+/// zones -- `lan.` also receives direct DDNS writes for DHCP lease
+/// hostnames, alongside its separate NATS-applied path for Admin-UI-driven
+/// writes). Runs unconditionally on every node (unlike the existing
+/// `reconciler()`, which only runs when `NATS_RECONCILER=1`): this watcher
+/// is not about NATS record replication, it is about noticing PowerDNS
+/// state that changed without ever going through this process at all, which
+/// is true on every node identically. Mirrors the existing `reconciler`'s
+/// 60-second interval shape (main.rs:442-541 in the pre-#628 layout).
+async fn zone_snapshot_watcher(
+    http_client: Arc<Client>,
+    pdns_api_key: String,
+    ctx: SnapshotContext,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        for &zone in zone_snapshots::ROLLBACK_ZONES {
+            maybe_snapshot_zone(zone, &http_client, &pdns_api_key, &ctx).await;
+        }
+    }
 }
 
 #[tokio::main]
@@ -168,6 +308,54 @@ async fn main() {
         });
     }
 
+    // ── Zone/record known-good snapshots (#628) ─────────────────────────
+    // DNS_CONFIG_SNAPSHOT_DIR/KEEP_KNOWN_GOOD_CONFIGS are the same env vars
+    // entrypoint.sh already uses for the recursor.conf/pdns.conf static-file
+    // adapter (#615); this adapter nests its own snapshots under a `zones/`
+    // subdirectory of the same base dir (see zone_snapshots::zone_snapshot_root)
+    // so both live in the same persistent volume without colliding.
+    let dns_config_snapshot_dir = env::var("DNS_CONFIG_SNAPSHOT_DIR")
+        .unwrap_or_else(|_| "/var/lib/lancache-dns/config-snapshots".to_string());
+    let keep_known_good_configs = env_u32_clamped("KEEP_KNOWN_GOOD_CONFIGS", 3);
+    let snapshot_ctx = SnapshotContext {
+        base_dir: PathBuf::from(dns_config_snapshot_dir),
+        keep_n: keep_known_good_configs,
+        lock: Arc::new(AsyncMutex::new(())),
+    };
+
+    // Periodic export-and-diff trigger: runs on every node unconditionally
+    // (not gated by NATS_RECONCILER, see zone_snapshot_watcher's doc
+    // comment -- it is not about NATS replication, it is about noticing
+    // Kea's direct-to-PowerDNS DDNS writes, which happen on every node).
+    {
+        let client_clone = http_client.clone();
+        let pdns_api_key_clone = pdns_api_key.clone();
+        let ctx_clone = snapshot_ctx.clone();
+        tokio::spawn(async move {
+            zone_snapshot_watcher(client_clone, pdns_api_key_clone, ctx_clone).await;
+        });
+    }
+
+    // Local rollback listener: a new port (default 0.0.0.0:8083, see
+    // rollback_listener.rs's module doc comment for why 0.0.0.0 and not
+    // 127.0.0.1) the Admin UI calls to list zone snapshots and trigger an
+    // operator-selected rollback.
+    {
+        let rollback_listen_addr =
+            env::var("DNS_ROLLBACK_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8083".to_string());
+        let rollback_state = Arc::new(rollback_listener::RollbackState {
+            http_client: http_client.clone(),
+            pdns_api_key: pdns_api_key.clone(),
+            snapshot_base_dir: snapshot_ctx.base_dir.clone(),
+            keep_n: snapshot_ctx.keep_n,
+            snapshot_lock: snapshot_ctx.lock.clone(),
+            js: js.clone(),
+        });
+        tokio::spawn(async move {
+            rollback_listener::serve(&rollback_listen_addr, rollback_state).await;
+        });
+    }
+
     // Main fetch loop with exponential backoff (#87 fix)
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF_SECS: u64 = 30;
@@ -200,7 +388,9 @@ async fn main() {
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
                         Ok(msg) => {
-                            let result = handle_message(&msg, &pdns_api_key, &http_client).await;
+                            let result =
+                                handle_message(&msg, &pdns_api_key, &http_client, &snapshot_ctx)
+                                    .await;
                             // #653 fix: what to do with THIS message is decided by the pure
                             // `decide_msg` (unit-tested below via `simulate_batch_processing`)
                             // so the ack/nak decision itself -- not just this call site -- is
@@ -398,6 +588,7 @@ async fn handle_message(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
     http_client: &Arc<Client>,
+    snapshot_ctx: &SnapshotContext,
 ) -> HandleOutcome {
     let subject = msg.subject.as_ref();
 
@@ -407,7 +598,7 @@ async fn handle_message(
     }
 
     if subject == "lancache.dns.record" {
-        return if handle_dns_record(msg, pdns_api_key, http_client).await {
+        return if handle_dns_record(msg, pdns_api_key, http_client, snapshot_ctx).await {
             HandleOutcome::Ack
         } else {
             // Record updates carry the stale-clobber ordering hazard -- stop
@@ -460,6 +651,7 @@ async fn handle_dns_record(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
     http_client: &Arc<Client>,
+    snapshot_ctx: &SnapshotContext,
 ) -> bool {
     let record: DNSRecord = match serde_json::from_slice(&msg.payload) {
         Ok(r) => r,
@@ -518,6 +710,22 @@ async fn handle_dns_record(
                     "Updated DNS record: zone={} name={} type={} action={}",
                     record.zone, record.name, record.record_type, record.action
                 );
+                // Post-PATCH known-good snapshot trigger (#628). Validated
+                // by construction: this only runs after PowerDNS's own
+                // PATCH already returned 2xx, so there is no separate
+                // pre-snapshot check to run (docs/known-good-config-
+                // snapshots.md's "Validation" point). Best-effort/non-fatal
+                // by design -- `maybe_snapshot_zone` only ever logs on
+                // failure, never changes this function's return value, so a
+                // snapshot-volume outage can never turn an already-applied
+                // write into a NATS redelivery loop.
+                maybe_snapshot_zone(
+                    &zone_snapshots::canonical_zone(&record.zone),
+                    http_client,
+                    pdns_api_key,
+                    snapshot_ctx,
+                )
+                .await;
                 true
             } else if resp.status().is_client_error() {
                 // P2 fix: Ack on 4xx client errors (invalid data, permanent failure).
@@ -655,41 +863,30 @@ async fn reconciler(
                         rrset.record_type
                     );
 
-                    let record_payload = json!({
-                        "action": "replace",
-                        "zone": "lan",
-                        "name": rrset.name,
-                        "type": rrset.record_type,
-                        "ttl": rrset.ttl,
-                        "records": rrset.records,
-                    });
-
-                    let payload = match serde_json::to_vec(&record_payload) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("Reconciler: error marshaling record: {}", e);
-                            continue;
-                        }
-                    };
-
-                    let mut headers = async_nats::HeaderMap::new();
-                    headers.insert(async_nats::header::NATS_MESSAGE_ID, msg_id.as_str());
-
-                    // #69 fix: properly await the PublishAckFuture
-                    match js
-                        .publish_with_headers("lancache.dns.record", headers, payload.into())
-                        .await
-                    {
-                        Ok(publish_ack) => match publish_ack.await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                eprintln!("Reconciler: error waiting for publish ack: {}", e);
-                            }
+                    // #628: factored into nats_publish::publish_dns_record
+                    // so this reconciler and rollback_listener.rs's
+                    // post-rollback re-publish (the design doc's answer for
+                    // how a lan. rollback interacts with existing NATS
+                    // replication) write the exact same message shape.
+                    let ttl = rrset.ttl.map(|t| json!(t)).unwrap_or(Value::Null);
+                    let records = rrset
+                        .records
+                        .clone()
+                        .map(|r| json!(r))
+                        .unwrap_or(Value::Null);
+                    nats_publish::publish_dns_record(
+                        &js,
+                        &msg_id,
+                        nats_publish::DnsRecordMessage {
+                            action: "replace",
+                            zone: "lan",
+                            name: &rrset.name,
+                            record_type: &rrset.record_type,
+                            ttl,
+                            records,
                         },
-                        Err(e) => {
-                            eprintln!("Reconciler: error publishing record: {}", e);
-                        }
-                    }
+                    )
+                    .await;
                 }
 
                 println!(

@@ -353,10 +353,10 @@ an inconsistent database file, and "rolling back" zone/record data has
 completely different implications than rolling back a static config file —
 it can silently undo legitimate client DHCP leases, DDNS-driven hostname
 records, or secondary-node reconciliation state that changed after the
-snapshot was taken. Issue #628 tracks this gap; this section is that
-issue's design. No snapshot/rollback code exists yet for zone/record data —
-everything below is the scoped design an implementation PR should follow,
-not a description of running behavior.
+snapshot was taken. Issue #628 implemented this design; everything below
+describes running behavior (`services/dns/nats-subscriber/src/
+zone_snapshots.rs`, `rollback_listener.rs`, `services/ui/src/routes/
+dns_snapshots.rs`), not a proposal for a future implementation PR.
 
 **Scope decision.** Looking at what `services/dns/entrypoint.sh` actually
 does on every start narrows the problem a lot:
@@ -402,7 +402,8 @@ does on every start narrows the problem a lot:
   node never receives `local.lan.`/reverse-zone records at all, regardless
   of rollback — this is a pre-existing replication gap this design does not
   create and cannot fix on its own; see "Secondary nodes and NATS
-  replication" below for how the implementation PR must treat it.
+  replication" below for how the implementation documents (rather than
+  silently papers over) it.
 
 So the only state that genuinely needs a snapshot/rollback story is the
 **dynamic record data inside `lan.`, `local.lan.`, and the private reverse
@@ -452,11 +453,13 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   this call and writes the result under
   `${DNS_CONFIG_SNAPSHOT_DIR}/zones/<zone>`, one `snapshot_root` per zone,
   applying the same `KEEP_KNOWN_GOOD_CONFIGS` retention default as every
-  other adapter. An implementation PR may additionally store the `/export`
-  AXFR text alongside the JSON purely as a human-readable artifact for
-  manual inspection (see "Manual recovery" below) — but it is never the
-  thing rollback diffs or patches from; the JSON `rrsets` snapshot is the
-  only artifact the rollback path itself reads. Because `nats-subscriber` is
+  other adapter. This implementation does not additionally store the
+  `/export` AXFR text alongside the JSON (an option this section originally
+  left open, purely as a human-readable artifact for manual inspection, see
+  "Manual recovery" below) — only the JSON `rrsets` snapshot exists on disk;
+  a future PR could add the AXFR text as a second, read-only artifact
+  without changing the rollback path itself, which would still only ever
+  diff/patch from the JSON. Because `nats-subscriber` is
   a compiled Rust binary in its own process (`services/dns/Dockerfile` copies it to
   `/usr/local/bin/nats-subscriber` and the entrypoint execs it as a separate
   process at the bottom of the file), it cannot call the `kgs_*` shell
@@ -475,13 +478,25 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   authenticated DNS UPDATE, bypassing NATS and `nats-subscriber` entirely.
   A design that only snapshots after a NATS-applied write would silently
   stop covering DHCP-driven lease/PTR record changes, which this section
-  claims are in scope. The implementation PR must add a second trigger for
-  DDNS-originated changes — e.g. a periodic export-and-diff similar in
-  shape to the existing 60-second `reconciler`, or a PowerDNS
-  primary-notify-style hook — rather than relying solely on the NATS apply
-  point.
-  Two further requirements apply to whichever trigger(s) end up
-  implemented:
+  claims are in scope. Two triggers exist:
+  1. `handle_dns_record`'s post-`PATCH` hook (`main.rs`'s `maybe_snapshot_
+     zone`, called right after a successful PATCH) covers the NATS-applied
+     path.
+  2. `zone_snapshot_watcher` (`main.rs`) is the periodic export-and-diff
+     trigger for DDNS-originated changes: it polls every zone in
+     `zone_snapshots::ROLLBACK_ZONES` every 60 seconds (the same interval
+     shape as the existing `reconciler`) and runs unconditionally on every
+     node, since it is not gated on NATS reconciliation being enabled — the
+     alternative considered (a PowerDNS primary-notify-style hook) would
+     need a webhook/notify receiver this codebase has no equivalent of
+     anywhere else, whereas polling reuses the exact API call and diff
+     helpers the post-PATCH trigger already needs.
+  Both triggers cover all of `ROLLBACK_ZONES` (`lan.`, `local.lan.`, and the
+  private reverse zones), not just the two zones with no NATS path: `lan.`
+  itself also receives direct DDNS writes for DHCP lease hostnames
+  alongside its separate NATS-applied path, so it needs the periodic
+  trigger too, not only the post-PATCH one.
+  Two further requirements apply to both triggers:
   - **Skip no-op applies.** The existing `reconciler` (services/dns/nats-
     subscriber/src/main.rs:442-541) polls `/zones/lan` every 60 seconds and
     republishes every non-SOA/NS rrset unconditionally, regardless of
@@ -489,10 +504,14 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
     window only partially absorbs this. A trigger that snapshots on every
     confirmed apply without comparing content would let these periodic
     republishes burn through the default retention of 3 snapshots within
-    minutes, pushing out genuinely different history. The trigger must
-    compare the freshly exported zone against the most recently stored
-    snapshot (e.g. a content hash) and skip snapshot creation when nothing
-    changed.
+    minutes, pushing out genuinely different history. Both triggers compare
+    the freshly exported zone against the most recently stored snapshot
+    before creating a new one (`zone_snapshots::matches_latest_snapshot`):
+    rather than hashing serialized bytes (order-sensitive), both sides are
+    canonicalized -- the rrsets array sorted by (name, type), each rrset's
+    own `records` array sorted by content -- and compared with plain `==`,
+    so PowerDNS returning the same content in a different order never reads
+    as a change.
   - **Snapshot failures are best-effort, never fatal to message
     acknowledgment.** `nats-subscriber`'s consumer loop only calls
     `msg.ack().await` when `handle_message` returns `true`; on `false` it
@@ -563,14 +582,19 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   with no equivalent check would let anything else reachable on the same
   Compose network — not just the Admin UI — list and roll back zone
   snapshots, silently bypassing whatever authentication the Admin UI itself
-  enforces on the operator. The implementation PR must gate this listener
-  the same way this project already gates every comparable internal
-  surface: require a shared key on every request (reusing `PDNS_API_KEY` via
-  the same `X-API-Key` header convention is the natural fit, since
-  `nats-subscriber` already holds that value in memory for its own calls to
-  PowerDNS's API), and treat binding the listener to a container-local/
-  loopback-only address as defense-in-depth on top of that check, never as
-  a substitute for it.
+  enforces on the operator. This listener (`services/dns/nats-subscriber/
+  src/rollback_listener.rs`) gates every request the same way this project
+  already gates every comparable internal surface: a constant-time
+  comparison of the `X-API-Key` header against `PDNS_API_KEY`, checked
+  before the request body is even parsed. It binds `0.0.0.0:8083`, not
+  `127.0.0.1` -- a literal loopback bind would make it unreachable from the
+  Admin UI's own container (containers have separate network namespaces);
+  "container-local" here instead means not published to the host/LAN via
+  docker-compose `ports:`, only `expose:`, the same treatment PowerDNS's own
+  8081/8082 already get. That network placement is defense-in-depth on top
+  of the `X-API-Key` check, never a substitute for it -- any container on
+  the same Compose network could still reach the port and would be rejected
+  by the header check alone.
 - **Flush recursor caches after a rollback.** A `load`/`PATCH`-style
   rollback can change or delete many names in one operation, but
   `flush_recursor_cache` (`services/ui/src/routes/domains.rs:264-289`)
@@ -597,22 +621,32 @@ path are both hardcoded to `zone: "lan"`, and `local.lan.`/reverse-zone
 DDNS updates go straight to the primary, never through NATS). Two separate
 things follow from that:
 
-- For `lan.`, an implementation PR must confirm how a rollback on one node
-  interacts with existing NATS replication: applying the rollback's `PATCH`
-  locally changes only that node's own database, so a rollback on the
-  primary needs an explicit answer for whether/how it re-publishes the
-  restored state onto the NATS stream so secondaries converge to the same
-  records, rather than leaving the primary and its secondaries silently
-  holding different data for the rolled-back zone. JetStream's own message
-  history is itself a form of replay log for these changes and may turn out
-  to be part of the answer.
+- For `lan.`, a rollback re-publishes the restored state onto the NATS
+  stream so secondaries converge, rather than leaving the primary and its
+  secondaries silently holding different data for the rolled-back zone.
+  `rollback_listener.rs`'s `publish_rollback_records` (called only when
+  `zone == "lan."`) re-publishes every REPLACE/DELETE entry from the
+  applied rollback patch onto `lancache.dns.record`, reusing the same
+  message shape `nats_publish::publish_dns_record` already provides to the
+  existing `reconciler`. Each entry gets a fresh, rollback-specific message
+  id (`rollback-<batch timestamp>-<name>-<type>`) rather than reusing the
+  reconciler's stable `reconcile-lan-<name>-<type>` id, so JetStream's
+  ~120s duplicate-message window can never silently absorb this explicit
+  republish if the periodic reconciler happened to publish an identical id
+  moments earlier. The existing 60-second reconciler is a backstop on top
+  of this, not a replacement for it: even without the explicit republish,
+  it would eventually converge secondaries on its own, just with up to a
+  60-second delay.
 - For `local.lan.` and the private reverse zones, there is no existing NATS
   replication to preserve or break in the first place — a rollback on the
   primary for these zones only ever affects that one node, exactly like
-  every DDNS write to them already does today. The implementation PR must
-  either extend NATS coverage to these zones (so both normal DDNS-driven
-  convergence and rollback convergence work the same way `lan.` does), or
-  explicitly document that `dns-secondary` nodes do not carry `local.lan.`/
+  every DDNS write to them already does today. This implementation takes
+  the simpler of the two options this section originally posed: it does
+  NOT extend NATS coverage to these zones (that would be real scope creep
+  beyond this issue -- a second, separately-scoped change to Kea's
+  DDNS-update path and to `nats-subscriber`'s consumer, not a rollback
+  concern). Instead, this paragraph documents the gap explicitly:
+  `dns-secondary` nodes do not carry `local.lan.`/
   reverse-zone records and will not converge after a rollback either. Either
   way, this design does not silently assume replication that does not
   exist.
@@ -663,21 +697,19 @@ chosen one applied manually against the Kea Control Agent API
 (`config-test` → `config-set` → `config-write`, the same three-call
 sequence the Admin UI itself uses).
 
-The PowerDNS zone/record adapter designed above under "Zones, records, and
+The PowerDNS zone/record adapter described above under "Zones, records, and
 TSIG/DDNS metadata" has no equivalent manual-CLI fallback documented here
-yet. Like Kea's on-disk snapshot JSON files, its snapshots are also stored
-as JSON `rrsets` (see "Snapshot mechanism" above), but there is currently no
-established procedure for inspecting one directly and hand-applying it
-outside the Admin UI — largely because the snapshot mechanism itself does
-not exist yet; that section is a scoped design for a future implementation
-PR, not running behavior today. Once it is implemented, it will still share
-the same underlying limitation called out above: any fallback procedure
+yet, even though the mechanism itself now exists and runs. Like Kea's
+on-disk snapshot JSON files, its snapshots are also stored as JSON `rrsets`
+(under `${DNS_CONFIG_SNAPSHOT_DIR}/zones/<zone>/<id>/zone.json`, see
+"Snapshot mechanism" above), but there is still no established procedure for
+inspecting one directly and hand-applying it outside the Admin UI. That is
+not an oversight this PR could have closed cheaply: any fallback procedure
 documented here would still need either `nats-subscriber`'s local admin
 listener reachable inside the `dns-standard`/`dns-ssl` container (and,
 per the auth requirement above, credentials for it), or, for the stored
 JSON snapshot files themselves, the container reachable to inspect them and
 run `pdnsutil --config-dir=/etc/pdns/auth check-zone` against the live zone
 directly — which is exactly the gap issue #763 is meant to close. Writing
-that fallback procedure down is therefore deferred to #763 rather than
-invented here
-ahead of the mechanism it would document.
+that fallback procedure down is therefore still deferred to #763 rather
+than invented here ahead of the rescue-mode mechanism it would depend on.

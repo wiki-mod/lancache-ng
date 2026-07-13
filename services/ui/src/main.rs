@@ -859,6 +859,10 @@ async fn main() -> Result<()> {
             "/domains/aaaa-filter",
             post(routes::domains::toggle_aaaa_filter),
         )
+        .route(
+            "/domains/zones/rollback",
+            post(routes::dns_snapshots::rollback_zone_snapshot),
+        )
         .route("/stats", get(routes::stats::stats_page))
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))

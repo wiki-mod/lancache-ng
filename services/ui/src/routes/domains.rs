@@ -59,11 +59,27 @@ pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap
 
     let lan_records = fetch_lan_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
+    // #628: zone/record known-good snapshot rollback -- see
+    // routes/dns_snapshots.rs's module doc comment for why this is a thin
+    // HTTP call to nats-subscriber's own listener, not logic living here.
+    let zone_snapshot_groups =
+        crate::routes::dns_snapshots::fetch_zone_snapshot_groups(&state).await;
 
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
+    ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
+    // Retention count shown on the zone-snapshot panel: the same
+    // KEEP_KNOWN_GOOD_CONFIGS variable and default this adapter shares with
+    // every other known-good-snapshot adapter (docs/known-good-config-
+    // snapshots.md's contract) -- reusing the field the Kea adapter already
+    // reads rather than adding a second config field with an identical
+    // value.
+    ctx.insert(
+        "zone_snapshot_retention",
+        &state.config.kea_keep_known_good_configs,
+    );
     ctx.insert("active_page", "domains");
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 

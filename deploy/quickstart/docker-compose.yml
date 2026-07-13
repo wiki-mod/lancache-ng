@@ -1193,6 +1193,12 @@ services:
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
+      # Zone/record known-good snapshot rollback listener (#628), scoped to
+      # dns-standard only for now -- same single-primary convention
+      # PDNS_AUTH_URL/PDNS_REC_URL already use (see services/ui/src/routes/
+      # dns_snapshots.rs's module doc comment for why dns-ssl isn't wired up
+      # here yet).
+      - DNS_ROLLBACK_URL=http://dns-standard:8083
       - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
