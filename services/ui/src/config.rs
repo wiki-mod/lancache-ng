@@ -162,6 +162,16 @@ pub struct Config {
     // dnsmasq `log-facility=`; there is no dual-output config for either).
     pub nats_log_file: String,
     pub dev_mode: bool,
+    // Central syslog-ng reader (#633 PR4, depends on PR3's watchdog.sh
+    // retention-engine contract for the exact env var names/semantics these
+    // mirror). Fail-closed default: syslog_enabled=false means
+    // routes/logs.rs and routes/dashboard.rs never touch syslog_log_root at
+    // all, so installs that never opt into `docker compose --profile
+    // logging` see byte-identical behavior to before this PR.
+    pub syslog_enabled: bool,
+    pub syslog_log_root: String,
+    pub syslog_max_gb: u32,
+    pub syslog_retention_days: u32,
 }
 
 // Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
@@ -263,6 +273,10 @@ impl fmt::Debug for Config {
             .field("nats_service", &self.nats_service)
             .field("nats_log_file", &self.nats_log_file)
             .field("dev_mode", &self.dev_mode)
+            .field("syslog_enabled", &self.syslog_enabled)
+            .field("syslog_log_root", &self.syslog_log_root)
+            .field("syslog_max_gb", &self.syslog_max_gb)
+            .field("syslog_retention_days", &self.syslog_retention_days)
             .finish()
     }
 }
@@ -537,6 +551,19 @@ impl Config {
             nats_service: env_str("NATS_SERVICE", "nats"),
             nats_log_file: env_str("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
+            // Mirrors watchdog.sh's maybe_prune_syslog() contract (PR3/#757)
+            // exactly: same 4 env var names, same defaults (10 GB / 30
+            // days). env_u32_clamped's `n >= 1` floor is a deliberate, minor
+            // divergence from watchdog.sh's bash clamp (which lets a
+            // literal "0" through unchanged, since it is all-digits) --
+            // these two fields are display/reporting-only on the UI side
+            // (the UI never enforces the budget itself, watchdog does), so
+            // a clamped-to-default "0" here has no behavioral effect beyond
+            // what number is shown to the operator.
+            syslog_enabled: env_bool("SYSLOG_ENABLED", false),
+            syslog_log_root: env_str("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
+            syslog_max_gb: env_u32_clamped("SYSLOG_MAX_GB", 10),
+            syslog_retention_days: env_u32_clamped("SYSLOG_RETENTION_DAYS", 30),
         })
     }
 }
@@ -1084,6 +1111,47 @@ mod tests {
 
         env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
         env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+    }
+
+    #[test]
+    fn syslog_settings_load_from_env_with_documented_defaults_matching_watchdog_contract() {
+        // Defaults here must match watchdog.sh's maybe_prune_syslog() (PR3/#757)
+        // exactly, since both read the same 4 env vars against the same
+        // `docker compose --profile logging` deployment.
+        let _guard = env_test_lock().lock().unwrap();
+
+        for key in [
+            "SYSLOG_ENABLED",
+            "SYSLOG_LOG_ROOT",
+            "SYSLOG_MAX_GB",
+            "SYSLOG_RETENTION_DAYS",
+        ] {
+            env::remove_var(key);
+        }
+        let cfg = Config::from_env().unwrap();
+        assert!(!cfg.syslog_enabled);
+        assert_eq!(cfg.syslog_log_root, "/var/log/lancache-syslog-ng");
+        assert_eq!(cfg.syslog_max_gb, 10);
+        assert_eq!(cfg.syslog_retention_days, 30);
+
+        env::set_var("SYSLOG_ENABLED", "true");
+        env::set_var("SYSLOG_LOG_ROOT", "/custom/syslog-root");
+        env::set_var("SYSLOG_MAX_GB", "25");
+        env::set_var("SYSLOG_RETENTION_DAYS", "7");
+        let cfg = Config::from_env().unwrap();
+        assert!(cfg.syslog_enabled);
+        assert_eq!(cfg.syslog_log_root, "/custom/syslog-root");
+        assert_eq!(cfg.syslog_max_gb, 25);
+        assert_eq!(cfg.syslog_retention_days, 7);
+
+        for key in [
+            "SYSLOG_ENABLED",
+            "SYSLOG_LOG_ROOT",
+            "SYSLOG_MAX_GB",
+            "SYSLOG_RETENTION_DAYS",
+        ] {
+            env::remove_var(key);
+        }
     }
 
     #[test]

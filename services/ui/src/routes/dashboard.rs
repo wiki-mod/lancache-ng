@@ -1,7 +1,7 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! Main dashboard route displaying cache statistics and connection metrics.
 
-use crate::{config::DhcpMode, nginx_client, AppState};
+use crate::{config::DhcpMode, nginx_client, syslog_client, AppState};
 use axum::extract::State;
 use axum::response::{Html, Json};
 use serde_json::json;
@@ -52,18 +52,52 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         move || nginx_client::parse_log_tail(&path, 10)
     });
 
+    // Syslog store size/stats (#633 PR4): same spawn_blocking-wrapped shape
+    // as the three collectors above (get_syslog_size_gb shells out to `du`,
+    // get_syslog_stats does a full-tree scan, both block). Gated on
+    // syslog_enabled the same way ssl_status_future is gated on ssl_enabled
+    // above -- when the `logging` profile was never opted into,
+    // SYSLOG_LOG_ROOT may not even exist, so these must stay pure no-ops
+    // rather than run `du`/walk a directory that isn't there.
+    let syslog_size_task = tokio::task::spawn_blocking({
+        let enabled = cfg.syslog_enabled;
+        let root = cfg.syslog_log_root.clone();
+        move || {
+            if enabled {
+                syslog_client::get_syslog_size_gb(&root)
+            } else {
+                0.0
+            }
+        }
+    });
+    let syslog_stats_task = tokio::task::spawn_blocking({
+        let enabled = cfg.syslog_enabled;
+        let root = cfg.syslog_log_root.clone();
+        move || {
+            if enabled {
+                syslog_client::get_syslog_stats(&root)
+            } else {
+                syslog_client::SyslogStats::default()
+            }
+        }
+    });
+
     let (
         standard_status,
         distinct_ssl_status,
         cache_used_result,
         log_stats_result,
         recent_logs_result,
+        syslog_size_result,
+        syslog_stats_result,
     ) = tokio::join!(
         standard_status_future,
         ssl_status_future,
         cache_used_task,
         log_stats_task,
-        recent_logs_task
+        recent_logs_task,
+        syslog_size_task,
+        syslog_stats_task,
     );
     let ssl_status = if !cfg.ssl_enabled {
         None
@@ -75,6 +109,8 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let cache_used_gb = cache_used_result.unwrap_or(0.0);
     let log_stats = log_stats_result.unwrap_or_default();
     let recent_logs = recent_logs_result.unwrap_or_default();
+    let syslog_size_gb = syslog_size_result.unwrap_or(0.0);
+    let syslog_stats = syslog_stats_result.unwrap_or_default();
 
     let cache_pct = cache_usage_pct(cache_used_gb, cfg.cache_max_gb);
 
@@ -92,6 +128,10 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("cache_pct", &cache_pct);
     ctx.insert("log_stats", &log_stats);
     ctx.insert("recent_logs", &recent_logs);
+    ctx.insert("syslog_enabled", &cfg.syslog_enabled);
+    ctx.insert("syslog_size_gb", &format!("{:.1}", syslog_size_gb));
+    ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
+    ctx.insert("syslog_stats", &syslog_stats);
     ctx.insert("active_page", "dashboard");
 
     crate::routes::render(

@@ -33,3 +33,10 @@ subtle = "2"
 sha2 = "0.11"
 nkeys = "0.4"
 data-encoding = "2"
+# Transparent decompression of syslog-ng's rotated log output (#633:
+# syslog_client.rs). syslog-ng compresses rotated files with zstd, falling
+# back to gzip only if zstd could not be installed at container start (see
+# deploy/*/docker-compose.yml's syslog-ng rotation loop) -- both crates are
+# needed so the Admin UI reader can transparently read either outcome.
+zstd = "0.13"
+flate2 = "1"

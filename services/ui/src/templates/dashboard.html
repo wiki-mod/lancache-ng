@@ -133,6 +133,23 @@
     </div>
   </div>
 
+  <!-- Central syslog store (#633 PR4): only rendered once an install opts
+       into `docker compose --profile logging` (SYSLOG_ENABLED=true) --
+       syslog_size_gb/syslog_stats come from syslog_client::get_syslog_size_gb
+       / get_syslog_stats (routes/dashboard.rs), both no-ops otherwise. -->
+  {% if syslog_enabled %}
+  <div class="card">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <h2 class="font-semibold text-slate-200">Central syslog store</h2>
+        <span class="text-xs text-slate-500">{{ syslog_stats.hosts | length }} hosts · {{ syslog_stats.total_files }} files</span>
+      </div>
+      <span class="text-xs text-slate-500 font-mono">{{ syslog_size_gb }} / {{ syslog_max_gb }} GB</span>
+    </div>
+    <p class="text-xs text-slate-500">{{ syslog_stats.total_lines }} lines total. Retention is enforced by watchdog's storage-budget pruning, not this page.</p>
+  </div>
+  {% endif %}
+
   <!-- Recent requests: last N lines tailed from the access log
        (nginx_client::parse_log_tail), newest-to-oldest is not guaranteed —
        this is simply the tail of the file. -->

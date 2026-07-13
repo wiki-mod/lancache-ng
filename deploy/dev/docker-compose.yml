@@ -1072,6 +1072,12 @@ services:
       # Central logging pipeline (#633): main.rs's init_tracing() writes
       # UI_LOG_FILE (default matches this path) alongside stdout.
       - ui-logs:/var/log/lancache-ui
+      # Central syslog store reader (#633 PR4): read-only, since watchdog
+      # (not the UI) owns pruning of this volume. A missing mount here would
+      # make syslog_client's SYSLOG_LOG_ROOT reads silently return empty
+      # results, not fail, so this is required for SYSLOG_ENABLED=true to
+      # actually show anything on /logs or the dashboard.
+      - logs-syslog-ng:/var/log/lancache-syslog-ng:ro
     ports:
       - "9090:8080"
     environment:
@@ -1117,6 +1123,14 @@ services:
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:-lancache-nats-callout}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-lancache-nats-callout-dev-secret}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-lancache-reg-dev-secret}
+      # Central syslog store reader (#633 PR4): same 4 vars/defaults as the
+      # watchdog retention engine (PR3/#757), so the UI's "enabled" toggle
+      # and its actual budget display always agree with what watchdog is
+      # enforcing.
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
     networks:
       - lancache
       - docker-api

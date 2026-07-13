@@ -1093,6 +1093,14 @@ services:
       # Central logging pipeline (#633): main.rs's init_tracing() writes
       # UI_LOG_FILE (default matches this path) alongside stdout.
       - ui-logs:/var/log/lancache-ui
+      # Central syslog store reader (#633 PR4): read-only, same bind-mount
+      # source as syslog-ng/watchdog (SYSLOG_NG_LOG_DIR) so an
+      # operator-overridden host path is honored consistently by all three.
+      # A missing mount here would make syslog_client's SYSLOG_LOG_ROOT reads
+      # silently return empty results, not fail, so this is required for
+      # SYSLOG_ENABLED=true to actually show anything on /logs or the
+      # dashboard.
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -1138,6 +1146,14 @@ services:
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
+      # Central syslog store reader (#633 PR4): same 4 vars/defaults as the
+      # watchdog retention engine (PR3/#757), so the UI's "enabled" toggle
+      # and its actual budget display always agree with what watchdog is
+      # enforcing.
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
