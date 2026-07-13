@@ -1326,31 +1326,52 @@ runtime_env_file_for_install_dir() {
 # secondary DNS nodes depend on). NATS_BIND_IP has exactly one purpose in
 # this codebase: it is the value the override's `ports:` mapping requires via
 # `${NATS_BIND_IP:?...}` (see docker-compose.nats-secondary.yml), so a
-# non-empty NATS_BIND_IP in the runtime env file is used as the activation
-# signal instead of inventing a separate marker file. An operator who
-# persisted NATS_BIND_IP into .env.local (so the override keeps working
-# across shell sessions, per the override file's own usage comment) has, by
-# construction, committed to running with the override active.
+# non-empty NATS_BIND_IP is used as the activation signal instead of
+# inventing a separate marker file. The override file's own header comment
+# documents its PRIMARY activation example as a shell-exported
+# `NATS_BIND_IP=<ip> docker compose ... up -d`, not a persisted .env.local
+# assignment, so the process environment is checked first -- mirroring
+# Compose's own variable-interpolation precedence, where a shell variable
+# always wins over an --env-file value. Only if the shell has nothing set do
+# we fall back to the runtime env file, covering operators who persisted
+# NATS_BIND_IP into .env.local so the override keeps working across shell
+# sessions (the file's documented secondary activation path). Either path
+# means the operator has, by construction, committed to running with the
+# override active.
 nats_secondary_override_active_for_install_dir() {
     local install_dir="$1" env_file="$2" bind_ip
 
     [[ -f "$install_dir/docker-compose.nats-secondary.yml" ]] || return 1
+    if [[ -n "${NATS_BIND_IP:-}" ]]; then
+        return 0
+    fi
     bind_ip=$(get_env_var_nonempty NATS_BIND_IP "$env_file" 2>/dev/null || true)
     [[ -n "$bind_ip" ]]
 }
 
-# Builds the -f argument list a compose invocation for install_dir needs,
-# always including the base file explicitly (harmless when cwd is already
-# install_dir, since it matches Compose's own auto-discovery default) and
-# appending the NATS-secondary override when nats_secondary_override_active_
-# for_install_dir() says it is active. Passing the base file explicitly is
-# required the moment any -f is added at all: Compose disables its cwd
-# auto-discovery of docker-compose.yml as soon as one -f is given, so a call
-# site that appended only the override would run the stack from that
-# partial-services fragment alone.
+# Builds the -f argument list a compose invocation for install_dir needs:
+# the base file, an operator-provided docker-compose.override.yml/.yaml when
+# present, and the NATS-secondary override when
+# nats_secondary_override_active_for_install_dir() says it is active. The
+# base file must always be passed explicitly the moment any -f is added at
+# all: Compose disables its cwd auto-discovery of docker-compose.yml (and,
+# with it, the auto-discovery/merge of a sibling docker-compose.override.yml)
+# as soon as one -f is given, so a call site that appended only the
+# NATS-secondary override would both (a) run the stack from that
+# partial-services fragment alone and (b) silently drop any operator
+# override customizations that Compose would otherwise have auto-merged.
+# Detecting and re-adding the override file here keeps that auto-merge
+# behavior intact even though this function must pass -f explicitly.
 compose_file_args_for_install_dir() {
-    local install_dir="$1" env_file="$2"
+    local install_dir="$1" env_file="$2" override_file
     local -a args=(-f "$install_dir/docker-compose.yml")
+
+    for override_file in "$install_dir/docker-compose.override.yml" "$install_dir/docker-compose.override.yaml"; do
+        if [[ -f "$override_file" ]]; then
+            args+=(-f "$override_file")
+            break
+        fi
+    done
 
     if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
         args+=(-f "$install_dir/docker-compose.nats-secondary.yml")
@@ -3151,7 +3172,12 @@ cmd_update() {
     cd "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
-    if [[ ${#compose_files[@]} -gt 2 ]]; then
+    # Query the activation state directly rather than inferring it from
+    # ${#compose_files[@]}: that count now also grows when a
+    # docker-compose.override.yml/.yaml is auto-detected (see
+    # compose_file_args_for_install_dir), so array length alone can no longer
+    # distinguish "NATS override active" from "operator override present".
+    if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
         print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
     fi
 

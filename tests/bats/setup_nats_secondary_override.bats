@@ -92,3 +92,61 @@ setup() {
     [ "${lines[2]}" = "-f" ]
     [ "${lines[3]}" = "$install_dir/docker-compose.nats-secondary.yml" ]
 }
+
+@test "nats_secondary_override_active_for_install_dir is true when NATS_BIND_IP is only set in the shell environment" {
+    : > "$install_dir/docker-compose.nats-secondary.yml"
+    # Deliberately no NATS_BIND_IP in the env file: the override file's own
+    # header comment documents this shell-exported form as the PRIMARY
+    # activation example, and Compose's own interpolation precedence puts a
+    # shell variable ahead of an --env-file value.
+    printf 'IP_STANDARD=192.0.2.10\n' > "$env_file"
+
+    NATS_BIND_IP=192.0.2.5 run nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"
+    [ "$status" -eq 0 ]
+}
+
+# Regression test for compose_file_args_for_install_dir auto-detecting a
+# docker-compose.override.yml: before this fix, the helper always passed -f
+# explicitly for the base file, which (per Compose's documented behavior)
+# disables Compose's own cwd auto-discovery/merge of a sibling override file
+# -- silently dropping any operator customization on every `setup.sh update`,
+# even when the NATS-secondary override was never involved.
+@test "compose_file_args_for_install_dir auto-includes a docker-compose.override.yml sitting next to the base file" {
+    printf 'IP_STANDARD=192.0.2.10\n' > "$env_file"
+    : > "$install_dir/docker-compose.override.yml"
+
+    run compose_file_args_for_install_dir "$install_dir" "$env_file"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 4 ]
+    [ "${lines[0]}" = "-f" ]
+    [ "${lines[1]}" = "$install_dir/docker-compose.yml" ]
+    [ "${lines[2]}" = "-f" ]
+    [ "${lines[3]}" = "$install_dir/docker-compose.override.yml" ]
+}
+
+@test "compose_file_args_for_install_dir auto-includes a docker-compose.override.yaml sitting next to the base file" {
+    printf 'IP_STANDARD=192.0.2.10\n' > "$env_file"
+    : > "$install_dir/docker-compose.override.yaml"
+
+    run compose_file_args_for_install_dir "$install_dir" "$env_file"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 4 ]
+    [ "${lines[2]}" = "-f" ]
+    [ "${lines[3]}" = "$install_dir/docker-compose.override.yaml" ]
+}
+
+@test "compose_file_args_for_install_dir includes the operator override and the NATS-secondary override together" {
+    : > "$install_dir/docker-compose.override.yml"
+    : > "$install_dir/docker-compose.nats-secondary.yml"
+    printf 'NATS_BIND_IP=192.0.2.5\n' > "$env_file"
+
+    run compose_file_args_for_install_dir "$install_dir" "$env_file"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 6 ]
+    [ "${lines[0]}" = "-f" ]
+    [ "${lines[1]}" = "$install_dir/docker-compose.yml" ]
+    [ "${lines[2]}" = "-f" ]
+    [ "${lines[3]}" = "$install_dir/docker-compose.override.yml" ]
+    [ "${lines[4]}" = "-f" ]
+    [ "${lines[5]}" = "$install_dir/docker-compose.nats-secondary.yml" ]
+}
