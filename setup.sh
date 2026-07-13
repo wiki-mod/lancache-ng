@@ -3035,6 +3035,20 @@ cmd_update_ip() {
     current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env")
     current_ip_ssl=$(get_env_var IP_SSL "$deploy_env")
 
+    # UI_BIND_IP and DHCP_DNS_PRIMARY/SECONDARY default to IP_STANDARD/IP_SSL
+    # at install time (see cmd_setup below) and, for a default quickstart
+    # install, are written into deploy_env as concrete values rather than
+    # staying empty -- Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback never
+    # kicks in. Read them here so the update below can tell "still the
+    # install-time default" apart from "operator set this explicitly" and
+    # only rewrite the former (e.g. 127.0.0.1 or a custom DNS IP survives).
+    local current_ui_bind_ip current_dhcp_mode
+    local current_dhcp_dns_primary current_dhcp_dns_secondary
+    current_ui_bind_ip=$(get_env_var UI_BIND_IP "$deploy_env")
+    current_dhcp_mode=$(get_env_var DHCP_MODE "$deploy_env")
+    current_dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$deploy_env")
+    current_dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$deploy_env")
+
     printf "\n  ${BOLD}Current configuration:${RESET}\n"
     printf "    Standard IP: %s\n" "$current_ip_standard"
     printf "    SSL IP:      %s\n" "$current_ip_ssl"
@@ -3077,6 +3091,38 @@ cmd_update_ip() {
     sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
     print_ok "Updated: $deploy_env"
 
+    # Keep UI_BIND_IP in sync only while it still equals the pre-update
+    # Standard IP -- that is the install-time default (see cmd_setup), so an
+    # unmodified default install would otherwise stay bound to the address
+    # docker-compose.yml just removed. An explicit override such as
+    # 127.0.0.1 will not match current_ip_standard and is left alone. The
+    # `-n` guard also leaves a deliberately empty UI_BIND_IP= untouched: that
+    # empty state already tracks IP_STANDARD automatically via Compose's
+    # ${UI_BIND_IP:-${IP_STANDARD}} fallback (see line ~1114), so rewriting
+    # it here is unnecessary and would just turn it into a fixed value.
+    if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
+        sed -i "s|^UI_BIND_IP=.*|UI_BIND_IP=$new_ip_standard|" "$deploy_env"
+        print_ok "Updated: $deploy_env (UI_BIND_IP)"
+    fi
+
+    # Same idea for the proxy-DHCP/PXE DNS options: DHCP_DNS_PRIMARY/SECONDARY
+    # default to IP_STANDARD/IP_SSL at install time and are only actually
+    # consumed by deploy/quickstart/docker-compose.yml's dhcp-proxy service
+    # when DHCP_MODE=dnsmasq-proxy (the Kea dhcp service re-derives its DNS
+    # options from IP_STANDARD/IP_SSL directly and never goes stale). Only
+    # rewrite values that still match the pre-update defaults so an operator
+    # who pointed proxy-DHCP clients at real DNS servers keeps that choice.
+    if [[ "$current_dhcp_mode" = "dnsmasq-proxy" ]]; then
+        if [[ -n "$current_dhcp_dns_primary" && "$current_dhcp_dns_primary" = "$current_ip_standard" ]]; then
+            sed -i "s|^DHCP_DNS_PRIMARY=.*|DHCP_DNS_PRIMARY=$new_ip_standard|" "$deploy_env"
+            print_ok "Updated: $deploy_env (DHCP_DNS_PRIMARY)"
+        fi
+        if [[ -n "$current_dhcp_dns_secondary" && "$current_dhcp_dns_secondary" = "$current_ip_ssl" ]]; then
+            sed -i "s|^DHCP_DNS_SECONDARY=.*|DHCP_DNS_SECONDARY=$new_ip_ssl|" "$deploy_env"
+            print_ok "Updated: $deploy_env (DHCP_DNS_SECONDARY)"
+        fi
+    fi
+
     # Quickstart installs have no separate dns-standard.env/dns-ssl.env --
     # deploy/quickstart/docker-compose.yml reads PROXY_IP straight from
     # IP_STANDARD/IP_SSL in deploy_env above, so there's nothing more to edit.
@@ -3090,8 +3136,17 @@ cmd_update_ip() {
 
     print_step "Restarting containers"
 
-    (cd "$install_dir" && docker compose --env-file "$deploy_env" -f "$install_dir/docker-compose.yml" up -d) \
-        && print_ok "Stack restarted"
+    # `cmd1 && cmd2` as a bare statement is exempt from set -e when cmd1 is
+    # not the list's last command (verified: `set -e; false && echo hi` does
+    # NOT exit) -- so a failing `docker compose up -d` here would silently
+    # fall through to the "Reconfiguration complete!" banner below even
+    # though the running containers are still bound to the old IPs. Branch
+    # explicitly and die() so a restart failure is fatal and visible.
+    if (cd "$install_dir" && docker compose --env-file "$deploy_env" -f "$install_dir/docker-compose.yml" up -d); then
+        print_ok "Stack restarted"
+    else
+        die "Failed to restart the stack: 'docker compose up -d' exited non-zero. The .env files were already updated with the new IPs, but the running containers may still be bound to the old ones -- fix the issue (e.g. confirm the new IP is assigned to this host) and rerun: docker compose --env-file $deploy_env -f $install_dir/docker-compose.yml up -d"
+    fi
 
     printf "\n"
     printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
