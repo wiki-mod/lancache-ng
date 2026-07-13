@@ -411,6 +411,28 @@ zone. This is called out here as a design question the implementation PR
 must resolve, since JetStream's own message history is itself a form of
 replay log for these changes and may turn out to be part of the answer.
 
+**Known gap: this rollback path assumes the container is reachable.**
+Everything described above — the Admin UI listing zone snapshots, an
+operator picking one, `pdnsutil load-zone` applying it inside the
+`dns-standard`/`dns-ssl` container — depends on an operator (or the Admin
+UI acting on their behalf) actually being able to reach that container,
+whether via `docker exec` or via the Admin UI's own control path against
+it. That assumption is not safe in precisely the scenario this mechanism
+exists to help with: if PowerDNS is crash-looping because its own
+zone/record data is broken — the same class of problem `check-zone` and
+rollback are meant to fix — the container may never stay up long enough
+to be reached, and the rollback tool built to fix that state becomes
+unreachable during the very crash-loop it exists to resolve. This is not
+unique to PowerDNS: the Kea adapter documented above has the identical
+latent gap, since its rollback also goes through a running Kea Control
+Agent. A real fix — a degraded-but-reachable "rescue mode" a
+crash-looping service can come up in specifically so an operator can
+intervene, plus a DAU-readable recovery runbook for this whole document —
+is tracked separately in issue #763 and is explicitly out of scope for
+this design. Until #763 lands, read everything in this section as *the
+rollback mechanism once the container is reachable*, not as a complete
+incident-recovery story for a PowerDNS zone/record crash-loop.
+
 ## Manual recovery
 
 If a service ever exhausts its known-good snapshots (fresh install with no
@@ -435,3 +457,17 @@ in both the `ui` and `dhcp` containers) can be inspected the same way, and a
 chosen one applied manually against the Kea Control Agent API
 (`config-test` → `config-set` → `config-write`, the same three-call
 sequence the Admin UI itself uses).
+
+The PowerDNS zone/record adapter designed above under "Zones, records, and
+TSIG/DDNS metadata" has no equivalent manual-CLI fallback documented here
+yet. Unlike Kea's on-disk snapshot JSON files, there is currently no
+established procedure for inspecting an exported zone snapshot directly and
+hand-applying a `load-zone` outside the Admin UI — largely because the
+export/snapshot mechanism itself does not exist yet; that section is a
+scoped design for a future implementation PR, not running behavior today.
+Once it is implemented, it will still share the same underlying limitation
+called out above: any fallback procedure documented here would still need
+the `dns-standard`/`dns-ssl` container reachable to run `pdnsutil` against
+it at all, which is exactly the gap issue #763 is meant to close. Writing
+that fallback procedure down is therefore deferred to #763 rather than
+invented here ahead of the mechanism it would document.
