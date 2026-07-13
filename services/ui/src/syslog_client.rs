@@ -39,14 +39,22 @@ pub struct SyslogEntry {
 pub struct SyslogHostStats {
     pub host: String,
     pub files: u64,
-    pub lines: u64,
     pub size_bytes: u64,
     // Distinct count of YYYYMMDD file-name prefixes seen for this host, i.e.
     // "aggregate by host/day" collapsed to a count rather than a full
-    // per-day breakdown table -- the size/line/file totals above are already
+    // per-day breakdown table -- the size/file totals above are already
     // per-host, and a full per-day matrix would need line-level timestamp
     // parsing on every compressed file for a dashboard stat nobody asked to
     // drill into, which isn't worth the extra decompression cost.
+    //
+    // No line count here (deliberately removed, see #758 review): counting
+    // non-empty lines requires decompressing every .zst/.gz file, and
+    // get_syslog_stats runs on every /dashboard render (no cache, no
+    // upper bound while the PR3/#757 storage-budget pruning is out of this
+    // branch's scope) -- on an install with GBs of retained history that
+    // turned each dashboard load into a full decompress-everything scan.
+    // files/size_bytes/days above are metadata/filename-only and stay cheap
+    // regardless of retained volume.
     pub days: u64,
 }
 
@@ -54,7 +62,6 @@ pub struct SyslogHostStats {
 pub struct SyslogStats {
     pub hosts: Vec<SyslogHostStats>,
     pub total_files: u64,
-    pub total_lines: u64,
     pub total_size_bytes: u64,
 }
 
@@ -104,13 +111,28 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
     // collected enough lines without opening older (irrelevant) files.
     candidates.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
 
+    // Every host dir that has at least one file must contribute before the
+    // early-break below fires. Without this, a single noisy/most-recently-
+    // touched host's newest file can already satisfy `limit` by itself, so
+    // the loop would stop before ever opening any other host's file --
+    // silently dropping that host from a multi-host merge rather than
+    // interleaving across hosts (see #758 review). This still bounds the
+    // worst case to "one file per host dir with data" before the fast path
+    // can kick in, not a full-store scan.
+    let dirs_with_candidates: HashSet<PathBuf> = candidates
+        .iter()
+        .filter_map(|(path, _)| path.parent().map(PathBuf::from))
+        .collect();
+    let mut hosts_seen: HashSet<PathBuf> = HashSet::new();
+
     let mut collected: Vec<SyslogEntry> = Vec::new();
     for (path, _mtime) in candidates {
-        let host_name = path
-            .parent()
-            .and_then(|p| p.file_name())
+        let host_dir = path.parent().map(PathBuf::from).unwrap_or_default();
+        let host_name = host_dir
+            .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        hosts_seen.insert(host_dir);
         let Some(content) = read_file_transparent(&path) else {
             continue;
         };
@@ -119,7 +141,7 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
                 collected.push(entry);
             }
         }
-        if collected.len() >= limit {
+        if collected.len() >= limit && hosts_seen.len() >= dirs_with_candidates.len() {
             break;
         }
     }
@@ -137,10 +159,15 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
     collected[start..].to_vec()
 }
 
-// Aggregates file count / line count / on-disk size per host, plus a
-// distinct-day count per host, across every file under `log_root`. Full
-// scan, same cost class as nginx_client::get_log_stats's whole-file
-// aggregate read -- not a bounded tail read like parse_syslog_tail above.
+// Aggregates file count / on-disk size per host, plus a distinct-day count
+// per host, across every file under `log_root`. Metadata/filename-only
+// (fs::read_dir + Metadata::len(), no file content is read), unlike
+// nginx_client::get_log_stats's whole-file aggregate read -- content-level
+// stats (e.g. line counts) would require decompressing every .zst/.gz file
+// on every call, which isn't bounded by anything in this branch (the
+// PR3/#757 storage-budget pruning that would cap retained volume is out of
+// scope here), so this deliberately stays metadata-only. Not a bounded tail
+// read like parse_syslog_tail above either -- this always visits every file.
 pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
     let mut stats = SyslogStats::default();
 
@@ -181,9 +208,6 @@ pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
             host_stats.files += 1;
             host_stats.size_bytes += metadata.len();
 
-            if let Some(content) = read_file_transparent(&path) {
-                host_stats.lines += content.lines().filter(|l| !l.trim().is_empty()).count() as u64;
-            }
             if let Some(day) = extract_day(&path) {
                 days.insert(day);
             }
@@ -191,7 +215,6 @@ pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
 
         host_stats.days = days.len() as u64;
         stats.total_files += host_stats.files;
-        stats.total_lines += host_stats.lines;
         stats.total_size_bytes += host_stats.size_bytes;
         stats.hosts.push(host_stats);
     }
@@ -338,7 +361,7 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     // Unique temp dir per test (nanosecond suffix), mirroring
     // nginx_client.rs's temp-file-per-test convention -- `cargo test` runs
@@ -375,6 +398,20 @@ mod tests {
         encoder.write_all(content.as_bytes()).expect("gz write");
         let encoded = encoder.finish().expect("gz finish");
         fs::write(host_dir.join(name), encoded).expect("write gz fixture");
+    }
+
+    // Backdates a fixture file's mtime by `secs_ago` from now, so tests can
+    // deterministically control the newest-mtime-first ordering that
+    // parse_syslog_tail sorts candidates by -- relying on real filesystem
+    // write ordering alone is flaky (mtime resolution can be coarser than
+    // the time between two fs::write calls in a fast test run).
+    fn set_mtime(path: &Path, secs_ago: u64) {
+        let time = SystemTime::now() - Duration::from_secs(secs_ago);
+        let file = File::options()
+            .write(true)
+            .open(path)
+            .expect("open fixture for mtime backdate");
+        file.set_modified(time).expect("set fixture mtime");
     }
 
     #[test]
@@ -461,6 +498,47 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup");
     }
 
+    // Regression test for #758 review: a single host's newest-mtime file
+    // satisfying `limit` on its own must not stop the loop before every
+    // other host with data has had a chance to contribute a file. Before
+    // the fix, the early break fired as soon as `collected.len() >= limit`
+    // regardless of which/how-many hosts had been opened, so hostB below
+    // would be silently dropped from the merge even though it has data.
+    #[test]
+    fn parse_syslog_tail_does_not_starve_other_hosts_when_the_newest_file_alone_satisfies_limit() {
+        let root = temp_root("starve");
+        write_plain(
+            &root,
+            "hostA",
+            "20260713.log",
+            "2026-07-13T10:00:00+00:00 hostA nginx: a1\n\
+             2026-07-13T10:00:01+00:00 hostA nginx: a2\n\
+             2026-07-13T10:00:02+00:00 hostA nginx: a3\n",
+        );
+        write_plain(
+            &root,
+            "hostB",
+            "20260713.log",
+            "2026-07-13T10:00:03+00:00 hostB pdns_server: b1\n",
+        );
+        // hostA is the most-recently-touched file in the whole store (mtime
+        // "now"), hostB's file is older by mtime -- exactly the scenario
+        // that let hostA alone starve hostB pre-fix.
+        set_mtime(&root.join("hostA").join("20260713.log"), 0);
+        set_mtime(&root.join("hostB").join("20260713.log"), 60);
+
+        let entries = parse_syslog_tail(root.to_str().unwrap(), None, 2);
+        let hosts: Vec<&str> = entries.iter().map(|e| e.host.as_str()).collect();
+        assert!(
+            hosts.contains(&"hostB"),
+            "hostB must be represented in the merged tail even though \
+             hostA's (newer-mtime) file alone already had >= limit lines; \
+             got {hosts:?}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
     #[test]
     fn parse_syslog_tail_respects_limit_and_keeps_the_most_recent_lines() {
         let root = temp_root("limit");
@@ -512,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn get_syslog_stats_aggregates_files_lines_and_size_per_host() {
+    fn get_syslog_stats_aggregates_files_and_size_per_host() {
         let root = temp_root("stats");
         write_plain(
             &root,
@@ -536,7 +614,7 @@ mod tests {
 
         let stats = get_syslog_stats(root.to_str().unwrap());
         assert_eq!(stats.total_files, 3);
-        assert_eq!(stats.total_lines, 4);
+        assert!(stats.total_size_bytes > 0);
         assert_eq!(stats.hosts.len(), 2);
 
         let host_a = stats
@@ -545,7 +623,6 @@ mod tests {
             .find(|h| h.host == "hostA")
             .expect("hostA present");
         assert_eq!(host_a.files, 2);
-        assert_eq!(host_a.lines, 3);
         assert_eq!(host_a.days, 2);
 
         let host_b = stats
@@ -554,14 +631,21 @@ mod tests {
             .find(|h| h.host == "hostB")
             .expect("hostB present");
         assert_eq!(host_b.files, 1);
-        assert_eq!(host_b.lines, 1);
         assert_eq!(host_b.days, 1);
 
         fs::remove_dir_all(root).expect("cleanup");
     }
 
+    // Regression test for #758 review: get_syslog_stats must count
+    // compressed files by metadata alone (fs::read_dir + Metadata::len()),
+    // never decompress their content, since a dashboard-tile stat running
+    // on every render can't afford to decode a whole store's worth of
+    // .zst/.gz history per request. There is no line count to assert on
+    // anymore (that field was removed for the same reason) -- this test
+    // instead confirms file/size/day metadata is still collected correctly
+    // for compressed files without needing to read their content.
     #[test]
-    fn get_syslog_stats_counts_lines_through_compressed_files_too() {
+    fn get_syslog_stats_counts_compressed_files_by_metadata_only() {
         let root = temp_root("stats-compressed");
         write_zst(
             &root,
@@ -579,7 +663,13 @@ mod tests {
 
         let stats = get_syslog_stats(root.to_str().unwrap());
         assert_eq!(stats.total_files, 2);
-        assert_eq!(stats.total_lines, 3);
+        assert!(stats.total_size_bytes > 0);
+        let host_a = stats
+            .hosts
+            .iter()
+            .find(|h| h.host == "hostA")
+            .expect("hostA present");
+        assert_eq!(host_a.days, 2);
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -589,7 +679,7 @@ mod tests {
         let root = temp_root("stats-missing");
         let stats = get_syslog_stats(root.to_str().unwrap());
         assert_eq!(stats.total_files, 0);
-        assert_eq!(stats.total_lines, 0);
+        assert_eq!(stats.total_size_bytes, 0);
         assert!(stats.hosts.is_empty());
     }
 

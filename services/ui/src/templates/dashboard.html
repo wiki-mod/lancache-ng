@@ -146,7 +146,7 @@
       </div>
       <span class="text-xs text-slate-500 font-mono">{{ syslog_size_gb }} / {{ syslog_max_gb }} GB</span>
     </div>
-    <p class="text-xs text-slate-500">{{ syslog_stats.total_lines }} lines total. Retention is enforced by watchdog's storage-budget pruning, not this page.</p>
+    <p class="text-xs text-slate-500">Storage-budget retention is watchdog's responsibility, not this page's.</p>
   </div>
   {% endif %}
 
