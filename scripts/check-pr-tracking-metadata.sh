@@ -26,6 +26,13 @@
 #   GITHUB_TOKEN cannot read Projects v2 data (same constraint documented
 #   in gc-pr-staging-images.yml for GHCR_PACKAGE_DELETE_PAT), so without
 #   a configured token this check is skipped with a warning, not failed.
+#   Once a token IS supplied, a rejected/invalid/insufficient-scope token
+#   (HTTP 401/403, or a GraphQL response body with a top-level "errors"
+#   array) fails the check instead of warning -- that's a configuration
+#   problem with the secret itself, not the documented no-token gap, and
+#   should not silently disable the project-board gate. Only a genuine
+#   infrastructure hiccup (other non-200 statuses, an unparseable-but-non-
+#   error response) still degrades to a warning.
 #
 # Runs inside the build-tools container in CI (per AG-VAL-016 -- python3
 # and curl below must not be host-local tools), not directly on the runner;
@@ -83,7 +90,16 @@ print(json.dumps({"query": q, "variables": {"owner": "'"$project_owner"'", "pr":
         -H "Content-Type: application/json" \
         -d "$query" \
         "https://api.github.com/graphql") || status="000"
-    if [ "$status" != "200" ]; then
+    if [ "$status" = "401" ] || [ "$status" = "403" ]; then
+        # A token was supplied and GitHub rejected it outright (expired,
+        # revoked, or missing the required scope) -- this is a configuration
+        # problem with the token itself, not an infrastructure blip, and not
+        # the documented "no token configured" gap this check already warns
+        # about above. Failing loudly here is what actually catches a broken
+        # PROJECT_AUTOMATION_PAT instead of silently disabling the
+        # project-board gate for every PR until someone notices the warning.
+        errors+=("Project-board lookup rejected (HTTP $status): the configured token (PROJECT_AUTOMATION_PAT) was rejected or lacks the required read:project scope. A token was supplied, so this is a configuration problem, not the absent-token gap documented in AG-GH-008's enforcement notes -- fix or rotate the secret.")
+    elif [ "$status" != "200" ]; then
         warnings+=("Could not query project-board membership (HTTP $status) -- not failing the check on an infrastructure issue, but this should be investigated.")
     else
         # Read the response over stdin rather than having Python open
@@ -93,16 +109,27 @@ print(json.dumps({"query": q, "variables": {"owner": "'"$project_owner"'", "pr":
         # /tmp/... isn't the same filesystem view native Python sees) --
         # piping keeps path resolution entirely inside the shell that
         # already wrote the file.
+        #
+        # GitHub's GraphQL endpoint can return HTTP 200 with a top-level
+        # "errors" array for some auth/scope failures (not just via a 401/403
+        # status) -- that's still a configured-but-broken token, so it's
+        # reported as TOKEN_ERROR and handled below as a hard failure rather
+        # than falling into the generic "could not parse" warning path.
         project_item_count=$(python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
-    nodes = d['data']['repository']['pullRequest']['projectItems']['nodes']
-    print(sum(1 for n in nodes if n['project']['number'] == $project_number))
+    if 'errors' in d:
+        print('TOKEN_ERROR')
+    else:
+        nodes = d['data']['repository']['pullRequest']['projectItems']['nodes']
+        print(sum(1 for n in nodes if n['project']['number'] == $project_number))
 except Exception:
     print('')
 " < "$response_file")
-        if [ -z "$project_item_count" ]; then
+        if [ "$project_item_count" = "TOKEN_ERROR" ]; then
+            errors+=("Project-board lookup failed: the GraphQL response contained an error (commonly an invalid/expired token or a token missing read:project scope). A token was supplied, so this is a configuration problem -- fix or rotate PROJECT_AUTOMATION_PAT (see AG-GH-008 enforcement notes).")
+        elif [ -z "$project_item_count" ]; then
             warnings+=("Could not parse project-board membership response -- not failing the check on an infrastructure issue, but this should be investigated.")
         elif [ "$project_item_count" -eq 0 ]; then
             errors+=("Not on project board #$project_number ($project_owner). Add it with: gh project item-add $project_number --owner $project_owner --url <pr-url> (see AG-GH-008).")
