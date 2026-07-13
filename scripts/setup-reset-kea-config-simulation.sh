@@ -90,6 +90,26 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    # Reported for real on a shared self-hosted runner (not hypothetical):
+    # services/dhcp/entrypoint.sh runs as root inside the Kea container and
+    # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
+    # uid (10001, see that entrypoint and dhcp-kea-ctrl-agent-mutation-
+    # simulation.sh's identical comment on its own kea-data mount). Left
+    # as-is, the plain `rm -rf "$work_dir"` below silently fails to remove
+    # those now-root/10001-owned files, leaving them on disk under this
+    # runner's own actions-runner work directory -- which then made a LATER
+    # job's `actions/checkout` on the same runner slot fail outright trying
+    # to clean its workspace (EACCES: permission denied, rmdir ...),
+    # blocking an unrelated PR's CI run. Reset ownership back to this
+    # process's own uid/gid via the already-built (no extra pull) Kea image
+    # -- unconditionally, in this EXIT trap, so it runs whether the
+    # simulation above succeeded or failed, not just on the happy path --
+    # before ever touching rm -rf.
+    if [[ -d "$work_dir" ]]; then
+        docker run --rm --entrypoint chown \
+            -v "$work_dir:/reset-owner" \
+            "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1 || true
+    fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
     exit "$status"
