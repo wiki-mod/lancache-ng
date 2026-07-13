@@ -992,6 +992,14 @@ pub async fn add_subnet(
         lease_time: &form.lease_time,
     })
     .map_err(DhcpError::from)?;
+    // Resolved here, before the sync kea_config_modify closure below (which
+    // cannot itself await), so a hostname that doesn't resolve is reported
+    // as a clear 400 instead of either reaching Kea unresolved (#670) or
+    // requiring build_subnet_options -- called from inside that closure --
+    // to become async.
+    let ntp_servers = resolve_ntp_servers(&form.ntp_servers)
+        .await
+        .map_err(|message| DhcpError::new(StatusCode::BAD_REQUEST, message))?;
 
     kea_config_modify(&state, move |config| {
         // Each `.ok_or(...)?` names exactly which part of the expected
@@ -1021,7 +1029,7 @@ pub async fn add_subnet(
             gateway: form.gateway,
             dns_primary: form.dns_primary,
             dns_secondary: form.dns_secondary,
-            ntp_servers: form.ntp_servers,
+            ntp_servers,
             domain: form.domain,
             lease_time,
             editable_options: Vec::new(),
@@ -1061,6 +1069,12 @@ pub async fn update_subnet(
     })
     .map_err(DhcpError::from)?;
     let subnet_id = form.id;
+    // See add_subnet's identical resolve_ntp_servers call for why this
+    // happens here rather than inside the sync kea_config_modify closure
+    // below or inside validate_dhcp_form.
+    let ntp_servers = resolve_ntp_servers(&form.ntp_servers)
+        .await
+        .map_err(|message| DhcpError::new(StatusCode::BAD_REQUEST, message))?;
 
     kea_config_modify(&state, move |config| {
         // Same per-field-named navigation as add_subnet above.
@@ -1086,7 +1100,7 @@ pub async fn update_subnet(
                 gateway: form.gateway,
                 dns_primary: form.dns_primary,
                 dns_secondary: form.dns_secondary,
-                ntp_servers: form.ntp_servers,
+                ntp_servers,
                 domain: form.domain,
                 lease_time,
                 editable_options: preserved_subnet_options(entry),
@@ -2771,6 +2785,115 @@ fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
 }
 
+// One entry of a parsed NTP server list, split into the three shapes
+// resolve_ntp_servers below has to handle differently: an entry that is
+// already the IPv4 literal Kea's ntp-servers option-42 data requires
+// (written straight through), one that names a host and therefore needs a
+// DNS lookup first, or one that only looks like a botched IPv4 literal
+// (digits and dots, but not a valid a.b.c.d address -- e.g. "1.2.3" or
+// "999999999") and must be rejected outright rather than handed to DNS.
+// Kept as a separate, pure classification step -- rather than inlining the
+// `Ipv4Addr::from_str` check into the async resolver -- so this decision is
+// unit-testable without a resolver or network access, mirroring
+// nginx_client.rs's split between IO (e.g. get_stub_status) and its pure
+// parsing helper (parse_stub_status).
+#[derive(Debug, PartialEq)]
+enum NtpServerEntry {
+    Ipv4(Ipv4Addr),
+    Hostname(String),
+    MalformedAddress(String),
+}
+
+// A digit-and-dot-only token is never a legitimate DNS hostname (real
+// hostname labels always contain a letter), so once it has already failed
+// strict `Ipv4Addr::from_str` parsing, the only thing it can be is a typo'd
+// IPv4 literal (e.g. "1.2.3" or "999999999"). Whether the OS resolver would
+// accept such legacy/non-standard numeric syntax and silently return some
+// IPv4 for it is platform- and NSS-config-dependent and not something this
+// code should rely on either way -- routing it through classify_ntp_entry's
+// Hostname branch would risk exactly that: writing an unintended NTP server
+// where Kea's own strict "ipv4-address" option-42 validation would
+// previously have rejected the config outright with a clear error. Treating
+// it as MalformedAddress instead keeps that same fail-fast, typo-catching
+// behavior, just surfaced as this project's own 400 instead of Kea's.
+//
+// Deliberate tradeoff: a bare all-digit token like "123" is also rejected
+// here even though it is technically a valid DNS label -- it was never a
+// valid Kea ntp-servers entry before this PR either (Kea requires a real
+// IPv4 literal), and as a "hostname" it would be exceptionally unusual, so
+// failing fast on it matches user intent far more often than not. Hex
+// (`0x7f000001`) forms are not covered here -- Rust's `Ipv4Addr::from_str`
+// already rejects those as invalid, so they fall into this same digit-only
+// check when hex digits happen to be pure ASCII digits, but genuine hex
+// letters (a-f) will still be classified as Hostname; this is a known,
+// narrow gap, not something #670 or its review asked to be closed.
+fn looks_like_malformed_ipv4(entry: &str) -> bool {
+    !entry.is_empty() && entry.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+fn classify_ntp_entry(entry: &str) -> NtpServerEntry {
+    match Ipv4Addr::from_str(entry) {
+        Ok(addr) => NtpServerEntry::Ipv4(addr),
+        Err(_) if looks_like_malformed_ipv4(entry) => {
+            NtpServerEntry::MalformedAddress(entry.to_string())
+        }
+        Err(_) => NtpServerEntry::Hostname(entry.to_string()),
+    }
+}
+
+// Resolves every entry of a comma/whitespace-separated NTP server list to an
+// IPv4 literal before it is written into Kea's ntp-servers option-data.
+// Mirrors entrypoint.sh's resolve_ntp_csv/resolve_ntp_server, which already
+// perform this same resolution for the INITIAL Kea config rendered from
+// DHCP_NTP_SERVERS (#310/PR#311) -- this is the missing counterpart for the
+// Admin UI's live add_subnet/update_subnet mutation path (#670), which
+// otherwise writes DHCP_NTP_SERVERS' shipped default
+// ("debian.pool.ntp.org,time.nist.gov") straight into Kea's option-42 data
+// and lets Kea reject it with its own confusing config-set error instead of
+// this project ever resolving it or explaining the failure.
+//
+// `tokio::net::lookup_host` is used rather than a new resolver dependency:
+// it is backed by the OS resolver (getaddrinfo), the same NSS-based lookup
+// `getent` performs on the bash side, and `tokio` (with the "full" feature,
+// already a dependency here) already ships it. A lookup target needs a port
+// per `ToSocketAddrs`'s contract, hence the harmless `:0` suffix -- it is
+// never connected to, only resolved.
+//
+// Only the first IPv4 result of a hostname's lookup is kept: Kea's option 42
+// is IPv4-only, so an AAAA-only answer is treated the same as no answer at
+// all, producing the same clear, entry-naming error as an NXDOMAIN would --
+// surfaced as a 400 from this project's own code, before the value ever
+// reaches Kea's Control Agent.
+async fn resolve_ntp_servers(raw: &str) -> Result<String, String> {
+    let mut resolved = Vec::new();
+
+    for entry in parse_ntp_server_list(raw) {
+        let ipv4 = match classify_ntp_entry(&entry) {
+            NtpServerEntry::Ipv4(addr) => addr,
+            NtpServerEntry::MalformedAddress(bad) => {
+                return Err(format!("NTP server '{bad}' is not a valid IPv4 address"));
+            }
+            NtpServerEntry::Hostname(host) => {
+                let lookup_target = format!("{host}:0");
+                let mut addrs = tokio::net::lookup_host(lookup_target).await.map_err(|_| {
+                    format!("NTP server '{host}' is not an IPv4 address and could not be resolved via DNS")
+                })?;
+                addrs
+                    .find_map(|addr| match addr.ip() {
+                        std::net::IpAddr::V4(ip) => Some(ip),
+                        std::net::IpAddr::V6(_) => None,
+                    })
+                    .ok_or_else(|| {
+                        format!("NTP server '{host}' resolved but has no IPv4 address")
+                    })?
+            }
+        };
+        resolved.push(ipv4.to_string());
+    }
+
+    Ok(resolved.join(", "))
+}
+
 // Converts one Kea subnet4 JSON entry back into the Subnet read-model for
 // display. The inner `opt` closure looks up a built-in option by name OR by
 // its well-known code, since a subnet's option-data can specify either form
@@ -3519,6 +3642,96 @@ mod tests {
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    // #670: classify_ntp_entry is the pure decision resolve_ntp_servers
+    // relies on to know which entries need a DNS lookup at all -- pinning
+    // it directly (IPv4 literal vs. hostname, for both the shipped default
+    // hostnames and a bare local hostname with no dots) keeps that decision
+    // testable without a resolver or network access, per this file's
+    // IO/pure split convention (see resolve_ntp_servers's own doc comment).
+    #[test]
+    fn classify_ntp_entry_distinguishes_ipv4_literals_from_hostnames() {
+        assert_eq!(
+            classify_ntp_entry("198.51.100.4"),
+            NtpServerEntry::Ipv4(Ipv4Addr::new(198, 51, 100, 4))
+        );
+        assert_eq!(
+            classify_ntp_entry("debian.pool.ntp.org"),
+            NtpServerEntry::Hostname("debian.pool.ntp.org".to_string())
+        );
+        assert_eq!(
+            classify_ntp_entry("time.nist.gov"),
+            NtpServerEntry::Hostname("time.nist.gov".to_string())
+        );
+        // No dots at all is still a hostname, not a malformed IPv4 -- e.g. an
+        // NTP server reachable by a bare local/mDNS name.
+        assert_eq!(
+            classify_ntp_entry("ntp-server"),
+            NtpServerEntry::Hostname("ntp-server".to_string())
+        );
+    }
+
+    // Codex review on #749/PR (P2): a digit-and-dot-only token that fails
+    // strict IPv4 parsing (a typo'd address, not a hostname -- real hostname
+    // labels always contain a letter) must be classified as
+    // MalformedAddress, not Hostname, so resolve_ntp_servers rejects it with
+    // a clear error up front instead of handing it to the OS resolver, whose
+    // handling of non-standard numeric syntax is platform-dependent and not
+    // something this project should rely on.
+    #[test]
+    fn classify_ntp_entry_rejects_malformed_numeric_addresses() {
+        assert_eq!(
+            classify_ntp_entry("1.2.3"),
+            NtpServerEntry::MalformedAddress("1.2.3".to_string())
+        );
+        assert_eq!(
+            classify_ntp_entry("999999999"),
+            NtpServerEntry::MalformedAddress("999999999".to_string())
+        );
+        // Five octets is just as clearly a botched IPv4 literal as three.
+        assert_eq!(
+            classify_ntp_entry("198.51.100.4.5"),
+            NtpServerEntry::MalformedAddress("198.51.100.4.5".to_string())
+        );
+    }
+
+    // #670: an all-IPv4-literal list must resolve without ever touching the
+    // network (classify_ntp_entry keeps every entry on the Ipv4 branch), so
+    // this is safe to run in a sandboxed/offline CI runner while still
+    // exercising resolve_ntp_servers' actual async path end to end,
+    // including the "a, b" join format build_subnet_options expects.
+    #[tokio::test]
+    async fn resolve_ntp_servers_passes_through_ipv4_literals_without_dns() {
+        let resolved = resolve_ntp_servers("198.51.100.4, 198.51.100.5")
+            .await
+            .expect("all-IPv4 input must resolve");
+        assert_eq!(resolved, "198.51.100.4, 198.51.100.5");
+    }
+
+    // Codex review on #749/PR (P2): mirrors the classify_ntp_entry test
+    // above but through the actual async resolve_ntp_servers entry point,
+    // confirming the malformed entry is rejected before any DNS lookup is
+    // attempted (classify_ntp_entry keeps it off the Hostname branch
+    // entirely), so this is safe to run offline too.
+    #[tokio::test]
+    async fn resolve_ntp_servers_rejects_malformed_numeric_address() {
+        let err = resolve_ntp_servers("198.51.100.4, 1.2.3")
+            .await
+            .expect_err("malformed numeric address must not resolve");
+        assert_eq!(err, "NTP server '1.2.3' is not a valid IPv4 address");
+    }
+
+    // Mirrors format_ntp_server_option's own empty-input contract (empty in,
+    // empty out, never an error) so add_subnet/update_subnet's "no NTP
+    // servers configured" case still ends up with no ntp-servers option in
+    // the built Kea subnet, exactly as before this issue's fix.
+    #[tokio::test]
+    async fn resolve_ntp_servers_empty_input_yields_empty_string() {
+        let resolved = resolve_ntp_servers("")
+            .await
+            .expect("empty input is not an error");
+        assert_eq!(resolved, "");
     }
 
     // This test opens the cluster covering kea_config_modify_with_post's

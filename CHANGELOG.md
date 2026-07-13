@@ -226,6 +226,18 @@ is real, live, running code, not just work sitting in source control.
   matching the pattern already used by `recursor.conf.template`'s own REST
   API `allow_from` (port 8082). Standard installs (Docker's default
   `172.17.0.0/16`–`172.31.0.0/16` pools) were never affected (#654).
+- Fixed the Admin UI's `/dhcp` add-subnet and update-subnet forms sending an
+  unresolved NTP hostname straight into Kea's `ntp-servers` option-data,
+  which Kea's own IPv4-only validation for that option then rejected at
+  `config-set` time. `services/dhcp/entrypoint.sh` already resolved
+  `DHCP_NTP_SERVERS` hostnames to IPv4 for the initial Kea config (#310), but
+  the Admin UI's live mutation path had no equivalent step, so a stock
+  install's shipped default (`debian.pool.ntp.org,time.nist.gov`,
+  pre-filled into the form) failed on first save unless an operator manually
+  replaced it with raw IPs. Both routes now resolve each NTP entry via the
+  OS resolver before writing the subnet, returning a clear 400 naming the
+  offending hostname if it can't be resolved to an IPv4 address, instead of
+  Kea's own opaque config-set error (#670).
 - Fixed `build-tools.yml`'s branch-triggered publish path writing an
   unconditional, bare branch-name-derived mutable tag to the `build-tools`
   GHCR package. Because the integration branch is literally named `v0.2.0`,
