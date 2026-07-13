@@ -250,6 +250,19 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed Kea DHCP (`kea-dhcp4`, `kea-ctrl-agent`, `kea-dhcp-ddns`) failing to
+  start at all once the `logging` profile's file-log wiring (#633/#756) was
+  active. Kea's packaged binaries hard-restrict file-logger `output` paths
+  to exactly `/var/log/kea` (a security hardening against arbitrary file
+  writes via a malicious `config-set`); #756 pointed all three daemons'
+  file loggers at `/var/log/lancache-dhcp/*.log` instead, following this
+  project's usual per-service naming convention, which Kea rejects at
+  config-load time with "invalid path in `output`" -- a full outage for any
+  install with the `logging` profile enabled, not just a missing log
+  stream. Both the static configs and `migrate_dhcp4_config()`'s upgrade
+  path now write to `/var/log/kea/*.log`, and the `dhcp-logs` volume mount
+  plus fluent-bit's tail source were remapped to match in all three Compose
+  files (#773).
 - Fixed the PowerDNS authoritative server's `webserver-allow-from` in
   `services/dns/pdns.conf.template` only permitting `127.0.0.1` and
   `172.16.0.0/12` — Docker's default address-pool range. Operators who

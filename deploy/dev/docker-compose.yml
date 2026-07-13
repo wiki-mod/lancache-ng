@@ -243,7 +243,7 @@ services:
       - kea-data:/var/lib/kea    # runtime config + leases persist across restarts
       # Central logging pipeline (#633): Kea's loggers dual-write here (see
       # kea-dhcp4.conf.template's "output-options") in addition to stdout.
-      - dhcp-logs:/var/log/lancache-dhcp
+      - dhcp-logs:/var/log/kea
     ports:
       - "67:67/udp"      # DHCP
       - "127.0.0.1:8000:8000"  # Kea Control Agent API (localhost only in dev)
@@ -670,7 +670,7 @@ services:
       - -i
       - tail
       - -p
-      - path=/var/log/lancache-dhcp/*.log
+      - path=/var/log/kea/*.log
       - -p
       - tag=dhcp.syslog
       - -p
@@ -941,7 +941,7 @@ services:
       - syslog-data:/data
       - dns-logs-standard:/var/log/lancache-dns-standard:ro
       - dns-logs-ssl:/var/log/lancache-dns-ssl:ro
-      - dhcp-logs:/var/log/lancache-dhcp:ro
+      - dhcp-logs:/var/log/kea:ro
       - dhcp-proxy-logs:/var/log/lancache-dhcp-proxy:ro
       - ui-logs:/var/log/lancache-ui:ro
       - watchdog-logs:/var/log/lancache-watchdog:ro
