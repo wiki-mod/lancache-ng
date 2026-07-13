@@ -2785,24 +2785,58 @@ fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
 }
 
-// One entry of a parsed NTP server list, split into the two shapes
+// One entry of a parsed NTP server list, split into the three shapes
 // resolve_ntp_servers below has to handle differently: an entry that is
 // already the IPv4 literal Kea's ntp-servers option-42 data requires
-// (written straight through), versus one that names a host and therefore
-// needs a DNS lookup first. Kept as a separate, pure classification step --
-// rather than inlining the `Ipv4Addr::from_str` check into the async
-// resolver -- so this decision is unit-testable without a resolver or
-// network access, mirroring nginx_client.rs's split between IO (e.g.
-// get_stub_status) and its pure parsing helper (parse_stub_status).
+// (written straight through), one that names a host and therefore needs a
+// DNS lookup first, or one that only looks like a botched IPv4 literal
+// (digits and dots, but not a valid a.b.c.d address -- e.g. "1.2.3" or
+// "999999999") and must be rejected outright rather than handed to DNS.
+// Kept as a separate, pure classification step -- rather than inlining the
+// `Ipv4Addr::from_str` check into the async resolver -- so this decision is
+// unit-testable without a resolver or network access, mirroring
+// nginx_client.rs's split between IO (e.g. get_stub_status) and its pure
+// parsing helper (parse_stub_status).
 #[derive(Debug, PartialEq)]
 enum NtpServerEntry {
     Ipv4(Ipv4Addr),
     Hostname(String),
+    MalformedAddress(String),
+}
+
+// A digit-and-dot-only token is never a legitimate DNS hostname (real
+// hostname labels always contain a letter), so once it has already failed
+// strict `Ipv4Addr::from_str` parsing, the only thing it can be is a typo'd
+// IPv4 literal (e.g. "1.2.3" or "999999999"). Whether the OS resolver would
+// accept such legacy/non-standard numeric syntax and silently return some
+// IPv4 for it is platform- and NSS-config-dependent and not something this
+// code should rely on either way -- routing it through classify_ntp_entry's
+// Hostname branch would risk exactly that: writing an unintended NTP server
+// where Kea's own strict "ipv4-address" option-42 validation would
+// previously have rejected the config outright with a clear error. Treating
+// it as MalformedAddress instead keeps that same fail-fast, typo-catching
+// behavior, just surfaced as this project's own 400 instead of Kea's.
+//
+// Deliberate tradeoff: a bare all-digit token like "123" is also rejected
+// here even though it is technically a valid DNS label -- it was never a
+// valid Kea ntp-servers entry before this PR either (Kea requires a real
+// IPv4 literal), and as a "hostname" it would be exceptionally unusual, so
+// failing fast on it matches user intent far more often than not. Hex
+// (`0x7f000001`) forms are not covered here -- Rust's `Ipv4Addr::from_str`
+// already rejects those as invalid, so they fall into this same digit-only
+// check when hex digits happen to be pure ASCII digits, but genuine hex
+// letters (a-f) will still be classified as Hostname; this is a known,
+// narrow gap, not something #670 or its review asked to be closed.
+fn looks_like_malformed_ipv4(entry: &str) -> bool {
+    !entry.is_empty() && entry.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
 }
 
 fn classify_ntp_entry(entry: &str) -> NtpServerEntry {
     match Ipv4Addr::from_str(entry) {
         Ok(addr) => NtpServerEntry::Ipv4(addr),
+        Err(_) if looks_like_malformed_ipv4(entry) => {
+            NtpServerEntry::MalformedAddress(entry.to_string())
+        }
         Err(_) => NtpServerEntry::Hostname(entry.to_string()),
     }
 }
@@ -2836,6 +2870,9 @@ async fn resolve_ntp_servers(raw: &str) -> Result<String, String> {
     for entry in parse_ntp_server_list(raw) {
         let ipv4 = match classify_ntp_entry(&entry) {
             NtpServerEntry::Ipv4(addr) => addr,
+            NtpServerEntry::MalformedAddress(bad) => {
+                return Err(format!("NTP server '{bad}' is not a valid IPv4 address"));
+            }
             NtpServerEntry::Hostname(host) => {
                 let lookup_target = format!("{host}:0");
                 let mut addrs = tokio::net::lookup_host(lookup_target).await.map_err(|_| {
@@ -3635,6 +3672,30 @@ mod tests {
         );
     }
 
+    // Codex review on #749/PR (P2): a digit-and-dot-only token that fails
+    // strict IPv4 parsing (a typo'd address, not a hostname -- real hostname
+    // labels always contain a letter) must be classified as
+    // MalformedAddress, not Hostname, so resolve_ntp_servers rejects it with
+    // a clear error up front instead of handing it to the OS resolver, whose
+    // handling of non-standard numeric syntax is platform-dependent and not
+    // something this project should rely on.
+    #[test]
+    fn classify_ntp_entry_rejects_malformed_numeric_addresses() {
+        assert_eq!(
+            classify_ntp_entry("1.2.3"),
+            NtpServerEntry::MalformedAddress("1.2.3".to_string())
+        );
+        assert_eq!(
+            classify_ntp_entry("999999999"),
+            NtpServerEntry::MalformedAddress("999999999".to_string())
+        );
+        // Five octets is just as clearly a botched IPv4 literal as three.
+        assert_eq!(
+            classify_ntp_entry("198.51.100.4.5"),
+            NtpServerEntry::MalformedAddress("198.51.100.4.5".to_string())
+        );
+    }
+
     // #670: an all-IPv4-literal list must resolve without ever touching the
     // network (classify_ntp_entry keeps every entry on the Ipv4 branch), so
     // this is safe to run in a sandboxed/offline CI runner while still
@@ -3646,6 +3707,19 @@ mod tests {
             .await
             .expect("all-IPv4 input must resolve");
         assert_eq!(resolved, "198.51.100.4, 198.51.100.5");
+    }
+
+    // Codex review on #749/PR (P2): mirrors the classify_ntp_entry test
+    // above but through the actual async resolve_ntp_servers entry point,
+    // confirming the malformed entry is rejected before any DNS lookup is
+    // attempted (classify_ntp_entry keeps it off the Hostname branch
+    // entirely), so this is safe to run offline too.
+    #[tokio::test]
+    async fn resolve_ntp_servers_rejects_malformed_numeric_address() {
+        let err = resolve_ntp_servers("198.51.100.4, 1.2.3")
+            .await
+            .expect_err("malformed numeric address must not resolve");
+        assert_eq!(err, "NTP server '1.2.3' is not a valid IPv4 address");
     }
 
     // Mirrors format_ntp_server_option's own empty-input contract (empty in,
