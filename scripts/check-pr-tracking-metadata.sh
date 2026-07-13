@@ -26,6 +26,10 @@
 #   GITHUB_TOKEN cannot read Projects v2 data (same constraint documented
 #   in gc-pr-staging-images.yml for GHCR_PACKAGE_DELETE_PAT), so without
 #   a configured token this check is skipped with a warning, not failed.
+#
+# Runs inside the build-tools container in CI (per AG-VAL-016 -- python3
+# and curl below must not be host-local tools), not directly on the runner;
+# see the pr-tracking-metadata-check job in build-push.yml.
 set -euo pipefail
 
 pr_draft="${PR_DRAFT:-false}"

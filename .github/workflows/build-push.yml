@@ -259,9 +259,20 @@ jobs:
     # api.github.com, no self-hosted-specific resource needed -- but kept
     # on the self-hosted pool as the primary job with a hosted fallback
     # below, matching every other zero-LAN check in this file.
+    #
+    # check-pr-tracking-metadata.sh runs python3 (JSON parsing) and curl (the
+    # project-board GraphQL call) -- per AG-VAL-016, host-local tools on the
+    # runner must be treated as absent/stale, so this executes inside the
+    # same pinned build-tools image validate-compose already resolved for
+    # this run, the same pattern shellcheck/check-governance-guards.sh use,
+    # rather than relying on whatever python3/curl happen to be on
+    # lancache-light.
     name: PR tracking metadata (labels/milestone/project)
     if: github.event_name == 'pull_request'
+    needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Validate labels, milestone, and project-board placement
@@ -272,7 +283,20 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-        run: bash scripts/check-pr-tracking-metadata.sh
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e PR_LABELS_JSON \
+            -e PR_MILESTONE_TITLE \
+            -e PR_DRAFT \
+            -e PR_NUMBER \
+            -e REPO \
+            -e GH_TOKEN \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-pr-tracking-metadata.sh
 
   pr-tracking-metadata-check-hosted:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
@@ -280,6 +304,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Select build-tools image
+        # This fallback job must resolve its own image rather than depending
+        # on validate-compose's output (like the self-hosted job above does)
+        # -- it exists specifically for when self-hosted runners (and
+        # anything that depends on them, including validate-compose) are
+        # unavailable, so a needs: dependency on that job would defeat the
+        # fallback's purpose. Matches shellcheck-hosted's own resolution step.
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -291,7 +327,20 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-        run: bash scripts/check-pr-tracking-metadata.sh
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e PR_LABELS_JSON \
+            -e PR_MILESTONE_TITLE \
+            -e PR_DRAFT \
+            -e PR_NUMBER \
+            -e REPO \
+            -e GH_TOKEN \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-pr-tracking-metadata.sh
 
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
