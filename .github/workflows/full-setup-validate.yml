@@ -737,6 +737,70 @@ jobs:
           set -euo pipefail
           bash scripts/dhcp-kea-lease-flow-simulation.sh
 
+  dhcp-proxy-pxe-simulation:
+    # Real DHCP behavior test for our own dnsmasq-proxy ProxyDHCP/PXE mode
+    # (issue #705) -- the dnsmasq-proxy service is explicitly called out as
+    # out of scope by dhcp-kea-lease-flow-simulation.sh's own header comment
+    # above ("The dnsmasq-proxy DHCP mode ... entirely different code path,
+    # out of scope for this script"), and no other check in this repo drives
+    # it with a real PXE-tagged client either: services/ui/dhcp-probe.sh's
+    # #377 check never sets DHCP option 60 (vendor class = "PXEClient"), so
+    # it can never exercise dnsmasq's ProxyDHCP reply path at all. Builds a
+    # throwaway dnsmasq-proxy container from THIS checkout's
+    # services/dhcp-proxy on a dedicated, isolated Docker bridge network it
+    # creates and destroys itself (never the full-setup-validate compose
+    # project's network, and never a host interface), then drives a real,
+    # synthetically-crafted PXE client (scapy, since no off-the-shelf DHCP
+    # client can send a real PXE-tagged DHCPDISCOVER) against it for legacy
+    # BIOS and both covered UEFI architecture codes, asserting each receives
+    # a DHCPOFFER carrying the operator-configured external PXE boot server
+    # address, the architecture-appropriate boot filename, and the LanCache
+    # NG DNS servers -- plus a negative case confirming an ordinary,
+    # non-PXE-tagged DISCOVER still receives no reply at all. See
+    # scripts/dhcp-proxy-pxe-simulation.sh's own header comment and
+    # docs/dhcp-modes.md for exactly what is and is not verified (PXE menu
+    # behavior and a real TFTP/HTTP transfer against the external boot
+    # server are both explicitly out of scope -- this project only ever
+    # hands out a pointer to an operator's own existing infrastructure, per
+    # the maintainer-confirmed #705 scope decision).
+    #
+    # Independent of the full-setup-validate compose project (its own
+    # network/containers, not deploy/full-setup's), so it does not need to
+    # chain after those jobs for IP-collision reasons -- chained after
+    # dhcp-kea-lease-flow-simulation anyway simply to keep this workflow's
+    # jobs running one at a time on the shared self-hosted runner tier
+    # rather than introducing new concurrency here, matching that job's own
+    # rationale for being chained rather than parallel.
+    name: DHCP proxy PXE simulation
+    needs: dhcp-kea-lease-flow-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
+        # dhcp-kea-lease-flow-simulation's own reasoning above:
+        # python3-scapy/tcpdump (added to tools/build-tools/Dockerfile in
+        # this same change) only exist on this branch, not yet in any
+        # published build-tools image. This workflow only ever runs via
+        # workflow_dispatch (event_name != pull_request), so
+        # select-build-tools-image.sh's trusted-ref path already always
+        # builds a fresh branch-local image instead of trying the published
+        # tag first.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run DHCP proxy PXE simulation
+        env:
+          DHCP_PXE_SIMULATION_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/dhcp-proxy-pxe-simulation.sh
+
   nats-auth-callout-simulation:
     # Real per-secondary NATS auth-callout integration test. Drives the actual
     # Admin UI register / rotate-token / remove routes plus a real nats-server
@@ -759,7 +823,7 @@ jobs:
     # concurrency here (matching dhcp-kea-lease-flow-simulation's own rationale
     # for being chained rather than parallel).
     name: NATS auth-callout simulation
-    needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
+    needs: [compute-validation-network, dhcp-proxy-pxe-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     env:
