@@ -136,11 +136,26 @@ fi
 # the config, dnsmasq recognized the PXE-tagged request in its own debug
 # log but never sent a DHCPOFFER. This is the literal root-cause bug this
 # issue fixes, so it is exercised by every code path below, not just the
-# x86PC one. Also confirmed: adding a pxe-service entry for the SAME
-# architecture as an active dhcp-match/dhcp-boot rule actively SUPPRESSES
-# that architecture's dhcp-boot delivery (falls back to no filename at
-# all) -- so pxe-service must never be rendered for an architecture that
-# also has a dhcp-match/dhcp-boot rule below.
+# x86PC one.
+#
+# Correction (PR #765 review): an earlier version of this comment claimed
+# that rendering a pxe-service entry for the SAME architecture as an
+# active dhcp-match/dhcp-boot rule actively suppresses that architecture's
+# dhcp-boot delivery, and that pxe-service must therefore never share an
+# architecture with a dhcp-match/dhcp-boot rule. That claim is false as
+# stated -- it directly contradicts the code below, which deliberately
+# renders BOTH a pxe-service=x86PC line and a dhcp-match/dhcp-boot pair
+# for the SAME architecture (0), and scripts/dhcp-proxy-pxe-simulation.sh
+# (run against this exact code in CI) confirms the BIOS case correctly
+# delivers the operator-configured external siaddr/filename, not
+# dnsmasq's own address or an empty one. UEFI (architectures 7/11) gets
+# no pxe-service entry of its own not because doing so would suppress
+# dhcp-boot, but simply because it would add nothing: finding 1 above
+# already established pxe-service renders no boot-file information at
+# all for non-x86PC architectures, and x86PC's own pxe-service line
+# already satisfies the "at least one pxe-service directive must exist"
+# requirement for the whole config, so a redundant UEFI entry has no
+# purpose.
 : "${DHCP_PROXY_PXE_BOOT_SERVER:=}"
 : "${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:=}"
 : "${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:=}"
@@ -575,16 +590,20 @@ _dhcp_proxy_render_pxe_service_directives() {
         # comment above documents the confirmed-by-packet-capture finding
         # that pxe-service does not deliver a usable boot filename for any
         # architecture other than x86PC on this dnsmasq build (it only sets
-        # the reply's next-server field, never the filename) -- and adding
-        # a pxe-service entry for the SAME architecture as an active
-        # dhcp-match/dhcp-boot rule was confirmed directly to actively
-        # SUPPRESS the dhcp-boot delivery for that architecture, falling
-        # back to dnsmasq's own address with no filename at all. So
-        # dhcp-boot (tag-scoped to the matching architectures via
-        # dhcp-match on DHCP option 93) is the only directive rendered for
-        # UEFI, and it must stay the only one. One dhcp-match line per
-        # covered architecture code sets the same tag; dhcp-boot then
-        # applies to any of them via that shared tag.
+        # the reply's next-server field, never the filename). A UEFI
+        # pxe-service entry would therefore add nothing even if rendered --
+        # not because it would suppress dhcp-boot (PR #765 review corrected
+        # an earlier version of this comment that claimed exactly that; see
+        # the header comment above's "Correction" paragraph and
+        # scripts/dhcp-proxy-pxe-simulation.sh, which asserts the BIOS case
+        # combining both directives for the SAME architecture in CI). It is
+        # simply redundant: the x86PC pxe-service line rendered above
+        # already satisfies the "at least one pxe-service directive must
+        # exist" requirement for the whole config, so dhcp-boot (tag-scoped
+        # to the matching architectures via dhcp-match on DHCP option 93)
+        # is the only directive UEFI needs. One dhcp-match line per covered
+        # architecture code sets the same tag; dhcp-boot then applies to
+        # any of them via that shared tag.
         printf 'dhcp-match=set:lancache-pxe-uefi,option:client-arch,7\n' >> "$dest_conf"
         printf 'dhcp-match=set:lancache-pxe-uefi,option:client-arch,11\n' >> "$dest_conf"
         printf 'dhcp-boot=tag:lancache-pxe-uefi,%s,,%s\n' \
