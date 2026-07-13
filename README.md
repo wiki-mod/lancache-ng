@@ -365,6 +365,27 @@ cd /opt/lancache-ng
 docker compose logs -f
 ```
 
+### Reporting a bug
+
+If you need to open a GitHub issue for something that isn't working, run:
+
+```bash
+sudo /opt/lancache-ng/setup.sh create-logs-for-issue
+```
+
+This bundles everything a maintainer needs to triage the report into one
+compressed, timestamped archive and prints its path:
+
+- `docker compose logs`/`ps`/`config` output
+- a copy of `.env`/`.env.local` with every credential-shaped value (API keys,
+  TSIG keys, passwords, tokens) redacted
+- host facts (Docker/Compose versions, kernel, disk space)
+- known-good-snapshot directory listings (file names only, no content) --
+  see `docs/known-good-config-snapshots.md`
+
+Review the archive yourself before attaching it to an issue -- this command
+never uploads or attaches anything automatically.
+
 ## Point your clients to the cache
 
 LanCache NG works by DNS.
@@ -668,8 +689,8 @@ Release channels and package rules are documented in `docs/release-versioning.md
 
 Keep `deploy/prod/.env` as the checked-in template. Manual production changes
 belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
-`setup.sh update`, `setup.sh backup`, `setup.sh restore`, and `setup.sh update-ip`
-when present.
+`setup.sh update`, `setup.sh backup`, `setup.sh restore`, `setup.sh update-ip`,
+and `setup.sh create-logs-for-issue` when present.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
