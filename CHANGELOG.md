@@ -360,6 +360,18 @@ is real, live, running code, not just work sitting in source control.
   `kea-dhcp4.conf` must stay comment-free, unlike Kea's own runtime files,
   for exactly this reason — do not re-add a `//` comment to it; put such
   rationale in this CHANGELOG or the commit message instead.
+- Fixed the Admin UI's `remove_domain()` (CDN domain-list removal) picking a
+  single line separator for the *whole* domain-list file — CRLF if the file
+  contained CRLF anywhere, else LF — and rejoining every retained line with
+  it. On a file with mixed line endings (e.g. a CRLF header/comment
+  hand-edited on Windows followed by LF domain entries appended from
+  Linux/the container), every surviving LF domain entry was rewritten with a
+  spurious trailing `\r`. Since the domain value is read verbatim by the
+  proxy/DNS entrypoints, that stray `\r` could leak into generated nginx
+  map/cert names and stream targets. Each retained line now keeps its own
+  original terminator (`\r\n`, `\n`, or none for a final line with no
+  trailing newline) instead of being normalized to one file-wide separator
+  (#656).
 
 ## [0.1.0] - 2026-07-06
 

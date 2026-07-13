@@ -594,34 +594,60 @@ fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
 fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let mut removed = false;
-    let sep = if content.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
 
-    let new = content
-        .lines()
-        .filter(|line| {
+    // Previously this picked ONE separator for the whole file (CRLF if the
+    // file contained CRLF *anywhere*, else LF) and rejoined every retained
+    // line with it. A file with mixed endings (e.g. a CRLF header hand-edited
+    // on Windows followed by LF domain entries appended from Linux/the
+    // container) would then have every surviving LF line rewritten with a
+    // spurious trailing \r. $domain is read verbatim by the proxy/DNS
+    // entrypoints, so that stray \r leaked into generated nginx map/cert
+    // names and stream targets (#656). Preserving each line's own original
+    // terminator instead avoids rewriting any line that wasn't removed.
+    let new: String = split_lines_preserve_terminators(&content)
+        .into_iter()
+        .filter(|(line, _terminator)| {
             let keep = !line_matches_domain_delete(line, domain);
             if !keep {
                 removed = true;
             }
             keep
         })
-        .collect::<Vec<_>>()
-        .join(sep);
+        .map(|(line, terminator)| format!("{line}{terminator}"))
+        .collect();
 
     if removed {
-        let new = if content.ends_with('\n') && !new.is_empty() {
-            format!("{new}{sep}")
-        } else {
-            new
-        };
         write_domain_file_atomic(path, &new)?;
     }
 
     Ok(())
+}
+
+// Splits file content into (line, terminator) pairs without normalizing line
+// endings, so a caller that drops some lines and rejoins the rest reproduces
+// each surviving line's own original terminator ("\r\n", "\n", or "" for a
+// final line with no trailing newline at all) instead of forcing one
+// separator across the whole file. See remove_domain's comment (#656) for why
+// that distinction matters here.
+fn split_lines_preserve_terminators(content: &str) -> Vec<(&str, &str)> {
+    let mut lines = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() {
+        if let Some(idx) = rest.find('\n') {
+            let (line_with_lf, remainder) = rest.split_at(idx + 1);
+            let without_lf = &line_with_lf[..line_with_lf.len() - 1];
+            if let Some(stripped) = without_lf.strip_suffix('\r') {
+                lines.push((stripped, "\r\n"));
+            } else {
+                lines.push((without_lf, "\n"));
+            }
+            rest = remainder;
+        } else {
+            lines.push((rest, ""));
+            rest = "";
+        }
+    }
+    lines
 }
 
 fn line_matches_domain_delete(line: &str, domain: &DomainDeleteTarget) -> bool {
@@ -995,6 +1021,69 @@ mod tests {
         let after_remove_root = fs::read_to_string(&file).unwrap();
         assert!(!after_remove_root.contains("steamcontent.com"));
         assert!(!after_remove_root.contains(".steamcontent.com"));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn split_lines_preserve_terminators_keeps_each_lines_own_ending() {
+        // Directly exercises the pure splitting helper with every terminator
+        // shape remove_domain must round-trip: CRLF, LF, and a final line
+        // with no trailing newline at all.
+        let content = "a\r\nb\nc";
+        assert_eq!(
+            split_lines_preserve_terminators(content),
+            vec![("a", "\r\n"), ("b", "\n"), ("c", "")]
+        );
+
+        // Trailing newline on the last line must also be preserved, not lost.
+        let content_trailing_nl = "a\nb\n";
+        assert_eq!(
+            split_lines_preserve_terminators(content_trailing_nl),
+            vec![("a", "\n"), ("b", "\n")]
+        );
+
+        assert_eq!(
+            split_lines_preserve_terminators(""),
+            Vec::<(&str, &str)>::new()
+        );
+    }
+
+    #[test]
+    fn remove_domain_preserves_each_surviving_lines_own_terminator_on_mixed_endings() {
+        // Reproduces #656: a CRLF header/comment followed by LF domain
+        // entries plus one CRLF domain entry (the realistic "hand-edited on
+        // Windows, then appended to from Linux/the container" scenario).
+        // Removing one LF entry must not rewrite the OTHER surviving LF/CRLF
+        // lines to match a single globally-chosen separator.
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-mixed-endings-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        let mixed = "# comment\r\nexample.com\nsteamcontent.com\r\nkeep-lf.example.com\n";
+        fs::write(&file, mixed.as_bytes()).unwrap();
+
+        remove_domain(
+            file.to_str().unwrap(),
+            &DomainDeleteTarget::Canonical(domain_spec("example.com", false)),
+        )
+        .unwrap();
+
+        let after_remove = fs::read_to_string(&file).unwrap();
+        // Exact byte-for-byte expectation: only the matched line is gone,
+        // every surviving line keeps its OWN original terminator (CRLF
+        // header, CRLF domain entry, LF domain entry) -- none of them get
+        // normalized to whatever separator the old single-`sep` logic would
+        // have picked for the whole file.
+        assert_eq!(
+            after_remove,
+            "# comment\r\nsteamcontent.com\r\nkeep-lf.example.com\n"
+        );
 
         fs::remove_dir_all(&base).unwrap();
     }
