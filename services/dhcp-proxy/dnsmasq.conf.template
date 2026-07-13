@@ -36,3 +36,12 @@ dhcp-range=${DHCP_SUBNET_START},proxy
 dhcp-option-pxe=6,${DHCP_DNS_PRIMARY},${DHCP_DNS_SECONDARY}
 log-dhcp
 no-daemon
+# Central logging pipeline (#633): dnsmasq supports only one logging
+# destination at a time (confirmed against `dnsmasq --help`'s
+# `-l, --log-facility=<file>` -- there is no dual stdout+file mode the way
+# Kea's "output-options" array offers), so pointing this at a file means
+# `docker logs` on this container stops showing DHCP transaction lines --
+# an accepted, documented trade-off (the file is what fluent-bit tails
+# instead; entrypoint.sh's own startup diagnostics still reach `docker logs`
+# since they run before dnsmasq is exec'd).
+log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log
