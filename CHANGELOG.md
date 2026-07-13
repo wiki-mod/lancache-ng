@@ -281,6 +281,10 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `build-push.yml`'s `rust_coverage` job pinning `actions/upload-artifact`
+  to `v4.3.6`, whose own action metadata still declares the deprecated Node 20
+  runtime (#799). Bumped to `v7.0.1`; the `name`/`path`/`retention-days` inputs
+  used here are unaffected across that range.
 - Fixed the `full-setup-deep-validate.yml` PR gate's `setup.sh CLI simulation`
   job perpetually validating stale images. `scripts/setup-cli-simulation.sh`
   hardcoded the mutable `edge` channel, which only moves on a push to `master`;
