@@ -1,3 +1,4 @@
+#!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Pure (Docker-free, registry-free) helpers for deciding WHICH image tag the

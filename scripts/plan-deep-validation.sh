@@ -7,7 +7,7 @@
 # (for a pull_request) the per-service touched flags + should_run gate. Writes
 # all of it as key=value lines to $GITHUB_OUTPUT so downstream jobs can gate
 # off one place. Kept as a script (not inline YAML) so the tag maths stay
-# shellcheck-clean and unit-tested via scripts/lib/validation-image-tag.sh.
+# easy to lint cleanly and unit-tested via scripts/lib/validation-image-tag.sh.
 #
 # Required env: EVENT_NAME, REPOSITORY, GITHUB_OUTPUT. For a pull_request:
 # BASE_REF, BASE_SHA, PR_NUMBER, BUILD_SHA (github.sha), ACTOR, HEAD_REPO. For
