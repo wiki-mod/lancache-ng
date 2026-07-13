@@ -1,0 +1,33 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Automatically adds newly opened issues and pull requests to the
+# KANBAN-Lancache-NG project board (AGENTS.md AG-GH-002/AG-GH-008). The
+# default Actions GITHUB_TOKEN cannot write to an org-owned Projects v2
+# board (same constraint documented in gc-pr-staging-images.yml for
+# GHCR_PACKAGE_DELETE_PAT), so this requires PROJECT_AUTOMATION_PAT -- a
+# classic PAT with the `project` scope, created by a repo/org admin and
+# added as a repository secret. Until that secret exists, this workflow's
+# single step fails harmlessly (the item just isn't auto-added; add it
+# manually with `gh project item-add`) -- it does not block issue/PR
+# creation itself.
+name: Add to project board
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  add-to-project:
+    name: Add to KANBAN-Lancache-NG
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add issue/PR to project board
+        uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
+        with:
+          project-url: https://github.com/orgs/wiki-mod/projects/6
+          github-token: ${{ secrets.PROJECT_AUTOMATION_PAT }}

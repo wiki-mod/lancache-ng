@@ -234,6 +234,48 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: bash scripts/validate-pr-template.sh
 
+  pr-tracking-metadata-check:
+    # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone,
+    # and (when PROJECT_AUTOMATION_PAT is configured) project-board
+    # placement. Same zero-LAN-dependency shape as pr-template-check --
+    # reads github.event.pull_request context plus one outbound call to
+    # api.github.com, no self-hosted-specific resource needed -- but kept
+    # on the self-hosted pool as the primary job with a hosted fallback
+    # below, matching every other zero-LAN check in this file.
+    name: PR tracking metadata (labels/milestone/project)
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate labels, milestone, and project-board placement
+        env:
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
+          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash scripts/check-pr-tracking-metadata.sh
+
+  pr-tracking-metadata-check-hosted:
+    name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Validate labels, milestone, and project-board placement
+        env:
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
+          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash scripts/check-pr-tracking-metadata.sh
+
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -3451,6 +3493,7 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - pr-tracking-metadata-check
       - line-endings
     if: >-
       ${{
@@ -3461,7 +3504,8 @@ jobs:
         needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
@@ -4155,6 +4199,7 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - pr-tracking-metadata-check
       - line-endings
     if: >-
       ${{
@@ -4165,7 +4210,8 @@ jobs:
         needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success')
       }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120

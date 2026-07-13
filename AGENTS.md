@@ -345,7 +345,7 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-GH-005 | Non-closing Refs for drafts | Manual review |
 | AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
 | AG-GH-007 | Project-facing text is English | Manual review |
-| AG-GH-008 | PRs carry issue's labels/Milestone/Project | Manual review (no automated check currently; see enforcement notes) |
+| AG-GH-008 | PRs carry issue's labels/Milestone/Project | CI-enforced (`pr-tracking-metadata-check` in build-push.yml, blocking on non-draft PRs); Project-board sub-check requires `PROJECT_AUTOMATION_PAT` (see enforcement notes) |
 | AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
 | AG-WF-002 | Separate worktree per PR | Manual review |
 | AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
@@ -446,6 +446,6 @@ This matrix maps the hard rules defined above to how they are currently enforced
 
 - **AG-GH-001 and related language rules**: Enforced by human reviewers reading PRs, not by an automated language detector. An automated spell-checker or language-detection tool could help, but none is currently integrated.
 
-- **AG-GH-008**: No CI check currently blocks merge on missing labels/Milestone/Project-board placement; enforcement is manual review only. A future CI job could query the GitHub API for each open PR's labels, milestone, and project-board membership and fail if any is empty. Until such a check exists, treat this rule as a mandatory step at PR-creation time, not a later cleanup pass.
+- **AG-GH-008**: Enforced by `scripts/check-pr-tracking-metadata.sh`, run as the `pr-tracking-metadata-check` job in `build-push.yml` and gating the `build`/`build-arm64` jobs on pull requests, the same way `pr-template-check` does. It reads labels and milestone directly from the pull-request webhook payload (no extra permissions needed) and fails a non-draft PR missing either. The project-board sub-check additionally requires a `PROJECT_AUTOMATION_PAT` repository secret (a classic PAT with the `project` scope) because the default `GITHUB_TOKEN` cannot read or write Projects v2 data for an org-owned board; without that secret configured, the project-board sub-check is skipped with a warning rather than failing the job. `.github/workflows/add-to-project.yml` (using the same secret) and `.github/workflows/labeler.yml` (path-based auto-labeling, no secret needed) reduce how often labels/project placement need to be set by hand in the first place.
 
 - Several operational rules (AG-OP-*) and comment style rules (AG-CODE-*) rely entirely on manual code review. No linting tools currently enforce these at CI time.
