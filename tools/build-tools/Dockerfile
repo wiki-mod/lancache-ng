@@ -10,6 +10,15 @@ ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.6.1
 ARG DOCKER_COMPOSE_VERSION=5.2.0
 ARG DOCKER_BUILDX_VERSION=0.35.0
+# buildx v0.35.0's go.mod pins github.com/containerd/containerd/v2 at v2.2.4,
+# which carries three HIGH-severity CVEs (CVE-2026-53488/53489/53492) fixed in
+# 2.2.5+ -- confirmed directly via Trivy scanning this image's first buildx
+# build attempt. Unlike the docker/docker v28.5.2+incompatible case just below
+# (no v29.x module tags exist at all, so that one genuinely cannot be bumped),
+# containerd/containerd/v2 does publish a newer, non-breaking 2.2.x tag, so
+# `go get` this exact module up to the fixed version before building instead
+# of carrying the vulnerability forward.
+ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -44,17 +53,23 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # target as if it were the main module, and `exclude` is only valid in a
 # genuine main module) -- cloning and running a real local `go build` from
 # within the checkout sidesteps that restriction.
-# docker/buildx has neither problem -- a plain go.mod with no vendor.mod and
-# no exclude directives (verified against its v0.35.0 tag) -- so it can use
-# the same simple `go install pkg@version` form as actionlint above, unlike
-# the cli/compose workarounds. Its cmd package is named `buildx`, not
-# `docker-buildx`, so the resulting binary is renamed after install to match
-# the `docker-<subcommand>` filename Docker's CLI plugin discovery requires.
+# docker/buildx has neither the vendor.mod nor the exclude-directive problem
+# (a plain go.mod, verified against its v0.35.0 tag), but it does need the
+# containerd bump described above, which `go install pkg@version` has no way
+# to apply (there is no go.mod in scope to `go get` against) -- so it is built
+# the same clone-and-`go build` way as docker-compose below, not via a plain
+# `go install` like actionlint. Its cmd package is named `buildx`, not
+# `docker-buildx`, so the build output is named explicitly to match the
+# `docker-<subcommand>` filename Docker's CLI plugin discovery requires.
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
     /out/actionlint --version; \
-    GOBIN=/out go install "github.com/docker/buildx/cmd/buildx@v${DOCKER_BUILDX_VERSION}"; \
-    mv /out/buildx /out/docker-buildx; \
+    buildx_src="$(mktemp -d)"; \
+    git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
+    ( cd "$buildx_src" \
+      && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+      && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
+    rm -rf "$buildx_src"; \
     /out/docker-buildx version; \
     docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
     install -d "$(dirname "$docker_cli_src")"; \

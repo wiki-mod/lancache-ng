@@ -483,6 +483,13 @@ is real, live, running code, not just work sitting in source control.
   `docker buildx` from source in the existing `actionlint-builder` stage
   (same CVE-staleness rationale already applied to the Docker CLI and
   docker-compose there) and installed it as a CLI plugin alongside them.
+  Buildx v0.35.0 pins `github.com/containerd/containerd/v2` at v2.2.4, which
+  carries three HIGH-severity CVEs (CVE-2026-53488/53489/53492) fixed in
+  2.2.5+ -- caught by this image's own Trivy scan step during development of
+  this fix -- so the build now `go get`s that one module up to v2.2.6 before
+  building buildx, the same way the Dockerfile already deliberately accepts
+  (via `.trivyignore.yaml`) that `github.com/docker/docker`'s v28.5.2 pin
+  cannot be bumped the same way (no v29.x Go module tags exist upstream).
   Also widened `scripts/select-build-tools-image.sh`'s smoke test to check
   `docker buildx version`, matching the #775 precedent, so a future gap like
   this is caught before merge instead of after (#787).
