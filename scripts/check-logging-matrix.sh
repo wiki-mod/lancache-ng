@@ -33,16 +33,6 @@ ARCHITECTURE_DOC=docs/architecture-ng.md
 # to check in the first place.
 COMPOSE_FILES=(deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml)
 
-# Every profile any of the 3 compose files gate a service behind (dhcp-kea,
-# dhcp-proxy, logging, ssl, watchtower). `docker compose config --services`
-# silently omits a service whose profile isn't activated, so all of them
-# must be passed together to see the *full* service set a file can produce
-# -- passing a profile name a given file doesn't declare is harmless (no
-# service references it, so it's simply a no-op for that file), which is
-# what lets one fixed list be reused across all 3 files below instead of
-# hand-maintaining a per-file subset.
-ALL_PROFILES=(dhcp-kea dhcp-proxy logging ssl watchtower)
-
 failures=0
 
 fail() {
@@ -101,10 +91,22 @@ service_in_canonical() {
 all_consumer_services=""
 
 for compose_file in "${COMPOSE_FILES[@]}"; do
+  # Discover this file's own profile names via `config --profiles` instead
+  # of a hand-maintained list: `docker compose config --services` silently
+  # omits a service whose profile isn't activated, so every profile the
+  # file declares must be passed to see the *full* service set it can
+  # produce. A fixed list would drift the moment a new profile is added to
+  # any of the 3 Compose files without also updating this script -- which
+  # is exactly the kind of new-profiled-service-with-no-matrix-row drift
+  # this guard exists to catch, so deriving the list keeps it self-updating.
+  profiles=$(docker compose -f "$compose_file" config --profiles 2>&1) \
+    || { fail "docker compose config --profiles failed for $compose_file: $profiles"; continue; }
+
   profile_flags=()
-  for profile in "${ALL_PROFILES[@]}"; do
+  while IFS= read -r profile; do
+    [ -n "$profile" ] || continue
     profile_flags+=(--profile "$profile")
-  done
+  done <<<"$profiles"
 
   services=$(docker compose -f "$compose_file" "${profile_flags[@]}" config --services 2>&1) \
     || { fail "docker compose config --services failed for $compose_file: $services"; continue; }

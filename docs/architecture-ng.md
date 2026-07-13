@@ -136,7 +136,7 @@ Lightweight container with Docker socket access (restart permission).
 - nginx: HTTP request on `/health`
 - PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
-- syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit does not have a healthcheck yet (follow-up #633)
+- syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit: `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build)
 
 **Auto-restart:** X failed checks → `docker restart <container>`
 
