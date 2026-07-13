@@ -164,6 +164,21 @@ above already uses) — never to ordinary DHCP clients. Leave any of these
 empty to skip it; entrypoint.sh omits the corresponding line entirely rather
 than rendering an empty or invalid one.
 
+> **Issue #705 finding, affecting every option in this section:** dnsmasq's
+> ProxyDHCP mode does not reply to *any* DHCPDISCOVER at all — PXE-tagged or
+> not — unless at least one `pxe-service` directive is present in its
+> config. Before issue #705, nothing in this service ever rendered one, so
+> every option below (and the base DNS-option-6 injection above it) was
+> silently inert since the day #450 shipped: configured, accepted by
+> `dnsmasq --test`, and never actually delivered to a single client. Fixing
+> that (see "PXE boot-pointer" below) is deliberately opt-in rather than
+> unconditional: making dnsmasq start replying at all is a real behavior
+> change for the segment it's deployed on, so it stays off by default and
+> only turns on once you configure `DHCP_PROXY_PXE_BOOT_SERVER` and at
+> least one `DHCP_PROXY_PXE_BOOT_FILENAME_*` variable below. Until you do,
+> the options in this table (and the base DNS option) remain in the same
+> inert state they have always been in.
+
 | Key | Meaning | Example |
 |---|---|---|
 | `DHCP_PROXY_INTERFACE` | Bind dnsmasq to one host network interface instead of all of them. | `eth0` |
@@ -183,6 +198,56 @@ structurally invalid optional value (e.g. an out-of-range custom option
 code) is skipped with an explicit warning in the container logs rather than
 silently accepted or crash the container. Existing non-empty values in your
 local `.env` are preserved and never overwritten on update.
+
+### PXE boot-pointer (issue #705)
+
+`dnsmasq-proxy` mode can point a real PXE client at an **operator-owned,
+already-existing** PXE/TFTP boot server — this project never hosts or
+serves boot files itself, in v0.2.0 or planned beyond it as of this
+writing. Setting these variables is also, unavoidably, what activates
+ProxyDHCP replies for this service at all (see the finding boxed above),
+so it is entirely opt-in: leave both variables below empty and nothing in
+this section or the "Optional (issue #450)" one above changes.
+
+| Key | Meaning | Example |
+|---|---|---|
+| `DHCP_PROXY_PXE_BOOT_SERVER` | Address of your own external PXE/TFTP boot server. Required for any PXE boot-pointer to activate at all. | `10.0.0.5` |
+| `DHCP_PROXY_PXE_BOOT_FILENAME_BIOS` | Boot filename served to legacy BIOS PXE clients (dnsmasq architecture tag `x86PC`, client-system-architecture 0 — still the most common real-world PXE client). | `pxelinux.0` |
+| `DHCP_PROXY_PXE_BOOT_FILENAME_UEFI` | Boot filename served to 64-bit UEFI PXE clients: architecture 7 (`x86-64_EFI`, the dominant UEFI PXE client on both desktops and servers) and architecture 11 (`ARM64_EFI`, UEFI ARM boards/servers, e.g. Raspberry Pi 4/5 UEFI firmware). One shared filename covers both codes — see the limitation note below. | `bootx64.efi` |
+
+Set `DHCP_PROXY_PXE_BOOT_SERVER` plus at least one of the two filename
+variables to activate PXE support. Both a BIOS-only and a UEFI-only
+configuration are supported (set only the filename variable for the
+architecture family you need); setting neither filename variable leaves
+PXE support off even if the server address is set, with an explicit
+warning in the container logs. The remaining dnsmasq-documented PXE
+architecture tags (`PC98`, `IA64_EFI`, `Xscale_EFI`, `BC_EFI`, `ARM32_EFI`)
+are not covered — NEC PC-98, Itanium, XScale, and 32-bit ARM UEFI are all
+effectively extinct or rare network-boot targets in 2026.
+
+**Known limitation:** `DHCP_PROXY_PXE_BOOT_FILENAME_UEFI` is one field
+shared by both UEFI architecture codes above, on the assumption that your
+external boot server serves a single self-selecting artifact at that
+filename (e.g. an iPXE or GRUB2 EFI binary that picks its own next stage) —
+the common real-world pattern for "point at existing infrastructure"
+setups. If your x86-64 and ARM64 UEFI boot artifacts are genuinely
+different files, this single field cannot express that; use
+`DHCP_PROXY_CUSTOM_OPTIONS` for a finer-grained override, or track this as
+a future dedicated-field request.
+
+**Wire-level detail, for anyone extending this further:** every
+architecture above is delivered via dnsmasq's `dhcp-boot` directive
+(tag-matched by DHCP option 93, client-system-architecture), not
+`pxe-service`. This was confirmed necessary by direct packet capture during
+this issue's investigation: `pxe-service`'s own basename/server-address
+fields never reflect the configured *external* server (dnsmasq
+substitutes its own address instead, for every architecture including
+BIOS), and for any architecture other than BIOS it renders no boot
+filename at all. `pxe-service` is still rendered once (for BIOS if
+configured, or a dedicated inert placeholder architecture otherwise)
+purely because at least one such directive must exist for ProxyDHCP
+replies to happen at all — see `services/dhcp-proxy/entrypoint.sh` for the
+full account.
 
 ## Verifying that clients receive LanCache NG DNS
 
@@ -221,20 +286,21 @@ router/clients directly, to guarantee cache routing.
 
 ## Automated DHCP behavior testing (CI)
 
-This project has two separate, non-overlapping automated DHCP checks. Neither
-runs on the host's real network interface by default:
+This project has four separate, non-overlapping automated DHCP checks.
+None run on the host's real network interface by default:
 
 | Check | What it answers | Where it runs | Invasive? |
 |---|---|---|---|
 | **Conflict discovery** (`services/ui/dhcp-probe.sh`) | Does *any* DHCP server answer on this LAN segment (broadcast discover via `nmap`), and does a client dry-run on the host's own detected default interface also succeed? | Admin UI DHCP page, on demand | The client dry-run leg uses `dhclient -sf /bin/true` so it never applies the negotiated lease to the host interface, but it does run against the host's real detected interface. |
 | **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
 | **Kea Control Agent mutation round-trip** (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
+| **dnsmasq-proxy PXE simulation** (`scripts/dhcp-proxy-pxe-simulation.sh`) | Does *our own* dnsmasq-proxy ProxyDHCP mode reply to a real, synthetically-crafted PXE-tagged DHCPDISCOVER with the correct external boot server address, architecture-appropriate boot filename, and LanCache NG DNS servers -- for both legacy BIOS and UEFI clients -- while still ignoring an ordinary, non-PXE-tagged DISCOVER? | `dhcp-proxy-pxe-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway dnsmasq-proxy container and a throwaway synthetic-PXE-client container (scapy), both on a dedicated Docker bridge network the script creates and destroys itself. No host interface is ever involved, and the external PXE boot server it asserts against is never a real listening service -- just a configured address, per issue #705's scope of pointing at operator infrastructure this project does not itself run. |
 
-The second check exists because the first only tells you a DHCP server
-answered -- it does not prove ours behaves correctly, and it does not report
-individual option values. `scripts/dhcp-kea-lease-flow-simulation.sh` is the
-authoritative check for "did Kea hand out what I configured, and does it
-honor a static reservation the way an operator using the Admin UI's DHCP
+The second, third, and fourth checks exist because the first only tells you
+a DHCP server answered -- it does not prove ours behaves correctly, and it
+does not report individual option values. `scripts/dhcp-kea-lease-flow-simulation.sh`
+is the authoritative check for "did Kea hand out what I configured, and does
+it honor a static reservation the way an operator using the Admin UI's DHCP
 page would expect" -- its output (printed to the job log and, in CI,
 `$GITHUB_STEP_SUMMARY`) lists every offered value and both reservation
 outcomes explicitly so a wrong result is easy to spot.
@@ -248,6 +314,13 @@ lightweight single-Kea-container setup, to prove Kea's own runtime honors a
 reservation for the right client and only the right client -- complementary
 coverage, not a duplicate.
 
+`scripts/dhcp-proxy-pxe-simulation.sh` is the authoritative check for the
+`dnsmasq-proxy` DHCP mode's entirely separate code path
+(`services/dhcp-proxy`), covering ProxyDHCP PXE-tagged behavior that none of
+the Kea-focused checks above exercise at all. Like the others, it prints
+every asserted value explicitly (to the job log and, in CI,
+`$GITHUB_STEP_SUMMARY`) so a wrong result is easy to spot.
+
 **What the Kea lease-flow simulation does NOT verify** (documented here per
 its own design -- see the script's header comment for the full rationale):
 
@@ -255,12 +328,24 @@ its own design -- see the script's header comment for the full rationale):
   PowerDNS record via TSIG-authenticated DDNS) -- tracked separately in
   issue #557.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path
-  (`services/dhcp-proxy`), not exercised by this script at all.
+  (`services/dhcp-proxy`), covered instead by the PXE simulation below.
 
-It has no invasive/host-interface mode: both the Kea server and the DHCP
-client involved always run inside their own throwaway, isolated Docker
+**What the dnsmasq-proxy PXE simulation does NOT verify** (documented here
+per its own design -- see `scripts/dhcp-proxy-pxe-simulation.sh`'s own
+header comment for the full rationale):
+
+- PXE boot menu behavior -- this project deliberately implements none;
+  dnsmasq's role here is only to point a PXE client at an external boot
+  server, never to serve a menu or boot files itself.
+- An actual TFTP/HTTP boot-file transfer against the configured external
+  boot server -- out of scope by design, and that server is never a real
+  listening service in this simulation, just a configured address the
+  DHCPOFFER is asserted to point at.
+
+Neither check has an invasive/host-interface mode: every server and client
+container involved always runs inside its own throwaway, isolated Docker
 network, so there was nothing that needed gating behind an explicit opt-in
-flag beyond the job itself only running on manual dispatch.
+flag beyond each job itself only running on manual dispatch.
 
 `scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh` (issue #634) closes the
 static-reservation gap left open above: it drives a real static host

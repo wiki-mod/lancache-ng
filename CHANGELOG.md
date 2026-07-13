@@ -247,6 +247,26 @@ is real, live, running code, not just work sitting in source control.
   exporting runner-local validation tags across jobs, while keeping BuildKit
   secret wiring for `sccache` Redis, `sccache-dist`, and `distcc` host lists
   intact.
+- Added opt-in PXE boot-pointer support to `dnsmasq-proxy` DHCP mode (#705):
+  `DHCP_PROXY_PXE_BOOT_SERVER` plus `DHCP_PROXY_PXE_BOOT_FILENAME_BIOS`/
+  `DHCP_PROXY_PXE_BOOT_FILENAME_UEFI` let `services/dhcp-proxy` point real
+  PXE clients (legacy BIOS and both x86-64/ARM64 UEFI, dnsmasq architecture
+  codes 0/7/11) at an operator's own external, already-existing PXE/TFTP
+  boot server — this project never hosts or serves boot files itself. Fixes
+  a root-cause bug found while building this: dnsmasq's ProxyDHCP mode never
+  replied to any DHCPDISCOVER at all, PXE-tagged or not, because no
+  `pxe-service` directive was ever rendered; every #450 optional dnsmasq-proxy
+  option was therefore silently inert since #450 shipped. The fix stays
+  opt-in (both new variables must be set) since unlocking ProxyDHCP replies
+  is itself a real behavior change for the LAN segment. See
+  `docs/dhcp-modes.md`'s "PXE boot-pointer" section for the full option
+  reference and the wire-level details (`dhcp-boot`/`dhcp-match`, not
+  `pxe-service`, is what actually delivers the configured external server to
+  UEFI and, for the external-address case, BIOS clients too), and
+  `scripts/dhcp-proxy-pxe-simulation.sh` for the new end-to-end simulation
+  (a synthetic PXE client, via `scapy`) that proves it against a real
+  `dnsmasq` container for both architectures and confirms an ordinary,
+  non-PXE-tagged client still receives no reply.
 
 ### Fixed
 

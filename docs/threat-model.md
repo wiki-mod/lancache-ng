@@ -476,10 +476,29 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
   with a warning by `_dhcp_proxy_render_optional_directives` rather than
   silently accepted; the rendered config is still validated by
   `dnsmasq --test` before dnsmasq starts, same as every other value here.
+- **Update (issue #705):** the threat above assumes dnsmasq actually answers
+  PXE-tagged DHCPDISCOVERs. Investigation for #705 found it never did, on
+  any install, past or present: dnsmasq's ProxyDHCP mode does not reply to
+  *any* DHCPDISCOVER at all unless at least one `pxe-service` directive is
+  present in its config, and nothing in this service ever rendered one
+  before #705. So the "appliance answers the proxy-DHCP portion" premise
+  above only holds once an operator explicitly opts in by setting
+  `DHCP_PROXY_PXE_BOOT_SERVER` plus at least one
+  `DHCP_PROXY_PXE_BOOT_FILENAME_*` variable (see `docs/dhcp-modes.md`'s
+  "PXE boot-pointer" section). By default (the pre-#705 state, and every
+  install that never sets those variables), `dnsmasq-proxy` mode renders no
+  `pxe-service` directive, never replies to a DHCPDISCOVER at all, and this
+  threat does not apply. Once the operator opts in, the mitigations above
+  (fail-closed required values, PXE-scoped-only delivery, `dnsmasq --test`
+  validation) resume applying as documented.
 
-**Residual risk**: Medium — by design the upstream DHCP server's DNS option can
-win, causing cache bypass. Not a security compromise, but a correctness/coverage
-limitation the operator must understand.
+**Residual risk**: Medium once PXE boot-pointer opt-in is configured — by
+design the upstream DHCP server's DNS option can win, causing cache bypass.
+Not a security compromise, but a correctness/coverage limitation the operator
+must understand. None while the opt-in variables are left unset (the default):
+dnsmasq renders no `pxe-service` directive and never replies to a
+DHCPDISCOVER at all, so there is no proxy-DHCP reply for a client to prefer
+incorrectly.
 
 ---
 

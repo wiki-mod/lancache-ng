@@ -907,6 +907,29 @@ jobs:
           grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
 
+          # Issue #705: PXE boot-pointer opt-in surface. Same guard shape as
+          # #450 above -- a PR review (#765) found the quickstart Compose
+          # environment allowlist silently stopped before these three keys,
+          # leaving the opt-in feature unreachable there even when set in
+          # .env; this also checks explicit compose passthrough (not just
+          # env-file presence) so that specific class of regression is
+          # caught here instead of only by manual review next time.
+          dhcp_proxy_pxe_keys=(
+            DHCP_PROXY_PXE_BOOT_SERVER
+            DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
+            DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
+          )
+          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+            for key in "${dhcp_proxy_pxe_keys[@]}"; do
+              grep -Eq "^${key}=" "$env_file" \
+                || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the PXE boot-pointer opt-in surface added by issue #705."; exit 1; }
+            done
+          done
+          for key in "${dhcp_proxy_pxe_keys[@]}"; do
+            grep -F "${key}=\${${key}:-}" deploy/quickstart/docker-compose.yml >/dev/null \
+              || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through ${key} like the other optional dnsmasq relay/proxy keys."; exit 1; }
+          done
+
           grep -F '_dhcp_proxy_render_optional_directives()' services/dhcp-proxy/entrypoint.sh >/dev/null \
             || { echo "::error::services/dhcp-proxy/entrypoint.sh must render the issue #450 optional dnsmasq relay/proxy directives."; exit 1; }
           grep -F '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' services/dhcp-proxy/entrypoint.sh >/dev/null \
