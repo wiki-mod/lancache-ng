@@ -320,6 +320,21 @@ is real, live, running code, not just work sitting in source control.
   `detect-full-setup-changes.sh`'s fail-closed staging guard would otherwise
   poll for a PR-staging `proxy` tag `build-push.yml` never pushes and time
   out (#771).
+- Fixed reverse (PTR) DHCP-DDNS updates always failing in production,
+  independent of and not fixed by #706's forward-DDNS fix. Kea's D2 daemon's
+  `reverse-ddns.ddns-domains` targeted a single hardcoded catch-all zone,
+  the literal `in-addr.arpa.`, but PowerDNS never creates a zone with that
+  exact name -- it only ever creates the narrower private-range subzones
+  `services/dns/entrypoint.sh`'s `PRIVATE_REVERSE_ZONES` lists (e.g.
+  `31.172.in-addr.arpa.`) -- so every PTR update was rejected with RCODE 9
+  (NOTAUTH) "Can't determine backend for domain", for any leased address,
+  unconditionally. `services/dhcp/kea-dhcp-ddns.conf`'s `reverse-ddns` now
+  lists one `ddns-domains` entry per real IPv4 private reverse zone
+  (mirroring `PRIVATE_REVERSE_ZONES` verbatim), so Kea's D2 can match a
+  lease's reverse FQDN against the correct, real zone by suffix instead of a
+  zone nothing hosts. Verified against a real Kea 2.6.3 + PowerDNS 5.2.11
+  stack: a granted DHCP lease now produces a matching PTR record via a real
+  TSIG-signed DDNS update (#768).
 - Fixed Kea DHCP (`kea-dhcp4`, `kea-ctrl-agent`, `kea-dhcp-ddns`) failing to
   start at all once the `logging` profile's file-log wiring (#633/#756) was
   active. Kea's packaged binaries hard-restrict file-logger `output` paths

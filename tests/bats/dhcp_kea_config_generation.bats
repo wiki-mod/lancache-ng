@@ -489,16 +489,74 @@ setup() {
     # tsig-keys[0].name above) would make Kea send unsigned or wrongly-signed
     # PTR updates, which PowerDNS would then reject -- silently, since a
     # missing/wrong reverse key-name does not affect forward-ddns at all.
-    run jq -e '.DhcpDdns["reverse-ddns"]["ddns-domains"][0]["key-name"]' "$ddns_output"
+    # Checked across every entry (not just [0]), since issue #768 replaced the
+    # single catch-all entry with one per private reverse zone below -- a
+    # template edit that dropped key-name from any entry but the first would
+    # otherwise pass this check while silently breaking PTR auth for every
+    # other zone.
+    run jq -e '[.DhcpDdns["reverse-ddns"]["ddns-domains"][]["key-name"]] | unique == ["lancache-ddns-key"]' "$ddns_output"
     [ "$status" -eq 0 ]
-    [[ "$output" == '"lancache-ddns-key"' ]]
+    [ "$output" = "true" ]
 
     # Same two-entry invariant as forward-ddns: both the standard-mode and
     # SSL-mode DNS containers are kept in sync for reverse/PTR updates too,
-    # regardless of which mode is presently active.
-    run jq -e '.DhcpDdns["reverse-ddns"]["ddns-domains"][0]["dns-servers"] | length' "$ddns_output"
+    # regardless of which mode is presently active. Checked across every
+    # entry, for the same reason as key-name above.
+    run jq -e '[.DhcpDdns["reverse-ddns"]["ddns-domains"][]["dns-servers"] | length] | unique == [2]' "$ddns_output"
     [ "$status" -eq 0 ]
-    [ "$output" = "2" ]
+    [ "$output" = "true" ]
+}
+
+# Regression test for issue #768: Kea's D2 daemon requires reverse-ddns's
+# "name" to match one real, existing PowerDNS zone -- it cannot express "any
+# of these dynamically-selected per-octet zones" in a single entry. The old
+# config had exactly one entry, hardcoded to the literal catch-all
+# "in-addr.arpa.", which PowerDNS never creates a zone for (it only creates
+# the narrower private-range subzones below) -- every PTR update was
+# therefore rejected with RCODE 9 (NOTAUTH) "Can't determine backend for
+# domain", for any octet, unconditionally. This asserts the fixed template's
+# reverse-ddns zone list is byte-for-byte identical (as a set) to
+# services/dns/entrypoint.sh's own PRIVATE_REVERSE_ZONES -- the actual list
+# of zones PowerDNS creates -- so the two can never silently drift apart
+# again (mirroring known_good_snapshots_sync.bats's own drift-guard pattern
+# for a different duplicated-list problem). IPv6 zones
+# (c.f.ip6.arpa./d.f.ip6.arpa.) are deliberately excluded from both sides of
+# this comparison: this project's Kea config is Dhcp4-only (no DHCPv6), so
+# D2 never generates an IPv6 PTR update, and services/dhcp/entrypoint.sh's
+# own comment on this block documents that exclusion explicitly.
+@test "DHCP-DDNS config reverse-ddns zones exactly match PowerDNS's PRIVATE_REVERSE_ZONES (IPv4 only)" {
+    ddns_template="$repo_root/services/dhcp/kea-dhcp-ddns.conf"
+    ddns_output="$test_config_dir/kea-dhcp-ddns-reverse-zones.conf"
+    dns_entrypoint="$repo_root/services/dns/entrypoint.sh"
+
+    envsubst "$ENVSUBST_VARS" < "$ddns_template" > "$ddns_output"
+
+    # The literal catch-all that caused #768 must never reappear as a zone
+    # name -- checked explicitly, not just implied by the set-equality
+    # assertion below, so a future edit that adds it back alongside the real
+    # zones (rather than instead of them) still fails loudly here.
+    run jq -e '[.DhcpDdns["reverse-ddns"]["ddns-domains"][].name] | index("in-addr.arpa.")' "$ddns_output"
+    [ "$status" -ne 0 ]
+
+    # Extracted straight from services/dns/entrypoint.sh's own PRIVATE_REVERSE_ZONES
+    # array declaration text (awk slices out just that array's lines, grep
+    # keeps only the IPv4 in-addr.arpa. entries, dropping the two ip6.arpa.
+    # lines by construction) rather than hand-copied here, so this test can
+    # never itself drift from the real source of truth it is guarding
+    # against. Not sourcing dns/entrypoint.sh directly: that script is a full
+    # `set -euo pipefail` entrypoint with its own required-env-var checks
+    # (e.g. PROXY_IP) and side effects, not a library meant to be sourced.
+    mapfile -t expected_ipv4_zones < <(
+        awk '/^PRIVATE_REVERSE_ZONES=\(/,/^\)/' "$dns_entrypoint" \
+            | grep -oE '[0-9a-z.]+\.in-addr\.arpa\.'
+    )
+
+    [ "${#expected_ipv4_zones[@]}" -gt 0 ]
+
+    actual_zones_json="$(jq -c '[.DhcpDdns["reverse-ddns"]["ddns-domains"][].name] | sort' "$ddns_output")"
+    expected_zones_json="$(printf '%s\n' "${expected_ipv4_zones[@]}" | jq -R . | jq -sc 'sort')"
+
+    [ "$actual_zones_json" = "$expected_zones_json" ]
 }
 
 @test "DHCP-DDNS config has domain suffix set from DHCP_DOMAIN" {
