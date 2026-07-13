@@ -2821,6 +2821,32 @@ EOF
 # files/volumes and whatever migrate_env_for_update managed to write to .env
 # before failing are left on disk either way; rerun `setup.sh update` once the
 # reported problem is fixed.
+#
+# If the archived install tree has no .env.local (a backup that predates the
+# .env.local split, or a deploy/prod backup taken before an operator ever
+# created one), moves any .env.local currently sitting at install_dir out of
+# the way instead of leaving it in place. Without this, rsync (deliberately
+# run without --delete, see cmd_restore's own comment below) leaves a
+# pre-restore .env.local completely untouched, and
+# runtime_env_file_for_install_dir() prefers .env.local over .env whenever it
+# exists -- so every subsequent compose/update/debug call would keep reading
+# the stale pre-restore override instead of the archive's just-restored
+# .env, silently defeating the point of a rollback restore. The stale file is
+# renamed rather than deleted outright, so it stays available for manual
+# recovery instead of being silently lost. Idempotent: a second restore of
+# the same archive against the same target finds no .env.local left to move
+# and is a no-op.
+restore_clear_stale_env_local_if_unarchived() {
+    local archived_install_root="$1" install_dir="$2" stale_target
+
+    [[ -f "$archived_install_root/.env.local" ]] && return 0
+    [[ -f "$install_dir/.env.local" ]] || return 0
+
+    stale_target="$install_dir/.env.local.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$install_dir/.env.local" "$stale_target"
+    print_warn "Archived backup has no .env.local; moved the stale pre-restore override to $(basename "$stale_target") so the restored .env takes effect."
+}
+
 cmd_restore() {
     local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
     install_dir=$(realpath -m "$install_dir")
@@ -2912,6 +2938,10 @@ cmd_restore() {
     if [[ -d "$root/$rel_install" ]]; then
         mkdir -p "$install_dir"
         rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/"
+        # Must run before the path-rewrite sed loop below: a stale .env.local
+        # that the archive doesn't account for should be moved aside, not
+        # rewritten in place as if it were part of the restored config.
+        restore_clear_stale_env_local_if_unarchived "$root/$rel_install" "$install_dir"
         if [[ "$archived_install" != "$install_dir" ]]; then
             for path in "$install_dir/.env" "$install_dir/.env.local"; do
                 [[ -f "$path" ]] || continue
