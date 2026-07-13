@@ -6,10 +6,15 @@
 # board (same constraint documented in gc-pr-staging-images.yml for
 # GHCR_PACKAGE_DELETE_PAT), so this requires PROJECT_AUTOMATION_PAT -- a
 # classic PAT with the `project` scope, created by a repo/org admin and
-# added as a repository secret. Until that secret exists, this workflow's
-# single step fails harmlessly (the item just isn't auto-added; add it
-# manually with `gh project item-add`) -- it does not block issue/PR
-# creation itself.
+# added as a repository secret. Until that secret exists, the job below is
+# skipped outright (if: secrets.PROJECT_AUTOMATION_PAT != '') rather than
+# running and failing -- actions/add-to-project requires a non-empty
+# github-token input and errors out immediately if it's blank, which would
+# otherwise leave a red, failed run on every single new issue/PR in the
+# documented before-the-secret-exists deployment state. Skipping the job
+# entirely (not just the step) means the run shows as skipped, matching the
+# harmless-no-op behavior this file's header always intended: the item just
+# isn't auto-added; add it manually with `gh project item-add`.
 name: Add to project board
 
 on:
@@ -25,6 +30,7 @@ jobs:
   add-to-project:
     name: Add to KANBAN-Lancache-NG
     runs-on: ubuntu-latest
+    if: ${{ secrets.PROJECT_AUTOMATION_PAT != '' }}
     steps:
       - name: Add issue/PR to project board
         uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
