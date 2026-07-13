@@ -471,6 +471,24 @@ apt_compose_package() {
     fi
 }
 
+# Picks the best available Buildx plugin package name for this apt index, same
+# preference-order pattern as apt_compose_package: Docker's own apt repo names
+# it docker-buildx-plugin, while Debian's/Ubuntu's native repos package the
+# same CLI plugin as docker-buildx. Returns non-zero (not a die()) when
+# neither is available so callers can treat provisioning it as best-effort --
+# assert_resolved_image_tag_platform_supported (#665) still fails closed later
+# with its own actionable "install docker-buildx-plugin" message if Buildx
+# ends up missing regardless.
+apt_buildx_package() {
+    if apt_package_available docker-buildx-plugin; then
+        printf '%s\n' docker-buildx-plugin
+    elif apt_package_available docker-buildx; then
+        printf '%s\n' docker-buildx
+    else
+        return 1
+    fi
+}
+
 # Docker bootstrap is a first-install convenience, not a build environment
 # contract. Changes here affect production setup directly and must stay separate
 # from future dev-mode/compiler-farm decisions.
@@ -543,7 +561,8 @@ install_docker_apt_repo() {
 # index has no Compose v2 package. Uses the lighter docker.io + ensure_apt_docker_client
 # path when possible instead of always pulling in Docker's own docker-ce group.
 install_docker_apt() {
-    local compose_package=""
+    local compose_package="" buildx_package=""
+    local -a docker_packages=()
 
     apt-get update -y
     if ! compose_package=$(apt_compose_package); then
@@ -553,10 +572,23 @@ install_docker_apt() {
             || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
     fi
 
+    # assert_resolved_image_tag_platform_supported (#665) hard-requires
+    # `docker buildx` before the first pull. Install it alongside Docker/Compose
+    # here so that check does not immediately abort a fresh install right after
+    # setup.sh finished installing its own prerequisites -- best-effort only:
+    # if this apt index has neither buildx package name, skip it and let the
+    # later platform check fail closed with its own actionable message instead
+    # of failing this whole Docker install over an unrelated package gap.
+    buildx_package=$(apt_buildx_package) || buildx_package=""
+
     if [[ "$compose_package" = docker-compose-plugin ]]; then
-        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io "$compose_package"
+        docker_packages=(docker-ce docker-ce-cli containerd.io "$compose_package")
+        [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
+        apt-get install -y --no-install-recommends "${docker_packages[@]}"
     else
-        apt-get install -y --no-install-recommends docker.io "$compose_package"
+        docker_packages=(docker.io "$compose_package")
+        [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
+        apt-get install -y --no-install-recommends "${docker_packages[@]}"
         # Debian Trixie splits the Docker client into docker-cli, so install it
         # only when docker.io did not already provide /usr/bin/docker.
         ensure_apt_docker_client
@@ -684,7 +716,14 @@ install_docker_rpm() {
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
-        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+        # docker-buildx-plugin is included here (not just docker-compose-plugin)
+        # so a fresh full Docker install already satisfies
+        # assert_resolved_image_tag_platform_supported's (#665) `docker buildx`
+        # requirement -- this repo_url is always Docker's own official repo
+        # (see docker_rpm_repo_url above), which publishes docker-buildx-plugin
+        # directly, unlike the apt path where it must be probed for (see
+        # apt_buildx_package).
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
     fi
 
     for package in "${packages[@]}"; do
@@ -761,13 +800,13 @@ install_docker() {
 
     if command -v apt-get >/dev/null 2>&1; then
         print_warn "Docker is missing."
-        printf "  Required packages: docker.io and an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)\n"
+        printf "  Required packages: docker.io, an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose), and Buildx (docker-buildx-plugin or docker-buildx) when this apt index has one\n"
         if ! confirm "Install these packages now? [y/N]" "N"; then
             die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
         fi
         install_docker_apt || die "Failed to install Docker."
     elif command -v dnf >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -776,7 +815,7 @@ install_docker() {
         fi
         install_docker_rpm dnf || die "Failed to install Docker."
     elif command -v yum >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -785,7 +824,7 @@ install_docker() {
         fi
         install_docker_rpm yum || die "Failed to install Docker."
     elif command -v pacman >/dev/null 2>&1; then
-        packages=(docker docker-compose)
+        packages=(docker docker-compose docker-buildx)
         install_packages "Docker is missing." "${packages[@]}" \
             || die "Failed to install Docker."
     else
@@ -1610,6 +1649,83 @@ assert_prebuilt_image_platform_supported() {
     esac
 }
 
+# Maps `uname -m` to the "linux/<arch>" platform string used throughout
+# release/stack-images.yml and by `docker buildx`. Shared by
+# assert_prebuilt_image_platform_supported's host-only check and by
+# assert_resolved_image_tag_platform_supported below so both checks agree on
+# exactly which architectures are recognized.
+host_image_platform() {
+    local arch="$1"
+    case "$arch" in
+        x86_64|amd64)
+            printf 'linux/amd64\n'
+            ;;
+        aarch64|arm64)
+            printf 'linux/arm64\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# assert_prebuilt_image_platform_supported only checks that this host's
+# architecture is one setup.sh understands at all; it says nothing about
+# whether the specific tag/channel this install actually resolved to
+# (LANCACHE_IMAGE_TAG) has a manifest published for that architecture. A host
+# pinned to a pre-arm64 tag, or to a channel whose current pointer is missing
+# an arm64 leg, would otherwise sail past that earlier guard and only fail
+# deep inside `docker compose pull`, after setup.sh has already written
+# .env/compose state for this install (#665). Call this once the tag is fully
+# resolved and before the first state-mutating write for that install/update.
+#
+# Mirrors scripts/require-image-platforms.sh's `docker buildx imagetools
+# inspect` approach, but inlined rather than shelled out to that script:
+# setup.sh is documented (see README.md) to run standalone via `curl | bash`,
+# so it cannot assume a full repository checkout with scripts/ present on
+# disk. Checks the "dns" image only -- release/stack-images.yml declares an
+# identical platform list for every runtime service and the stack pointer, so
+# one lookup is representative and avoids one registry round-trip per service.
+assert_resolved_image_tag_platform_supported() {
+    local registry="$1" prefix="$2" tag="$3"
+    local arch platform image single_platform inspect_text discovered_platforms
+
+    # Every guard below adds an explicit `return 1` after `die`. In
+    # production this is unreachable (die() calls exit and terminates the
+    # whole process), but it makes the function correctly fail-fast under
+    # test doubles that stub die() as a non-exiting `return` (see
+    # tests/bats/helpers/setup-platform-helpers.sh) instead of silently
+    # falling through to later checks with empty, unset state.
+    arch=$(uname -m)
+    platform=$(host_image_platform "$arch") \
+        || { die "Prebuilt production images are currently published for linux/amd64 and linux/arm64 only. This host reports '${arch}'."; return 1; }
+
+    command -v docker >/dev/null 2>&1 \
+        || { die "docker is required to verify that image tag '${tag}' publishes a ${platform} image before continuing."; return 1; }
+    docker buildx version >/dev/null 2>&1 \
+        || { die "docker buildx is required to verify that image tag '${tag}' publishes a ${platform} image before continuing. Install the docker-buildx-plugin package, then rerun setup.sh."; return 1; }
+
+    image="${registry}/${prefix}/dns:${tag}"
+
+    # shellcheck disable=SC2016 # Go template is evaluated by Docker, not the shell.
+    single_platform=$(docker buildx imagetools inspect "$image" --format '{{if .Image}}{{.Image.OS}}/{{.Image.Architecture}}{{end}}' 2>&1) \
+        || { die "Failed to inspect ${image} to verify it publishes a ${platform} image (${single_platform}). Check network access and registry reachability, then rerun setup.sh."; return 1; }
+
+    if [[ -n "$single_platform" && "$single_platform" != "<no value>/<no value>" && "$single_platform" != "unknown/unknown" ]]; then
+        discovered_platforms="$single_platform"
+    else
+        inspect_text=$(docker buildx imagetools inspect "$image" 2>&1) \
+            || { die "Failed to inspect ${image} manifest to verify it publishes a ${platform} image (${inspect_text}). Check network access and registry reachability, then rerun setup.sh."; return 1; }
+        discovered_platforms=$(printf '%s\n' "$inspect_text" | awk '$1 == "Platform:" && $2 != "unknown/unknown" { print $2 }' | sort -u)
+    fi
+
+    [[ -n "$discovered_platforms" ]] \
+        || { die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."; return 1; }
+
+    printf '%s\n' "$discovered_platforms" | grep -Eq "^${platform}(/.*)?$" \
+        || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
+}
+
 # True if systemctl is present AND the given unit file is known to it. Used to
 # make all convergence-timer handling a no-op on hosts without systemd or
 # without the lancache-converge units installed, instead of erroring out.
@@ -2139,6 +2255,7 @@ migrate_env_for_update() {
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
+    local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     [[ -f "$env_file" ]] \
@@ -2147,6 +2264,51 @@ migrate_env_for_update() {
     print_step "Checking runtime .env"
 
     require_env_value_for_update IP_STANDARD "$env_file"
+
+    # Resolve, verify, and persist the image registry/prefix/channel/tag
+    # before any other .env mutation below (#665). This used to run after
+    # several unrelated normalizations (session TTL, cache/state directory
+    # migration, PROXY_SECURITY_MODE, ...), so a host whose resolved tag
+    # lacks this platform would still have all of those already rewritten
+    # into .env by the time assert_resolved_image_tag_platform_supported
+    # aborted the update -- more partial state than necessary, even though
+    # cmd_update's pre-update backup (taken before this function runs) still
+    # makes it recoverable. Resolving into local variables first and calling
+    # assert_resolved_image_tag_platform_supported before writing anything
+    # means a platform failure here leaves every key in the rest of this
+    # function's migration untouched, not just these four.
+    lancache_image_registry=$(resolve_lancache_image_registry "$env_file")
+    validate_lancache_image_registry "$lancache_image_registry"
+    lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")
+    validate_lancache_image_prefix "$lancache_image_prefix"
+    lancache_image_channel=$(resolve_lancache_image_channel "$env_file")
+    existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    if [[ "$preserve_image_tag" = "1" ]] \
+        && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+        # Restoring a backup to roll back a bad channel-tracked image: keep
+        # the archived immutable tag as-is instead of re-resolving it below,
+        # which would silently pull whatever the channel (edge/latest)
+        # currently points to -- right after a bad release that is likely
+        # still the same bad tag, defeating the whole point of the restore.
+        validate_lancache_image_tag "$existing_image_tag"
+        lancache_image_tag="$existing_image_tag"
+    else
+        # resolve_lancache_image_tag independently re-derives the same
+        # tag-implies-channel inference resolve_lancache_image_channel just
+        # computed (see its own docstring: "mirrors, and is deliberately more
+        # specific than" that precedence) by reading env_file directly, so it
+        # does not need lancache_image_channel written into .env first to
+        # reach the same result -- verified by tracing every branch of both
+        # functions.
+        lancache_image_tag=$(resolve_lancache_image_tag "$env_file")
+    fi
+    assert_resolved_image_tag_platform_supported \
+        "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$lancache_image_registry" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
+    set_env_key LANCACHE_IMAGE_TAG "$lancache_image_tag" "$env_file"
+
     ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
     ui_session_ttl="${ui_session_ttl:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
     validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
@@ -2226,23 +2388,11 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" "$env_file"
     migrate_proxy_security_mode_for_update "$env_file"
     set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
-    existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
-    if [[ "$preserve_image_tag" = "1" ]] \
-        && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
-        # Restoring a backup to roll back a bad channel-tracked image: keep
-        # the archived immutable tag as-is instead of re-resolving it below,
-        # which would silently pull whatever the channel (edge/latest)
-        # currently points to -- right after a bad release that is likely
-        # still the same bad tag, defeating the whole point of the restore.
-        validate_lancache_image_tag "$existing_image_tag"
-    else
-        set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
-    fi
-    validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
-    validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
+    # LANCACHE_IMAGE_REGISTRY/PREFIX/CHANNEL/TAG (including the #731
+    # preserve_image_tag restore-rollback exception) were already resolved,
+    # verified, and written near the top of this function, before any of the
+    # migration above -- see the #665 comment there.
+
     set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
@@ -3464,6 +3614,8 @@ cmd_secondary() {
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
+    local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel
+    local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
 
     usage_secondary() {
         cat <<EOF
@@ -3551,6 +3703,62 @@ EOF
         || die "No free secondary bind IP available on port 53. Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     assert_prebuilt_image_platform_supported
+
+    # --rotate against an existing secondary directory can resolve
+    # registry/prefix/channel/tag entirely from local config (an explicit
+    # LANCACHE_IMAGE_* env var or the existing .env) with no need for the
+    # primary's response below. Check the platform for that case here, before
+    # the registration POST rotates this secondary's NATS password on the
+    # primary (#665) -- otherwise a Buildx/platform failure surfacing only
+    # after the POST would leave the primary already expecting the new
+    # password while this host's .env still has the old one, with no way to
+    # recover except registering again. A fresh (non-rotate) registration has
+    # no local .env to resolve from yet, so it necessarily keeps relying on
+    # the existing post-registration check further down; the same is true for
+    # a --rotate run whose local channel/tag genuinely can't be resolved
+    # without the primary's response (e.g. a still-mutable, non-pinned
+    # channel with no LANCACHE_IMAGE_TAG override).
+    if [[ "$rotate" -eq 1 ]]; then
+        preflight_dir="${name}"
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            preflight_dir="."
+        fi
+        preflight_env_file=""
+        [[ -f "${preflight_dir}/.env" ]] && preflight_env_file="${preflight_dir}/.env"
+
+        if [[ -n "$preflight_env_file" ]]; then
+            preflight_registry="${LANCACHE_IMAGE_REGISTRY:-$(get_env_var LANCACHE_IMAGE_REGISTRY "$preflight_env_file")}"
+            preflight_prefix="${LANCACHE_IMAGE_PREFIX:-$(get_env_var LANCACHE_IMAGE_PREFIX "$preflight_env_file")}"
+            preflight_channel="${LANCACHE_IMAGE_CHANNEL:-$(get_env_var LANCACHE_IMAGE_CHANNEL "$preflight_env_file")}"
+
+            if [[ -n "$preflight_registry" && -n "$preflight_prefix" && -n "$preflight_channel" ]]; then
+                validate_lancache_image_registry "$preflight_registry"
+                validate_lancache_image_prefix "$preflight_prefix"
+                validate_lancache_image_channel "$preflight_channel"
+
+                # A non-pinned (mutable) channel with no explicit
+                # LANCACHE_IMAGE_TAG override still resolves entirely from
+                # local/registry state (it pulls the channel's own pointer
+                # image), so it counts as locally resolvable too. A pinned
+                # channel, by contrast, has no channel pointer of its own --
+                # it requires an actual tag from either the shell env or the
+                # existing .env; if neither has one, only the primary's
+                # response can supply it, so this preflight must be skipped.
+                if [[ "$preflight_channel" != "pinned" \
+                    || -n "${LANCACHE_IMAGE_TAG:-}" \
+                    || -n "$(get_env_var LANCACHE_IMAGE_TAG "$preflight_env_file")" ]]; then
+                    preflight_tag=$(LANCACHE_IMAGE_REGISTRY="$preflight_registry" \
+                        LANCACHE_IMAGE_PREFIX="$preflight_prefix" \
+                        LANCACHE_IMAGE_CHANNEL="$preflight_channel" \
+                        resolve_lancache_image_tag "$preflight_env_file")
+                    assert_resolved_image_tag_platform_supported "$preflight_registry" "$preflight_prefix" "$preflight_tag"
+                    preflight_verified_registry="$preflight_registry"
+                    preflight_verified_prefix="$preflight_prefix"
+                    preflight_verified_tag="$preflight_tag"
+                fi
+            fi
+        fi
+    fi
 
     print_step "Registering secondary"
     response_file=$(mktemp)
@@ -3662,6 +3870,22 @@ EOF
         LANCACHE_IMAGE_PREFIX="$lancache_image_prefix" \
         LANCACHE_IMAGE_CHANNEL="$lancache_image_channel" \
         resolve_lancache_image_tag)
+
+    # Verify the resolved tag actually publishes an image for this secondary
+    # host's architecture before any secondary state below is written (#665).
+    # The earlier assert_prebuilt_image_platform_supported call only checked
+    # the host architecture in general, not this specific tag/channel. Skip
+    # this if the --rotate preflight above (before the registration POST)
+    # already verified these exact registry/prefix/tag values -- re-running it
+    # here would only repeat the same registry inspect for no new information.
+    # Any drift from the preflight (e.g. the response provided different
+    # values than local config) still falls through to a fresh, real check.
+    if [[ -z "$preflight_verified_tag" \
+        || "$lancache_image_registry" != "$preflight_verified_registry" \
+        || "$lancache_image_prefix" != "$preflight_verified_prefix" \
+        || "$lancache_image_tag" != "$preflight_verified_tag" ]]; then
+        assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    fi
 
     # Known-good pdns.conf/recursor.conf snapshot retention (#615): same
     # variable and default (3) as config/{dev,prod}/dns-standard.env. The
@@ -4240,6 +4464,13 @@ LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
 LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$env_file")
 LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$env_file")
 LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
+
+# Verify the resolved tag actually publishes an image for this host's
+# architecture before any state below is written (#665). The earlier
+# assert_prebuilt_image_platform_supported call only checked the host
+# architecture in general, not this specific tag/channel.
+assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCACHE_IMAGE_PREFIX" "$LANCACHE_IMAGE_TAG"
+
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
