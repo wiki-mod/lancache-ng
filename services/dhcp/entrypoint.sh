@@ -11,6 +11,13 @@ set -e
 
 install -d -m 750 /run/kea
 mkdir -p /var/lib/kea
+# Central logging pipeline (#633): Kea's loggers write to this file in
+# addition to stdout (see kea-dhcp4.conf.template's "output-options" and
+# migrate_dhcp4_config()'s logger patch below) so fluent-bit can tail it, the
+# same "file on shared volume" pattern proxy/nginx already uses -- Kea itself
+# never creates a missing parent directory for a logger's file output, it
+# just fails to start, so this must exist before either daemon runs.
+mkdir -p /var/log/lancache-dhcp
 
 case "${1:-}" in
     nmap|/usr/bin/nmap|/bin/nmap)
@@ -245,12 +252,23 @@ migrate_dhcp4_config() {
         exit 1
     fi
     next="$(mktemp)"
+    # kea_log_file: central logging pipeline (#633). Existing installs'
+    # persisted kea-dhcp4.conf (on the /var/lib/kea volume, so it survives
+    # upgrades untouched otherwise) only has the "stdout" output-option this
+    # migration originally wrote -- the jq filter below adds the file output
+    # alongside it (not in place of it) for both the "kea-dhcp4" and
+    # "kea-dhcp4.dhcp4" loggers, same dual-output shape as a first-boot
+    # render of the template. Comments cannot live in kea-dhcp4.conf.template
+    # itself (or the runtime JSON this migration writes) because both must
+    # stay parseable by `jq` -- see migrate_dhcp4_config's own callers and
+    # tests/bats/*kea* for the parseability contract this relies on.
     if ! jq \
         --arg domain "$DHCP_DOMAIN" \
         --argjson lease_time "$DHCP_LEASE_TIME" \
         --argjson max_lease_time "$DHCP_MAX_LEASE_TIME" \
         --argjson ntp_migration_map "$ntp_migration_map" \
         --arg lease_cmds_hook_path "$KEA_LEASE_CMDS_HOOK_PATH" \
+        --arg kea_log_file "/var/log/lancache-dhcp/kea-dhcp4.log" \
         '
         def is_ipv4:
           type == "string"
@@ -315,7 +333,7 @@ migrate_dhcp4_config() {
           ))
         | walk(migrate_ntp_option)
         | .Dhcp4.loggers = ((.Dhcp4.loggers // []) as $loggers
-          | if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
+          | (if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
               $loggers | map(if .name == "kea-dhcp4.dhcp4" then .severity = "ERROR" else . end)
             else
               $loggers + [{
@@ -325,6 +343,14 @@ migrate_dhcp4_config() {
                 "debuglevel": 0
               }]
             end)
+          | map(
+              if (.name == "kea-dhcp4" or .name == "kea-dhcp4.dhcp4") then
+                .["output-options"] = ((.["output-options"] // [{"output": "stdout"}]) as $opts
+                  | if any($opts[]; .output == $kea_log_file) then $opts
+                    else $opts + [{"output": $kea_log_file}]
+                    end)
+              else . end
+            ))
         ' \
         "$runtime" > "$next"; then
         rm -f "$next"
