@@ -410,8 +410,8 @@ fi
 # so upgrades can fix D2 schema or target changes without touching DHCP subnets.
 #
 # services/dhcp/kea-dhcp-ddns.conf's forward-ddns/reverse-ddns "name" fields
-# (issue #706) carry a literal trailing dot ("${DHCP_DOMAIN}.",
-# "in-addr.arpa.") that can't be documented inline in that file itself: it
+# (issue #706) carry a literal trailing dot ("${DHCP_DOMAIN}.", each reverse
+# zone name below) that can't be documented inline in that file itself: it
 # is validated as plain JSON elsewhere (tests/bats/dhcp_kea_config_generation.bats
 # runs `jq empty` on the rendered output), and Kea's own config format,
 # while it does tolerate `//`/`/* */` comments as an extension, would break
@@ -425,6 +425,28 @@ fi
 # #706's DDNS-follow-through test is what first exercised this path
 # end-to-end). Kea's own config parser does not add the trailing dot
 # itself, so it must be literal in the template.
+#
+# reverse-ddns.ddns-domains (issue #768): this used to be a single entry
+# named the literal catch-all "in-addr.arpa." -- but Kea D2 requires "name"
+# to match one real, existing zone (it cannot express "any of these
+# dynamically-selected per-octet zones" in one entry), and PowerDNS never
+# creates a zone with that exact literal name; it only ever creates the
+# narrower private-range subzones services/dns/entrypoint.sh's
+# PRIVATE_REVERSE_ZONES list creates (e.g. "31.172.in-addr.arpa."). Every
+# reverse/PTR DDNS update was therefore rejected by PowerDNS with "Can't
+# determine backend for domain 'in-addr.arpa'" (RCODE 9, NOTAUTH),
+# unconditionally, for any octet -- confirmed against a real Kea 2.6.3 +
+# PowerDNS 5.2.11 stack. The fix mirrors PRIVATE_REVERSE_ZONES exactly: one
+# ddns-domains entry per IPv4 private-range subzone PowerDNS actually hosts
+# (the same 18 zones, verbatim), each targeting the same dns-servers as
+# forward-ddns above, so Kea's D2 can match a lease's reverse FQDN (e.g.
+# "50.1.168.192.in-addr.arpa.") against the correct, real zone by suffix.
+# IPv6 reverse zones (c.f.ip6.arpa./d.f.ip6.arpa.) are deliberately excluded
+# here -- this project's Kea config is Dhcp4-only, no DHCPv6, so D2 never
+# generates an IPv6 PTR update in the first place. If
+# services/dns/entrypoint.sh's PRIVATE_REVERSE_ZONES list ever changes, this
+# list must be updated to match (tests/bats/dhcp_kea_config_generation.bats
+# guards the two staying in sync).
 DDNS_TEMPLATE="/etc/kea/kea-dhcp-ddns.conf.template"
 DDNS_RUNTIME="/var/lib/kea/kea-dhcp-ddns.conf"
 DDNS_NEXT="$(mktemp)"

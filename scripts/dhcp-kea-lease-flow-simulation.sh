@@ -52,18 +52,29 @@
 #
 # What this script does NOT verify (documented per the issue's "must
 # document what is verified and what is not verified" criterion):
-#   - Reverse (PTR) DDNS updates. Confirmed BROKEN in production, discovered
-#     incidentally while empirically verifying forward DDNS below: Kea's D2
-#     sends the reverse update's on-wire zone as the literal string
-#     "in-addr.arpa." (services/dhcp/kea-dhcp-ddns.conf's reverse-ddns
-#     "name"), but services/dns/entrypoint.sh never creates a zone with that
-#     exact name -- only narrower private-range subzones (e.g.
-#     "31.172.in-addr.arpa.") -- so PowerDNS rejects every PTR update with
-#     "Can't determine backend for domain 'in-addr.arpa'" (RCODE 9,
-#     NOTAUTH), for any octet, unconditionally. Refs #768 (tracks the fix;
-#     out of scope here since it needs its own design, not a #706 sub-item).
 #   - The dnsmasq-proxy DHCP mode (services/dhcp-proxy) -- entirely
 #     different code path, out of scope for this script.
+#
+# Reverse (PTR) DHCP-DDNS lease-event follow-through (issue #768) IS verified
+# below, alongside forward DDNS. It used to be BROKEN in production,
+# discovered incidentally while empirically verifying forward DDNS: Kea's D2
+# sent every reverse update's on-wire zone as the literal string
+# "in-addr.arpa." (services/dhcp/kea-dhcp-ddns.conf's reverse-ddns "name"),
+# but services/dns/entrypoint.sh never creates a zone with that exact name --
+# only narrower private-range subzones (e.g. "31.172.in-addr.arpa.") -- so
+# PowerDNS rejected every PTR update with "Can't determine backend for domain
+# 'in-addr.arpa'" (RCODE 9, NOTAUTH), for any octet, unconditionally. #768
+# fixed this by giving reverse-ddns one ddns-domains entry per private
+# reverse zone PowerDNS actually hosts (mirroring PRIVATE_REVERSE_ZONES),
+# instead of one non-existent catch-all -- see that fix's own comment in
+# services/dhcp/entrypoint.sh for the full explanation. This script's own
+# subnet ($subnet below, always 172.31.<octet>.0/24) always falls inside the
+# "31.172.in-addr.arpa." zone regardless of <octet> (that zone spans the
+# whole 172.16.0.0/12-through-172.31.0.0/16 second-octet range
+# PRIVATE_REVERSE_ZONES lists one entry per, so no test-only zone-bootstrap
+# shim is needed here the way forward DDNS's non-"lan" test domain needed
+# one above -- the real zone already exists, created unconditionally by
+# services/dns/entrypoint.sh on every start, exactly like production.
 #
 # Forward (A-record) DHCP-DDNS lease-event follow-through (issue #706, the
 # DDNS half of #557's scenario 2) IS verified below: after the lease above
@@ -596,6 +607,49 @@ else
     fail=1
 fi
 
+echo "== Verifying Kea's DDNS update produced a matching PowerDNS PTR record (issue #768) =="
+
+# assert_ptr_record_matches_lease <ip> <expected_fqdn>
+# Reverse counterpart of assert_ddns_record_matches_lease above: queries the
+# same real PowerDNS authoritative server for <ip>'s PTR record via `dig -x`
+# and checks it equals <expected_fqdn>. Same polling rationale as the
+# forward check -- DDNS is asynchronous, so the PTR record is not guaranteed
+# to exist the instant the A record above was confirmed.
+assert_ptr_record_matches_lease() {
+    local ip="$1" expected_fqdn="$2" resolved_fqdn=""
+    local ptr_deadline=$((SECONDS + 30))
+    while (( SECONDS < ptr_deadline )); do
+        resolved_fqdn="$(docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 -x "$ip" 2>/dev/null | tail -n1)"
+        if [[ "$resolved_fqdn" == "$expected_fqdn" ]]; then
+            echo "Reverse DDNS verification passed: PowerDNS authoritative has a PTR record for $ip -> $resolved_fqdn, matching the lease Kea just granted."
+            return 0
+        fi
+        sleep 2
+    done
+    echo "::error::PowerDNS authoritative never produced a PTR record for '$ip' matching the leased hostname ($expected_fqdn); last resolved value: '${resolved_fqdn:-<none>}'." >&2
+    echo "::group::kea-dhcp-ddns / PowerDNS container logs" >&2
+    docker logs "$kea_container" >&2 2>&1 || true
+    docker logs "$dns_container" >&2 2>&1 || true
+    echo "::endgroup::" >&2
+    return 1
+}
+
+# The expected PTR target is the exact same FQDN the A-record check above
+# just confirmed ($ddns_expected_fqdn) -- Kea's D2 daemon derives both the
+# forward and reverse DDNS updates from the same lease event, so a correct
+# reverse update must point back at the identical name, not a second
+# independently-derived value that could coincidentally match. $offered_address
+# always falls inside "31.172.in-addr.arpa." (see this script's header
+# comment on why), which services/dns/entrypoint.sh creates unconditionally,
+# needing no test-only zone-bootstrap shim the way forward DDNS's non-"lan"
+# domain did above.
+ptr_status="FAILED (see ::error above)"
+if assert_ptr_record_matches_lease "$offered_address" "$ddns_expected_fqdn"; then
+    ptr_status="verified: ${offered_address} -> ${ddns_expected_fqdn} (TSIG-signed nsupdate from kea-dhcp-ddns)"
+else
+    fail=1
+fi
+
 # ─── Static host reservation scenario (issue #707) ───
 #
 # Appended as its own self-contained step rather than interleaved into the
@@ -841,6 +895,7 @@ NTP servers:          ${ntp_servers:-<none>}
 Lease time (s):       ${lease_time:-<none>}
 Domain name:          ${domain_name:-<none>}
 DDNS A record:        ${ddns_status}
+DDNS PTR record:      ${ptr_status}
 
 == Static host reservation result (issue #707) ==
 Reserved MAC:          ${reserved_mac} -> ${reserved_ip}
@@ -861,11 +916,16 @@ the granted lease produced a matching PowerDNS A record via a real
 TSIG-authenticated DDNS update from kea-dhcp-ddns to a real PowerDNS
 authoritative server, using this project's real DDNS transport/config
 wiring (see the header comment above for the one test-only zone-bootstrap
-shim this run needed and why).
+shim this run needed and why). Also verified (issue #768): the same lease
+produced a matching PowerDNS PTR record, proving Kea's reverse-ddns fix
+(one ddns-domains entry per real private reverse zone, instead of the old
+non-existent "in-addr.arpa." catch-all) actually resolves against a real
+PowerDNS instance -- no test-only zone-bootstrap shim needed for this half,
+since this script's subnet always falls inside a zone
+services/dns/entrypoint.sh creates unconditionally.
 
 NOT verified by this script (see header comment / docs/dhcp-modes.md):
-reverse (PTR) DDNS updates (confirmed BROKEN in production -- see the header
-comment and issue #768), and the dnsmasq-proxy DHCP mode (out of scope here).
+the dnsmasq-proxy DHCP mode (out of scope here).
 REPORT
 )
 echo "$report"
