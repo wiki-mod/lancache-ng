@@ -281,6 +281,15 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `AGENTS.md`'s two CodeQL macro-expansion carve-out rules (AG-VAL-021,
+  AG-VAL-022) contradicting each other: AG-VAL-021's worked example described
+  macro-*generated* code while the general rule it illustrated (AG-VAL-022)
+  correctly scoped the exception to ordinary macro *invocations* in
+  human-authored source. Reworded AG-VAL-021 as its own, genuinely distinct
+  case (CodeQL findings in code a macro actually generates, which needs
+  test-coverage evidence AG-VAL-022 does not), with explicit citations to the
+  upstream CodeQL bugs (github/codeql#19966, #19982, #20659) AG-VAL-022's
+  exception rests on (#702).
 - Fixed Kea DHCP (`kea-dhcp4`, `kea-ctrl-agent`, `kea-dhcp-ddns`) failing to
   start at all once the `logging` profile's file-log wiring (#633/#756) was
   active. Kea's packaged binaries hard-restrict file-logger `output` paths
