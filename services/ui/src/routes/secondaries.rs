@@ -291,7 +291,57 @@ pub async fn update_nats_conf(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     nats_config::validate_runtime_nats_credentials(&state.config)?;
 
-    let nats_conf = format!(
+    // .as_deref().unwrap_or_default() below is defensive only: the
+    // validate_runtime_nats_credentials call above already guarantees every
+    // one of these is Some by the time render_nats_conf runs.
+    let nats_conf = render_nats_conf(
+        &state.config.nats_ui_user,
+        state.config.nats_ui_password.as_deref().unwrap_or_default(),
+        &state.config.nats_dns_writer_user,
+        state
+            .config
+            .nats_dns_writer_password
+            .as_deref()
+            .unwrap_or_default(),
+        &state.config.nats_dns_replica_user,
+        state
+            .config
+            .nats_dns_replica_password
+            .as_deref()
+            .unwrap_or_default(),
+        &state.config.nats_callout_user,
+        state
+            .config
+            .nats_callout_password
+            .as_deref()
+            .unwrap_or_default(),
+        &state.nats_issuer_public_key,
+    );
+
+    write_nats_conf_atomically(&state.config.nats_conf_path, &nats_conf)
+}
+
+// Pulled out of update_nats_conf as a pure, I/O-free function (#640, follow-
+// up to #583's per-secondary identity decision) so the repeat-run/
+// idempotence property #640 requires -- that starting up twice with an
+// unchanged Config renders byte-identical nats.conf content -- is directly
+// unit-testable. update_nats_conf's own AppState carries a live Docker
+// client, NATS connection, and SQLite handle, none of which a unit test can
+// construct without a running stack, so this function takes only the plain
+// string values it actually needs instead of the whole AppState.
+#[allow(clippy::too_many_arguments)]
+fn render_nats_conf(
+    ui_user: &str,
+    ui_password: &str,
+    writer_user: &str,
+    writer_password: &str,
+    replica_user: &str,
+    replica_password: &str,
+    callout_user: &str,
+    callout_password: &str,
+    issuer_public_key: &str,
+) -> String {
+    format!(
         r#"jetstream {{
   store_dir: /data
 }}
@@ -362,34 +412,8 @@ authorization {{
     auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}"]
   }}
 }}
-"#,
-        // .as_deref().unwrap_or_default() below is defensive only: the
-        // validate_runtime_nats_credentials call above already guarantees
-        // every one of these is Some by the time this format! runs.
-        ui_user = state.config.nats_ui_user,
-        ui_password = state.config.nats_ui_password.as_deref().unwrap_or_default(),
-        writer_user = state.config.nats_dns_writer_user,
-        writer_password = state
-            .config
-            .nats_dns_writer_password
-            .as_deref()
-            .unwrap_or_default(),
-        replica_user = state.config.nats_dns_replica_user,
-        replica_password = state
-            .config
-            .nats_dns_replica_password
-            .as_deref()
-            .unwrap_or_default(),
-        callout_user = state.config.nats_callout_user,
-        callout_password = state
-            .config
-            .nats_callout_password
-            .as_deref()
-            .unwrap_or_default(),
-        issuer_public_key = state.nats_issuer_public_key,
-    );
-
-    write_nats_conf_atomically(&state.config.nats_conf_path, &nats_conf)
+"#
+    )
 }
 
 fn write_nats_conf_atomically(
@@ -485,6 +509,121 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .count();
         assert_eq!(leftovers, 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // #640: closes the one real gap the #456 convergence/idempotence audit
+    // flagged for NATS -- render_nats_conf/write_nats_conf_atomically are the
+    // write path #583's per-secondary-identity decision settled on (a static
+    // nats.conf written once at startup; see this module's own header comment
+    // and secondaries.rs's `update_nats_conf` doc comment), but nothing
+    // previously proved that path is actually a stable fixed point across
+    // repeated container starts with an unchanged Config. A prior version of
+    // this code path (the now-removed shared DNS-reader role, #380/#426/#473)
+    // *was* a documented no-op, so this repeat-run test intentionally targets
+    // real, non-trivial per-role content (nine format! placeholders, four
+    // roles) rather than assuming that history still applies today.
+    #[test]
+    fn render_nats_conf_is_byte_identical_across_repeated_calls_with_unchanged_inputs() {
+        let render = || {
+            render_nats_conf(
+                "lancache-ui",
+                "ui-secret",
+                "lancache-dns-writer",
+                "writer-secret",
+                "lancache-dns-replica",
+                "replica-secret",
+                "lancache-nats-callout",
+                "callout-secret",
+                "issuer-public-key-abc123",
+            )
+        };
+
+        let first = render();
+        let second = render();
+        assert_eq!(
+            first, second,
+            "render_nats_conf must be a pure function of its inputs: same credentials in, byte-identical config out, every call"
+        );
+
+        // Sanity check that the comparison above isn't trivially true because
+        // both calls returned empty/placeholder output -- every interpolated
+        // value must actually appear in the rendered config.
+        for needle in [
+            "lancache-ui",
+            "ui-secret",
+            "lancache-dns-writer",
+            "writer-secret",
+            "lancache-dns-replica",
+            "replica-secret",
+            "lancache-nats-callout",
+            "callout-secret",
+            "issuer-public-key-abc123",
+        ] {
+            assert!(
+                first.contains(needle),
+                "rendered nats.conf is missing expected value {needle:?}"
+            );
+        }
+    }
+
+    // End-to-end version of the test above: drives the real
+    // render_nats_conf -> write_nats_conf_atomically pipeline twice in a row
+    // (simulating two container starts with an unchanged Config, the same
+    // shape setup_update_idempotence.bats and dns_config_snapshot_idempotence.bats
+    // already prove for setup.sh and PowerDNS respectively) and asserts the
+    // on-disk file converges to byte-identical content with no leftover
+    // `.tmp-*` file from either write.
+    #[test]
+    fn nats_conf_write_converges_to_the_same_file_across_repeated_writes_of_unchanged_config() {
+        let dir = temp_dir("nats-conf-repeat-run");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nats.conf");
+        let path_str = path.to_str().unwrap();
+
+        let rendered_first = render_nats_conf(
+            "lancache-ui",
+            "ui-secret",
+            "lancache-dns-writer",
+            "writer-secret",
+            "lancache-dns-replica",
+            "replica-secret",
+            "lancache-nats-callout",
+            "callout-secret",
+            "issuer-public-key-abc123",
+        );
+        write_nats_conf_atomically(path_str, &rendered_first).unwrap();
+        let first_write = fs::read_to_string(&path).unwrap();
+
+        // Second "startup": same inputs, freshly re-rendered (not the cached
+        // `rendered_first` string) so this also exercises render_nats_conf a
+        // second time, not just write_nats_conf_atomically writing the same
+        // string object twice.
+        let rendered_second = render_nats_conf(
+            "lancache-ui",
+            "ui-secret",
+            "lancache-dns-writer",
+            "writer-secret",
+            "lancache-dns-replica",
+            "replica-secret",
+            "lancache-nats-callout",
+            "callout-secret",
+            "issuer-public-key-abc123",
+        );
+        write_nats_conf_atomically(path_str, &rendered_second).unwrap();
+        let second_write = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            first_write, second_write,
+            "nats.conf must converge to the same content across repeated startups with an unchanged Config"
+        );
+
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "no .tmp-* file may survive either write");
         fs::remove_dir_all(dir).unwrap();
     }
 }

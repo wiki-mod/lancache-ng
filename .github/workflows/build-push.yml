@@ -1586,6 +1586,17 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-naming-consistency.sh
 
+      - name: Check config-writer idempotence test coverage (#640)
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-idempotence-test-coverage.sh
+
       - name: Remove fallback compose validation image
         if: always()
         run: |
