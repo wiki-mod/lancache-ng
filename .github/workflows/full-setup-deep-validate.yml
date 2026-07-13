@@ -147,6 +147,7 @@ jobs:
       netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
       nats_ip: ${{ steps.derive.outputs.nats_ip }}
       ui_ip: ${{ steps.derive.outputs.ui_ip }}
+      standard_shim_ip: ${{ steps.derive.outputs.standard_shim_ip }}
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
@@ -439,6 +440,12 @@ jobs:
       VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
       VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
       VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
+      # This is the only job in this workflow that threads this through: the
+      # standard-passthrough-shim service it names is Compose-profile-gated
+      # (see deploy/full-setup/docker-compose.yml), so only this job's own
+      # `docker compose up ... standard-passthrough-shim` call ever starts
+      # it -- no other job needs a collision-safe value for it (issue #668).
+      VALIDATION_STANDARD_SHIM_IP: ${{ needs.compute-validation-network.outputs.standard_shim_ip }}
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:

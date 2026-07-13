@@ -301,6 +301,25 @@ is real, live, running code, not just work sitting in source control.
   as a pinned target (operator-facing pinned/derive messages still name only
   `sha-*`/`vX.Y.Z`, so these ephemeral CI tags are not advertised for
   production installs).
+- Fixed `scripts/ssl-mitm-cache-simulation.sh` being unable to prove SSL
+  mode's DNS actually routes to a distinct MITM endpoint (#668): it
+  previously asserted `dns-standard` and `dns-ssl` both resolve a test CDN
+  domain to the exact same hardcoded proxy address, so a `dns-ssl` wrongly
+  wired to the standard-mode address would have passed identically. Added a
+  `standard-passthrough-shim` service to `deploy/full-setup/docker-compose.yml`
+  (Compose-profile-gated, only started by this script) that reproduces
+  prod's real `IP_STANDARD:443` -> proxy-container-`:8443` port-forward as a
+  genuinely separate, dialable address; `dns-standard`'s `PROXY_IP` now
+  points there instead of at the proxy container's own address. The test now
+  connects to whatever each DNS server *actually* answers with and inspects
+  the certificate presented: `dns-ssl`'s resolved address must present a
+  certificate issued by the LAN CA (and be rejected by the public trust
+  store), while `dns-standard`'s resolved address must present the real
+  origin's own certificate (and validate cleanly against the public trust
+  store) -- proving the DNS-driven MITM-vs-passthrough distinction
+  end-to-end instead of a shared-address assumption. Also updated
+  `scripts/full-setup-client-simulation.sh`'s DNS check to expect the two
+  nameservers' now-genuinely-different answers.
 - Fixed `AGENTS.md`'s two CodeQL macro-expansion carve-out rules (AG-VAL-021,
   AG-VAL-022) contradicting each other: AG-VAL-021's worked example described
   macro-*generated* code while the general rule it illustrated (AG-VAL-022)

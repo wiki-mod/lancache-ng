@@ -46,6 +46,14 @@ outputs:
   ui_ip:
     description: ui service IP
     value: ${{ steps.derive.outputs.ui_ip }}
+  standard_shim_ip:
+    description: >-
+      standard-passthrough-shim service IP (issue #668) -- only started by
+      scripts/ssl-mitm-cache-simulation.sh's own `docker compose up` call
+      (the service is Compose-profile-gated), but derived here alongside
+      every other per-run address so that job's env block can thread a
+      collision-free value the same way it already does for the others.
+    value: ${{ steps.derive.outputs.standard_shim_ip }}
   project_name:
     description: Compose project name (derived for per-run isolation)
     value: ${{ steps.derive.outputs.project_name }}
@@ -123,6 +131,7 @@ runs:
           echo "netdata_ip=172.30.${octet}.7"
           echo "nats_ip=172.30.${octet}.8"
           echo "ui_ip=172.30.${octet}.9"
+          echo "standard_shim_ip=172.30.${octet}.10"
           echo "project_name=${project_name}"
           echo "ui_port=${ui_port}"
         } >> "$GITHUB_OUTPUT"
