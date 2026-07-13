@@ -106,9 +106,22 @@ cleanup() {
     # simulation above succeeded or failed, not just on the happy path --
     # before ever touching rm -rf.
     if [[ -d "$work_dir" ]]; then
-        docker run --rm --entrypoint chown \
+        # Reported explicitly (not just silently `|| true`-d) because the
+        # first time this was fixed, the fix's own success was only ever
+        # confirmed by *inference* (grepping a later run's log for the
+        # absence of a "Permission denied" from the `rm -rf` below) --
+        # good enough after the fact, but not something a future reviewer
+        # of this same log could confirm at a glance without redoing that
+        # archaeology. Printing the chown's own exit code makes "did the
+        # ownership reset actually happen" a directly visible fact in
+        # every run's log, success or failure, instead of an inference.
+        if docker run --rm --entrypoint chown \
             -v "$work_dir:/reset-owner" \
-            "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1 || true
+            "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1; then
+            echo "cleanup: reset ownership of $work_dir to $(id -u):$(id -g) -- ok"
+        else
+            echo "cleanup: WARNING -- resetting ownership of $work_dir failed (rc=$?); the rm -rf below may leave files behind on this runner" >&2
+        fi
     fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
     # `|| true`: confirmed for real that this exact command, unguarded, is
@@ -118,8 +131,14 @@ cleanup() {
     # above should prevent that now, but this is the second, independent
     # layer: this trap's whole point is to report the TEST's own outcome via
     # `exit "$status"` below, never let an incidental cleanup hiccup
-    # overwrite that).
-    rm -rf "$work_dir" || true
+    # overwrite that). Its own stderr is deliberately left unredirected (unlike
+    # the chown step above) so a leftover permission-denied file still shows
+    # up verbatim in the log even though it can no longer flip the job red.
+    if rm -rf "$work_dir"; then
+        echo "cleanup: removed $work_dir -- ok"
+    else
+        echo "cleanup: WARNING -- rm -rf $work_dir left files behind (see stderr above); this can block a LATER job's actions/checkout on this same runner slot" >&2
+    fi
     exit "$status"
 }
 trap cleanup EXIT
