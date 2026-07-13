@@ -3120,6 +3120,20 @@ jobs:
     # The build job depends on this gate before it can push normal service
     # images. Build-tools receives an additional exact pushed-digest scan in the
     # build job because the multi-arch published image is produced there.
+    #
+    # This bare `if:` (implicit `&& success()`) is deliberately NOT hardened
+    # with `!cancelled()` like promote/release/publish_coverage_badge, because
+    # the implicit success() only walks this job's transitive needs graph --
+    # here just `validate-compose`, a root job with no `if:`/`needs:` of its
+    # own, so it can never be legitimately *skipped* (only success/failure/
+    # cancelled). With no skippable upstream, the implicit-success() silent-skip
+    # trap that bit publish_coverage_badge (#677) and promote (#532) cannot fire
+    # here. INVARIANT: this holds ONLY while validate-compose stays a root job.
+    # If validate-compose ever gains an `if:` or a `needs:` on something that
+    # can skip, this bare condition would start silently skipping container-scan
+    # (and, transitively, weakening the build gate) -- switch it to
+    # `!cancelled() && needs['validate-compose'].result == 'success' && ...`
+    # then, matching the established fix pattern.
     if: github.event_name != 'pull_request'
     needs: validate-compose
     # Each matrix row carries its own JSON-encoded runner selector so amd64
