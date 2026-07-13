@@ -175,9 +175,12 @@ setup() {
     # `command -v docker` fail without needing any external command to set it
     # up -- important here because this test is deliberately simulating "no
     # usable PATH", so it must not depend on external commands itself.
-    PATH=""
-
-    run assert_resolved_image_tag_platform_supported ghcr.io wiki-mod/lancache-ng latest
+    # Set as a temporary assignment on the `run` line (not a standalone
+    # statement) so it only applies to this one command: a bare `PATH=""`
+    # persists in this test's own shell afterward and breaks bats-core's own
+    # per-test cleanup (which needs a working PATH to find `rm`), causing the
+    # *next* test to fail with an unrelated "rm: No such file or directory".
+    PATH="" run assert_resolved_image_tag_platform_supported ghcr.io wiki-mod/lancache-ng latest
     [ "$status" -ne 0 ]
     [[ "$output" == *"docker is required"* ]]
 }
