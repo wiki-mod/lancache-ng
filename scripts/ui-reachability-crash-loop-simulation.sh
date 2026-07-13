@@ -70,7 +70,17 @@ compose=(docker compose -p "$compose_project" -f "$compose_file" -f "$override_f
 cleanup() {
     local status=$?
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-    rm -rf "$work_dir"
+    # `|| true`: confirmed for real in the sibling setup-reset-kea-config-
+    # simulation.sh that an unguarded `rm -rf` as the last command in this
+    # trap can turn a run whose actual test logic already passed into a job
+    # CI reports as failed, if removal hits so much as one permission-denied
+    # file. work_dir here only ever holds a plain compose override file this
+    # script itself wrote (no container bind-mount into it, unlike the Kea
+    # sibling script), so that specific failure mode should not occur -- but
+    # this trap's whole point is reporting the TEST's own outcome via
+    # `exit "$status"` below, never letting an incidental cleanup hiccup
+    # override that, so the same guard is applied here too.
+    rm -rf "$work_dir" || true
     exit "$status"
 }
 trap cleanup EXIT

@@ -111,7 +111,15 @@ cleanup() {
             "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1 || true
     fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
-    rm -rf "$work_dir"
+    # `|| true`: confirmed for real that this exact command, unguarded, is
+    # what turned a run where the simulation itself printed its own "passed:"
+    # success message into a job CI still reported as failed -- `rm -rf`
+    # still exits non-zero on a permission-denied removal (the chown step
+    # above should prevent that now, but this is the second, independent
+    # layer: this trap's whole point is to report the TEST's own outcome via
+    # `exit "$status"` below, never let an incidental cleanup hiccup
+    # overwrite that).
+    rm -rf "$work_dir" || true
     exit "$status"
 }
 trap cleanup EXIT
