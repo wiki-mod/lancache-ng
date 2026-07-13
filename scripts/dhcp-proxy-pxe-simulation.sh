@@ -79,17 +79,25 @@ chmod 0777 "$work_dir"
 # A fixed subnet would collide across concurrent runs sharing one of this
 # project's self-hosted runner hosts. Mirror
 # dhcp-kea-lease-flow-simulation.sh's own per-run derivation, on a
-# dedicated 172.32.0.0/16 range unused by deploy/dev's 172.28.0.0/16,
+# dedicated 172.29.0.0/16 range unused by deploy/dev's 172.28.0.0/16,
 # full-setup-validate's 172.30.0.0/16, and
-# dhcp-kea-lease-flow-simulation's own 172.31.0.0/16.
+# dhcp-kea-lease-flow-simulation's own 172.31.0.0/16. Deliberately NOT
+# 172.32.0.0/16: RFC 1918's 172.16.0.0/12 private block ends at
+# 172.31.255.255, so 172.32.0.0/16 is public address space -- creating a
+# Docker bridge route there could hijack traffic to a real public
+# 172.32.*  destination on a self-hosted runner for the duration of the
+# job (and on a failed cleanup, until the route is removed). 172.29.0.0/16
+# stays inside 172.16.0.0/12 and is not claimed by any other script/compose
+# file in this repo (confirmed via a repo-wide grep for other 172.16-31.x.x
+# usages), found in PR #765 review.
 run_identity="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-$$}-${RANDOM:-0}-pxe"
 digest="$(printf '%s' "$run_identity" | sha256sum | cut -c1-8)"
 octet=$(( (16#$digest % 252) + 2 )) # 2..253
-subnet="172.32.${octet}.0/24"
-gateway="172.32.${octet}.1"
-dhcp_proxy_ip="172.32.${octet}.2"
-dns_primary="172.32.${octet}.10"
-dns_secondary="172.32.${octet}.11"
+subnet="172.29.${octet}.0/24"
+gateway="172.29.${octet}.1"
+dhcp_proxy_ip="172.29.${octet}.2"
+dns_primary="172.29.${octet}.10"
+dns_secondary="172.29.${octet}.11"
 # The external PXE boot server this run's DHCPOFFERs are asserted to
 # point at. Deliberately never started as a real listening service
 # anywhere -- per this project's #705 scope, lancache-ng only ever hands
@@ -97,7 +105,7 @@ dns_secondary="172.32.${octet}.11"
 # never hosts boot files itself, so this script only needs to prove the
 # pointer's address/filename are correct, not that a real TFTP transfer
 # against it would succeed.
-pxe_boot_server="172.32.${octet}.50"
+pxe_boot_server="172.29.${octet}.50"
 bios_boot_filename="lancache-pxe705-bios.0"
 uefi_boot_filename="lancache-pxe705-uefi.efi"
 
@@ -139,7 +147,7 @@ echo "== Starting a real dhcp-proxy container on the isolated network, PXE boot-
 docker run -d --name "$dhcp_container" \
     --network "$network_name" --ip "$dhcp_proxy_ip" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
-    -e DHCP_SUBNET_START="172.32.${octet}.0" \
+    -e DHCP_SUBNET_START="172.29.${octet}.0" \
     -e DHCP_DNS_PRIMARY="$dns_primary" \
     -e DHCP_DNS_SECONDARY="$dns_secondary" \
     -e UPSTREAM_DHCP_IP="$gateway" \
@@ -168,7 +176,7 @@ if [[ "$dhcp_ready" -ne 1 ]]; then
     docker logs "$dhcp_container" >&2 || true
     exit 1
 fi
-echo "dhcp-proxy is up (subnet: 172.32.${octet}.0, PXE boot server: $pxe_boot_server)."
+echo "dhcp-proxy is up (subnet: 172.29.${octet}.0, PXE boot server: $pxe_boot_server)."
 
 echo "== Starting the synthetic PXE client container =="
 # NET_RAW/NET_ADMIN: scapy needs a raw socket to craft and send an
