@@ -1019,7 +1019,13 @@ set_env_key() {
             { print }
         ' "$env_file" | write_env_file "$env_file"
     else
-        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+        # Explicit die() instead of relying on `set -e`: a caller running this
+        # inside a subshell whose own exit status is being tested (e.g.
+        # `if ! ( fn1 && fn2 )`) sits in a bash context where errexit is
+        # silently ignored for everything inside that subshell, so a bare
+        # failed append here would otherwise go unnoticed instead of aborting.
+        printf '%s=%s\n' "$key" "$value" >> "$env_file" \
+            || die "Failed to append $key to $env_file."
     fi
 }
 
@@ -1053,7 +1059,10 @@ set_env_assignment() {
             { print }
         ' "$env_file" | write_env_file "$env_file"
     else
-        printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+        # See set_env_key's matching comment: explicit die() so a failure
+        # here is never silently swallowed by a tested-subshell errexit gap.
+        printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file" \
+            || die "Failed to append $key to $env_file."
     fi
 }
 
@@ -1062,8 +1071,12 @@ set_env_assignment() {
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
-    # Preserve intentional empty placeholders; only add the key when it is absent.
-    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    # Preserve intentional empty placeholders; only add the key when it is
+    # absent. Explicit die() (see set_env_key's matching comment) instead of
+    # relying on `set -e` alone.
+    env_key_exists "$key" "$env_file" \
+        || printf '%s=%s\n' "$key" "$value" >> "$env_file" \
+        || die "Failed to append $key to $env_file."
 }
 
 # Fills in a default only when the key is missing or its current value is
@@ -1081,7 +1094,10 @@ set_env_key_if_empty_or_missing() {
             set_env_key "$key" "$value" "$env_file"
         fi
     else
-        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+        # See set_env_key's matching comment: explicit die() so a failure
+        # here is never silently swallowed by a tested-subshell errexit gap.
+        printf '%s=%s\n' "$key" "$value" >> "$env_file" \
+            || die "Failed to append $key to $env_file."
     fi
 }
 
@@ -1100,7 +1116,11 @@ append_env_assignment_if_missing() {
     esac
     # Migration-only helper: duplicate an existing Compose .env assignment
     # without destroying supported interpolation such as ${LAN_CACHE_ROOT:-...}.
-    env_key_exists "$key" "$env_file" || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file"
+    # Explicit die() (see set_env_key's matching comment) instead of relying
+    # on `set -e` alone.
+    env_key_exists "$key" "$env_file" \
+        || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file" \
+        || die "Failed to append $key to $env_file."
 }
 
 # Migrates an optional key from an old name (source_key) to a new one
@@ -2017,13 +2037,21 @@ resolve_lancache_image_tag() {
 # install, preserve real operator secrets, replace placeholders, and normalize
 # legacy profile/DHCP/cache state without rewriting the whole file blindly.
 migrate_env_for_update() {
-    local install_dir="$1" env_file dhcp_enabled dhcp_mode
+    # preserve_image_tag: "1" keeps an already-valid LANCACHE_IMAGE_TAG as-is
+    # instead of re-resolving it against the current channel pointer. update
+    # always wants the default (0) re-resolve behavior, since that is how a
+    # channel-tracking install picks up a new image on every update. restore
+    # passes 1: restoring an old backup to roll back a bad channel image must
+    # keep the archived immutable tag, not silently re-resolve back to
+    # whatever the channel (e.g. edge/latest) currently points to -- which,
+    # right after a bad release, is likely still the same bad tag.
+    local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
-    local legacy_cache_std legacy_cache_ssl
+    local legacy_cache_std legacy_cache_ssl existing_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     [[ -f "$env_file" ]] \
@@ -2114,7 +2142,18 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
-    set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
+    existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    if [[ "$preserve_image_tag" = "1" ]] \
+        && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+        # Restoring a backup to roll back a bad channel-tracked image: keep
+        # the archived immutable tag as-is instead of re-resolving it below,
+        # which would silently pull whatever the channel (edge/latest)
+        # currently points to -- right after a bad release that is likely
+        # still the same bad tag, defeating the whole point of the restore.
+        validate_lancache_image_tag "$existing_image_tag"
+    else
+        set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
+    fi
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
     set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
@@ -2559,12 +2598,34 @@ EOF
 # under the archived install directory are skipped in the generic copy loop
 # and handled separately first, since they need the path-remap/sed rewrite
 # rather than a literal restore to their original absolute path.
+#
+# A restored archive can carry a legacy or otherwise unconverged .env (older
+# split cache keys, a stale strict security mode, keys a later release added)
+# because it was captured verbatim at backup time -- unlike cmd_update, which
+# always runs migrate_env_for_update + validate_compose_config before it lets
+# the stack come back up. Issue #639: after files/volumes are restored, this
+# function runs that same convergence path so a restore never leaves an
+# install silently un-migrated, requiring an undocumented manual
+# `setup.sh update` afterward. Following AG-OP-010 (validate before restart
+# when a failed validation would leave the install worse off), a migration or
+# validation failure here is fail-closed: stack_stopped is cleared before
+# die() runs so the already-stopped stack is left stopped instead of being
+# started against a config that failed to converge or validate. The restored
+# files/volumes and whatever migrate_env_for_update managed to write to .env
+# before failing are left on disk either way; rerun `setup.sh update` once the
+# reported problem is fixed.
 cmd_restore() {
     local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
     install_dir=$(realpath -m "$install_dir")
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
-    install_missing_tools tar rsync
+    # openssl is required here (not just tar/rsync) because the .env
+    # convergence step below can call ensure_secret_env_key() for a legacy or
+    # incomplete backup with missing/placeholder service tokens, and that
+    # generator shells out to `openssl rand`. Installing it upfront means a
+    # minimal disaster-recovery host fails before any restore mutation
+    # instead of after files/volumes are already restored.
+    install_missing_tools tar rsync openssl
 
     local tmp root backup_dir archived_install archived_repo_root new_repo_root rel_install stack_stopped=0 path rel target
     tmp=$(mktemp -d)
@@ -2625,6 +2686,48 @@ cmd_restore() {
     done < "$backup_dir/manifest.txt"
     restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
     print_ok "Files restored from $archive"
+
+    # A quickstart install keeps its own copied docker-compose.yml/scripts
+    # bundle under install_dir rather than a Git checkout, so an archive
+    # taken before a compose/script change (e.g. the pre-single-CACHE_DIR
+    # layout) restores that stale bundle verbatim. Refresh it from this
+    # running setup.sh's own checkout before convergence -- exactly what
+    # cmd_update() already does -- so the migration below never validates or
+    # starts the stack against compose wiring the .env it just produced no
+    # longer matches. Skipped for a deploy/prod (Git-tracked) restore target:
+    # that compose file is managed by the checkout itself, not this bundle,
+    # and restore deliberately does not run a git sync (unlike update).
+    if ! is_deploy_prod_install_dir "$install_dir"; then
+        install_quickstart_compose_assets "$install_dir"
+        print_ok "quickstart compose assets refreshed"
+    fi
+
+    # Run in a subshell so a die() inside either helper is caught here instead
+    # of unwinding straight past the stack_stopped=0 line below -- both
+    # helpers already wrote whatever they could to the on-disk .env before
+    # die()ing, and that partial progress is intentionally left in place for
+    # the operator to inspect/finish via setup.sh update. migrate_env_for_update
+    # is called with preserve_image_tag=1 so a rollback restore keeps the
+    # archived immutable image tag instead of re-resolving a channel back to
+    # its current (possibly still-bad) pointer -- see the function's own
+    # preserve_image_tag comment. validate_compose_config only runs when
+    # Docker/compose is actually available: backup/restore intentionally
+    # support config-only archives on hosts without Docker (see
+    # compose_stack_available and restore_compose_volumes above), and
+    # `docker compose config` would otherwise fail that offline restore path
+    # even though nothing here actually needs Docker to converge .env.
+    if ! (
+        migrate_env_for_update "$install_dir" 1
+        if compose_stack_available "$install_dir"; then
+            validate_compose_config "$install_dir"
+        else
+            print_warn "Docker/compose not available for $install_dir -- .env was converged, but compose validation and the stack start were skipped. Install Docker, then run: setup.sh update $install_dir"
+        fi
+    ); then
+        stack_stopped=0
+        die "Restore could not converge or validate the restored .env. The stack was left stopped instead of starting on an unconverged/invalid configuration. Fix the reported problem, then run: setup.sh update $install_dir"
+    fi
+
     restore_cleanup
 }
 
@@ -2727,7 +2830,11 @@ EOF
 Usage: ./setup.sh restore <backup.tar.gz> [install-dir]
 
 Restores a setup-script backup. Files from the archived install directory are
-remapped to [install-dir] when it differs from the original path.
+remapped to [install-dir] when it differs from the original path. After
+restoring, runs the same .env convergence and Compose validation as
+setup.sh update, then starts the stack. If convergence or validation fails,
+the stack is left stopped instead of starting on an unconverged config; fix
+the reported problem and run setup.sh update.
 EOF
             ;;
         *)
