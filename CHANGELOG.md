@@ -316,6 +316,21 @@ is real, live, running code, not just work sitting in source control.
   test anyway. Confirmed as the root cause of PR #764's `DHCP Kea lease-flow
   simulation` job failing with `dhclient: command not found` even after
   #773's Kea log-path fix landed (#775).
+- Fixed `scripts/setup-cli-simulation.sh` (the same class of bug as #775,
+  in a sibling script) hardcoding `LANCACHE_IMAGE_CHANNEL=edge` for its
+  fresh-install simulation. `edge` is promoted only from `master`, which has
+  been effectively frozen during `v0.2.0` stabilization and is hundreds of
+  commits behind; `dev` (promoted from `v0.2.0`) is the channel actually kept
+  in sync with the source this simulation checks out. The mismatch made the
+  `ui` container crash-loop with `Invalid NATS DNS reader credentials: NATS
+  username cannot be empty` -- a label that no longer exists in current
+  source (#583 renamed it to "NATS DNS replica" along with the
+  `NATS_DNS_READER_USER`/`PASSWORD` env vars), confirming the simulation was
+  actually running a pre-#583 `ui` image that never saw the renamed env vars
+  setup.sh writes. Switching the simulation to the `dev` channel resolved
+  it; verified with a real fresh-install run reaching a healthy stack.
+  Real installs on the default `master` branch are unaffected since its
+  setup.sh and its images are consistently pre-#583 (#796).
 - Fixed the PowerDNS authoritative server's `webserver-allow-from` in
   `services/dns/pdns.conf.template` only permitting `127.0.0.1` and
   `172.16.0.0/12` — Docker's default address-pool range. Operators who
