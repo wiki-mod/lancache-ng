@@ -23,7 +23,15 @@
 set -euo pipefail
 
 changed_files=""
-cleanup() { [[ -n "${_vit_tmp:-}" ]] && rm -f "$_vit_tmp"; }
+# Not `[[ -n ... ]] && rm -f ...`: under set -e, that guard's own false
+# result (whenever _vit_tmp was never set, i.e. the CHANGED_FILES path was
+# used instead of the git-diff path) becomes the script's exit code, making
+# every otherwise-successful CHANGED_FILES-driven run report failure.
+cleanup() {
+    if [[ -n "${_vit_tmp:-}" ]]; then
+        rm -f "$_vit_tmp"
+    fi
+}
 trap cleanup EXIT
 
 if [[ -n "${CHANGED_FILES:-}" ]]; then
