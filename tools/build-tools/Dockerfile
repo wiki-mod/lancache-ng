@@ -61,6 +61,13 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # `go install` like actionlint. Its cmd package is named `buildx`, not
 # `docker-buildx`, so the build output is named explicitly to match the
 # `docker-<subcommand>` filename Docker's CLI plugin discovery requires.
+# Unlike docker-compose, buildx's release tag ships a committed vendor/
+# directory, which Go's toolchain auto-selects (`-mod=vendor`) whenever a
+# vendor/modules.txt is present and go.mod's go directive is >= 1.14 -- `go
+# get` alone only updates go.mod/go.sum, leaving vendor/modules.txt
+# referencing the old containerd version, which then fails the build outright
+# ("inconsistent vendoring") rather than silently using the wrong version.
+# `go mod vendor` re-syncs vendor/ to the bumped go.mod before the build runs.
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
     /out/actionlint --version; \
@@ -68,6 +75,7 @@ RUN set -euo pipefail; \
     git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
     ( cd "$buildx_src" \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+      && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
     /out/docker-buildx version; \

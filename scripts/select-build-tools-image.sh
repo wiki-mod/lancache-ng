@@ -113,7 +113,17 @@ smoke_test_image() {
 
     docker --version >/dev/null
     docker compose version >/dev/null
-    docker buildx version >/dev/null
+    # docker buildx version is deliberately NOT checked here yet (issue #791,
+    # follow-up to #787/#789). This smoke test only trusts the already-
+    # published `:dev`/`:edge` channel image (BUILD_TOOLS_REQUIRE_PUBLISHED
+    # callers have no local-build fallback, see the strict-mode branch
+    # below), and that published image cannot contain buildx until AFTER
+    # #789 merges and republishes it -- adding this check in the same PR
+    # that first adds buildx to tools/build-tools/Dockerfile would fail
+    # every check on that PR itself. #776 widened this same smoke test for
+    # dhclient/expect/tcpdump safely because those were already in an
+    # earlier, separately-published Dockerfile by the time that PR ran;
+    # #791 re-adds this check once the same is true for buildx.
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
     cargo-audit --version >/dev/null

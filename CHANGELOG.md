@@ -490,9 +490,17 @@ is real, live, running code, not just work sitting in source control.
   building buildx, the same way the Dockerfile already deliberately accepts
   (via `.trivyignore.yaml`) that `github.com/docker/docker`'s v28.5.2 pin
   cannot be bumped the same way (no v29.x Go module tags exist upstream).
-  Also widened `scripts/select-build-tools-image.sh`'s smoke test to check
-  `docker buildx version`, matching the #775 precedent, so a future gap like
-  this is caught before merge instead of after (#787).
+  Also, buildx's release tag ships a committed `vendor/` directory, which Go
+  auto-selects over the network fetch once `go get` touches `go.mod` --
+  `go mod vendor` re-syncs it before the build to avoid an "inconsistent
+  vendoring" failure. Filed #791 as a deliberate follow-up (not done here)
+  to widen `scripts/select-build-tools-image.sh`'s smoke test for `docker
+  buildx version`, matching the #775 precedent: that check can only be
+  added once the published `:dev`/`:edge` build-tools image actually
+  contains buildx, i.e. after this fix merges and republishes -- adding it
+  in this same PR would fail the strict, no-fallback `validate-compose` and
+  `shellcheck (GitHub-hosted fallback)` jobs against the still-stale
+  currently-published image (#787).
 
 ## [0.1.0] - 2026-07-06
 
