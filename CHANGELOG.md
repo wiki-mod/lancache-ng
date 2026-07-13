@@ -61,6 +61,25 @@ is real, live, running code, not just work sitting in source control.
   and the recursor's cache were actually rolled back -- proving the
   PATCH/DELETE round-trip and cache-flush behavior the crate's unit tests
   cannot exercise against a live PowerDNS instance.
+- Added `setup.sh create-logs-for-issue` (#762): bundles `docker compose
+  logs`/`ps`/`config` output, a secret-redacted copy of `.env`/`.env.local`,
+  host facts (Docker/Compose versions, kernel, disk space), and
+  known-good-snapshot directory listings (`docs/known-good-config-snapshots.md`)
+  into one compressed, timestamped archive an operator can attach to a
+  GitHub bug report, instead of manually running and pasting a series of
+  commands. Every credential-shaped value this script generates/manages
+  (`PDNS_API_KEY`, `DDNS_TSIG_KEY`, `KEA_CTRL_TOKEN`, the `NATS_*_PASSWORD`
+  set, `SECONDARY_REGISTRATION_TOKEN`, `UI_AUTH_PASSWORD`) is redacted
+  value-by-value across every collected artifact -- not just name-filtered
+  out of `.env` -- so a secret interpolated into `docker compose config`'s
+  resolved YAML or echoed by a service's own startup logs is scrubbed too,
+  on top of a name-pattern safety net for any future credential-shaped
+  variable. Compression prefers zstd, then bzip2, then gzip, extending the
+  same "best available compressor, fall back gracefully" idiom already used
+  for syslog-ng log rotation (`deploy/*/docker-compose.yml`) with the
+  missing bzip2 middle tier. Automatic upload/attachment to GitHub is
+  explicitly out of scope -- the operator reviews and attaches the archive
+  themselves.
 - Added the repeat-run/idempotence test that was still missing for NATS's
   static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
   Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config

@@ -6,10 +6,11 @@
 # Debian/Ubuntu/RHEL-family hosts, writes .env with generated secrets,
 # configures DHCP mode/cache sizing/DNS IPs, enables the systemd
 # service+converge timer, and starts the stack), update, update-ip, debug,
-# secondary (register/rotate a secondary DNS node against a primary),
-# backup, and restore. Also hosts the shared .env helpers (read/write/
-# generate secret values, validate CIDR/DHCP-mode input) reused by the
-# secondary registration flow.
+# create-logs-for-issue (bundles redacted logs/config for a GitHub bug
+# report), secondary (register/rotate a secondary DNS node against a
+# primary), backup, and restore. Also hosts the shared .env helpers
+# (read/write/generate secret values, validate CIDR/DHCP-mode input) reused
+# by the secondary registration flow.
 # Usage: ./setup.sh [command] [install-dir]
 set -euo pipefail
 export LANG=C LC_ALL=C
@@ -3218,6 +3219,9 @@ Commands:
                        Change the configured standard and SSL listener IPs.
                        Default dir: /opt/lancache-ng
   debug [install-dir]  Print diagnostic information for an existing stack.
+  create-logs-for-issue [install-dir]
+                       Bundle redacted logs/config into an archive to attach
+                       to a GitHub bug report.
   secondary [options]  Register and launch a secondary DNS node.
   backup [options]     Create a config-only or full rollback backup.
   restore <archive>    Restore a setup-script backup.
@@ -3274,6 +3278,23 @@ Usage: ./setup.sh debug [install-dir]
 Prints container status, recent logs, cache usage, LAN addresses, and health
 checks for an existing installation. If [install-dir] is omitted,
 /opt/lancache-ng is used.
+EOF
+            ;;
+        create-logs-for-issue)
+            cat <<EOF
+Usage: ./setup.sh create-logs-for-issue [install-dir] [--dest /output/path]
+
+Bundles docker compose logs/ps/config, a secret-redacted copy of .env, host
+facts (Docker/Compose versions, disk space), and known-good-snapshot
+directory listings into one compressed, timestamped archive, then prints its
+path. Attach that one file to a GitHub bug report instead of manually
+running and pasting a series of commands. If [install-dir] is omitted,
+/opt/lancache-ng is used; the archive is written to /var/backups/lancache-ng
+unless --dest overrides it.
+
+Every credential-shaped value (API keys, TSIG keys, passwords, tokens) is
+redacted before compression. This command never uploads or attaches
+anything automatically -- review the archive yourself before attaching it.
 EOF
             ;;
         secondary)
@@ -3453,6 +3474,364 @@ cmd_debug() {
             fi
         done
     fi
+}
+
+# ── create-logs-for-issue subcommand ──────────────────────────────────────────
+# #762: bundles the diagnostic state a maintainer needs to triage a bug
+# report into one compressed, secret-redacted archive, so a non-technical
+# operator (this project's actual audience per CLAUDE.md) can attach one
+# file to a GitHub issue instead of manually running and pasting a series of
+# commands. Read-only like cmd_debug above: this never repairs, restarts, or
+# rewrites anything, it only collects and redacts.
+#
+# Redaction is intentionally two-layered (see #762 review) because a
+# name-based scrub of just the .env file is not enough on its own:
+# `docker compose config` re-emits the same secret VALUES interpolated into
+# the resolved YAML wherever a service references them via ${VAR}/env_file:,
+# and a service's own startup logs can echo a secret value verbatim (e.g. a
+# connection URL embedding a password). Redacting only .env would still ship
+# every one of those values in a different file inside the same archive.
+# So every collected artifact — not just .env — is run through
+# logbundle_redact_stream, which substitutes the literal current VALUE of
+# every credential-shaped variable, on top of (not instead of) the
+# name-based, line-level redaction applied to the .env copy itself.
+
+# The explicit floor for "credential-shaped variable name": every key this
+# script itself generates/manages via ensure_secret_env_key/
+# get_or_generate_secret/generate_secret_value (grepped fresh against this
+# file for #762, not assumed from memory — see the PR body for the exact
+# `grep` used). logbundle_key_looks_like_secret below extends this with a
+# name-pattern safety net, so a future credential-shaped variable added
+# without also updating this explicit list is still redacted.
+logbundle_secret_env_keys() {
+    printf '%s\n' \
+        KEA_CTRL_TOKEN \
+        DDNS_TSIG_KEY \
+        PDNS_API_KEY \
+        NATS_UI_PASSWORD \
+        NATS_DNS_WRITER_PASSWORD \
+        NATS_DNS_REPLICA_PASSWORD \
+        NATS_CALLOUT_PASSWORD \
+        SECONDARY_REGISTRATION_TOKEN \
+        UI_AUTH_PASSWORD
+}
+
+# Pattern-based safety net on top of logbundle_secret_env_keys above: matches
+# any env var KEY containing PASSWORD/SECRET/TOKEN/TSIG/CREDENTIAL, or ending
+# in _KEY. Deliberately broad (per #762's "when in doubt, over-redact"
+# instruction) so a future secret-shaped variable this list forgets to
+# enumerate — or a variable an operator adds to their own .env by hand — is
+# still caught instead of silently shipped in the archive.
+logbundle_key_looks_like_secret() {
+    local key="$1"
+    [[ "$key" =~ (PASSWORD|SECRET|TOKEN|TSIG|CREDENTIAL|_KEY) ]]
+}
+
+# Prints one non-empty, non-placeholder secret VALUE per line, longest first,
+# gathered from every given env file for every key that is either in
+# logbundle_secret_env_keys or matches logbundle_key_looks_like_secret.
+# secret_value_is_placeholder (line ~890) is reused here so a still-default
+# CHANGE_ME_*/lancache-*-secret placeholder is never treated as a real
+# secret needing redaction (that would just clutter every log line
+# containing e.g. "CHANGE_ME" with a confusing [REDACTED]).
+# Longest-first ordering matters for logbundle_redact_stream's sequential
+# literal substitution: if one secret value happened to be a substring of
+# another, replacing the shorter one first would corrupt the longer one's
+# remaining, un-redacted tail instead of fully masking it.
+logbundle_collect_secret_values() {
+    local -a env_files=("$@")
+    local -A key_set=()
+    local key env_file value
+
+    while IFS= read -r key; do
+        [[ -n "$key" ]] && key_set["$key"]=1
+    done < <(logbundle_secret_env_keys)
+
+    for env_file in "${env_files[@]}"; do
+        [[ -f "$env_file" ]] || continue
+        while IFS= read -r key; do
+            [[ -n "$key" ]] || continue
+            logbundle_key_looks_like_secret "$key" && key_set["$key"]=1
+        done < <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$env_file" 2>/dev/null)
+    done
+
+    for key in "${!key_set[@]}"; do
+        for env_file in "${env_files[@]}"; do
+            [[ -f "$env_file" ]] || continue
+            value=$(get_env_var_nonempty "$key" "$env_file")
+            [[ -n "$value" ]] || continue
+            secret_value_is_placeholder "$value" && continue
+            printf '%s\n' "$value"
+        done
+    done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | cut -d' ' -f2-
+}
+
+# Reads all of stdin, replaces every literal secret VALUE listed in
+# secrets_file with "[REDACTED]" (plain string substitution, not regex, so
+# no escaping concerns for values containing base64 punctuation like +/=),
+# and writes the result to stdout. Used on every collected artifact —
+# compose config/ps output, per-service logs, and the redacted .env copy —
+# so a credential is scrubbed everywhere it could appear, not just in the
+# one file it is "supposed" to live in. `read -d ''` slurps stdin verbatim
+# (including embedded blank lines) since these artifacts are always text
+# with no NUL bytes.
+logbundle_redact_stream() {
+    local secrets_file="$1"
+    local content="" secret
+    IFS= read -r -d '' content || true
+    if [[ -f "$secrets_file" ]]; then
+        while IFS= read -r secret; do
+            [[ -n "$secret" ]] || continue
+            content="${content//"$secret"/[REDACTED]}"
+        done < "$secrets_file"
+    fi
+    printf '%s' "$content"
+}
+
+# Writes a redacted copy of an env file: every line whose KEY looks
+# credential-shaped (logbundle_key_looks_like_secret) has its VALUE replaced
+# with [REDACTED] unconditionally — including an already-empty or
+# still-placeholder value — so the archived file consistently reads as
+# "this field is a secret" rather than incidentally revealing which
+# credentials were still on their generated/placeholder default. Lines that
+# don't look credential-shaped (IPs, DHCP mode, SSL_ENABLED, ...) are copied
+# through unmodified since they're exactly the operational context a
+# maintainer needs to triage the report.
+logbundle_redact_env_file() {
+    local src="$1" dst="$2"
+    local line key
+    : > "$dst"
+    [[ -f "$src" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+            key="${BASH_REMATCH[1]}"
+            if logbundle_key_looks_like_secret "$key"; then
+                printf '%s=[REDACTED]\n' "$key" >> "$dst"
+                continue
+            fi
+        fi
+        printf '%s\n' "$line" >> "$dst"
+    done < "$src"
+}
+
+# Picks the best compressor actually available on the host, preferring
+# zstd > bzip2 > gzip per #762's explicit scope. This extends, rather than
+# invents, the "prefer the best available compressor, fall back gracefully"
+# idiom this project already uses for syslog-ng log rotation
+# (deploy/*/docker-compose.yml's zstd-preferred/gzip-fallback rotation
+# block) — that existing idiom is only two-tiered (zstd or gzip, no bzip2
+# anywhere in this codebase today), so this adds the missing middle tier
+# rather than copying a pre-existing three-way chain that does not exist
+# yet. gzip is always available on every Debian host this project targets,
+# so this chain always terminates. Prints one of zst/bz2/gz.
+logbundle_select_compressor() {
+    if command -v zstd >/dev/null 2>&1; then
+        printf 'zst\n'
+    elif command -v bzip2 >/dev/null 2>&1; then
+        printf 'bz2\n'
+    else
+        printf 'gz\n'
+    fi
+}
+
+# Directory listings (never file content) of the known-good-snapshot volumes
+# documented in docs/known-good-config-snapshots.md. proxy/dhcp-proxy/pdns
+# snapshot volumes are, per that document and their own docker-compose.yml
+# declaration comment ("Deliberately plain Docker-managed volumes ... out of
+# scope for setup.sh backup/restore"), plain Docker-managed named volumes
+# outside the LANCACHE_STATE_DIR bind-mount contract backup_manifest()
+# already walks — so they are not reachable as host paths and need the same
+# `docker run --rm -v <volume>:/data busybox ls -la /data` approach that
+# doc's own "Manual recovery" section documents for hand triage. Only `ls`
+# ever runs inside the throwaway container; it cannot read file content.
+logbundle_named_volume_listing() {
+    local install_dir="$1" env_file="$2" base_name="$3" subpath="$4" out="$5"
+    if ! command -v docker >/dev/null 2>&1; then
+        printf 'docker not available; skipped\n' > "$out"
+        return 0
+    fi
+    local project volume
+    project=$(compose_project_name "$install_dir" "$env_file")
+    volume="${project}_${base_name}"
+    if ! docker volume inspect "$volume" >/dev/null 2>&1; then
+        printf 'volume %s not found (not created yet)\n' "$volume" > "$out"
+        return 0
+    fi
+    docker run --rm -v "${volume}:/data:ro" alpine \
+        sh -c "ls -laR '/data/${subpath}' 2>/dev/null || echo '(no snapshots yet)'" \
+        > "$out" 2>/dev/null
+}
+
+# Counterpart to logbundle_named_volume_listing for a known-good-snapshot
+# path that is (or may be) a real host directory instead of a Docker-managed
+# volume — this is Kea's case in prod/quickstart, where KEA_DATA_DIR is a
+# plain bind mount (unlike proxy/dhcp-proxy/pdns's snapshot volumes above),
+# so the host path is directly listable with no container needed.
+logbundle_host_path_listing() {
+    local dir="$1" out="$2"
+    if [[ -d "$dir" ]]; then
+        ls -laR "$dir" > "$out" 2>/dev/null
+    else
+        printf 'directory %s not found\n' "$dir" > "$out"
+    fi
+}
+
+cmd_create_logs_for_issue() {
+    local install_dir="/opt/lancache-ng"
+    local dest_root="/var/backups/lancache-ng"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dest) dest_root="${2:?Missing value for --dest}"; shift 2 ;;
+            *) install_dir="$1"; shift ;;
+        esac
+    done
+    install_dir=$(realpath -m "$install_dir")
+    dest_root=$(realpath -m "$dest_root")
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+    install_missing_tools tar
+
+    local env_file cache_env_file state_dir
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    cache_env_file="$install_dir/.env"
+    state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
+    state_dir="${state_dir:-$(legacy_state_root_or_default "$(production_state_root_default "$install_dir")")}"
+
+    local -a env_files=("$env_file")
+    [[ "$cache_env_file" != "$env_file" && -f "$cache_env_file" ]] && env_files+=("$cache_env_file")
+
+    local stamp dest ext archive old_umask secrets_file
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    dest="$dest_root/.create-logs-for-issue-$stamp"
+    old_umask=$(umask)
+    umask 077
+    mkdir -p "$dest_root" "$dest/logs" "$dest/env" "$dest/known-good-snapshots"
+    secrets_file=$(mktemp) || die "Could not create a temporary file for secret redaction."
+    chmod 600 "$secrets_file"
+
+    # Cleanup always removes the working directory and the secrets scratch
+    # file, whether this succeeds, fails partway, or is interrupted — the
+    # working directory's contents only ever matter once folded into the
+    # final archive below, and the secrets file must never survive on disk
+    # longer than this run needs it.
+    logbundle_cleanup() {
+        local status=$?
+        rm -rf "$dest"
+        rm -f "$secrets_file"
+        umask "$old_umask"
+        trap - EXIT
+        return "$status"
+    }
+    trap logbundle_cleanup EXIT
+
+    print_step "Collecting diagnostic bundle for issue report"
+
+    logbundle_collect_secret_values "${env_files[@]}" > "$secrets_file"
+
+    # Host facts (#762 scope: Docker version, Compose version, disk space).
+    # Follows the same docker/compose version commands already used for the
+    # one-off terminal print_ok lines in the main install flow above, but
+    # keeps their full, unstripped output here (that flow trims to a bare
+    # version number for a short interactive message; a diagnostic bundle
+    # benefits from the fuller string instead). Disk space has no prior
+    # helper to reuse — nothing in this script gathers it today — so `df -h`
+    # is added fresh.
+    {
+        printf 'Generated: %s UTC\n' "$stamp"
+        printf 'Install directory: %s\n' "$install_dir"
+        printf 'Docker: %s\n' "$(docker --version 2>/dev/null || printf 'not found')"
+        printf 'Docker Compose: %s\n' "$(docker compose version 2>/dev/null || printf 'not found')"
+        printf 'Kernel: %s\n' "$(uname -srm 2>/dev/null || printf 'unknown')"
+        printf '\nDisk usage:\n'
+        df -h 2>/dev/null || true
+    } | logbundle_redact_stream "$secrets_file" > "$dest/host-facts.txt"
+
+    print_step "Container status and configuration"
+    docker compose --env-file "$env_file" ps 2>&1 \
+        | logbundle_redact_stream "$secrets_file" > "$dest/compose-ps.txt"
+    # config re-interpolates every ${VAR}/env_file: reference into plain
+    # text, which is exactly why this is redacted the same way as logs
+    # instead of being assumed safe just because it's "just config" (#762
+    # review — see the function comment above logbundle_redact_stream).
+    docker compose --env-file "$env_file" config 2>&1 \
+        | logbundle_redact_stream "$secrets_file" > "$dest/compose-config.txt"
+
+    print_step "Collecting service logs"
+    local -a services=()
+    mapfile -t services < <(docker compose --env-file "$env_file" config --services 2>/dev/null)
+    local svc
+    for svc in "${services[@]}"; do
+        [[ -n "$svc" ]] || continue
+        print_ok "Logs: $svc"
+        docker compose --env-file "$env_file" logs --no-color --timestamps --tail=2000 "$svc" 2>&1 \
+            | logbundle_redact_stream "$secrets_file" > "$dest/logs/$svc.log"
+    done
+
+    print_step "Redacting configuration"
+    logbundle_redact_env_file "$cache_env_file" "$dest/env/.env"
+    logbundle_redact_stream "$secrets_file" < "$dest/env/.env" > "$dest/env/.env.tmp"
+    mv "$dest/env/.env.tmp" "$dest/env/.env"
+    if [[ "$env_file" != "$cache_env_file" ]]; then
+        logbundle_redact_env_file "$env_file" "$dest/env/.env.local"
+        logbundle_redact_stream "$secrets_file" < "$dest/env/.env.local" > "$dest/env/.env.local.tmp"
+        mv "$dest/env/.env.local.tmp" "$dest/env/.env.local"
+    fi
+
+    print_step "Known-good-snapshot directory listings"
+    logbundle_named_volume_listing "$install_dir" "$env_file" proxy-config-snapshots config-snapshots \
+        "$dest/known-good-snapshots/proxy.txt"
+    logbundle_named_volume_listing "$install_dir" "$env_file" dhcp-proxy-config-snapshots config-snapshots \
+        "$dest/known-good-snapshots/dhcp-proxy.txt"
+    logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-standard config-snapshots \
+        "$dest/known-good-snapshots/dns-standard.txt"
+    if [[ "$(get_env_var SSL_ENABLED "$env_file")" = "1" ]]; then
+        logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-ssl config-snapshots \
+            "$dest/known-good-snapshots/dns-ssl.txt"
+    fi
+    # Kea's config-snapshots directory is a plain host bind mount in
+    # prod/quickstart (KEA_DATA_DIR) but a real named Docker volume in dev
+    # (see deploy/dev/docker-compose.yml's top-level kea-data: entry vs.
+    # prod/quickstart's ${KEA_DATA_DIR:-...}/kea bind path) — try the host
+    # path first and only fall back to the named-volume approach if it does
+    # not exist, so this works correctly for both.
+    local kea_dir; kea_dir=$(get_env_var KEA_DATA_DIR "$env_file"); kea_dir="${kea_dir:-$state_dir/kea}"
+    if [[ -d "$kea_dir" ]]; then
+        logbundle_host_path_listing "$kea_dir/config-snapshots" "$dest/known-good-snapshots/kea.txt"
+    else
+        logbundle_named_volume_listing "$install_dir" "$env_file" kea-data config-snapshots \
+            "$dest/known-good-snapshots/kea.txt"
+    fi
+
+    cat > "$dest/README.txt" <<EOF
+LanCache-NG diagnostic bundle created at $stamp UTC
+Install directory: $install_dir
+
+Contents:
+  host-facts.txt              Docker/Compose versions, kernel, disk space
+  compose-ps.txt               docker compose ps
+  compose-config.txt           docker compose config (resolved)
+  logs/<service>.log           docker compose logs --tail=2000 per service
+  env/.env, env/.env.local      configuration, with secrets redacted
+  known-good-snapshots/        directory listings only (no file content)
+
+Every credential-shaped value (API keys, TSIG keys, passwords, tokens) has
+been replaced with [REDACTED] everywhere it could appear in this bundle.
+Review the contents before attaching this archive to a GitHub issue --
+automatic upload is intentionally not part of this tool (#762).
+EOF
+
+    ext=$(logbundle_select_compressor)
+    archive="$dest_root/lancache-ng-issue-logs-${stamp}.tar.${ext}"
+    case "$ext" in
+        zst) tar -C "$dest_root" --zstd -cf "$archive" "$(basename "$dest")" ;;
+        bz2) tar -C "$dest_root" -cjf "$archive" "$(basename "$dest")" ;;
+        *)   tar -C "$dest_root" -czf "$archive" "$(basename "$dest")" ;;
+    esac
+    chmod 600 "$archive"
+
+    logbundle_cleanup
+    print_ok "Diagnostic bundle written: $archive"
+    printf "\n${BOLD}Attach this file to your GitHub issue:${RESET} %s\n\n" "$archive"
 }
 
 # ── update-ip subcommand ───────────────────────────────────────────────────────
@@ -4010,6 +4389,12 @@ case "${1:-install}" in
             exit 0
         fi
         cmd_debug  "${2:-/opt/lancache-ng}"; exit 0 ;;
+    create-logs-for-issue)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help create-logs-for-issue
+            exit 0
+        fi
+        shift; cmd_create_logs_for_issue "$@"; exit 0 ;;
     backup)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help backup
