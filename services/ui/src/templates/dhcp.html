@@ -157,6 +157,11 @@
         <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
         <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
         <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
+        {# Lists the extra nmap broadcast-dhcp-discover fields (Router, DNS, lease time, ...) for a
+           found conflicting server, alongside the address already shown above in check-conflict-status.
+           Hidden by default/on every re-check; only populated+shown by checkDhcpConflict() itself when
+           data.conflict.status === 'found' and details are present, see script below. #}
+        <ul id="check-conflict-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
         <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
       </div>
       <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
@@ -565,9 +570,16 @@ function toggleEditSubnet(id) {
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
   const conflictEl = document.getElementById('check-conflict-status');
+  const conflictDetailsEl = document.getElementById('check-conflict-details');
   const clientEl = document.getElementById('check-client-status');
   statusEl.textContent = 'Prüfe...';
   conflictEl.textContent = 'Konfliktprobe läuft...';
+  // Reset the details list on every run (button re-click or the
+  // DOMContentLoaded auto-run further down), not just when a conflict is
+  // found below -- otherwise a later "no conflict" re-check would still
+  // show a stale server's fields from a previous run.
+  conflictDetailsEl.replaceChildren();
+  conflictDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
     const res = await fetch('/api/dhcp/check');
@@ -589,6 +601,19 @@ async function checkDhcpConflict() {
     if (data.conflict?.status === 'found') {
       conflictEl.className = 'text-sm text-yellow-400';
       conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
+      // Label/value pairs come straight from the rogue DHCP server's
+      // own DHCPOFFER response (untrusted network input relayed via the
+      // probe container), so each row is built with textContent, never
+      // innerHTML -- a malicious value must never be interpreted as markup.
+      const details = data.conflict.details ?? [];
+      for (const item of details) {
+        const li = document.createElement('li');
+        li.textContent = `${item.label}: ${item.value}`;
+        conflictDetailsEl.appendChild(li);
+      }
+      if (details.length > 0) {
+        conflictDetailsEl.classList.remove('hidden');
+      }
     } else if (data.conflict?.status === 'not_found') {
       conflictEl.className = 'text-sm text-green-400';
       conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';
