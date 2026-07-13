@@ -55,11 +55,65 @@ services:
       retries: 2
       start_period: 10s
 
+  # Standard-mode passthrough shim (issue #668). Prod's IP_STANDARD:443 is
+  # Docker-port-published straight into this SAME proxy container's own
+  # internal :8443 SNI-passthrough listener (see entrypoint.sh's "Docker
+  # routes IP_SSL:443->container:443 and IP_STANDARD:443->container:8443"
+  # comment, and nginx.conf's stream block) -- a host-IP-scoped port-publish
+  # mechanism this bridge-network validation harness has no equivalent for,
+  # since a single container only ever gets one address per Compose network.
+  # This tiny socat shim reproduces that exact TCP-level :443 -> proxy:8443
+  # forward as a real, separately dialable address instead. dns-standard's
+  # PROXY_IP below now points here rather than at the proxy container's own
+  # address, so a client that only trusts dns-standard's DNS answer genuinely
+  # lands on the SNI-passthrough listener and never on the interception one --
+  # closing the gap issue #668 raised: previously dns-standard and dns-ssl
+  # resolved to the exact same reachable endpoint, so nothing could tell a
+  # correctly-wired dns-ssl apart from one wrongly pointed at the
+  # standard-mode address. scripts/ssl-mitm-cache-simulation.sh proves this
+  # end-to-end by connecting to whatever each DNS server actually answers
+  # with and inspecting the certificate presented there.
+  #
+  # Gated behind a Compose profile so only that script (which names this
+  # service explicitly on its own `docker compose up` command line) ever
+  # starts it -- every other job in this harness brings the stack up
+  # unrestricted (`docker compose up -d`, no service list) and has no use
+  # for it; profile-gating keeps this addition a no-op there instead of
+  # requiring every one of those jobs' workflow env blocks to also thread a
+  # per-run VALIDATION_STANDARD_SHIM_IP (an un-threaded default here would
+  # otherwise land outside whatever per-run subnet those jobs reserved and
+  # break their unrelated `docker compose up -d`).
+  standard-passthrough-shim:
+    profiles: [ssl-mitm-proof]
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    command: >-
+      sh -c "apk add --no-cache socat >/dev/null && exec socat
+      TCP-LISTEN:443,fork,reuseaddr TCP:proxy:8443"
+    networks:
+      validation:
+        ipv4_address: ${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
+    depends_on:
+      - proxy
+    restart: unless-stopped
+    healthcheck:
+      # nc -z: same "prove a real listener is up" check nats' own healthcheck
+      # below uses (both are alpine-family images with busybox nc built in).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   # DNS services for validation (both standard and SSL modes)
   dns-standard:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
-      - PROXY_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
+      # Points at standard-passthrough-shim above, NOT at the proxy
+      # container's own address (issue #668) -- see that service's comment
+      # for why: this is what makes dns-standard's DNS answer actually lead
+      # somewhere behaviorally distinct from dns-ssl's answer below, instead
+      # of both resolving to the identical reachable endpoint.
+      - PROXY_IP=${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
       - PDNS_API_KEY=validation-pdns-key
       - DDNS_TSIG_KEY=validation-ddns-key
       - NATS_URL=nats://nats:4222

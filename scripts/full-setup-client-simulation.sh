@@ -15,6 +15,15 @@ client_domain="${FULL_SETUP_CLIENT_DOMAIN:-}"
 proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
+# Must track deploy/full-setup/docker-compose.yml's dns-standard PROXY_IP
+# default exactly (issue #668): this job never threads a real per-run
+# VALIDATION_STANDARD_SHIM_IP (the standard-passthrough-shim service it
+# names is Compose-profile-gated and only started by
+# scripts/ssl-mitm-cache-simulation.sh's own `docker compose up` call), so
+# dns-standard here always answers with this literal default -- this
+# variable just has to agree with that default, not resolve to anything
+# actually reachable in THIS job's stack.
+standard_shim_ip="${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}"
 
 if [[ -z "$client_domain" ]]; then
     client_domain="$(awk 'NF && $1 !~ /^#/ { print $1; exit }' "$domain_file")"
@@ -49,30 +58,38 @@ docker run --rm \
     -e VALIDATION_PROXY_IP="$proxy_ip" \
     -e VALIDATION_DNS_STANDARD_IP="$dns_standard_ip" \
     -e VALIDATION_DNS_SSL_IP="$dns_ssl_ip" \
+    -e VALIDATION_STANDARD_SHIM_IP="$standard_shim_ip" \
     "$client_tools_image" \
     bash -ceu '
         domain="${FULL_SETUP_CLIENT_DOMAIN:?}"
         proxy_ip="${VALIDATION_PROXY_IP:?}"
+        standard_shim_ip="${VALIDATION_STANDARD_SHIM_IP:?}"
 
         check_dns() {
-            local label="$1" server_ip="$2" response
+            local label="$1" server_ip="$2" expected_ip="$3" response
             response="$(dig +time=3 +tries=2 +short @"$server_ip" A "$domain" | awk "NF { print }" | sort -u)"
             printf "%s DNS response for %s: %s\n" "$label" "$domain" "${response:-<empty>}"
-            if ! printf "%s\n" "$response" | grep -Fx "$proxy_ip" >/dev/null; then
-                echo "::error::$label DNS did not resolve $domain to expected proxy IP $proxy_ip."
+            if ! printf "%s\n" "$response" | grep -Fx "$expected_ip" >/dev/null; then
+                echo "::error::$label DNS did not resolve $domain to expected IP $expected_ip."
                 exit 1
             fi
         }
 
-        # dns-standard and dns-ssl are both checked against the same
-        # $proxy_ip on purpose in this harness (issue #668) -- see the long
-        # comment above the equivalent check in
-        # scripts/ssl-mitm-cache-simulation.sh for why prod uses two
-        # distinct LAN addresses (host-IP-scoped Docker port publishing)
-        # while this bridge-network validation topology cannot reach the
-        # proxy any other way than through its one real container address.
-        check_dns dns-standard "$VALIDATION_DNS_STANDARD_IP"
-        check_dns dns-ssl "$VALIDATION_DNS_SSL_IP"
+        # dns-ssl resolves to the proxy container own address (the
+        # interception listener, proxy:443) -- unchanged. dns-standard now
+        # resolves to the standard-passthrough-shim address instead (issue
+        # #668): a real, separate endpoint whose port 443 forwards to the
+        # proxy SNI-passthrough listener (proxy:8443), so the two
+        # nameservers genuinely no longer share one answer. This job does
+        # not itself start that shim (it is Compose-profile-gated; only
+        # scripts/ssl-mitm-cache-simulation.sh names it explicitly), so this
+        # check only proves the DNS answer is correct here, not that the
+        # target is reachable -- the full endpoint-behavior proof (that each
+        # answer leads to a genuinely different, correctly-behaving TLS
+        # listener) lives in scripts/ssl-mitm-cache-simulation.sh, which does
+        # start the shim.
+        check_dns dns-standard "$VALIDATION_DNS_STANDARD_IP" "$standard_shim_ip"
+        check_dns dns-ssl "$VALIDATION_DNS_SSL_IP" "$proxy_ip"
 
         curl --connect-timeout 5 --max-time 10 -fsS "http://${proxy_ip}/healthz" >/dev/null \
             || { echo "::error::Client could not reach proxy HTTP health endpoint."; exit 1; }
