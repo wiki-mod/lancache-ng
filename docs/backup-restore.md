@@ -17,7 +17,7 @@ sudo /opt/lancache-ng/setup.sh backup [--config|--full] [install-dir] [--dest /b
 sudo /opt/lancache-ng/setup.sh restore <backup.tar.gz> [install-dir]
 ```
 
-The script verifies that required archive tools are present before running backup or restore. If `tar` or `rsync` is missing on an `apt-get` based system, the script installs the missing tool before it touches backup data.
+The script verifies that required archive tools are present before running backup or restore. If `tar` or `rsync` is missing on an `apt-get` based system, the script installs the missing tool before it touches backup data. `restore` additionally requires `openssl`, since converging a legacy or incomplete `.env` (see "Restore also re-converges `.env`" below) can generate missing service secrets, which shells out to `openssl rand`.
 
 ## Why there are two backup modes
 
@@ -68,7 +68,7 @@ The backup command stops the compose stack before copying mutable databases and 
    sudo docker compose ps
    ```
 
-If Watchtower changed an optional helper image, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same helper image is not pulled immediately. If the failure was caused by a bad first-party image, inspect the restored backup's `image-revisions.txt` and pin `LANCACHE_IMAGE_TAG` to the previous `sha-*`, release candidate, or stable release tag before restarting the affected service.
+If Watchtower changed an optional helper image, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same helper image is not pulled immediately. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or stable release tag, then run `setup.sh update [install-dir]` to apply it.
 
 ## Restore also re-converges `.env`
 
@@ -77,14 +77,37 @@ shape `.env` had at backup time. A backup taken from an older install can
 therefore carry legacy keys (split `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL`, a
 stale `PROXY_SECURITY_MODE=strict` with no allowlist), a placeholder secret,
 or keys a later release added that the archived install never had. After
-restoring files and Docker volumes, `restore` runs the exact same `.env`
-convergence path `update` uses (`migrate_env_for_update`, then
-`validate_compose_config`) before starting the stack, so a legacy or
-incomplete backup converges to the current expected `.env` shape
-automatically. Restoring a backup that is already fully converged is a no-op:
-convergence never rewrites values that already match the current expected
-shape, so it does not require and no longer relies on running `setup.sh
-update` by hand afterward.
+restoring files and Docker volumes, `restore` refreshes the quickstart
+compose/scripts bundle (the same refresh `update` performs, so a legacy
+archived compose file that still references removed keys like
+`CACHE_DIR_STANDARD` never gets validated against a `.env` that no longer has
+them; skipped for a `deploy/prod` Git checkout target, whose compose file is
+managed by the checkout itself) and then runs the same `.env` convergence
+path `update` uses (`migrate_env_for_update`, then `validate_compose_config`)
+before starting the stack, so a legacy or incomplete backup converges to the
+current expected `.env` shape automatically. Restoring a backup that is
+already fully converged is a no-op: convergence never rewrites values that
+already match the current expected shape, so it does not require and no
+longer relies on running `setup.sh update` by hand afterward.
+
+Unlike `update`, this convergence pass keeps an already-valid
+`LANCACHE_IMAGE_TAG` (an immutable `sha-*` or `vX.Y.Z` value) exactly as
+restored instead of re-resolving it against the current
+`LANCACHE_IMAGE_CHANNEL` pointer. Restoring a backup is commonly a rollback
+after a bad channel-tracked (`edge`/`latest`) image; re-resolving the channel
+during that restore would silently pull whatever the channel currently
+points to, which right after a bad release is often still the same bad tag.
+`update` does not have this exception because re-resolving the channel on
+every update is how a channel-tracking install picks up new images at all.
+
+If the backup contains Docker volume payloads, Docker must be available to
+restore them (see "What the automated backup includes" above). Compose
+validation and the stack start step are skipped, with a warning, when
+Docker/compose is not available for the target install directory -- this
+keeps the config-only restore path usable on a minimal host with no Docker,
+matching how `backup` and `restore_compose_volumes` already treat Docker as
+optional for a config-only archive. `.env` is still fully converged in that
+case; only the Docker-dependent validate-and-start step is skipped.
 
 If convergence or validation fails after a restore (for example, an
 unresolvable legacy value, or a compose configuration that fails to validate),
