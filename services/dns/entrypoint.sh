@@ -659,7 +659,11 @@ REC_PID=$!
 # ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
-        nats-subscriber || true
+        # Central logging pipeline (#633): tee alongside pdns_server/pdns_recursor
+        # above so nats-subscriber's connect/auth/processing errors also reach
+        # fluent-bit's tail of $PDNS_LOG_DIR/*.log instead of only Docker stdout.
+        nats-subscriber 2>&1 \
+            | tee -a "$PDNS_LOG_DIR/nats-subscriber.log" || true
         echo "[lancache-dns] nats-subscriber exited, restarting in 3s..."
         sleep 3
     done
