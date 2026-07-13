@@ -316,6 +316,7 @@ pub async fn update_nats_conf(
             .as_deref()
             .unwrap_or_default(),
         &state.nats_issuer_public_key,
+        &state.config.nats_log_file,
     );
 
     write_nats_conf_atomically(&state.config.nats_conf_path, &nats_conf)
@@ -340,11 +341,21 @@ fn render_nats_conf(
     callout_user: &str,
     callout_password: &str,
     issuer_public_key: &str,
+    log_file: &str,
 ) -> String {
     format!(
         r#"jetstream {{
   store_dir: /data
 }}
+
+# Central logging pipeline (#633): nats-server logs to exactly one
+# destination -- setting this disables its stdout output for the lifetime of
+# the process (confirmed against the upstream NATS docs: there is no
+# dual-output mode, unlike Kea's "output-options" array). `docker logs` on
+# this container goes quiet while the `logging` compose profile is active;
+# fluent-bit tails this file instead. See config.rs's nats_log_file docs for
+# the same trade-off dhcp-proxy's dnsmasq `log-facility=` already accepts.
+log_file: "{log_file}"
 
 authorization {{
   users = [
@@ -536,6 +547,7 @@ mod tests {
                 "lancache-nats-callout",
                 "callout-secret",
                 "issuer-public-key-abc123",
+                "nats-log-file-test-path",
             )
         };
 
@@ -559,6 +571,7 @@ mod tests {
             "lancache-nats-callout",
             "callout-secret",
             "issuer-public-key-abc123",
+            "nats-log-file-test-path",
         ] {
             assert!(
                 first.contains(needle),
@@ -591,6 +604,7 @@ mod tests {
             "lancache-nats-callout",
             "callout-secret",
             "issuer-public-key-abc123",
+            "nats-log-file-test-path",
         );
         write_nats_conf_atomically(path_str, &rendered_first).unwrap();
         let first_write = fs::read_to_string(&path).unwrap();
@@ -609,6 +623,7 @@ mod tests {
             "lancache-nats-callout",
             "callout-secret",
             "issuer-public-key-abc123",
+            "nats-log-file-test-path",
         );
         write_nats_conf_atomically(path_str, &rendered_second).unwrap();
         let second_write = fs::read_to_string(&path).unwrap();

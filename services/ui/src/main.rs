@@ -42,6 +42,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
 use tera::Tera;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 pub struct AppState {
     pub templates: Tera,
@@ -637,14 +639,44 @@ fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
     Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
 }
 
+// Central logging pipeline (#633): mirrors the existing stdout tracing layer
+// with a second layer that appends plain-text events to UI_LOG_FILE, so
+// fluent-bit can tail it the same way it already tails nginx's access.log
+// (see docs/architecture-ng.md's logging matrix). Runs before config::Config
+// is loaded (tracing must exist first, since Config::from_env() failures are
+// themselves reported via tracing::error!), so the log path is read directly
+// from the environment here rather than through Config. Opening the file is
+// best-effort: installs that never mount the shared log volume (i.e. never
+// opt into the `logging` compose profile) must still start and log to
+// stdout only -- a missing/unwritable log path is never a hard failure.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap());
+    let stdout_layer = tracing_subscriber::fmt::layer();
+
+    let ui_log_file = std::env::var("UI_LOG_FILE")
+        .unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
+    let file_layer = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ui_log_file)
+        .ok()
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(Mutex::new(file))
+        });
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap()),
-        )
-        .init();
+    init_tracing();
 
     let cfg = match config::Config::from_env() {
         Ok(cfg) => cfg,

@@ -153,6 +153,14 @@ pub struct Config {
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
     pub nats_service: String,
+    // Central logging pipeline (#633): written into nats.conf's top-level
+    // `log_file:` directive by update_nats_conf() (routes/secondaries.rs) so
+    // fluent-bit can tail it. nats-server logs to exactly one destination at
+    // a time -- setting `log_file` means `docker logs` on this container
+    // stops showing nats-server's own output while the `logging` compose
+    // profile is active (same accepted, documented trade-off as dhcp-proxy's
+    // dnsmasq `log-facility=`; there is no dual-output config for either).
+    pub nats_log_file: String,
     pub dev_mode: bool,
 }
 
@@ -253,6 +261,7 @@ impl fmt::Debug for Config {
             .field("lancache_image_tag", &self.lancache_image_tag)
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_service", &self.nats_service)
+            .field("nats_log_file", &self.nats_log_file)
             .field("dev_mode", &self.dev_mode)
             .finish()
     }
@@ -526,6 +535,7 @@ impl Config {
             lancache_image_tag,
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             nats_service: env_str("NATS_SERVICE", "nats"),
+            nats_log_file: env_str("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
         })
     }
