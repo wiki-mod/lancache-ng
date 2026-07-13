@@ -933,3 +933,46 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh
+
+  ui-reachability-crash-loop-simulation:
+    # Real end-to-end proof for #763: deliberately crash-loops `proxy` (a
+    # real `ui` depends_on entry) and confirms the Admin UI still starts,
+    # becomes healthy, and answers a real HTTP request throughout -- proving
+    # deploy/full-setup/docker-compose.yml's `ui` depends_on list has no
+    # condition: service_healthy gate on it, rather than just reading the
+    # compose file and assuming so. See
+    # scripts/ui-reachability-crash-loop-simulation.sh's own header for
+    # exactly what this does and does not prove. Chained after
+    # dhcp-kea-ctrl-agent-mutation-simulation (the current last job in this
+    # workflow's serial chain) for the same reason every other job here
+    # chains onto the previous one: one job at a time on the shared
+    # self-hosted runner tier.
+    name: Admin UI reachability during dependency crash-loop
+    needs: [compute-validation-network, dhcp-kea-ctrl-agent-mutation-simulation]
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # This job's script only drives a curl check against the real ui
+        # container it starts, matching ui-nats-dns-integration-simulation's
+        # own reasoning above -- no unpublished-tool dependency.
+        id: build-tools-image
+        env:
+          BUILD_TOOLS_REQUIRE_PUBLISHED: "true"
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run Admin UI reachability during crash-loop simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/ui-reachability-crash-loop-simulation.sh

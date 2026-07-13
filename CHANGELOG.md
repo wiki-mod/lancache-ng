@@ -108,6 +108,29 @@ is real, live, running code, not just work sitting in source control.
   any workflow file, as an early warning only -- the
   `shellcheck`/`shellcheck-hosted` CI jobs remain the actual enforcement (see
   CONTRIBUTING.md).
+- Added a real end-to-end test for the Admin UI reachability claim #763's
+  crash-loop-recovery discussion depends on: `deploy/*/docker-compose.yml`'s
+  `ui` service `depends_on` list has never had a `condition: service_healthy`
+  gate, which was meant to guarantee the Admin UI starts independently of
+  whether `proxy`/`nats`/`docker-socket-proxy` are healthy -- but that claim
+  had only ever been read off the compose file, never actually exercised.
+  `scripts/ui-reachability-crash-loop-simulation.sh` (new, wired into both
+  `full-setup-deep-validate.yml` and `full-setup-validate.yml` as
+  `ui-reachability-crash-loop-simulation`) deliberately forces `proxy` into a
+  genuine, continuous crash loop and confirms the Admin UI still starts,
+  becomes healthy, never restarts itself, and answers a real HTTP request on
+  `/health` throughout. This is the first, independently-mergeable half of
+  #763 (the "Admin-UI-reachability" scope item); the second half --
+  `setup.sh reset-to-last-known-good-config <service>`, a CLI fallback for
+  when the Admin UI itself is unreachable -- is tracked as a follow-up, since
+  its PowerDNS-side half depends on #628/PR #788's rollback listener, which
+  was still open at the time of this change. This PR does not add any new
+  "reset to last-known-good config" UI: that already exists today for Kea
+  (`services/ui/src/routes/dhcp.rs`'s `rollback_kea_snapshot`, `/dhcp` page)
+  and, once #628/PR #788 merges, for PowerDNS zone/record data (`/domains`
+  page's "Zone-Snapshots" tab) -- #763's own corrected scope treats building
+  a new unified reset UI as out of scope precisely because that mechanism
+  already exists per-service.
 - Added the repeat-run/idempotence test that was still missing for NATS's
   static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
   Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config
