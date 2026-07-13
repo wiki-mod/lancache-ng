@@ -8,6 +8,12 @@
 
 set -e
 
+# Central logging pipeline (#633): dnsmasq's own `log-facility=` directive
+# (see dnsmasq.conf.template) points at a file under here; dnsmasq creates
+# the file itself but not a missing parent directory, so this must exist
+# before dnsmasq starts.
+mkdir -p /var/log/lancache-dhcp-proxy
+
 if [ -f /data/lancache-ui-settings.env ]; then
     # shellcheck disable=SC1091
     . /data/lancache-ui-settings.env
