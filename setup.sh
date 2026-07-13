@@ -1318,6 +1318,46 @@ runtime_env_file_for_install_dir() {
     fi
 }
 
+# True if this install currently relies on the remote-secondary NATS
+# host-binding override (docker-compose.nats-secondary.yml) being active, so
+# update/validate must keep passing it on every subsequent compose invocation
+# instead of silently reverting to the base compose file's NATS wiring (which
+# only `expose`s 4222 internally, dropping the host port publish remote
+# secondary DNS nodes depend on). NATS_BIND_IP has exactly one purpose in
+# this codebase: it is the value the override's `ports:` mapping requires via
+# `${NATS_BIND_IP:?...}` (see docker-compose.nats-secondary.yml), so a
+# non-empty NATS_BIND_IP in the runtime env file is used as the activation
+# signal instead of inventing a separate marker file. An operator who
+# persisted NATS_BIND_IP into .env.local (so the override keeps working
+# across shell sessions, per the override file's own usage comment) has, by
+# construction, committed to running with the override active.
+nats_secondary_override_active_for_install_dir() {
+    local install_dir="$1" env_file="$2" bind_ip
+
+    [[ -f "$install_dir/docker-compose.nats-secondary.yml" ]] || return 1
+    bind_ip=$(get_env_var_nonempty NATS_BIND_IP "$env_file" 2>/dev/null || true)
+    [[ -n "$bind_ip" ]]
+}
+
+# Builds the -f argument list a compose invocation for install_dir needs,
+# always including the base file explicitly (harmless when cwd is already
+# install_dir, since it matches Compose's own auto-discovery default) and
+# appending the NATS-secondary override when nats_secondary_override_active_
+# for_install_dir() says it is active. Passing the base file explicitly is
+# required the moment any -f is added at all: Compose disables its cwd
+# auto-discovery of docker-compose.yml as soon as one -f is given, so a call
+# site that appended only the override would run the stack from that
+# partial-services fragment alone.
+compose_file_args_for_install_dir() {
+    local install_dir="$1" env_file="$2"
+    local -a args=(-f "$install_dir/docker-compose.yml")
+
+    if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
+        args+=(-f "$install_dir/docker-compose.nats-secondary.yml")
+    fi
+    printf '%s\n' "${args[@]}"
+}
+
 # Copies the quickstart compose file and helper scripts into install_dir (used
 # on both first install and every update, so copied installs always run the
 # current container wiring). See the inline comment for the #538 workaround
@@ -2476,9 +2516,11 @@ compose_stack_start() {
 validate_compose_config() {
     local install_dir="$1"
     local env_file
+    local -a compose_files
     print_step "Validating Docker Compose configuration"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    (cd "$install_dir" && docker compose --env-file "$env_file" -f "$install_dir/docker-compose.yml" config --quiet) \
+    mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
+    (cd "$install_dir" && docker compose --env-file "$env_file" "${compose_files[@]}" config --quiet) \
         || die "Docker Compose configuration is not valid. The stack was not pulled or restarted."
     print_ok "Docker Compose configuration is valid"
 }
@@ -3071,12 +3113,17 @@ EOF
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
+    local -a compose_files
     install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
+    if [[ ${#compose_files[@]} -gt 2 ]]; then
+        print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
+    fi
 
     UPDATE_CONVERGENCE_PAUSED=0
     UPDATE_CONVERGENCE_COMPLETED=0
@@ -3107,13 +3154,13 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling selected images"
-    docker compose --env-file "$env_file" pull \
+    docker compose --env-file "$env_file" "${compose_files[@]}" pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
     validate_compose_config "$install_dir"
 
     print_step "Restarting containers"
-    docker compose --env-file "$env_file" up -d --remove-orphans
+    docker compose --env-file "$env_file" "${compose_files[@]}" up -d --remove-orphans
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
