@@ -2406,6 +2406,19 @@ compose_stack_available() {
     [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1
 }
 
+# Reports whether any container in this compose project is currently in a
+# running state (plain `ps -q`, not `--all`). Backup/restore call this BEFORE
+# compose_stack_stop so their cleanup traps can restart the stack only if it
+# was actually running beforehand, instead of unconditionally undoing a
+# deliberate prior stop (e.g. `systemctl stop lancache.service`, or manual
+# maintenance) -- see #669.
+compose_stack_running() {
+    local install_dir="$1" env_file
+    compose_stack_available "$install_dir" || return 1
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -n "$(cd "$install_dir" && docker compose --env-file "$env_file" ps -q 2>/dev/null)" ]]
+}
+
 # Stops the stack before a backup/restore so files on disk are consistent
 # (no service writing to cache/state mid-copy). A stop failure only warns,
 # not dies, since backup/restore should still be attempted even if the stack
@@ -2444,31 +2457,92 @@ validate_compose_config() {
     print_ok "Docker Compose configuration is valid"
 }
 
-# Lists the distinct Docker named-volume names currently mounted by any
-# container in this compose project (including stopped ones, via `ps --all`),
-# by inspecting each container's mounts rather than relying on compose's own
-# volume list — this also picks up volumes attached to containers that predate
-# the current compose file.
+# Resolves the effective Docker Compose project name for a compose directory.
+# Compose itself resolves this, in priority order, from: the
+# COMPOSE_PROJECT_NAME environment variable, a COMPOSE_PROJECT_NAME entry in
+# the env file, the top-level `name:` key in docker-compose.yml, and finally
+# the containing directory's basename. All three of this repo's compose files
+# (deploy/quickstart, deploy/dev, deploy/prod) pin `name: lancache-ng`, so the
+# yaml fallback is what actually resolves today for every install — but
+# honoring an operator override first keeps this correct if that ever
+# changes. Reads the yaml directly (rather than shelling out to `docker
+# compose config`) so it also works against an archived, not-yet-restored
+# compose directory that has no running containers, and requires no Docker
+# JSON parsing dependency (jq is not otherwise used in this script).
+compose_project_name() {
+    local compose_dir="$1" env_file="$2" name
+    name="${COMPOSE_PROJECT_NAME:-}"
+    [[ -n "$name" ]] || name=$(get_env_var COMPOSE_PROJECT_NAME "$env_file")
+    if [[ -z "$name" && -f "$compose_dir/docker-compose.yml" ]]; then
+        name=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml" | head -1)
+    fi
+    name="${name:-$(basename "$compose_dir")}"
+    printf '%s\n' "$name"
+}
+
+# The proxy-cache Docker volume's project-prefixed name (e.g.
+# "lancache-ng_proxy-cache"), derived rather than looked up via `docker volume
+# ls`, so it can be classified even before the volume exists (a fresh
+# install's first backup, run before any container has started). Both prod's
+# bind-backed named volume and dev's plain named volume share this same
+# `<project>_proxy-cache` name, so a single name match excludes both (see
+# #669 #1: quickstart's cache is a plain bind-mount, type "bind", already
+# filtered out of compose_volume_names below without any special-casing).
+compose_cache_volume_name() {
+    local install_dir="$1" env_file="$2" project
+    project=$(compose_project_name "$install_dir" "$env_file")
+    printf '%s_proxy-cache\n' "$project"
+}
+
+# Lists the distinct Docker named-volume names belonging to this compose
+# project, as the union of two discovery methods:
+#   1. Mounts of any container in the project (including stopped ones, via
+#      `ps --all`) — picks up volumes attached to containers that predate the
+#      current compose file.
+#   2. `docker volume ls` filtered by the compose project label — needed
+#      because `lancache.service`'s `ExecStop=docker compose down` REMOVES
+#      containers (not just stops them), so after `systemctl stop
+#      lancache.service` method 1 alone finds nothing even though the named
+#      volumes (NATS/PowerDNS state, etc.) still exist on disk (#669 #5).
 compose_volume_names() {
-    local install_dir="$1" container env_file
+    local install_dir="$1" container env_file project
     compose_stack_available "$install_dir" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    while IFS= read -r container; do
-        [[ -n "$container" ]] || continue
-        docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "$container"
-    done < <(cd "$install_dir" && docker compose --env-file "$env_file" ps --all -q 2>/dev/null) | sort -u
+    project=$(compose_project_name "$install_dir" "$env_file")
+    {
+        while IFS= read -r container; do
+            [[ -n "$container" ]] || continue
+            docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "$container"
+        done < <(cd "$install_dir" && docker compose --env-file "$env_file" ps --all -q 2>/dev/null)
+        docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}' 2>/dev/null
+    } | sort -u
 }
 
 # Archives every Docker named volume used by this stack into its own tar file
 # under volume_root, using a throwaway alpine container to read the volume
 # read-only — avoids needing tar/permissions to reach the volume's real
 # on-disk location directly, which varies by Docker storage driver.
+#
+# The cache volume is skipped outside of `--full` mode: it can be hundreds of
+# GB on a prod install, and config-mode backups (including the automatic
+# pre-update rollback backup every `setup.sh update` runs) are documented as
+# excluding cache payloads — backup_manifest() already gates the bind-mounted
+# cache directories the same way. Docker still reports the bind-backed
+# `proxy-cache` volume's mount `.Type` as "volume" (its driver_opts make it a
+# bind mount under the hood, but Compose still models it as a named volume),
+# so without this it slipped through the mode gate entirely (#669 #1).
 backup_compose_volumes() {
-    local install_dir="$1" volume_root="$2" volume
+    local install_dir="$1" volume_root="$2" mode="$3" volume env_file cache_volume
     compose_stack_available "$install_dir" || return 0
     mkdir -p "$volume_root"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    cache_volume=$(compose_cache_volume_name "$install_dir" "$env_file")
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue
+        if [[ "$mode" != "full" && "$volume" = "$cache_volume" ]]; then
+            print_warn "Skipping cache volume in $mode-mode backup: $volume"
+            continue
+        fi
         print_ok "Including Docker volume: $volume"
         docker run --rm \
             -v "${volume}:/volume:ro" \
@@ -2498,6 +2572,38 @@ restore_compose_volumes() {
             -v "${volume_root}:/backup:ro" \
             alpine sh -c 'rm -rf /volume/* /volume/..?* /volume/.[!.]* 2>/dev/null || true; cd /volume && tar -xpf "/backup/$1.tar"' sh "$volume"
     done < <(find "$volume_root" -maxdepth 1 -type f -name '*.tar' | sort)
+}
+
+# The compose project name ("lancache-ng") is fixed across every compose file
+# in this repo (deploy/quickstart, deploy/dev, deploy/prod), not derived from
+# install_dir. Two installs on the same Docker host therefore resolve to the
+# SAME named Docker volumes regardless of install directory. `cmd_restore`'s
+# own --help documents remapping a restore to a different [install-dir] as
+# supported, but restore only stops the stack at the *target* install_dir
+# before restore_compose_volumes wipes and reloads those shared volumes — if
+# a DIFFERENT install on the same host is still actively running under the
+# same project name, its volumes get clobbered without ever being stopped.
+#
+# This is a real, documented constraint of same-host multi-install setups:
+# giving each install a unique COMPOSE_PROJECT_NAME would fix it, but would
+# also orphan every EXISTING install's already-created volumes on its next
+# `docker compose up` (the volumes are named `<old-project>_<name>`, and
+# nothing would reattach them to a renamed project) — a real regression
+# swapped for a narrower one. So this guards against the unsafe case instead
+# of silently working around it: refuse the restore outright rather than
+# risk destroying another install's live state.
+guard_restore_shared_project_volumes() {
+    local install_dir="$1" project="$2" container working_dir
+    command -v docker >/dev/null 2>&1 || return 0
+    while IFS= read -r container; do
+        [[ -n "$container" ]] || continue
+        working_dir=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container" 2>/dev/null)
+        [[ -n "$working_dir" ]] || continue
+        working_dir=$(realpath -m "$working_dir")
+        if [[ "$working_dir" != "$install_dir" ]]; then
+            die "Refusing to restore: a running stack for compose project '$project' is already active at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Stop the other install first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
+        fi
+    done < <(docker ps --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}' 2>/dev/null)
 }
 
 # Snapshots the exact image references/digests in use at backup time (JSON
@@ -2531,7 +2637,7 @@ cmd_backup() {
         || die "No stack found in $install_dir. Run ./setup.sh first."
     install_missing_tools tar rsync
 
-    local stamp dest archive rel path old_umask stack_stopped=0
+    local stamp dest archive rel path old_umask stack_stopped=0 stack_was_running=0 backup_paused_convergence=0
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
     archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
@@ -2541,13 +2647,29 @@ cmd_backup() {
     mkdir -p "$dest/rootfs"
     backup_cleanup() {
         local status=$?
-        [[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"
+        [[ "$stack_stopped" = "1" && "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
+        [[ "$backup_paused_convergence" = "1" ]] && resume_lancache_convergence_after_update
         rm -rf "$dest"
         umask "$old_umask"
         trap - EXIT
         return "$status"
     }
     trap backup_cleanup EXIT
+
+    # Only pause the convergence timer ourselves if it isn't already paused by
+    # an enclosing cmd_update run: cmd_update pauses before calling
+    # `cmd_backup --config` for its pre-update rollback backup, and pausing a
+    # second time here would overwrite CONVERGENCE_TIMER_WAS_* with "already
+    # stopped", so cmd_update's own resume at the end would never re-enable
+    # the timer. A STANDALONE `setup.sh backup` (dispatched directly, no
+    # cmd_update wrapper) has nothing pausing it otherwise, so
+    # lancache-converge.timer could fire `docker compose up -d
+    # --remove-orphans` mid-backup and restart the stack we just stopped for
+    # a consistent copy (#669 #2).
+    if [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" != "1" ]]; then
+        pause_lancache_convergence_for_update
+        backup_paused_convergence=1
+    fi
 
     print_step "Creating $mode backup"
     backup_manifest "$install_dir" "$mode" | sort -u > "$dest/manifest.txt"
@@ -2559,6 +2681,10 @@ cmd_backup() {
     done < "$dest/manifest.txt"
 
     record_image_revisions "$install_dir" "$dest/image-revisions.txt"
+    # Captured before compose_stack_stop so backup_cleanup only restarts the
+    # stack if it was actually running beforehand, instead of unconditionally
+    # undoing a deliberate prior stop (#669 #3).
+    compose_stack_running "$install_dir" && stack_was_running=1
     compose_stack_stop "$install_dir"
     stack_stopped=1
 
@@ -2574,7 +2700,7 @@ cmd_backup() {
         fi
         print_ok "Included: $path"
     done < "$dest/manifest.txt"
-    backup_compose_volumes "$install_dir" "$dest/docker-volumes"
+    backup_compose_volumes "$install_dir" "$dest/docker-volumes" "$mode"
 
     cat > "$dest/README.txt" <<EOF
 LanCache-NG backup created at $stamp UTC
@@ -2582,7 +2708,8 @@ Mode: $mode
 Install directory: $install_dir
 
 Config backups include text/configuration, Docker named volumes, and runtime databases needed for update rollback.
-Full backups additionally include cache directories, which can be very large.
+The cache volume is always excluded from config backups, since it can be very large.
+Full backups additionally include cache directories and the cache volume, which can be very large.
 Restore with: ./setup.sh restore $archive $install_dir
 EOF
     tar -C "$backup_root" -czf "$archive" "$stamp"
@@ -2627,11 +2754,26 @@ cmd_restore() {
     # instead of after files/volumes are already restored.
     install_missing_tools tar rsync openssl
 
-    local tmp root backup_dir archived_install archived_repo_root new_repo_root rel_install stack_stopped=0 path rel target
+    local tmp root backup_dir archived_install archived_repo_root new_repo_root rel_install stack_stopped=0 stack_was_running=0 archived_project path rel target
     tmp=$(mktemp -d)
     restore_cleanup() {
         local status=$?
-        [[ "$stack_stopped" = "1" ]] && compose_stack_start "$install_dir"
+        if [[ "$stack_stopped" = "1" ]]; then
+            if [[ "$status" -eq 0 ]]; then
+                # Success: restart only if the stack was actually running
+                # before this restore, instead of unconditionally bringing it
+                # up (#669 #4's "was already stopped" half).
+                [[ "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
+            else
+                # Failure/partial restore: leave the stack stopped rather
+                # than starting it on a mixed old/new or partially-restored
+                # state. Whatever files did get copied stay in place for
+                # inspection; the operator decides when it's safe to bring
+                # the stack back up (#669 #4).
+                print_warn "Restore failed; leaving the stack stopped at $install_dir for manual recovery."
+                print_warn "Investigate the error above, then run: cd \"$install_dir\" && docker compose up -d"
+            fi
+        fi
         rm -rf "$tmp"
         trap - EXIT
         return "$status"
@@ -2652,6 +2794,20 @@ cmd_restore() {
         new_repo_root=$(deploy_prod_repo_root "$install_dir")
     fi
 
+    # Read the project name from the ARCHIVED compose file (the one that
+    # actually owns the volumes about to be wiped/reloaded), not the restore
+    # target — the target's own docker-compose.yml may not exist yet on a
+    # fresh install-dir, and either way it is only relevant here as a name
+    # lookup, not as the thing being restored. See
+    # guard_restore_shared_project_volumes's own comment for why this matters
+    # (#669 #6).
+    archived_project=$(compose_project_name "$root/$rel_install" "$root/$rel_install/.env")
+    guard_restore_shared_project_volumes "$install_dir" "$archived_project"
+
+    # Captured before compose_stack_stop so restore_cleanup only restarts the
+    # stack on a successful restore if it was actually running beforehand
+    # (#669 #3/#4 pattern).
+    compose_stack_running "$install_dir" && stack_was_running=1
     compose_stack_stop "$install_dir"
     stack_stopped=1
 
@@ -2820,9 +2976,9 @@ EOF
 Usage: ./setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
 
 Creates a timestamped backup archive. Config backups include configuration,
-certificates, secrets, runtime databases, Docker named volumes, and image
-revision metadata. Full backups also include cache directories and can be very
-large.
+certificates, secrets, runtime databases, and Docker named volumes (excluding
+the cache volume), plus image revision metadata. Full backups also include
+cache directories and the cache volume, and can be very large.
 EOF
             ;;
         restore)
@@ -2835,6 +2991,13 @@ restoring, runs the same .env convergence and Compose validation as
 setup.sh update, then starts the stack. If convergence or validation fails,
 the stack is left stopped instead of starting on an unconverged config; fix
 the reported problem and run setup.sh update.
+
+Same-host limitation: the Docker Compose project name is fixed
+("lancache-ng") for every install, so two installs on the same host share the
+same named Docker volumes regardless of install-dir. Restoring into a
+different [install-dir] refuses to proceed if a running stack elsewhere on
+this host is still using that project name, to avoid overwriting its live
+volumes.
 EOF
             ;;
         *)
