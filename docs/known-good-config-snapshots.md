@@ -205,6 +205,21 @@ documented contract, in `services/ui/src/kea_snapshots.rs`:
   of this lives in a shell entrypoint. Coverage lives in
   `services/ui/src/kea_snapshots.rs`'s and `services/ui/src/routes/dhcp.rs`'s
   own `cargo test` suites instead.
+- **`kea-ctrl-agent.conf` and `kea-dhcp-ddns.conf` are outside this
+  mechanism entirely and are not user-editable.** Unlike `kea-dhcp4.conf`
+  (mutated live by the Admin UI, so `entrypoint.sh` merges narrowly to
+  preserve that state — see `migrate_dhcp4_config()`), these two files have
+  no UI-mutated state to protect, so `entrypoint.sh` fully regenerates each
+  from its template on every start and overwrites the persisted copy
+  whenever the rendered output differs (a full-file `cmp`, not a
+  field-level merge). This is deliberate: it lets a future template change
+  reach already-deployed installs on upgrade, the same reasoning that
+  motivated regenerating `kea-ctrl-agent.conf` on `KEA_CTRL_TOKEN`/
+  `KEA_CTRL_HOST` changes in the first place. The tradeoff is that any
+  manual edit made directly to either persisted file (e.g. added TLS
+  settings or an extra authenticated client in `kea-ctrl-agent.conf`) is
+  silently discarded on the next container start. Do not hand-edit these
+  files (#651).
 
 ## PowerDNS
 
