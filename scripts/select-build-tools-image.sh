@@ -113,6 +113,7 @@ smoke_test_image() {
 
     docker --version >/dev/null
     docker compose version >/dev/null
+    docker buildx version >/dev/null
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
     cargo-audit --version >/dev/null

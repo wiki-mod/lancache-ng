@@ -473,6 +473,19 @@ is real, live, running code, not just work sitting in source control.
   approach, and calls it right after the tag/channel is resolved and before
   the first state-mutating write in the install, update, and secondary-node
   flows (#665).
+- Fixed the `setup.sh CLI simulation` and `deep full-setup validation` jobs in
+  `full-setup-deep-validate.yml` failing on every PR since #744 merged. #744
+  added `assert_resolved_image_tag_platform_supported()`, which hard-requires
+  a working `docker buildx` before continuing; that check runs inside the
+  `build-tools` image (`tools/build-tools/Dockerfile`), which never installed
+  a `docker buildx` CLI plugin at all, so it failed closed with "docker
+  buildx is required ... Install the docker-buildx-plugin package". Built
+  `docker buildx` from source in the existing `actionlint-builder` stage
+  (same CVE-staleness rationale already applied to the Docker CLI and
+  docker-compose there) and installed it as a CLI plugin alongside them.
+  Also widened `scripts/select-build-tools-image.sh`'s smoke test to check
+  `docker buildx version`, matching the #775 precedent, so a future gap like
+  this is caught before merge instead of after (#787).
 
 ## [0.1.0] - 2026-07-06
 
