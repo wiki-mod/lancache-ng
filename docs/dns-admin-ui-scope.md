@@ -45,24 +45,24 @@ compose `.env` file and restarting the `dns-standard`/`dns-ssl` containers.
 | `DDNS_TSIG_KEY` / `DDNS_TSIG_NAME` / `DDNS_TSIG_ALGORITHM` | TSIG key material and metadata re-applied to every DDNS-eligible zone on every start via `configure_ddns_tsig()` |
 | `LOG_QUERIES` | Query logging on/off |
 | `ROOT_ZONE_MIRROR` (`ENABLE_ROOT_MIRROR` in `docs/architecture-ng.md`) | AXFR root zone mirror |
-| `ENABLE_SECONDARY` / `SECONDARY_MASTERS` / `SECONDARY_ZONES` | Legacy PowerDNS-native secondary/AXFR wiring — see 3a below, this is a *different* mechanism from the NATS-based secondary sync the Admin UI actually manages |
+| `ENABLE_SECONDARY` / `NATS_BIND_IP` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** `ENABLE_SECONDARY` is documentation-only narrative in `docs/architecture-ng.md` for when to include `deploy/prod/docker-compose.nats-secondary.yml`; no script reads it. `NATS_BIND_IP` is the one real env var here, consumed directly by that compose override to bind NATS to a trusted interface for the NATS-based secondary sync (3b) |
 | `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_TOKEN` / `NATS_CONSUMER` / `NATS_RECONCILER` | This node's own NATS connection identity for the `nats-subscriber` process |
 | `KEEP_KNOWN_GOOD_CONFIGS` / `DNS_CONFIG_SNAPSHOT_DIR` | Known-good config snapshot retention/location (see #415) |
 
 These are intentionally config-file-only: they are either security-sensitive
 (TSIG key, API key, NATS credentials — exposing a rotate-via-UI path for
 these needs its own threat-model discussion, not an incidental add-on here)
-or install-topology decisions (root mirror, legacy PowerDNS secondary/AXFR)
+or install-topology decisions (root mirror, the NATS secondary-bind override)
 made once at deploy time, not tuned routinely.
 
 ### 1b. Operator-configurable via Admin UI today
 
 | Setting | Route | Mechanism |
 |---|---|---|
-| CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/add`, `POST /domains/remove` (`services/ui/src/routes/domains.rs`) | Direct atomic file write to the shared `cdn-domains.txt`, consumed by both the DNS RPZ zone (regenerated every start from this file) and the SSL proxy's wildcard-cert root domain list |
-| LAN records in the `lan.` zone (A/AAAA/CNAME/MX/TXT) — add/remove | `POST /domains/lan/add`, `POST /domains/lan/remove` | Publishes a `lancache.dns.record` NATS message consumed by every node's `nats-subscriber`, which applies it via the PowerDNS API and re-publishes to JetStream for durability/secondary replication |
+| CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/add`, `POST /domains/remove` (`services/ui/src/routes/domains.rs`) | Direct atomic file write to the shared `cdn-domains.txt`, plus a per-domain recursor cache flush and (SSL mode only) an SSL proxy restart. **The RPZ zone itself is not live-reloaded by this route**: `services/dns/entrypoint.sh` regenerates `/var/lib/powerdns/rpz.zone` from `cdn-domains.txt` only at DNS container startup, and `recursor.lua`'s `rpzFile(...)` call has no `refresh` polling configured, so the recursor only picks up an added/removed domain's RPZ policy after the `dns-standard`/`dns-ssl` container is restarted — the cache flush alone does not make a newly added domain resolve to the proxy |
+| LAN records in the `lan.` zone (A/AAAA/CNAME/MX/TXT) — add/remove | `POST /domains/lan/add`, `POST /domains/lan/remove` | Publishes a `lancache.dns.record` NATS message to the `LANCACHE_DNS` JetStream stream (durability comes from JetStream persisting the publish itself); every node's `nats-subscriber` consumes that message and applies it to its own local PowerDNS instance via the PowerDNS API — the subscriber does not re-publish the message, so JetStream's own replay/redelivery is what secondaries rely on for replication, not a subscriber-side re-publish |
 | Global AAAA-response filter (suppress all AAAA answers) | `POST /domains/aaaa-filter` | Writes/removes a marker file on the shared `powerdns-state` volume, read live (no caching, `dq.variable=true`) by `filter-aaaa.lua`'s recursor `preresolve` hook — takes effect immediately, no restart |
-| Secondary node registration, credential rotation, removal | `services/ui/src/routes/secondaries.rs` (`/secondaries` page + `/secondaries/register`, `/secondaries/{name}/rotate`, `/secondaries/{name}` DELETE) | Per-secondary NATS auth-callout credential (issue #583); revocation is instant (deleting the DB row denies the next reconnect) since `nats.conf` itself is now static and never rewritten per secondary |
+| Secondary node registration, credential rotation, removal | `services/ui/src/routes/secondaries.rs` (`/secondaries` page + `/secondaries/register`, `/secondaries/{name}/rotate`, `/secondaries/{name}` DELETE) | Per-secondary NATS auth-callout credential (issue #583); `nats.conf` itself is static and never rewritten per secondary, so revocation works by `authorize_secondary` re-checking the `secondaries` table on every connection attempt — a removed/rotated credential is rejected starting from that node's *next* reconnect, not on its already-established connection (see `services/ui/src/nats_auth_callout.rs` module docs) |
 | Recursor cache flush for a specific name | Internal helper (`flush_recursor_cache`, called by the add/remove routes above) | PowerDNS Recursor `cache/flush?domain=` API call, plus a NATS `lancache.dns.flush` broadcast so every recursor instance (not just the one this UI process talks to) drops its cached answer for that exact name |
 
 **Doc-drift note found during this investigation:** `docs/architecture-ng.md`'s
@@ -86,16 +86,20 @@ category, just the display half of 1b's mutation routes.
 
 ## 2. Zone/record management surface
 
-**What exists today:** the zone topology itself is fixed at five zones
-(`lan.`, `local.lan.`, and the three RFC-1918 reverse zones — see
-`docs/architecture-ng.md`'s zone table), all created idempotently by
-`services/dns/entrypoint.sh` on every start (`create-zone ... || true`). The
-Admin UI cannot create, delete, or list arbitrary zones — it only manages
-*records inside* the fixed `lan.` zone (see 1b) and the CDN domain list that
-drives RPZ. `local.lan.` and the reverse zones exist and are created, but
-have no Admin UI record-management route at all today; their record content
-comes entirely from DDNS (Kea lease updates via `nsupdate`) and NATS-driven
-secondary reconciliation, not manual entry.
+**What exists today:** the zone topology itself is fixed at 20 zones —
+`lan.`, `local.lan.`, and 18 RFC-1918/ULA reverse zones (`10.in-addr.arpa.`,
+`168.192.in-addr.arpa.`, one `in-addr.arpa.` zone per `16.172.` through
+`31.172.` octet, and the two ULA IPv6 reverse zones `c.f.ip6.arpa.` /
+`d.f.ip6.arpa.` — see `services/dns/entrypoint.sh`'s `LAN_ZONES` /
+`PRIVATE_REVERSE_ZONES` arrays and `docs/architecture-ng.md`'s zone table),
+all created idempotently by `services/dns/entrypoint.sh` on every start
+(`create-zone ... || true`). The Admin UI cannot create, delete, or list
+arbitrary zones — it only manages *records inside* the fixed `lan.` zone
+(see 1b) and the CDN domain list that drives RPZ. `local.lan.` and the
+reverse zones exist and are created, but have no Admin UI record-management
+route at all today; their record content comes entirely from DDNS (Kea lease
+updates via `nsupdate`) — see 3b below for why NATS-driven secondary
+reconciliation does *not* cover these zones today, only `lan.`.
 
 **Intentionally out of scope (not planned):**
 - Arbitrary zone creation/deletion via the Admin UI. The zone list is a fixed
@@ -113,8 +117,8 @@ secondary reconciliation, not manual entry.
 
 **Planned but unbuilt (candidate v0.3.0 scope):**
 - Record management for `local.lan.` and the private reverse zones. Today
-  only `lan.` has an Admin UI CRUD surface; the other two zones that DDNS/NATS
-  actually populate have no manual override path if an operator needs to fix
+  only `lan.` has an Admin UI CRUD surface; the other 19 zones that DDNS
+  actually populates have no manual override path if an operator needs to fix
   or inspect a record PowerDNS-side without going through Kea.
 - A PTR-record checkbox alongside LAN A-record creation.
   `docs/architecture-ng.md` currently states "DNS: create zones, host
@@ -132,18 +136,24 @@ secondary reconciliation, not manual entry.
 
 ## 3. Secondary / DDNS / NATS sync
 
-Two independent secondary mechanisms exist in this codebase, at different
-maturity levels; conflating them was a real risk this document exists partly
-to prevent.
+### 3a. PowerDNS-native secondary/AXFR — not implemented
 
-### 3a. Legacy PowerDNS-native secondary/AXFR (`ENABLE_SECONDARY` / `SECONDARY_MASTERS` / `SECONDARY_ZONES`)
-
-Config-file-only (1a), PowerDNS's own built-in secondary/AXFR zone transfer
-mechanism. This predates the NATS-based sync below and is a different
-replication method (PowerDNS pulling zone data directly from a master via
-AXFR) with no Admin UI surface at all — it is set-and-forget at deploy time.
-Not slated for an Admin UI surface; it is a low-level PowerDNS protocol
-knob, not an operator workflow this project's UI is meant to wrap.
+Only one secondary mechanism exists in this codebase (3b below). PowerDNS's
+own built-in secondary/AXFR zone-transfer mode — a different replication
+method from the NATS-based sync below (PowerDNS pulling zone data directly
+from a master via AXFR) — is **not configured anywhere**:
+`services/dns/entrypoint.sh` and `services/dns/pdns.conf.template` never set
+up secondary/AXFR mode, and `SECONDARY_MASTERS` / `SECONDARY_ZONES` appear
+nowhere in this repository at all. `ENABLE_SECONDARY` is a real name, but it
+names something unrelated: documentation-only narrative in
+`docs/architecture-ng.md` for when to include
+`deploy/prod/docker-compose.nats-secondary.yml` (which binds NATS to a
+trusted interface via the one env var that compose file actually reads,
+`NATS_BIND_IP`) — no script gates any behavior on `ENABLE_SECONDARY` itself.
+This section is kept as a placeholder to record that PowerDNS-native
+secondary/AXFR is *not* implemented, so a future contributor who finds these
+env var names in `docs/architecture-ng.md`'s comments does not assume
+PowerDNS-side secondary/AXFR wiring exists to configure.
 
 ### 3b. NATS-based secondary sync (the actively developed mechanism, #433/#583)
 
@@ -156,10 +166,12 @@ instance independently. Each secondary gets its own per-node NATS
 auth-callout credential (issue #583, superseding an earlier shared-token
 model), managed entirely through `services/ui/src/routes/secondaries.rs`'s
 `/secondaries` page: register (issues a one-time-displayed credential),
-rotate (regenerates just that node's password, old one stops working
-instantly), remove (revokes on that node's next reconnect, `nats.conf`
-itself is never rewritten). LAN record adds/removes from the `/domains` page
-(1b) publish to the same stream every subscriber consumes, so a record
+rotate (regenerates just that node's password; the old one is rejected
+starting from that node's next reconnect, not on its already-established
+connection — see the note in 1b above), remove (same next-reconnect
+revocation, `nats.conf` itself is never rewritten). LAN record adds/removes
+from the `/domains` page (1b) publish to the same stream every subscriber
+consumes, so a record
 change made once on the primary's Admin UI replicates to every registered
 secondary automatically.
 
@@ -201,9 +213,14 @@ would be the natural way to close it, candidate v0.3.0 scope, not started.
 **Scoped design, not yet implemented:** zone/record data rollback (#628) —
 covered by PR #730's rewrite of
 [known-good-config-snapshots.md](known-good-config-snapshots.md)'s "Zones,
-records, and TSIG/DDNS metadata" section (open at the time of writing; not
-yet merged into `v0.2.0`). Unlike the file-based adapters above, this design
-explicitly calls for an **Admin UI-visible, operator-selected rollback**
+records, and TSIG/DDNS metadata" section. **PR #730 is open, not yet merged
+into `v0.2.0`, as of this writing** — following the link above today lands on
+that section's current merged text, which still says the topic is deferred
+and does not contain the design summarized in this paragraph; the design
+only exists in PR #730's diff until it merges. What follows is a summary of
+that pending design, checked against PR #730's diff at review time. Unlike
+the file-based adapters above, this design explicitly calls for an
+**Admin UI-visible, operator-selected rollback**
 (analogous to the existing `/dhcp` page's Kea snapshot picker) rather than an
 automatic startup-time rollback, because a stale zone snapshot can silently
 undo real client DHCP leases or hostnames. Nothing here exists in code yet —
@@ -226,15 +243,15 @@ UI-visible PowerDNS zone rollback" should eventually look like.
 
 | Area | State | Where |
 |---|---|---|
-| Static `pdns.conf`/`recursor.conf` settings (API key, TSIG, DDNS allow-from, query logging, root mirror, legacy AXFR secondary) | Config-file-only, implemented | `services/dns/entrypoint.sh`, `docs/architecture-ng.md` |
-| CDN domain list (RPZ + SSL cert scope) | Admin UI, implemented | `services/ui/src/routes/domains.rs`, `/domains` |
+| Static `pdns.conf`/`recursor.conf` settings (API key, TSIG, DDNS allow-from, query logging, root mirror) | Config-file-only, implemented | `services/dns/entrypoint.sh`, `docs/architecture-ng.md` |
+| CDN domain list (RPZ + SSL cert scope) | Admin UI, implemented; **DNS side requires a `dns-standard`/`dns-ssl` restart to take effect** (RPZ is regenerated only at container startup, no live reload) | `services/ui/src/routes/domains.rs`, `/domains` |
 | `lan.` zone records (A/AAAA/CNAME/MX/TXT) | Admin UI, implemented | `services/ui/src/routes/domains.rs`, `/domains` |
 | `local.lan.` / reverse zone records | No Admin UI route | Planned, v0.3.0 candidate |
 | PTR checkbox on LAN A records | Not built (doc claimed it; code doesn't have it) | Planned, v0.3.0 candidate |
 | Global AAAA filter | Admin UI, implemented | `services/ui/src/routes/domains.rs`, `filter-aaaa.lua` |
 | Arbitrary zone create/delete | Not planned | Deliberately out of scope |
 | RPZ direct record editor | Not planned | Deliberately out of scope (edit via CDN domain list instead) |
-| Legacy PowerDNS-native secondary/AXFR | Config-file-only, implemented, no UI planned | `services/dns/entrypoint.sh` |
+| PowerDNS-native secondary/AXFR | Not implemented (no code reads `SECONDARY_MASTERS`/`SECONDARY_ZONES`; `ENABLE_SECONDARY` names an unrelated NATS-bind doc convention, see 3a) | N/A |
 | NATS-based secondary registration/rotate/remove | Admin UI, implemented | `services/ui/src/routes/secondaries.rs`, `/secondaries` |
 | NATS secondary replication-health indicator | Not built | Planned, v0.3.0 candidate |
 | Static config snapshot/rollback status indicator | Not built (log-only today) | Planned, v0.3.0 candidate, not DNS-specific |
