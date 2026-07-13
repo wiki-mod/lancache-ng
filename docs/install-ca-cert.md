@@ -145,12 +145,38 @@ directly.
 
 ### Option B (no code change): admin-run one-liner
 
-The admin serves the file ad hoc from the install directory, e.g.:
+The admin serves the file ad hoc — but **never** point `python3 -m http.server`
+at the `certs/` directory itself: it serves the entire current directory, and
+`certs/` also holds `ca.key`, the private CA key. Copy just `ca.crt` into a
+freshly created throwaway directory first, then serve *that*:
 
 ```bash
-cd /opt/lancache-ng/certs && python3 -m http.server 8000
-# clients then browse to http://<lancache-lan-ip>:8000/ca.crt, then Ctrl-C when done
+( serve_dir="$(mktemp -d)" && trap 'rm -rf "$serve_dir"' EXIT && cp /opt/lancache-ng/certs/ca.crt "$serve_dir/" && cd "$serve_dir" && python3 -m http.server 8000 )
+# clients then browse to http://<lancache-lan-ip>:8000/ca.crt, then Ctrl-C when done --
+# the throwaway directory is removed automatically, no separate cleanup step needed
 ```
+
+Use `mktemp -d`, not a fixed path like `mkdir -p /tmp/lancache-ca-serve`: `mktemp
+-d` only succeeds by creating a directory that did not exist a moment ago, so
+there is no path for this command to silently follow a pre-existing directory
+or symlink left at a predictable name — `mkdir -p` on an existing path is a
+silent no-op, so a stale or planted path there would go unnoticed. The whole
+command is wrapped in `( ... )` with a `trap ... EXIT` inside it, so the
+throwaway directory is removed the moment the subshell exits — whether
+`python3` is stopped with `Ctrl-C`, exits on its own, or the command fails
+partway through — rather than depending on the admin remembering a separate
+cleanup step. Because only `ca.crt` was copied in, `ca.key` is never inside
+the directory being served — there is no window, however brief, in which it
+is reachable.
+
+The `trap` cannot run if the shell is killed outright (`kill -9`, an
+out-of-memory kill, a host power loss) — this project supports too wide a
+range of host operating systems (see `CONTRIBUTING.md`: "do not assume every
+operator runs the same ... host OS") to promise any specific OS-level temp
+cleanup will catch that case. The realistic worst case if it happens is a
+leftover copy of the public `ca.crt` sitting under `/tmp` until it's removed
+by hand or by whatever temp-cleaning policy (if any) the host itself runs —
+not a secret, so this is a tidiness gap, not a security one.
 
 or copies it off with `scp`:
 
@@ -161,6 +187,11 @@ scp user@<lancache-lan-ip>:/opt/lancache-ng/certs/ca.crt .
 - **Pro:** zero code, works today.
 - **Con:** manual and temporary; `python3` is not guaranteed on the host; `scp`
   still needs per-device handling. A stop-gap, not a real distribution path.
+- **Warning:** while the one-liner's server is running, `http://<lancache-lan-ip>:8000/ca.crt`
+  is reachable by any device on the LAN with no authentication. That is fine —
+  `ca.crt` is public — but don't leave it running longer than needed; `Ctrl-C`
+  it and remove the throwaway directory once every client device has fetched
+  the file.
 
 ### Option C (complementary): "Download CA certificate" button in the Admin UI
 
