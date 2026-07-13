@@ -194,6 +194,22 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
   actionlint .github/workflows/*.yml
 ```
 
+Also run `scripts/check-action-node-versions.sh` (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
+
+```bash
+bash scripts/check-action-node-versions.sh
+```
+
+#### Optional: a local pre-push hook for this same check
+
+`.githooks/pre-push` runs `scripts/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck`/`shellcheck-hosted` jobs are the actual, non-bypassable enforcement (they run the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
+
+Enable it once per checkout:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 For Rust services, run the relevant Cargo checks for the service you changed inside
 the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 

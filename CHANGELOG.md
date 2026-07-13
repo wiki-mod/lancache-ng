@@ -80,6 +80,29 @@ is real, live, running code, not just work sitting in source control.
   missing bzip2 middle tier. Automatic upload/attachment to GitHub is
   explicitly out of scope -- the operator reviews and attaches the archive
   themselves.
+- Added `scripts/check-action-node-versions.sh`, a CI guard (issue #801,
+  systemic follow-up to #799/#800) that scans every pinned GitHub Action
+  across all `.github/workflows/*.yml` files -- both third-party actions and
+  this repo's own local composite actions under `.github/actions/` -- and
+  fails the build if any of them declares a deprecated Node runtime
+  (`node6`/`node10`/`node12`/`node16`/`node20`) in its own action.yml/
+  action.yaml. External actions are resolved at their pinned ref via the
+  GitHub Contents API (curl + `GH_TOKEN`, matching this project's existing
+  `check-pr-tracking-metadata.sh` convention rather than depending on the
+  `gh` CLI, which is not installed in the build-tools image); local composite
+  actions are read straight off disk. Wired into `build-push.yml`'s
+  `shellcheck`/`shellcheck-hosted` jobs, with its own fixture-based
+  `tests/bats/check_action_node_versions.bats` suite (fully offline, via a
+  mock `curl`) that includes a permanent regression test against the real,
+  historical pre-#800 `actions/upload-artifact@834a144...` pin content,
+  proving this guard would have caught #799. Building this guard also found
+  a second, not-yet-fixed instance of the same problem
+  (`actions/download-artifact`, #802), fixed in the same PR since the new
+  guard would otherwise fail on its own pre-existing pin. Also adds an
+  optional local `.githooks/pre-push` hook that runs the same script before
+  a push touching any workflow file, as an early warning only -- the
+  `shellcheck`/`shellcheck-hosted` CI jobs remain the actual enforcement (see
+  CONTRIBUTING.md).
 - Added the repeat-run/idempotence test that was still missing for NATS's
   static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
   Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config
