@@ -3313,6 +3313,12 @@ services:
     ports:
       - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
       - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
+    healthcheck:
+      test: ["CMD", "rec_control", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
