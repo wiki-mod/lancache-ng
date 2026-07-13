@@ -147,17 +147,22 @@ directly.
 
 The admin serves the file ad hoc — but **never** point `python3 -m http.server`
 at the `certs/` directory itself: it serves the entire current directory, and
-`certs/` also holds `ca.key`, the private CA key. Copy just `ca.crt` into an
-empty throwaway directory first, then serve *that*:
+`certs/` also holds `ca.key`, the private CA key. Copy just `ca.crt` into a
+freshly created throwaway directory first, then serve *that*:
 
 ```bash
-mkdir -p /tmp/lancache-ca-serve && cp /opt/lancache-ng/certs/ca.crt /tmp/lancache-ca-serve/ && cd /tmp/lancache-ca-serve && python3 -m http.server 8000
+serve_dir="$(mktemp -d)" && cp /opt/lancache-ng/certs/ca.crt "$serve_dir/" && cd "$serve_dir" && python3 -m http.server 8000
 # clients then browse to http://<lancache-lan-ip>:8000/ca.crt, then Ctrl-C when done
-# rm -rf /tmp/lancache-ca-serve when finished
+# rm -rf "$serve_dir" when finished
 ```
 
-Because only `ca.crt` was copied in, `ca.key` is never inside the directory
-being served — there is no window, however brief, in which it is reachable.
+Use `mktemp -d`, not a fixed path like `mkdir -p /tmp/lancache-ca-serve`: `mktemp
+-d` only succeeds by creating a directory that did not exist a moment ago, so
+there is no path for this command to silently follow a pre-existing directory
+or symlink left at a predictable name — `mkdir -p` on an existing path is a
+silent no-op, so a stale or planted path there would go unnoticed. Because
+only `ca.crt` was copied in, `ca.key` is never inside the directory being
+served — there is no window, however brief, in which it is reachable.
 
 or copies it off with `scp`:
 
