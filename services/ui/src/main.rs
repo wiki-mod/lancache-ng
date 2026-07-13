@@ -67,17 +67,29 @@ const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 
-// Known placeholder value for SECONDARY_REGISTRATION_TOKEN, copied verbatim
-// from deploy/prod/.env's checked-in default (this fix's issue #659 scope),
-// which uses the CHANGE_ME_* form to match KEA_CTRL_TOKEN/PDNS_API_KEY's
-// existing convention in that same file. Recognized as unset by setup.sh's
-// own placeholder detector (see env_key_has_usable_secret in setup.sh). If
-// this literal ships untouched, it is public knowledge readable straight out
-// of this repo, so validate_secondary_registration_token below must reject
-// it exactly like an empty token -- see services/dns/entrypoint.sh's
-// analogous CHANGE_ME_* rejection for PDNS_API_KEY.
-const SECONDARY_REGISTRATION_TOKEN_PLACEHOLDERS: &[&str] =
-    &["CHANGE_ME_SECONDARY_REGISTRATION_TOKEN"];
+// Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
+// not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
+// exact-literal list previously missed deploy/quickstart/.env's distinct
+// YOUR_SECONDARY_REGISTRATION_TOKEN_HERE default, which manual quickstart deploys
+// that skip setup.sh ship untouched -- letting anyone who reads this public repo
+// register a secondary against it (flagged in review on PR #743). The first
+// five checks mirror setup.sh's own secret_value_is_placeholder pattern set
+// case-for-case so both checks stay in sync; the trailing `<...>` check is an
+// addition beyond that set, added because README.md's own
+// `SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>` code-block example (which
+// setup.sh's detector does NOT actually recognize, despite README prose
+// claiming otherwise -- a pre-existing doc/script inconsistency out of scope
+// here) is itself pasteable verbatim by a manual deployer. A real hex/base64
+// secret can never match any of these patterns by chance.
+fn secondary_registration_token_is_placeholder(token: &str) -> bool {
+    token.is_empty()
+        || token.starts_with("CHANGE_ME_")
+        || (token.starts_with("YOUR_") && token.ends_with("_HERE"))
+        || token.starts_with("changeme")
+        || token.contains("change-me")
+        || (token.starts_with("lancache-") && token.ends_with("-secret"))
+        || (token.starts_with('<') && token.ends_with('>'))
+}
 
 // Persists the CSRF/session-signing secret across restarts so existing
 // sessions don't get invalidated on every container recreate. `create_new`
@@ -585,7 +597,8 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
 //   an unset configured token compared equal to an unset/empty request
 //   token, so any client could register.
 // - a known placeholder is the same problem restated: its value is public,
-//   readable straight out of this repository's checked-in deploy/prod/.env.
+//   readable straight out of this repository's checked-in deploy/prod/.env
+//   and deploy/quickstart/.env defaults.
 //
 // Registering a secondary DNS node is an opt-in feature -- most single-node
 // installs never use it -- but the token itself is not opt-in: setup.sh
@@ -607,9 +620,9 @@ fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if SECONDARY_REGISTRATION_TOKEN_PLACEHOLDERS.contains(&token) {
+    if secondary_registration_token_is_placeholder(token) {
         return Err(format!(
-            "SECONDARY_REGISTRATION_TOKEN is still set to the default placeholder \
+            "SECONDARY_REGISTRATION_TOKEN is still set to a default placeholder \
              ('{token}') — refusing to start. Generate a real secret with: \
              openssl rand -hex 32"
         ));
@@ -1003,7 +1016,16 @@ mod tests {
     #[test]
     fn secondary_registration_token_rejects_empty_and_known_placeholders() {
         assert!(validate_secondary_registration_token("").is_err());
-        for placeholder in SECONDARY_REGISTRATION_TOKEN_PLACEHOLDERS {
+        // Every placeholder form actually checked into the repo's deploy/*/.env
+        // templates must be rejected, not just deploy/prod/.env's literal.
+        for placeholder in [
+            "CHANGE_ME_SECONDARY_REGISTRATION_TOKEN", // deploy/prod/.env
+            "YOUR_SECONDARY_REGISTRATION_TOKEN_HERE", // deploy/quickstart/.env
+            "changeme",
+            "please-change-me-now",
+            "lancache-default-secret",
+            "<generate-a-secret>", // README.md's SECONDARY_REGISTRATION_TOKEN example
+        ] {
             assert!(
                 validate_secondary_registration_token(placeholder).is_err(),
                 "expected placeholder {placeholder:?} to be rejected"
