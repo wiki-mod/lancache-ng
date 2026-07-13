@@ -8,7 +8,13 @@
 # guard actually catches a regression) -- it builds a small fixture tree
 # mirroring the guard's own WRITER_TEST_EVIDENCE pairs and exercises every
 # pass/fail branch the script's has_bats_repeat_test/has_rust_repeat_test
-# helpers and its file-existence checks are supposed to catch.
+# helpers and its file-existence checks are supposed to catch, including
+# (added in #732 review) that the guard rejects evasions that LOOK like
+# coverage but that `bats`/`cargo test` would never actually execute:
+# commented-out `@test`/`#[test]` lines, `#[ignore]`d Rust tests, and (for
+# the NATS writer's self-referential evidence file specifically) an
+# unrelated pre-existing test whose name happens to match only the generic
+# repeat/idempoten/converge marker.
 #
 # The guard script accepts an optional repo_root argument specifically so
 # this fixture-based testing is possible without touching the real repo
@@ -80,6 +86,10 @@ mod tests {
 }
 EOF
 
+    # The name below deliberately contains both the generic marker
+    # ("repeated") AND the NATS-specific extra_marker ("nats_conf") the real
+    # WRITER_TEST_EVIDENCE entry requires -- see "fails when the NATS
+    # evidence ..." below for the regression this guards (#732 review).
     cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
 #[cfg(test)]
 mod tests {
@@ -87,6 +97,21 @@ mod tests {
     async fn nats_conf_write_converges_to_the_same_file_across_repeated_writes() {
         assert!(true);
     }
+}
+EOF
+
+    mkdir -p "$fixture_root/services/proxy" "$fixture_root/services/dhcp-proxy"
+    printf '#!/usr/bin/env bash\n# fixture proxy entrypoint\n' > "$fixture_root/services/proxy/entrypoint.sh"
+    cat > "$fixture_root/tests/bats/proxy_known_good_snapshot.bats" <<EOF
+${at_test} "retention keeps only KEEP_KNOWN_GOOD_CONFIGS snapshots across repeated valid starts" {
+    true
+}
+EOF
+
+    printf '#!/usr/bin/env bash\n# fixture dhcp-proxy entrypoint\n' > "$fixture_root/services/dhcp-proxy/entrypoint.sh"
+    cat > "$fixture_root/tests/bats/dhcp_proxy_known_good_snapshot.bats" <<EOF
+${at_test} "retention keeps only KEEP_KNOWN_GOOD_CONFIGS snapshots across repeated valid starts" {
+    true
 }
 EOF
 }
@@ -157,6 +182,127 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"setup.sh"* ]]
     [[ "$output" == *"services/watchdog/watchdog.sh"* ]]
+}
+
+@test "fails when the NATS evidence file only has a repeat-named test unrelated to the writer" {
+    # Regression case from #732 review: secondaries.rs is its own evidence
+    # file, so an unrelated pre-existing test (here modelling the real
+    # generate_nats_password_is_high_entropy_and_never_repeats, about key
+    # generation, not config-writing) whose name merely contains "repeat"
+    # must NOT satisfy the NATS entry's extra_marker ("nats_conf") -- before
+    # this fix, deleting the real nats_conf_write_converges_... test still
+    # left the guard reporting OK because of this test alone.
+    seed_passing_fixture
+    cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generate_nats_password_is_high_entropy_and_never_repeats() {
+        assert!(true);
+    }
+}
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/ui/src/routes/secondaries.rs"* ]]
+}
+
+@test "fails when the proxy known-good-snapshot writer loses its repeat-run coverage" {
+    # The script's own header documents that it guards the nginx/dnsmasq
+    # known-good-snapshot adapters too; before #732's fix, WRITER_TEST_EVIDENCE
+    # had no entry for either one, so this fixture would have passed silently.
+    seed_passing_fixture
+    rm "$fixture_root/tests/bats/proxy_known_good_snapshot.bats"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/proxy/entrypoint.sh"* ]]
+}
+
+@test "fails when the dhcp-proxy known-good-snapshot writer loses its repeat-run coverage" {
+    seed_passing_fixture
+    rm "$fixture_root/tests/bats/dhcp_proxy_known_good_snapshot.bats"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/dhcp-proxy/entrypoint.sh"* ]]
+}
+
+@test "does not count a commented-out bats @test line as evidence" {
+    # A leading '#' (with or without indentation) makes a line a bats
+    # comment, never an active test declaration -- bats itself never
+    # executes it, so the guard must not treat it as proof either.
+    seed_passing_fixture
+    cat > "$fixture_root/tests/bats/watchdog_idempotence.bats" <<EOF
+  # ${at_test} "write_status converges across repeated writes" {
+    true
+}
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/watchdog/watchdog.sh"* ]]
+}
+
+@test "does not count a #[ignore]d Rust test as evidence" {
+    # Normal CI never runs a #[ignore]d test, so it must not be able to
+    # stand in for the writer's enforced repeat-run proof.
+    seed_passing_fixture
+    cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    #[ignore]
+    async fn nats_conf_write_converges_to_the_same_file_across_repeated_writes() {
+        assert!(true);
+    }
+}
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/ui/src/routes/secondaries.rs"* ]]
+}
+
+@test "does not count a #[ignore = \"reason\"]d Rust test as evidence" {
+    # #[ignore] with a reason string is the common real-world form; the
+    # matcher must catch this prefix too, not just the bare #[ignore] line.
+    seed_passing_fixture
+    cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    #[ignore = "flaky under CI load"]
+    async fn nats_conf_write_converges_to_the_same_file_across_repeated_writes() {
+        assert!(true);
+    }
+}
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/ui/src/routes/secondaries.rs"* ]]
+}
+
+@test "does not count a commented-out Rust #[test] block as evidence" {
+    # A '//'-commented attribute/fn pair is dead code to rustc; it must not
+    # satisfy the guard just because the raw text still contains the marker
+    # substrings.
+    seed_passing_fixture
+    cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    // #[tokio::test]
+    // async fn nats_conf_write_converges_to_the_same_file_across_repeated_writes() {
+    //     assert!(true);
+    // }
+}
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/ui/src/routes/secondaries.rs"* ]]
 }
 
 @test "the guard also passes when pointed at the real repository tree" {

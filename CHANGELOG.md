@@ -26,8 +26,22 @@ is real, live, running code, not just work sitting in source control.
   a row, proving it converges to byte-identical output for an unchanged
   config. Also added `scripts/check-idempotence-test-coverage.sh`, a small CI
   guard (with its own `tests/bats/check_idempotence_test_coverage.bats`
-  fixture coverage) that fails the build if any of these five known
-  config-writer entrypoints loses its repeat-run test.
+  fixture coverage) that fails the build if any known config-writer
+  entrypoint loses its repeat-run test.
+  - Hardened during PR review (#732): the guard now also covers the nginx
+    proxy and `dhcp-proxy` known-good-snapshot adapters (previously only
+    documented in the script's own header, not actually enforced), rejects
+    commented-out `@test`/`#[test]` evidence and `#[ignore]`d Rust tests
+    (none of which `cargo test`/`bats` actually run, so none should count as
+    proof), and requires the NATS writer's evidence to match a
+    writer-specific `nats_conf` marker (its self-referential evidence file
+    already had an unrelated pre-existing test whose name happened to
+    contain "repeat", which alone satisfied the old, broader check). The
+    script's Bats fixture suite gained matching regression coverage for each
+    case, and `.github/workflows/build-tools.yml`'s path filter now also
+    triggers on changes to the guard script itself, so its own fixture suite
+    runs on script-only PRs instead of only the real-repo happy-path check
+    in `build-push.yml`.
 - Added a known-good configuration snapshot mechanism for the nginx proxy and
   dnsmasq `dhcp-proxy` adapters: generated config is validated (`nginx -t`,
   `dnsmasq --test`) before being snapshotted to a persistent, service-owned
