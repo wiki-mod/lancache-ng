@@ -3593,6 +3593,8 @@ cmd_secondary() {
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
+    local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel
+    local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
 
     usage_secondary() {
         cat <<EOF
@@ -3680,6 +3682,62 @@ EOF
         || die "No free secondary bind IP available on port 53. Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     assert_prebuilt_image_platform_supported
+
+    # --rotate against an existing secondary directory can resolve
+    # registry/prefix/channel/tag entirely from local config (an explicit
+    # LANCACHE_IMAGE_* env var or the existing .env) with no need for the
+    # primary's response below. Check the platform for that case here, before
+    # the registration POST rotates this secondary's NATS password on the
+    # primary (#665) -- otherwise a Buildx/platform failure surfacing only
+    # after the POST would leave the primary already expecting the new
+    # password while this host's .env still has the old one, with no way to
+    # recover except registering again. A fresh (non-rotate) registration has
+    # no local .env to resolve from yet, so it necessarily keeps relying on
+    # the existing post-registration check further down; the same is true for
+    # a --rotate run whose local channel/tag genuinely can't be resolved
+    # without the primary's response (e.g. a still-mutable, non-pinned
+    # channel with no LANCACHE_IMAGE_TAG override).
+    if [[ "$rotate" -eq 1 ]]; then
+        preflight_dir="${name}"
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            preflight_dir="."
+        fi
+        preflight_env_file=""
+        [[ -f "${preflight_dir}/.env" ]] && preflight_env_file="${preflight_dir}/.env"
+
+        if [[ -n "$preflight_env_file" ]]; then
+            preflight_registry="${LANCACHE_IMAGE_REGISTRY:-$(get_env_var LANCACHE_IMAGE_REGISTRY "$preflight_env_file")}"
+            preflight_prefix="${LANCACHE_IMAGE_PREFIX:-$(get_env_var LANCACHE_IMAGE_PREFIX "$preflight_env_file")}"
+            preflight_channel="${LANCACHE_IMAGE_CHANNEL:-$(get_env_var LANCACHE_IMAGE_CHANNEL "$preflight_env_file")}"
+
+            if [[ -n "$preflight_registry" && -n "$preflight_prefix" && -n "$preflight_channel" ]]; then
+                validate_lancache_image_registry "$preflight_registry"
+                validate_lancache_image_prefix "$preflight_prefix"
+                validate_lancache_image_channel "$preflight_channel"
+
+                # A non-pinned (mutable) channel with no explicit
+                # LANCACHE_IMAGE_TAG override still resolves entirely from
+                # local/registry state (it pulls the channel's own pointer
+                # image), so it counts as locally resolvable too. A pinned
+                # channel, by contrast, has no channel pointer of its own --
+                # it requires an actual tag from either the shell env or the
+                # existing .env; if neither has one, only the primary's
+                # response can supply it, so this preflight must be skipped.
+                if [[ "$preflight_channel" != "pinned" \
+                    || -n "${LANCACHE_IMAGE_TAG:-}" \
+                    || -n "$(get_env_var LANCACHE_IMAGE_TAG "$preflight_env_file")" ]]; then
+                    preflight_tag=$(LANCACHE_IMAGE_REGISTRY="$preflight_registry" \
+                        LANCACHE_IMAGE_PREFIX="$preflight_prefix" \
+                        LANCACHE_IMAGE_CHANNEL="$preflight_channel" \
+                        resolve_lancache_image_tag "$preflight_env_file")
+                    assert_resolved_image_tag_platform_supported "$preflight_registry" "$preflight_prefix" "$preflight_tag"
+                    preflight_verified_registry="$preflight_registry"
+                    preflight_verified_prefix="$preflight_prefix"
+                    preflight_verified_tag="$preflight_tag"
+                fi
+            fi
+        fi
+    fi
 
     print_step "Registering secondary"
     response_file=$(mktemp)
@@ -3795,8 +3853,18 @@ EOF
     # Verify the resolved tag actually publishes an image for this secondary
     # host's architecture before any secondary state below is written (#665).
     # The earlier assert_prebuilt_image_platform_supported call only checked
-    # the host architecture in general, not this specific tag/channel.
-    assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    # the host architecture in general, not this specific tag/channel. Skip
+    # this if the --rotate preflight above (before the registration POST)
+    # already verified these exact registry/prefix/tag values -- re-running it
+    # here would only repeat the same registry inspect for no new information.
+    # Any drift from the preflight (e.g. the response provided different
+    # values than local config) still falls through to a fresh, real check.
+    if [[ -z "$preflight_verified_tag" \
+        || "$lancache_image_registry" != "$preflight_verified_registry" \
+        || "$lancache_image_prefix" != "$preflight_verified_prefix" \
+        || "$lancache_image_tag" != "$preflight_verified_tag" ]]; then
+        assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    fi
 
     # Known-good pdns.conf/recursor.conf snapshot retention (#615): same
     # variable and default (3) as config/{dev,prod}/dns-standard.env. The
