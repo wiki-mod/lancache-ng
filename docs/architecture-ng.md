@@ -154,18 +154,18 @@ Lightweight container with Docker socket access (restart permission).
 
 ## syslog-ng
 
-Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `dev`, `prod`, and `quickstart` alike. `fluent-bit` (the `syslog` service) is the collector/forwarder: it tails the proxy access log and fans it out to two independent pipelines — a local plain-text file (used by Netdata's `web_log` job in dev) and a forward to `syslog-ng` over TCP/601 (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`.
+Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `dev`, `prod`, and `quickstart` alike. `fluent-bit` (the `syslog` service) is the collector/forwarder: it tails every wired service's log file(s) (see the matrix below) and fans each one out to a forward to `syslog-ng` over TCP/601 (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`); the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job in dev). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`.
 
 **Currently implemented:**
 - Size-bounded rotation: an active log file is rotated once it exceeds `SYSLOG_MAX_FILE_MB` (default 100), then `syslog-ng` is signaled (`SIGHUP`) to reopen the (recreated) destination file.
 - Compression: rotated files are compressed with `zstd -T0` at `SYSLOG_COMPRESSION_LEVEL` (default 19); falls back to `gzip` if `zstd` cannot be installed at container start (e.g. no network egress).
 - Config for both `syslog` and `syslog-ng` is generated at container start (CLI flags for fluent-bit, an inline heredoc for syslog-ng) rather than bind-mounted, so `quickstart` — which has no local repo checkout — runs the identical pipeline as `dev`/`prod`.
-- Only the proxy/nginx access log is wired end to end today.
+- Every service in the matrix below is wired end to end except `dhcp-probe` (one-shot diagnostic, see its row for why that's a deliberate N/A, not a gap).
+- Per-service wiring mechanism varies by what the underlying daemon actually supports (#633): a native dual stdout+file option where one exists (Kea's `output-options` array), a `tee` of the daemon's own stdout into a file where no such option exists (PowerDNS has no file-log directive on Linux at all; nats-server and dnsmasq each support only one log destination at a time, not both simultaneously), or a second application-level logging layer (the Admin UI's `tracing-subscriber` setup). Every one of these choices is a documented, deliberate trade-off recorded in the matrix's Notes column, not an oversight.
 - Storage-budget retention: `watchdog.sh`'s `maybe_prune_syslog()` (opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above.
 
 **Not implemented yet (tracked in follow-up #633):**
-- The remaining per-container logging matrix (DNS, DHCP, Admin UI, watchdog, NATS, netdata, dhcp-probe logs are not yet routed to syslog-ng).
-- Admin UI log reading from the central path (the UI still reads `STANDARD_LOG`/`SSL_LOG` directly).
+- Admin UI log reading from the central path (the UI still reads `STANDARD_LOG`/`SSL_LOG` directly for its own dashboard, in addition to now also writing its own process log to the shared volume for fluent-bit).
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
 - A CI guard that fails when a new container is added without a declared logging path.
@@ -174,18 +174,20 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 
 | Service | Logging path | Notes |
 | --- | --- | --- |
-| proxy (nginx) | Via fluent-bit → syslog-ng | Access log tailed and forwarded; nginx error log not yet included |
-| dns-standard | Not yet wired | Follow-up #633 |
-| dns-ssl | Not yet wired | Follow-up #633 |
-| dhcp | Not yet wired | Follow-up #633 |
-| dhcp-proxy | Not yet wired | Follow-up #633 |
-| ui | Not yet wired | Follow-up #633 |
-| watchdog | Not yet wired | Follow-up #633 |
-| nats | Not yet wired | Follow-up #633 |
-| netdata | Not yet wired | Follow-up #633 |
-| dhcp-probe | Not yet wired | Follow-up #633 |
+| proxy (nginx) | Via fluent-bit → syslog-ng | `access.log`, `error.log`, and `stream.log` (SNI-passthrough logging, standard mode) all tailed and forwarded, each its own fluent-bit tag/db pair |
+| dns-standard | Via fluent-bit → syslog-ng | PowerDNS has no native file-log directive on Linux (confirmed against upstream docs — only syslog/stdout); `entrypoint.sh`'s `run_auth`/`run_recursor` `tee` each daemon's stdout into `/var/log/lancache-dns/{pdns-auth,pdns-recursor}.log` on the `dns-logs-standard` volume instead |
+| dns-ssl | Via fluent-bit → syslog-ng | Same mechanism as dns-standard, own `dns-logs-ssl` volume so the two instances' log files never collide |
+| dhcp | Via fluent-bit → syslog-ng | Kea's `loggers[].output-options` now lists both `stdout` and `/var/log/lancache-dhcp/kea-dhcp4.log` (native dual-output, no `docker logs` loss); `migrate_dhcp4_config()` adds the file output to any pre-existing runtime config on upgrade |
+| dhcp-proxy | Via fluent-bit → syslog-ng | dnsmasq's `log-facility=` directive supports only one destination at a time (no dual-output mode), so this is the one service where `docker logs` goes quiet while the `logging` profile is active — an accepted, documented trade-off; `entrypoint.sh`'s own startup diagnostics still reach `docker logs` since they run before dnsmasq is exec'd |
+| ui | Via fluent-bit → syslog-ng | `main.rs`'s `init_tracing()` adds a second `tracing-subscriber` layer that appends to `UI_LOG_FILE` (default `/var/log/lancache-ui/ui.log`) alongside the existing stdout layer; best-effort — a missing/unwritable log path never blocks startup |
+| watchdog | Via fluent-bit → syslog-ng | `watchdog.sh` itself is unchanged; the compose `entrypoint`/`command` override `tee`s its stdout into `/var/log/lancache-watchdog/watchdog.log` via `exec /watchdog.sh > >(tee -a ...) 2>&1`, so it stays PID 1 (signal handling unaffected) |
+| nats | Via fluent-bit → syslog-ng | Like dnsmasq, nats-server logs to exactly one destination — no dual-output mode exists — so `log_file: /var/log/lancache-nats/nats.log` (set both in the compose-generated boot config and, authoritatively, by the Admin UI's `update_nats_conf`) means `docker logs` goes quiet on this container while the `logging` profile is active; same accepted trade-off as dhcp-proxy |
+| netdata | Via fluent-bit → syslog-ng | netdata writes `health.log`/`collector.log`/`error.log` etc. under `/var/log/netdata` by default; that path is now mounted onto the `netdata-logs` volume, which fluent-bit tails read-only |
+| dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
 | fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet; no healthcheck yet (follow-up #633) |
 | syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
+| docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
+| watchtower | Not applicable | Third-party pinned image (`ghcr.io/nicholas-fedor/watchtower`), quickstart-only (`watchtower` profile); same reasoning as docker-socket-proxy |
 
 ## Cache Warming
 

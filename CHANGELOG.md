@@ -49,6 +49,23 @@ is real, live, running code, not just work sitting in source control.
   request for that MAC receives the reserved address, plus a companion
   negative case confirming a different, unrelated MAC still receives an
   ordinary dynamic-pool address rather than the reservation.
+- Wired the remaining 9 services into the syslog-ng/fluent-bit central
+  logging pipeline (#633, follow-up to #453/#632, which shipped only the
+  proxy access log): proxy's `error.log`/`stream.log`, `dns-standard`/
+  `dns-ssl`, `dhcp` (Kea), `dhcp-proxy` (dnsmasq), `ui`, `watchdog`, `nats`,
+  and `netdata` all now forward to syslog-ng, each via whatever mechanism
+  its own daemon actually supports: Kea's native dual `output-options`
+  (stdout + file); a `tee` of the daemon's own stdout into a file for
+  PowerDNS (no native file-log directive on Linux) and watchdog (its
+  `log()` function is unchanged, the compose entrypoint tees it); a second
+  `tracing-subscriber` layer for the Admin UI; and a single-destination
+  trade-off (documented, `docker logs` goes quiet on that one container
+  while the `logging` profile is active) for dnsmasq's `log-facility=` and
+  nats-server's `log_file:`, since neither supports simultaneous
+  stdout+file output despite what an earlier version of this plan assumed.
+  `dhcp-probe` stays intentionally unwired (one-shot diagnostic, no
+  persistent stream); `docs/architecture-ng.md`'s logging matrix records
+  every service's real mechanism.
 - Added a known-good configuration snapshot mechanism for the nginx proxy and
   dnsmasq `dhcp-proxy` adapters: generated config is validated (`nginx -t`,
   `dnsmasq --test`) before being snapshotted to a persistent, service-owned
