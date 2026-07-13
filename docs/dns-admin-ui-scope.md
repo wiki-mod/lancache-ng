@@ -114,14 +114,17 @@ forward DDNS records land in the already-UI-managed `lan.` zone, not
 `local.lan.` — `local.lan.` is TSIG-enabled for updates
 (`configure_ddns_tsig()` grants it the same as every other zone in
 `DDNS_UPDATE_ZONES`) but nothing in the default config actually targets it.
-The reverse zones are `reverse-ddns`'s intended target
-(`services/dhcp/kea-dhcp-ddns.conf`'s `reverse-ddns.ddns-domains` names
-`in-addr.arpa.`), but that update currently always fails in practice: no
-PowerDNS zone is literally named `in-addr.arpa.` (only the narrower
-per-octet `PRIVATE_REVERSE_ZONES` subzones exist), so every reverse update
-is rejected with NOTAUTH — see #768 for the live-verified failure and root
-cause. See 3b below for why NATS-driven secondary reconciliation does *not*
-cover any of these 19 zones today, only `lan.`.
+The reverse zones are `reverse-ddns`'s intended target. Until #768,
+`services/dhcp/kea-dhcp-ddns.conf`'s `reverse-ddns.ddns-domains` named a
+single literal catch-all, `in-addr.arpa.`, which is not a zone any PowerDNS
+instance here ever created (only the narrower per-octet
+`PRIVATE_REVERSE_ZONES` subzones exist), so every reverse update was
+rejected with NOTAUTH — see #768 for the live-verified failure, root cause,
+and fix (one `ddns-domains` entry per real `PRIVATE_REVERSE_ZONES` subzone,
+instead of the one non-existent catch-all). Reverse/PTR DDNS updates now
+succeed against the correct per-octet zone. See 3b below for why NATS-driven
+secondary reconciliation does *not* cover any of these 19 zones today, only
+`lan.`.
 
 **Intentionally out of scope (not planned):**
 - Arbitrary zone creation/deletion via the Admin UI. The zone list is a fixed
@@ -139,11 +142,12 @@ cover any of these 19 zones today, only `lan.`.
 
 **Planned but unbuilt (candidate v0.3.0 scope):**
 - Record management for `local.lan.` and the private reverse zones. Today
-  only `lan.` has an Admin UI CRUD surface; the other 19 zones (TSIG-enabled
-  for DDNS the same as `lan.`, but not actually reached by DDNS in the
-  default config — see the DDNS note above and #768 for the reverse-zone
-  case specifically) have no manual override path if an operator needs to
-  fix or inspect a record PowerDNS-side without going through Kea.
+  only `lan.` has an Admin UI CRUD surface; `local.lan.` (TSIG-enabled for
+  DDNS the same as `lan.`, but not actually reached by DDNS in the default
+  config — see the DDNS note above) and the private reverse zones (now
+  correctly reached by `reverse-ddns` as of #768, see the DDNS note above)
+  have no manual override path if an operator needs to fix or inspect a
+  record PowerDNS-side without going through Kea.
 - A PTR-record checkbox alongside LAN A-record creation.
   `docs/architecture-ng.md` currently states "DNS: create zones, host
   entries, PTR checkbox for LAN IPs" under "Admin UI" — verified against
