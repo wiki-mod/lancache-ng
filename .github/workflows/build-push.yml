@@ -1597,6 +1597,89 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-idempotence-test-coverage.sh
 
+      - name: Check logging matrix (docs/architecture-ng.md, issue #633)
+        # check-logging-matrix.sh itself shells out to `docker compose ...
+        # config --services` per Compose file, which -- same as the "Validate
+        # compose files" step above -- needs every required variable set to
+        # something so interpolation doesn't fail before the service list can
+        # even be read. Reuses that step's exact dummy values; kept as a
+        # second `env:` block (not merged into that step) so this stays a
+        # separately attributable, independently rerunnable CI check.
+        env:
+          CACHE_INACTIVE: 365d
+          CACHE_MAX_SIZE: 10g
+          CACHE_MEM_MB: "256"
+          CACHE_SLICE_SIZE: 1m
+          CACHE_VALID_ANY: 1h
+          CACHE_VALID_HIT: 30d
+          DDNS_TSIG_KEY: ci-ddns-tsig-key
+          IP_SSL: 127.0.0.2
+          IP_STANDARD: 127.0.0.1
+          LISTEN_IP: 127.0.0.3
+          ALLOW_INSECURE_UI: "true"
+          KEA_CTRL_TOKEN: ci-kea-token
+          NATS_CONSUMER: ci-secondary
+          NATS_DNS_REPLICA_PASSWORD: ci-nats-dns-replica-password
+          NATS_DNS_REPLICA_USER: ci-nats-dns-replica
+          NATS_DNS_WRITER_PASSWORD: ci-nats-dns-writer-password
+          NATS_DNS_WRITER_USER: ci-nats-dns-writer
+          NATS_CALLOUT_PASSWORD: ci-nats-callout-password
+          NATS_CALLOUT_USER: ci-nats-callout
+          NATS_PASSWORD: ci-nats-password
+          NATS_UI_PASSWORD: ci-nats-ui-password
+          NATS_UI_USER: ci-nats-ui
+          NATS_USER: ci-nats-user
+          NATS_TOKEN: ci-nats-token
+          NATS_URL: nats://127.0.0.1:4222
+          NGINX_UPSTREAM_RESOLVER: 1.1.1.1
+          PDNS_API_KEY: ci-pdns-api-key
+          PROXY_IP: 127.0.0.1
+          SECONDARY_REGISTRATION_TOKEN: ci-secondary-registration-token
+          SSL_CACHE_MAX_GB: "10"
+          STANDARD_CACHE_MAX_GB: "10"
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            --env CACHE_INACTIVE \
+            --env CACHE_MAX_SIZE \
+            --env CACHE_MEM_MB \
+            --env CACHE_SLICE_SIZE \
+            --env CACHE_VALID_ANY \
+            --env CACHE_VALID_HIT \
+            --env DDNS_TSIG_KEY \
+            --env IP_SSL \
+            --env IP_STANDARD \
+            --env LISTEN_IP \
+            --env ALLOW_INSECURE_UI \
+            --env KEA_CTRL_TOKEN \
+            --env NATS_CONSUMER \
+            --env NATS_DNS_REPLICA_PASSWORD \
+            --env NATS_DNS_REPLICA_USER \
+            --env NATS_DNS_WRITER_PASSWORD \
+            --env NATS_DNS_WRITER_USER \
+            --env NATS_CALLOUT_PASSWORD \
+            --env NATS_CALLOUT_USER \
+            --env NATS_PASSWORD \
+            --env NATS_UI_PASSWORD \
+            --env NATS_UI_USER \
+            --env NATS_USER \
+            --env NATS_TOKEN \
+            --env NATS_URL \
+            --env NGINX_UPSTREAM_RESOLVER \
+            --env PDNS_API_KEY \
+            --env PROXY_IP \
+            --env SECONDARY_REGISTRATION_TOKEN \
+            --env SSL_CACHE_MAX_GB \
+            --env STANDARD_CACHE_MAX_GB \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-logging-matrix.sh
+
       - name: Remove fallback compose validation image
         if: always()
         run: |

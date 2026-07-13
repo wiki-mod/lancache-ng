@@ -163,12 +163,13 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - Every service in the matrix below is wired end to end except `dhcp-probe` (one-shot diagnostic, see its row for why that's a deliberate N/A, not a gap).
 - Per-service wiring mechanism varies by what the underlying daemon actually supports (#633): a native dual stdout+file option where one exists (Kea's `output-options` array), a `tee` of the daemon's own stdout into a file where no such option exists (PowerDNS has no file-log directive on Linux at all; nats-server and dnsmasq each support only one log destination at a time, not both simultaneously), or a second application-level logging layer (the Admin UI's `tracing-subscriber` setup). Every one of these choices is a documented, deliberate trade-off recorded in the matrix's Notes column, not an oversight.
 - Storage-budget retention: `watchdog.sh`'s `maybe_prune_syslog()` (opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above.
+- `syslog` (fluent-bit) has a `healthcheck` block (`fluent-bit -V`, binary-integrity only -- see the logging matrix table below for why a real liveness probe isn't possible with the pinned image), matching `syslog-ng`'s existing block shape.
+- `scripts/check-logging-matrix.sh`, run in CI's `validate-compose` job, fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
 
 **Not implemented yet (tracked in follow-up #633):**
 - Admin UI log reading from the central path (the UI still reads `STANDARD_LOG`/`SSL_LOG` directly for its own dashboard, in addition to now also writing its own process log to the shared volume for fluent-bit).
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
-- A CI guard that fails when a new container is added without a declared logging path.
 
 **Logging matrix** (maintained here per #453's requirement; kept up to date as more services are wired):
 
@@ -184,7 +185,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | nats | Via fluent-bit → syslog-ng | Like dnsmasq, nats-server logs to exactly one destination — no dual-output mode exists — so `log_file: /var/log/lancache-nats/nats.log` (set both in the compose-generated boot config and, authoritatively, by the Admin UI's `update_nats_conf`) means `docker logs` goes quiet on this container while the `logging` profile is active; same accepted trade-off as dhcp-proxy |
 | netdata | Via fluent-bit → syslog-ng | netdata writes `health.log`/`collector.log`/`error.log` etc. under `/var/log/netdata` by default; that path is now mounted onto the `netdata-logs` volume, which fluent-bit tails read-only |
 | dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
-| fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet; no healthcheck yet (follow-up #633) |
+| fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet (follow-up #633); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build) |
 | syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
 | docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
 | watchtower | Not applicable | Third-party pinned image (`ghcr.io/nicholas-fedor/watchtower`), quickstart-only (`watchtower` profile); same reasoning as docker-socket-proxy |
