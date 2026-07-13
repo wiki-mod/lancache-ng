@@ -423,11 +423,11 @@ mod tests {
         fs::remove_file(path).expect("remove temp log");
     }
 
-    // Reproduces the bug from issue #663: `reader.lines().map_while(Result::ok)`
-    // stops the ENTIRE scan at the first line BufRead can't decode as UTF-8, so
-    // every valid line after a single corrupt one used to go uncounted. nginx
-    // access logs can contain raw, unescaped bytes in request paths/user-agents,
-    // so a mid-file invalid-UTF-8 line is a realistic occurrence, not an edge case.
+    // `reader.lines().map_while(Result::ok)` stops the ENTIRE scan at the first
+    // line BufRead can't decode as UTF-8, so every valid line after a single
+    // corrupt one would go uncounted. nginx access logs can contain raw,
+    // unescaped bytes in request paths/user-agents, so a mid-file invalid-UTF-8
+    // line is a realistic occurrence, not an edge case.
     #[test]
     fn bad_line_in_middle_does_not_truncate_stats() {
         let unique = SystemTime::now()
