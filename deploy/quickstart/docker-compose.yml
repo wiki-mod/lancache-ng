@@ -455,7 +455,11 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      - SYSLOG_LOG_ROOT=${SYSLOG_LOG_ROOT:-/var/log/lancache-syslog-ng}
+      # SYSLOG_LOG_ROOT is intentionally NOT wired here (#757 review): see
+      # the matching comment in deploy/prod/docker-compose.yml -- watchdog.sh
+      # already defaults it to /var/log/lancache-syslog-ng, matching the
+      # fixed mount target below, and exposing it as an independently
+      # settable compose var would silently break pruning if ever changed.
     volumes:
       # The watchdog reports and purges the same shared cache path the proxy uses.
       # Do not point this at a per-mode subdirectory; the split paths no longer exist.

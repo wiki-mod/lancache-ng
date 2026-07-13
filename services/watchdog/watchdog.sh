@@ -242,7 +242,10 @@ maybe_purge() {
 # see the `syslog-ng` service's rotation loop in deploy/*/docker-compose.yml.
 # This function treats every regular file under $SYSLOG_LOG_ROOT the same
 # regardless of extension (.log/.zst/.gz all count), since compression state
-# has no bearing on age or disk usage eligibility.
+# has no bearing on age or disk usage eligibility -- EXCEPT today's per-host
+# "$YEAR$MONTH$DAY.log" file, which the size pass always skips because it may
+# still be open for writing by syslog-ng (see the comment at that skip for
+# why deleting it would be unsafe).
 maybe_prune_syslog() {
     if [ "$SYSLOG_ENABLED" != "true" ]; then
         return
@@ -290,6 +293,21 @@ maybe_prune_syslog() {
             max_gb=10
             ;;
     esac
+    # Magnitude guard, separate from the digit-only check above: an
+    # all-digits-but-huge value (an accidental extra zero, e.g.
+    # "9999999999") still passes that check, then overflows Bash's signed
+    # 64-bit arithmetic when multiplied by 1024^3 a few lines below, wrapping
+    # budget_bytes to a negative number. A negative budget makes every file
+    # in the tree look "over budget," so the size pass would delete
+    # everything it can before stamping the run successful -- the exact
+    # opposite of what a large SYSLOG_MAX_GB is supposed to mean. 1048576
+    # GiB (1 PiB) is far beyond any plausible log budget but stays well
+    # under the ~8.6 billion GiB point where the multiplication below would
+    # actually overflow, leaving a wide safety margin. #757 review.
+    if [ "$max_gb" -gt 1048576 ]; then
+        log "SYSLOG_MAX_GB=${max_gb} exceeds supported maximum (1048576 GiB); clamping to 1048576"
+        max_gb=1048576
+    fi
 
     local log_root="${SYSLOG_LOG_ROOT:-/var/log/lancache-syslog-ng}"
 
@@ -374,9 +392,24 @@ maybe_prune_syslog() {
     rm -f "$size_scan"
 
     local size_count=0
+    # syslog-ng writes directly to $log_root/$HOST/$YEAR$MONTH$DAY.log; only
+    # its own rotation loop (which moves+compresses an oversized file, then
+    # signals a reopen) may retire today's per-host file. Unlinking it here
+    # instead would remove the directory entry out from under syslog-ng's
+    # still-open file descriptor: the space is not reclaimed until syslog-ng
+    # itself closes/reopens the file, and every line written in the meantime
+    # goes to the now-nameless inode instead of a readable path. Since
+    # syslog-ng only ever writes to *today's* dated file per host (previous
+    # days' un-rotated files are just closed, not actively written), skipping
+    # anything named after today's date is sufficient protection without
+    # needing to coordinate a reopen with syslog-ng. #757 review.
+    local today_name; today_name="$(date -u +%Y%m%d).log"
     while IFS=$'\t' read -r _mtime file; do
         [ "$size_bytes" -le "$budget_bytes" ] && break
         [ -f "$file" ] || continue
+        if [ "$(basename -- "$file")" = "$today_name" ]; then
+            continue
+        fi
         local fsize
         fsize=$(stat -c '%s' "$file" 2>/dev/null || echo 0)
         if rm -- "$file"; then
@@ -387,6 +420,9 @@ maybe_prune_syslog() {
     done < "$size_sorted"
     rm -f "$size_sorted"
     log "Size-based syslog prune: removed $size_count file(s), size now ${size_bytes} bytes (budget ${budget_bytes} bytes)"
+    if [ "$size_bytes" -gt "$budget_bytes" ]; then
+        log "WARNING: syslog size budget still exceeded after pruning -- today's active per-host log files are never deleted to avoid unlinking a file syslog-ng still has open; will retry once they age out or syslog-ng rotates them"
+    fi
 
     mkdir -p "$(dirname "$SYSLOG_PRUNE_STAMP")"
     echo "$now" > "$SYSLOG_PRUNE_STAMP"

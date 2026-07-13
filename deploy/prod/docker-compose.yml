@@ -182,7 +182,14 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      - SYSLOG_LOG_ROOT=${SYSLOG_LOG_ROOT:-/var/log/lancache-syslog-ng}
+      # SYSLOG_LOG_ROOT is intentionally NOT wired here (#757 review):
+      # watchdog.sh defaults it to /var/log/lancache-syslog-ng, matching the
+      # mount target below. That target is a fixed in-container path shared
+      # with the syslog-ng service's own hard-coded destination -- an
+      # operator setting SYSLOG_LOG_ROOT here would only change where
+      # watchdog *looks*, not where the mount or syslog-ng actually write,
+      # so it would silently break pruning (log_root wouldn't exist) instead
+      # of doing anything useful. The var stays script-internal / test-only.
     volumes:
       # Watchdog sees the same cache tree as nginx so disk alerts and purge
       # decisions match the real proxy cache, not a stale split-cache path.

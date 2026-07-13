@@ -163,3 +163,48 @@ make_log_file() {
     SYSLOG_LOG_ROOT="$BATS_TEST_TMPDIR/does-not-exist" run maybe_prune_syslog
     [ "$status" -eq 0 ]
 }
+
+# #757 review: the size pass must never unlink today's per-host active file
+# (syslog-ng's live write target), even when it is the oldest/only file over
+# budget. Deleting an open file only unlinks the directory entry -- the
+# space is not reclaimed until syslog-ng itself closes/reopens it, and new
+# log lines would keep going to the now-nameless inode.
+@test "maybe_prune_syslog size pass never deletes today's active per-host log file" {
+    local today; today="$(date -u +%Y%m%d).log"
+    local path="$log_root/hostA/$today"
+    # Must exceed the 1GB budget by itself (SYSLOG_MAX_GB is GiB, 1024^3
+    # bytes) so the size pass actually attempts pruning -- otherwise this
+    # test would pass trivially with no deletion attempted at all.
+    truncate -s 2000M "$path"
+    touch -d "-1 hours" "$path"
+
+    SYSLOG_MAX_GB=1 maybe_prune_syslog
+
+    [ -f "$path" ]
+}
+
+# Complements the test above: the active file is skipped, but older,
+# non-active files must still be pruned oldest-first to work toward budget.
+@test "maybe_prune_syslog size pass prunes older files around a protected active file" {
+    local today; today="$(date -u +%Y%m%d).log"
+    make_log_file old.log 500 5
+    local active_path="$log_root/hostA/$today"
+    truncate -s 900M "$active_path"
+    touch -d "-1 hours" "$active_path"
+
+    SYSLOG_MAX_GB=1 maybe_prune_syslog
+
+    [ ! -f "$log_root/hostA/old.log" ]
+    [ -f "$active_path" ]
+}
+
+# #757 review: a digit-only-but-huge SYSLOG_MAX_GB must not overflow the
+# `max_gb * 1024^3` arithmetic into a negative budget, which would make the
+# size pass treat any tree as over budget and delete everything it can.
+@test "maybe_prune_syslog clamps an oversized SYSLOG_MAX_GB instead of overflowing the budget" {
+    make_log_file a.log 1 1
+
+    SYSLOG_MAX_GB=9999999999 run maybe_prune_syslog
+    [ "$status" -eq 0 ]
+    [ -f "$log_root/hostA/a.log" ]
+}
