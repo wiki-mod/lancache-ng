@@ -1011,6 +1011,24 @@ services:
             create-dirs(yes);
             dir-perm(0750);
             perm(0640);
+            # This container runs as root (no user() drop configured), so
+            # files/dirs it creates default to root:root -- the 0750/0640
+            # perms above then leave zero access for the Admin UI's
+            # unprivileged `lancache` user (uid/gid 10001, pinned in
+            # services/ui/Dockerfile): not owner, not in root's group, and
+            # "other" has no bits. Chgrp'ing to that same fixed gid lets the
+            # existing perm bits' group-read allowance actually reach the
+            # UI's read-only mount (this file's `ui.volumes`
+            # SYSLOG_NG_LOG_DIR entry) without loosening perms to
+            # world-readable. syslog-ng accepts a bare numeric gid here, no
+            # "lancache" group needs to exist in this image's /etc/group
+            # (see PR #758 review). The bind-mount root itself
+            # (SYSLOG_NG_LOG_DIR) isn't created by syslog-ng -- Docker
+            # auto-creates a missing bind-mount host dir as root:root 0755,
+            # which already grants "other" the r-x needed to traverse into
+            # it, so only the per-host subdirs/files below need this fix.
+            dir-group(10001);
+            group(10001);
         };
 
         source s_forwarders {
@@ -1093,6 +1111,14 @@ services:
       # Central logging pipeline (#633): main.rs's init_tracing() writes
       # UI_LOG_FILE (default matches this path) alongside stdout.
       - ui-logs:/var/log/lancache-ui
+      # Central syslog store reader (#633 PR4): read-only, same bind-mount
+      # source as syslog-ng/watchdog (SYSLOG_NG_LOG_DIR) so an
+      # operator-overridden host path is honored consistently by all three.
+      # A missing mount here would make syslog_client's SYSLOG_LOG_ROOT reads
+      # silently return empty results, not fail, so this is required for
+      # SYSLOG_ENABLED=true to actually show anything on /logs or the
+      # dashboard.
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -1138,6 +1164,14 @@ services:
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
+      # Central syslog store reader (#633 PR4): same 4 vars/defaults as the
+      # watchdog retention engine (PR3/#757), so the UI's "enabled" toggle
+      # and its actual budget display always agree with what watchdog is
+      # enforcing.
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

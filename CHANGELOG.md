@@ -206,6 +206,17 @@ is real, live, running code, not just work sitting in source control.
   `wget`/`curl`/`ss` at all, so `syslog-ng`'s `CMD-SHELL` healthcheck shape
   can't be mirrored exactly -- `fluent-bit -V` (exec form, binary-integrity
   check only) is the one self-contained probe that image supports.
+- Added an Admin UI reader for the central syslog-ng log store (#633,
+  follow-up to #453): `services/ui/src/syslog_client.rs` (sibling to
+  `nginx_client.rs`) reads and transparently decompresses (`.zst`/`.gz`)
+  files under `SYSLOG_LOG_ROOT`, mirroring `SYSLOG_ENABLED`/`SYSLOG_MAX_GB`/
+  `SYSLOG_RETENTION_DAYS`/`SYSLOG_LOG_ROOT`'s existing watchdog contract. The
+  `/logs` page now branches on `SYSLOG_ENABLED`: enabled installs see a tail
+  of the central store (every wired service, not just the proxy); disabled
+  installs keep the previous direct-nginx-access-log-read behavior
+  unchanged. The dashboard gained a syslog storage tile (size/host/file/line
+  counts) alongside the existing cache and connection stats, gated the same
+  way.
 
 ### Changed
 

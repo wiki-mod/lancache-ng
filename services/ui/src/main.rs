@@ -20,6 +20,7 @@ mod nats_config;
 mod nginx_client;
 mod routes;
 mod session;
+mod syslog_client;
 
 use anyhow::Result;
 use axum::{
