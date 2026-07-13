@@ -874,8 +874,8 @@ fn is_valid_dns_label(label: &str) -> bool {
     let bytes = label.as_bytes();
     let alnum_or_hyphen = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
     bytes.iter().all(|&b| alnum_or_hyphen(b))
-        && !bytes.first().is_some_and(|&b| b == b'-')
-        && !bytes.last().is_some_and(|&b| b == b'-')
+        && bytes.first().is_none_or(|&b| b != b'-')
+        && bytes.last().is_none_or(|&b| b != b'-')
 }
 
 // PXE boot filenames are paths like `pxelinux.0` or `efi/bootx64.efi`. They
