@@ -20,6 +20,23 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master, "v[0-9]*"]
+    # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
+    # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
+    # the github.event.pull_request webhook snapshot for this run (see that job's
+    # own comment) -- with only the default types, a label added by labeler.yml or
+    # a human, a milestone set later, or a draft marked ready-for-review would never
+    # re-trigger this workflow, leaving a stale pass/fail on the Checks tab until
+    # someone pushes another commit. Adding these four extra types re-evaluates the
+    # metadata check (and everything else in this monolithic workflow) whenever PR
+    # metadata actually changes. `edited` is deliberately excluded -- it fires on
+    # title/body/base-ref edits, which are unrelated to labels/milestone and would
+    # add much higher-frequency reruns of the full heavy pipeline for no metadata
+    # benefit. Yes, this reruns build/test/scan jobs too on a bare label/milestone
+    # change (they have no metadata-only fast path -- see AG-GH-008 Enforcement
+    # Notes for why that tradeoff was accepted rather than building one): labels
+    # and milestones are set rarely per PR (usually once, by a human or the
+    # labeler), unlike commits, so the added self-hosted-runner cost is bounded.
+    types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
@@ -233,6 +250,115 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: bash scripts/validate-pr-template.sh
+
+  pr-tracking-metadata-check:
+    # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone,
+    # and (when PROJECT_AUTOMATION_PAT is configured) project-board
+    # placement. Same zero-LAN-dependency shape as pr-template-check --
+    # reads github.event.pull_request context plus one outbound call to
+    # api.github.com, no self-hosted-specific resource needed -- but kept
+    # on the self-hosted pool as the primary job with a hosted fallback
+    # below, matching every other zero-LAN check in this file.
+    #
+    # check-pr-tracking-metadata.sh runs python3 (JSON parsing) and curl (the
+    # project-board GraphQL call) -- per AG-VAL-016, host-local tools on the
+    # runner must be treated as absent/stale, so this executes inside the
+    # same pinned build-tools image validate-compose already resolved for
+    # this run, the same pattern shellcheck/check-governance-guards.sh use,
+    # rather than relying on whatever python3/curl happen to be on
+    # lancache-light.
+    name: PR tracking metadata (labels/milestone/project)
+    if: github.event_name == 'pull_request'
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate labels, milestone, and project-board placement
+        env:
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
+          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          # GitHub does not pass repository secrets (other than the
+          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
+          # forked repository, so GH_TOKEN above is empty for every external
+          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
+          # Telling the script whether this run is from a fork lets it warn
+          # with the right explanation instead of implying the secret is
+          # simply unconfigured -- see check-pr-tracking-metadata.sh.
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e PR_LABELS_JSON \
+            -e PR_MILESTONE_TITLE \
+            -e PR_DRAFT \
+            -e PR_NUMBER \
+            -e REPO \
+            -e GH_TOKEN \
+            -e PR_IS_FORK \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-pr-tracking-metadata.sh
+
+  pr-tracking-metadata-check-hosted:
+    name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Select build-tools image
+        # This fallback job must resolve its own image rather than depending
+        # on validate-compose's output (like the self-hosted job above does)
+        # -- it exists specifically for when self-hosted runners (and
+        # anything that depends on them, including validate-compose) are
+        # unavailable, so a needs: dependency on that job would defeat the
+        # fallback's purpose. Matches shellcheck-hosted's own resolution step.
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Validate labels, milestone, and project-board placement
+        env:
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
+          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          # GitHub does not pass repository secrets (other than the
+          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
+          # forked repository, so GH_TOKEN above is empty for every external
+          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
+          # Telling the script whether this run is from a fork lets it warn
+          # with the right explanation instead of implying the secret is
+          # simply unconfigured -- see check-pr-tracking-metadata.sh.
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e PR_LABELS_JSON \
+            -e PR_MILESTONE_TITLE \
+            -e PR_DRAFT \
+            -e PR_NUMBER \
+            -e REPO \
+            -e GH_TOKEN \
+            -e PR_IS_FORK \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-pr-tracking-metadata.sh
 
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
@@ -3571,6 +3697,7 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - pr-tracking-metadata-check
       - line-endings
     if: >-
       ${{
@@ -3581,7 +3708,8 @@ jobs:
         needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
@@ -4275,6 +4403,7 @@ jobs:
       - ci_scope_policy
       - file-headers
       - pr-template-check
+      - pr-tracking-metadata-check
       - line-endings
     if: >-
       ${{
@@ -4285,7 +4414,8 @@ jobs:
         needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success')
+        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success')
       }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
