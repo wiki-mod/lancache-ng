@@ -22,9 +22,16 @@ mkdir -p "$work_dir/shared"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
-ui_ip="172.30.99.9"
-dns_standard_ip="172.30.99.3"
-dns_ssl_ip="172.30.99.5"
+# See ssl-mitm-cache-simulation.sh's identical comment: these must track
+# deploy/full-setup/docker-compose.yml's own VALIDATION_*_IP defaults so the
+# addresses this script queries match the real container IPs `docker compose
+# up` below actually assigns. Falls back to the fixed IPs when unset
+# (unchanged behaviour for the manual full-setup-validate.yml); the automatic
+# full-setup-deep-validate.yml gate (#715) sets these per-run (Codex review
+# finding on #764).
+ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
+dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
+dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 

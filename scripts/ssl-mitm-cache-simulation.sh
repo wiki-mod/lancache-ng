@@ -39,13 +39,20 @@ mkdir -p "$work_dir"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
-# Same env vars/defaults as deploy/full-setup/docker-compose.yml and
-# scripts/full-setup-client-simulation.sh -- not just cosmetic: a run that
-# sets VALIDATION_PROXY_IP/VALIDATION_DNS_STANDARD_IP/VALIDATION_DNS_SSL_IP
-# to avoid a subnet collision with a concurrent run (see the
-# compute-validation-network job, #623) would otherwise have this script's
-# DNS/HTTP assertions check the wrong (default) IPs while the actual
-# containers came up on the overridden ones.
+# Must track deploy/full-setup/docker-compose.yml's own
+# ${VALIDATION_PROXY_IP:-172.30.99.2}-style defaults exactly: `docker compose
+# up` below (which reads these same VALIDATION_* vars from this script's
+# process environment) decides the REAL container IPs, so a mismatch here
+# would make every dig/curl call below target the wrong address. Falls back
+# to the historical fixed IPs when unset (e.g. when called from the manual
+# full-setup-validate.yml, which does not thread these through -- see that
+# workflow's own compute-validation-network job/comment) so existing
+# behaviour there is unchanged. The full-setup-deep-validate.yml automatic
+# gate (#715) DOES set these, giving each concurrent PR run its own
+# collision-free subnet instead of the fixed one (Codex review finding on
+# #764: without this, two concurrent runs on the same self-hosted host could
+# still overlap on the default subnet despite having distinct Compose
+# project names).
 proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
