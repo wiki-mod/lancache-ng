@@ -72,22 +72,37 @@ jobs:
     name: validate full-setup image
     needs: compute-validation-network
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # VALIDATION_SUBNET/GATEWAY/*_IP are deliberately NOT set here from
-    # compute-validation-network's outputs (unlike COMPOSE_PROJECT_NAME/
-    # VALIDATION_UI_PORT below, which are unaffected by the race this
-    # avoids -- see that job's own comment). A job-level `env:` entry is
-    # re-applied on top of every step's accumulated $GITHUB_ENV state, so if
-    # this job set a fixed VALIDATION_SUBNET here AND the "Reserve a
-    # validation subnet and start the stack" step below also wrote a
-    # (possibly different, on a retry) value via $GITHUB_ENV, this fixed
-    # entry would always win in every later step -- silently sending the
-    # "Run client simulation" step to check the WRONG subnet after an actual
-    # retry, exactly the kind of bug #703 exists to prevent. Leaving these
-    # unset here means $GITHUB_ENV, written once that step actually reserves
-    # a real, lock-protected subnet, is the only source of truth.
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    # NONE of VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, or
+    # VALIDATION_UI_PORT are set here from compute-validation-network's
+    # outputs. A job-level `env:` entry is re-applied on top of every step's
+    # accumulated $GITHUB_ENV state, so a fixed entry here would always win
+    # in every later step, silently overriding whatever a retry inside the
+    # "Reserve a validation subnet and start the stack" step below wrote via
+    # $GITHUB_ENV.
+    #
+    # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT used to be set here from
+    # compute-validation-network's outputs on the theory that only the
+    # subnet itself is affected by a retry. That was wrong: both are also
+    # derived from the SAME octet compute-validation-network derives
+    # (project_name = "lancache-ng-validation-<octet>", ui_port = 9000 +
+    # <octet>, see that action's own derive step), so whenever a retry lands
+    # on a DIFFERENT octet than the one two colliding concurrent runs both
+    # started from -- exactly the #703 scenario this whole mechanism exists
+    # to handle -- the run that retried would keep the ORIGINAL octet's
+    # project name and UI port (job-level env, unaffected by $GITHUB_ENV)
+    # while using the NEW octet's subnet. That reintroduces, on the compose
+    # project name and host UI port specifically, the exact same
+    # concurrent-run collision (colliding container/network names, colliding
+    # 127.0.0.1:<port> bind) that deriving them per-run was supposed to
+    # prevent in the first place. So these two are now rederived from the
+    # actually-reserved octet by that same step, alongside
+    # VALIDATION_SUBNET/GATEWAY/*_IP, for the same reason.
+    #
+    # Downstream jobs (ssl-mitm-cache-simulation and later) are unaffected:
+    # they deliberately use the fixed 172.30.99.0/24 default subnet rather
+    # than a derived one (see their own comments), so they never enter this
+    # job's retry loop at all and can keep reading
+    # compute-validation-network's outputs directly at job level.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -259,6 +274,30 @@ jobs:
             octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
             candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
 
+            # Rederive COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT from THIS
+            # attempt's own candidate octet, using the exact same formula
+            # .github/actions/derive-validation-network's own derive step
+            # uses. Both used to come only from compute-validation-network's
+            # job-level outputs -- i.e. from the FIRST octet ever tried,
+            # attempt 1 -- which stayed wrong for the rest of this loop on
+            # any actual retry (a different octet). That mattered in two
+            # ways: (1) subnet_conflicts() below reads COMPOSE_PROJECT_NAME
+            # to recognize a leftover Docker network from THIS SAME run's own
+            # earlier (crashed, never torn down) attempt at the CURRENT
+            # candidate octet as "ours" rather than a foreign conflict -- a
+            # stale value would misidentify a genuinely reusable leftover as
+            # a foreign collision and waste a retry; (2) two different,
+            # genuinely concurrent workflow runs that both started from the
+            # SAME initial octet (the exact #703 scenario) but where one
+            # loses the lock race and retries onto a DIFFERENT octet would
+            # otherwise keep sharing the ORIGINAL octet's project name and UI
+            # port even after diverging on subnet -- reintroducing, on the
+            # compose project namespace and host UI port specifically, the
+            # very same concurrent-run collision deriving them per-run was
+            # meant to prevent in the first place.
+            export COMPOSE_PROJECT_NAME="lancache-ng-validation-${octet}"
+            export VALIDATION_UI_PORT=$((9000 + octet))
+
             target_subnet="172.30.${octet}.0/24"
             conflict="$(subnet_conflicts "$target_subnet")"
             if [[ -n "$conflict" ]]; then
@@ -306,7 +345,19 @@ jobs:
 
           echo "Validation stack is up on subnet 172.30.${reserved_octet}.0/24 (lock held by PID $holder_pid)."
 
+          # Persist the SAME rederived project name/UI port the winning
+          # attempt above already exported for its own `docker compose up`,
+          # so every later step in this job (the health-check step, the
+          # client-simulation step, and the teardown step's own
+          # `docker compose down`) keeps targeting the actually-running
+          # stack instead of falling back to whatever a stale job-level env
+          # would have held on a retry.
+          reserved_project_name="lancache-ng-validation-${reserved_octet}"
+          reserved_ui_port=$((9000 + reserved_octet))
+
           {
+            echo "COMPOSE_PROJECT_NAME=$reserved_project_name"
+            echo "VALIDATION_UI_PORT=$reserved_ui_port"
             echo "VALIDATION_LOCK_HOLDER_PID=$holder_pid"
             echo "VALIDATION_SUBNET=172.30.${reserved_octet}.0/24"
             echo "VALIDATION_GATEWAY=172.30.${reserved_octet}.1"

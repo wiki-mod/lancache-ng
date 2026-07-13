@@ -105,6 +105,22 @@ validation_subnet_try_lock() {
     mkdir -p "$lock_root"
 
     (
+        # Redirect this subshell's stdout/stderr away FIRST, before doing
+        # anything else. Every caller of this function invokes it inside a
+        # `$(...)` command substitution (validation_subnet_reserve, and the
+        # workflow step further up the call chain), which only returns once
+        # it sees EOF on its read end of that pipe -- i.e. once every
+        # process holding the write end open has closed it. Without this
+        # redirect, the backgrounded `exec sleep infinity` below inherits
+        # fd 1/2 from the command substitution and keeps holding them open
+        # for as long as it lives (which is deliberately "until explicitly
+        # killed" -- see validation_subnet_release), so the very first
+        # successful reservation would hang its own caller (and therefore
+        # the Bats tests and the workflow step) forever, never reaching the
+        # `printf` of the holder PID below. Confirmed directly with a
+        # minimal repro of this exact backgrounded-subshell-in-command-
+        # substitution pattern.
+        exec >/dev/null 2>&1
         exec 9>"$lock_file"
         flock -n 9 || exit 1
         exec sleep infinity
