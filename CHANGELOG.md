@@ -98,9 +98,13 @@ is real, live, running code, not just work sitting in source control.
   proving this guard would have caught #799. Building this guard also found
   a second, not-yet-fixed instance of the same problem
   (`actions/download-artifact`, #802), fixed in the same PR since the new
-  guard would otherwise fail on its own pre-existing pin. Also adds an
-  optional local `.githooks/pre-push` hook that runs the same script before
-  a push touching any workflow file, as an early warning only -- the
+  guard would otherwise fail on its own pre-existing pin. The
+  `actions/upload-artifact` pin itself is intentionally left untouched here
+  -- that fix is #800's, still open at the time this PR was opened, so this
+  guard's own CI run stays red on that one pin until #800 merges and this
+  branch rebases; not a bug in the guard. Also adds an optional local
+  `.githooks/pre-push` hook that runs the same script before a push touching
+  any workflow file, as an early warning only -- the
   `shellcheck`/`shellcheck-hosted` CI jobs remain the actual enforcement (see
   CONTRIBUTING.md).
 - Added the repeat-run/idempotence test that was still missing for NATS's

@@ -78,14 +78,26 @@ repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$repo_root"
 
 workflow_dir=.github/workflows
+actions_dir=.github/actions
 shopt -s nullglob
 workflow_files=("$workflow_dir"/*.yml "$workflow_dir"/*.yaml)
+local_action_files=("$actions_dir"/*/action.yml "$actions_dir"/*/action.yaml)
 shopt -u nullglob
 
 if [ "${#workflow_files[@]}" -eq 0 ]; then
   echo "::error::check-action-node-versions: no workflow files found under $workflow_dir." >&2
   exit 1
 fi
+
+# A local composite action's own steps can themselves pin an action (`uses:`
+# inside .github/actions/<name>/action.yml, not just inside a workflow) --
+# scanned here too, alongside workflow_files, so "every pinned action" in
+# this script's docs is actually true rather than stopping one level short
+# at whatever a workflow file directly references. None of this repo's
+# composite actions do this today (they're all shell-only `run:` steps), but
+# a future one could, and there is no reason for that case to silently
+# escape this guard.
+scan_files=("${workflow_files[@]}" "${local_action_files[@]}")
 
 failures=0
 
@@ -132,26 +144,27 @@ extract_runs_using() {
 }
 
 # ---------------------------------------------------------------------------
-# Collect every real `uses:` step directive across all workflow files.
-# Anchored to the start of the (whitespace-trimmed) line so this only
-# matches an actual YAML `uses:` mapping key, not an unrelated string that
-# happens to contain "uses:" inside a `run:` block's embedded shell script
-# (build-push.yml's own CI-scope-policy guard greps for the literal text
-# "uses: ./.github/actions/rust-acceleration-preflight" as part of a
-# different check -- that line must NOT be mistaken for a real step here).
+# Collect every real `uses:` step directive across all workflow files AND
+# local composite action files (scan_files, see above). Anchored to the
+# start of the (whitespace-trimmed) line so this only matches an actual YAML
+# `uses:` mapping key, not an unrelated string that happens to contain
+# "uses:" inside a `run:` block's embedded shell script (build-push.yml's own
+# CI-scope-policy guard greps for the literal text "uses:
+# ./.github/actions/rust-acceleration-preflight" as part of a different
+# check -- that line must NOT be mistaken for a real step here).
 mapfile -t uses_values < <(
-  grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${workflow_files[@]}" \
+  grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${scan_files[@]}" \
     | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//' \
     | sort -u
 )
 
 if [ "${#uses_values[@]}" -eq 0 ]; then
-  fail "Found no 'uses:' step directives in any of ${workflow_files[*]} -- check the extraction pattern in this script."
+  fail "Found no 'uses:' step directives in any of ${scan_files[*]} -- check the extraction pattern in this script."
 fi
 
 referencing_files() {
   local needle="$1" f matches=()
-  for f in "${workflow_files[@]}"; do
+  for f in "${scan_files[@]}"; do
     if grep -qF "uses: ${needle}" "$f"; then
       matches+=("$f")
     fi
@@ -166,15 +179,27 @@ referencing_files() {
 gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
 # fetch_external_action_yaml <owner> <repo> <subpath> <ref>
-# Prints the resolved action.yml/action.yaml text to stdout and returns 0 on
-# success. On failure, sets $resolve_error_detail and returns 1 (an infra
-# hiccup -- caller should warn, not fail) or 2 (both action.yml and
-# action.yaml came back 404 -- a definitive not-found, caller should fail).
-resolve_error_detail=""
+# Prints one status line to stdout, followed by the resolved action.yml/
+# action.yaml body when found:
+#   OK\n<body>              -- resolved; <body> is the file content
+#   NOTFOUND                -- both action.yml and action.yaml came back 404
+#                               (a definitive not-found -- caller should fail)
+#   INFRA:<http-status>     -- any other non-200 (auth rejection, rate
+#                               limiting, network error) -- caller should
+#                               warn, not fail, on this
+# Always called via command substitution (metadata=$(fetch_external_action_yaml ...)),
+# which runs it in a subshell -- everything it needs to tell the caller
+# therefore has to travel over stdout, not a side-channel global variable
+# (an earlier version of this function tried to report the HTTP status via
+# a global $resolve_error_detail set from inside the function; that value
+# never made it back to the caller, since a subshell's variable changes do
+# not propagate to its parent -- confirmed while testing this script:
+# the warning printed an empty status every time). Encoding everything into
+# the one stdout stream this function already returns avoids that trap
+# entirely.
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
   local file body status auth=()
-  resolve_error_detail=""
   if [ -n "$gh_token" ]; then
     auth=(-H "Authorization: Bearer ${gh_token}")
   fi
@@ -186,6 +211,7 @@ fetch_external_action_yaml() {
       "https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}" 2>/dev/null) || status="000"
     case "$status" in
       200)
+        printf 'OK\n'
         cat "$body"
         rm -f "$body"
         return 0
@@ -195,13 +221,14 @@ fetch_external_action_yaml() {
         continue
         ;;
       *)
-        resolve_error_detail="HTTP $status"
+        printf 'INFRA:%s\n' "$status"
         rm -f "$body"
-        return 1
+        return 0
         ;;
     esac
   done
-  return 2
+  printf 'NOTFOUND\n'
+  return 0
 }
 
 for value in "${uses_values[@]}"; do
@@ -236,22 +263,28 @@ for value in "${uses_values[@]}"; do
     repo=$(cut -d/ -f2 <<<"$path_at")
     subpath=$(cut -d/ -f3- <<<"$path_at")
 
-    metadata=""
-    if metadata=$(fetch_external_action_yaml "$owner" "$repo" "$subpath" "$ref"); then
-      using=$(extract_runs_using <<<"$metadata")
-      if [ -z "$using" ]; then
-        warn "Could not determine runs.using for '$value' (referenced in: $(referencing_files "$value")) -- its action.yml/action.yaml had no parseable runs.using (may be a Docker-container or composite action); skipping."
-      elif is_deprecated_runtime "$using"; then
-        fail "'$value' (referenced in: $(referencing_files "$value")) declares runs.using: $using, a deprecated Node runtime. Re-pin to a newer release whose action.yml declares a current runtime (see this project's CHANGELOG for prior examples, e.g. issue #799/#800/#802)."
-      fi
-    else
-      rc=$?
-      if [ "$rc" -eq 2 ]; then
+    result=$(fetch_external_action_yaml "$owner" "$repo" "$subpath" "$ref")
+    marker="${result%%$'\n'*}"
+    case "$marker" in
+      OK)
+        metadata="${result#*$'\n'}"
+        using=$(extract_runs_using <<<"$metadata")
+        if [ -z "$using" ]; then
+          warn "Could not determine runs.using for '$value' (referenced in: $(referencing_files "$value")) -- its action.yml/action.yaml had no parseable runs.using (may be a Docker-container or composite action); skipping."
+        elif is_deprecated_runtime "$using"; then
+          fail "'$value' (referenced in: $(referencing_files "$value")) declares runs.using: $using, a deprecated Node runtime. Re-pin to a newer release whose action.yml declares a current runtime (see this project's CHANGELOG for prior examples, e.g. issue #799/#800/#802)."
+        fi
+        ;;
+      NOTFOUND)
         fail "Could not find action.yml or action.yaml for '$value' at ref '$ref' (referenced in: $(referencing_files "$value")) -- the pin may be broken, or point at a ref that never had this file."
-      else
-        warn "Could not resolve '$value' ($resolve_error_detail) -- treating as an infrastructure hiccup (rate limit, auth, or network issue), not failing the check on it. Re-run to retry."
-      fi
-    fi
+        ;;
+      INFRA:*)
+        warn "Could not resolve '$value' (HTTP ${marker#INFRA:}) -- treating as an infrastructure hiccup (rate limit, auth, or network issue), not failing the check on it. Re-run to retry."
+        ;;
+      *)
+        warn "Unexpected response resolving '$value' (referenced in: $(referencing_files "$value")) -- treating as an infrastructure hiccup, not failing the check on it."
+        ;;
+    esac
   fi
 done
 

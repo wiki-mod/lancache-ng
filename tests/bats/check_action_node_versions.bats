@@ -230,6 +230,14 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"infrastructure hiccup"* ]]
+    # Regression check: the HTTP status must actually reach the warning
+    # message. An earlier version of fetch_external_action_yaml tried to
+    # report it via a global variable set from inside a function that is
+    # only ever invoked through command substitution (a subshell) -- the
+    # variable never made it back to the caller, so the message printed an
+    # empty status every time. Asserting the real status code here would
+    # have caught that.
+    [[ "$output" == *"HTTP 403"* ]]
 }
 
 @test "fails when a local composite action is referenced but has no action.yml/action.yaml" {
