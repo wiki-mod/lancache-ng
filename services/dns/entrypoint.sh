@@ -30,6 +30,17 @@ KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
 DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
 RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
 PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
+# Central logging pipeline (#633): PowerDNS has no native "log to file"
+# config directive on Linux -- confirmed against the upstream docs/mailing
+# list, both pdns_server and pdns_recursor only ever write to stdout/stderr
+# or syslog, never a plain file (the plan this followed assumed a
+# `logfile=`-style directive existed, which is only ever true on the Windows
+# build). So instead of a config change, run_auth/run_recursor below `tee`
+# each daemon's own stdout/stderr into this file in addition to the
+# container's normal stdout -- same dual-output shape as every other service
+# in this issue, just implemented at the process level instead of in config.
+PDNS_LOG_DIR="/var/log/lancache-dns"
+mkdir -p "$PDNS_LOG_DIR"
 
 # Fail if PDNS_API_KEY is a known placeholder value
 case "$PDNS_API_KEY" in
@@ -606,7 +617,8 @@ echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
     while true; do
-        pdns_server --config-dir=/etc/pdns/auth --guardian=no --daemon=no || true
+        pdns_server --config-dir=/etc/pdns/auth --guardian=no --daemon=no 2>&1 \
+            | tee -a "$PDNS_LOG_DIR/pdns-auth.log" || true
         echo "[lancache-dns] pdns_server exited, restarting in 3s..."
         sleep 3
     done
@@ -615,7 +627,8 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
-        pdns_recursor --config-dir=/etc/pdns || true
+        pdns_recursor --config-dir=/etc/pdns 2>&1 \
+            | tee -a "$PDNS_LOG_DIR/pdns-recursor.log" || true
         echo "[lancache-dns] pdns_recursor exited, restarting in 3s..."
         sleep 3
     done
