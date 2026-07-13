@@ -281,6 +281,22 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed the `full-setup-deep-validate.yml` PR gate's `setup.sh CLI simulation`
+  job perpetually validating stale images. `scripts/setup-cli-simulation.sh`
+  hardcoded the mutable `edge` channel, which only moves on a push to `master`;
+  with `master` long frozen, every PR (including every `v0.2.0` PR) revalidated
+  months-old images instead of its own code -- the same "blocking check coupled
+  to a slow-moving channel tag" class of bug as #775 and #777. The job now
+  installs the PR's OWN immutable `pr-<N>-sha-<short>` image set (pinned,
+  threaded from the deep-validate plan and gated on `ensure-pr-staging-images`),
+  so it tests this PR's images against this PR's checked-out `setup.sh`/compose
+  and can never go stale; `workflow_dispatch`/fork/Dependabot runs fall back to
+  the base-ref channel (`dev` for `v0.2.0`, `edge` for `master`) resolved from
+  the event rather than hardcoded. `setup.sh`'s `validate_lancache_image_tag`
+  now also accepts the CI-only immutable `pr-<N>-sha-<short>` staging-tag format
+  as a pinned target (operator-facing pinned/derive messages still name only
+  `sha-*`/`vX.Y.Z`, so these ephemeral CI tags are not advertised for
+  production installs).
 - Fixed `AGENTS.md`'s two CodeQL macro-expansion carve-out rules (AG-VAL-021,
   AG-VAL-022) contradicting each other: AG-VAL-021's worked example described
   macro-*generated* code while the general rule it illustrated (AG-VAL-022)

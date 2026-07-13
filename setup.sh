@@ -1725,6 +1725,21 @@ validate_lancache_image_tag() {
                 || die "LANCACHE_IMAGE_TAG must be a valid sha-* image tag."
             return 0
             ;;
+        pr-*)
+            # CI-only immutable staging-tag format pr-<N>-sha-<short>, pushed by
+            # build-push.yml (and back-filled by scripts/ensure-pr-staging-images.sh)
+            # for a same-repo PR's merge commit. It is keyed on that commit's sha
+            # and never re-pointed, so it is a legitimate PINNED target that lets
+            # the full-setup deep-validate suite's setup.sh CLI simulation install
+            # the PR's OWN images instead of a mutable, possibly-stale channel.
+            # Deliberately NOT surfaced in the operator-facing pinned/derive error
+            # messages below (which still name only sha-*/vX.Y.Z): these tags are
+            # ephemeral CI build artifacts, not a release channel operators should
+            # pin production installs to.
+            [[ "$tag" =~ ^pr-[0-9]+-sha-[0-9a-fA-F]{7,}$ ]] \
+                || die "LANCACHE_IMAGE_TAG pr-* staging tags must match pr-<number>-sha-<commit>."
+            return 0
+            ;;
     esac
 
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \

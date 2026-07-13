@@ -570,14 +570,41 @@ jobs:
           bash scripts/watchtower-update-simulation.sh
 
   setup-cli-simulation:
-    # Runs the real setup.sh installer end-to-end. This exercises the
-    # installer's CLI/migration/rollback behaviour, which is independent of PR
-    # image CONTENT (setup.sh resolves the edge channel by design), so it is
-    # deliberately NOT gated on the staging-image step and does not thread the
-    # PR tag -- its value is driving setup.sh itself, not a specific image.
+    # Runs the real setup.sh installer end-to-end (fresh install, update/
+    # migration, rollback, restore). Its unique value is driving setup.sh's own
+    # CLI/migration/rollback logic -- but doing so still brings a real stack up
+    # on real images, so WHICH images matters.
+    #
+    # This used to hardcode the `edge` channel inside setup-cli-simulation.sh,
+    # on the rationale that the job was "independent of PR image content." That
+    # coupled a per-PR gate to a mutable channel tag refreshed far more slowly
+    # than the gate runs: `edge` only moves on a push to master, which has sat
+    # frozen for a long time, so every PR revalidated stale, months-old images
+    # (and a v0.2.0 PR tested master's frozen edge, not v0.2.0's own line at
+    # all). It is the same "blocking check coupled to a slow-moving channel tag"
+    # class of bug as #775 (build-tools :latest) and #777 (promote starvation).
+    #
+    # Fix: install the PR's OWN immutable pr-<N>-sha image set instead (pinned,
+    # threaded via plan's image_tag). That SUPERSEDES the old rationale rather
+    # than contradicting it -- testing setup.sh against this PR's already-built
+    # images + this PR's checked-out compose is strictly more correct than
+    # against a stale channel, at zero extra build cost (the pr-<N>-sha images
+    # already exist for the other sims), and is 1:1 with the PR's diff so no
+    # channel-promotion timing can make it stale. Because it now consumes those
+    # staging images, it is gated on ensure-pr-staging-images (skipped on
+    # dispatch/fork is fine -- see the env block). Testing that the currently-
+    # published channel still installs cleanly is a real but SEPARATE concern
+    # that belongs on a schedule/post-merge, not a per-PR gate; #785 tracks
+    # adding that scheduled channel-install smoke check (it is what re-covers
+    # setup.sh's channel->stack-pointer->sha path, now only exercised here on
+    # dispatch/fork/Dependabot runs rather than on the common same-repo PR).
     name: setup.sh CLI simulation
-    needs: [plan, watchtower-update-simulation]
-    if: always() && needs.plan.outputs.should_run == 'true'
+    needs: [plan, ensure-pr-staging-images, watchtower-update-simulation]
+    if: >-
+      always() &&
+      needs.plan.outputs.should_run == 'true' &&
+      needs['ensure-pr-staging-images'].result != 'failure' &&
+      needs['ensure-pr-staging-images'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -611,12 +638,23 @@ jobs:
         # daemon) match; see full-setup-validate.yml's identical step comment.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          # Which images setup.sh installs (see setup-cli-simulation.sh for the
+          # full rationale). Same-repo PR: pin the PR's own immutable
+          # pr-<N>-sha tag (plan.image_tag) so the gate tests THIS PR's code and
+          # can never go stale. Otherwise (dispatch/fork/Dependabot, where
+          # image_tag is already a channel word): install the base-ref channel
+          # -- resolved by plan, never hardcoded edge -- which also keeps
+          # setup.sh's channel->stack-pointer->sha resolution path covered.
+          SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
+          SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
         run: |
           set -euo pipefail
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
             -w "$PWD" \
+            -e SETUP_SIM_IMAGE_CHANNEL \
+            -e SETUP_SIM_IMAGE_TAG \
             "$BUILD_TOOLS_IMAGE" \
             bash scripts/setup-cli-simulation.sh
 
