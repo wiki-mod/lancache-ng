@@ -16,6 +16,38 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# Which images the fresh-install phase (and every follow-on `setup.sh update`,
+# via the .env it writes) brings the stack up on. The deep-validate workflow
+# resolves these from the triggering event and passes them in:
+#
+#   * Same-repo PR  -> SETUP_SIM_IMAGE_CHANNEL=pinned + SETUP_SIM_IMAGE_TAG=
+#     pr-<N>-sha-<short>, this PR's OWN immutable per-commit image set (built by
+#     build-push, back-filled by ensure-pr-staging-images). This is the whole
+#     point of the change that added these vars: the gate now tests THIS PR's
+#     images against THIS PR's checked-out setup.sh/quickstart compose, so no
+#     channel-promotion timing can ever make it validate stale, months-old code
+#     (the old hardcoded `edge` did exactly that while master/edge sat frozen).
+#   * workflow_dispatch / fork / Dependabot -> SETUP_SIM_IMAGE_CHANNEL set to
+#     the base-ref channel (dev for a v0.2.0 PR, edge for master -- resolved by
+#     the workflow, never hardcoded), SETUP_SIM_IMAGE_TAG empty. No PR staging
+#     tag exists for those, so setup.sh's normal channel->stack-pointer->sha
+#     resolution is exercised instead (and stays covered on those events).
+#
+# Defaults keep a bare local `bash scripts/setup-cli-simulation.sh` working:
+# edge is the only channel guaranteed to have published images pre-1.0. CI
+# always sets SETUP_SIM_IMAGE_CHANNEL explicitly, so this default is a
+# local-run convenience only, not a hardcoded-channel CI gate.
+#
+# These are applied ONLY to the Phase 1 fresh-install invocation below (as a
+# per-command env prefix on that one `expect` call), never exported process-
+# wide: Phase 2's `setup.sh update` reads the channel/tag straight out of the
+# .env Phase 1 wrote, and Phase 3 deliberately sabotages that .env's tag to
+# force a pull failure -- a process-wide LANCACHE_IMAGE_TAG export would shadow
+# that sabotaged .env value and make the rollback-safety phase silently pull a
+# real image and pass for the wrong reason.
+fresh_install_image_channel="${SETUP_SIM_IMAGE_CHANNEL:-edge}"
+fresh_install_image_tag="${SETUP_SIM_IMAGE_TAG:-}"
+
 # Without this, git inside this container treats the bind-mounted repo (owned
 # by the host runner's UID, not this container's root) as having "dubious
 # ownership" and refuses every git command, including the `git describe
@@ -118,6 +150,14 @@ wait_for_stack_healthy() {
 echo "== Phase 1: fresh install (expect-driven) =="
 
 run_fresh_install_expect() {
+    # Per-command env prefix: exports LANCACHE_IMAGE_CHANNEL/TAG for this expect
+    # process (and the `bash setup.sh` it spawns) only -- see the note at the
+    # top of this script for why they must NOT leak into Phases 2-4. An empty
+    # LANCACHE_IMAGE_TAG is equivalent to unset for setup.sh (it reads every
+    # occurrence via ${LANCACHE_IMAGE_TAG:-} and -n guards), so the base-ref-
+    # channel path passes it through harmlessly.
+    LANCACHE_IMAGE_CHANNEL="$fresh_install_image_channel" \
+    LANCACHE_IMAGE_TAG="$fresh_install_image_tag" \
     expect -f - <<'EXPECT_SCRIPT'
 set timeout 60
 log_user 1
@@ -132,14 +172,15 @@ proc expect_prompt {pattern reply} {
 }
 
 
-# The project has no stable release yet, so setup.sh's own deliberate
-# "default to the stable latest channel unless asked otherwise" behavior
-# (see resolve_lancache_image_channel's comment) means an unqualified fresh
-# install correctly refuses to proceed with a clear error right now --
-# confirmed directly against a real run. edge is what actually has published
-# images (see docs/release-versioning.md), so request it explicitly, exactly
-# as setup.sh's own error message suggests.
-set env(LANCACHE_IMAGE_CHANNEL) "edge"
+# setup.sh must be told which images to install: its own deliberate default
+# is the stable `latest` channel, which has no published images pre-1.0, so an
+# unqualified fresh install correctly refuses to proceed (see
+# resolve_lancache_image_channel's comment). The surrounding bash script has
+# already exported LANCACHE_IMAGE_CHANNEL (and, for a same-repo PR, the pinned
+# LANCACHE_IMAGE_TAG) with the values the deep-validate workflow resolved from
+# the event; expect inherits that environment and spawn passes it straight
+# through to setup.sh, so this phase installs the PR's own pinned image set on
+# a PR and the base-ref channel otherwise -- never a hardcoded channel here.
 spawn bash setup.sh
 
 expect_prompt {Server IP \(Standard mode\)} "127.0.0.2"
@@ -260,12 +301,15 @@ bash setup.sh update "$install_dir"
 wait_for_stack_healthy
 
 # LANCACHE_IMAGE_TAG/CHANNEL are excluded from the byte-diff for the same
-# reason Phase 3 already excludes them below: this fixture stays on the
-# "edge" channel from Phase 1's fresh install, so resolve_lancache_image_tag()
-# re-resolves it through a real `docker pull` of the channel pointer image on
-# every update call. That is expected, not drift -- only a real regression
-# would flip it to a *different* digest between two calls made seconds apart
-# with no new edge image published in between.
+# reason Phase 3 already excludes them below. On the base-ref-channel path
+# (dispatch/fork) this fixture carries a moving channel from Phase 1's fresh
+# install, so resolve_lancache_image_tag() re-resolves it through a real
+# `docker pull` of the channel pointer image on every update call -- expected,
+# not drift, unless a real regression flips it to a *different* digest between
+# two calls seconds apart. On the same-repo-PR path it carries CHANNEL=pinned +
+# the immutable pr-<N>-sha tag, which resolves verbatim and would stay
+# byte-identical anyway; excluding both keys keeps this assertion valid on
+# either path without special-casing which one produced the .env.
 diff -q \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.after-first-update") \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
@@ -280,16 +324,18 @@ echo "A second consecutive setup.sh update with no input change left .env and al
 echo "== Phase 3: rollback safety (forced platform-preflight failure during update) =="
 
 cp "$install_dir/.env" "$install_dir/.env.before-forced-failure"
-# LANCACHE_IMAGE_CHANNEL must move to "pinned" too, not just the tag: with
-# channel=edge still set (from the fresh install in Phase 1),
-# resolve_lancache_image_tag() resolves the tag from the edge channel
-# pointer and never even looks at the literal LANCACHE_IMAGE_TAG value --
-# confirmed directly, the update just silently re-pulled the real edge
-# images and succeeded instead of failing. pinned is the one channel value
-# that makes resolution use LANCACHE_IMAGE_TAG verbatim. The fake tag still
-# has to match the real sha-* format (validate_lancache_image_tag rejects
-# anything else before a pull is even attempted), so this is a
-# syntactically valid but non-existent digest, not an arbitrary string.
+# LANCACHE_IMAGE_CHANNEL must be forced to "pinned" too, not just the tag,
+# regardless of what Phase 1 left behind: on the base-ref-channel path the
+# .env still names a moving channel (dev/edge), and with a moving channel set
+# resolve_lancache_image_tag() resolves the tag from the channel pointer and
+# never even looks at the literal LANCACHE_IMAGE_TAG value -- confirmed
+# directly, the update just silently re-pulled the real channel images and
+# succeeded instead of failing. pinned is the one channel value that makes
+# resolution use LANCACHE_IMAGE_TAG verbatim (the same-repo-PR path is already
+# pinned, so this sed is a no-op for CHANNEL there and only swaps the tag).
+# The fake tag still has to match the real sha-* format (validate_lancache_
+# image_tag rejects anything else before a pull is even attempted), so this is
+# a syntactically valid but non-existent digest, not an arbitrary string.
 sed -i \
     -e 's/^LANCACHE_IMAGE_CHANNEL=.*/LANCACHE_IMAGE_CHANNEL=pinned/' \
     -e 's/^LANCACHE_IMAGE_TAG=.*/LANCACHE_IMAGE_TAG=sha-0000000/' \
