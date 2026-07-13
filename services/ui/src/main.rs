@@ -654,8 +654,8 @@ fn init_tracing() {
         .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap());
     let stdout_layer = tracing_subscriber::fmt::layer();
 
-    let ui_log_file = std::env::var("UI_LOG_FILE")
-        .unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
+    let ui_log_file =
+        std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
     let file_layer = OpenOptions::new()
         .create(true)
         .append(true)
