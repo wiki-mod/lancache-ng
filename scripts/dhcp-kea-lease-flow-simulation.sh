@@ -251,7 +251,25 @@ docker network create \
     "$network_name" >/dev/null
 
 echo "== Building the PowerDNS image from this checkout's services/dns (issue #706) =="
-docker build -q -t "$dns_image_tag" services/dns >/dev/null
+# --build-arg BUILD_TOOLS_IMAGE=$client_tool_image (PR #769 review follow-up):
+# services/dns/Dockerfile compiles the Rust nats-subscriber binary FROM
+# whatever BUILD_TOOLS_IMAGE resolves to, defaulting to the mutable
+# ghcr.io/wiki-mod/lancache-ng/build-tools:latest tag when no --build-arg is
+# given. Without this flag, this build would silently use that moving
+# `:latest` tag instead of $client_tool_image -- the same build-tools image
+# scripts/select-build-tools-image.sh already resolved for this workflow run
+# (and, on branches that add a tool to tools/build-tools/Dockerfile, a fresh
+# branch-local build of it, per full-setup-validate.yml's own "Resolve
+# build-tools image" step for this job). That mismatch would let this DNS
+# image's Rust build silently diverge from the toolchain contract this run
+# actually resolved -- compiling against whatever `:latest` happens to
+# contain can mask a real toolchain regression on this branch (false pass)
+# or fail on an unrelated `:latest` change this branch never touched (false
+# fail). $client_tool_image is reused here rather than a second env var
+# because it already IS the resolved build-tools image -- its name reflects
+# only its original (client-container) use above, from before this DDNS
+# verification block existed.
+docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" services/dns >/dev/null
 
 echo "== Starting a real PowerDNS container on the isolated network (issue #706) =="
 # No extra --cap-add here: unlike the Kea container below, services/dns/

@@ -185,6 +185,35 @@ STUB
     [ "$(echo "$output" | wc -l)" -eq 2 ]
 }
 
+@test "auth: rollback re-stamps local-address to this session's current address, not the snapshotted one" {
+    # PR #769 review follow-up: pdns.conf's local-address line bakes in the
+    # container's own dynamically-detected bridge IP ($PDNS_LOCAL_ADDRESS),
+    # so a snapshot taken by one container instance can hold a stale address
+    # that doesn't exist on a later, recreated instance. A rollback must not
+    # silently restore that stale address -- pdns_server would then fail to
+    # actually bind it, even though `--config=check` (which never validates
+    # bind-ability) reported the rolled-back config as valid.
+    PDNS_LOCAL_ADDRESS="172.20.0.2"
+    printf 'local-address=127.0.0.1,172.20.0.2\nOK pdns config v1\n' > "$pdns_conf"
+    _dns_auth_validate_snapshot_or_rollback "$pdns_conf" >/dev/null
+
+    # Simulate this container being recreated with a different bridge IP,
+    # and the freshly-rendered candidate for THIS session failing validation
+    # for an unrelated reason (forcing a rollback to the v1 snapshot above,
+    # which still has the old 172.20.0.2 address baked in).
+    PDNS_LOCAL_ADDRESS="172.20.0.9"
+    printf 'BROKEN pdns config v2\n' > "$pdns_conf"
+    run _dns_auth_validate_snapshot_or_rollback "$pdns_conf"
+    [ "$status" -eq 0 ]
+
+    # The restored file must reflect this session's current address, not
+    # the snapshot's stale one, and the rest of the restored snapshot
+    # content must otherwise survive untouched.
+    [ "$(grep -c '^local-address=127.0.0.1,172.20.0.9$' "$pdns_conf")" -eq 1 ]
+    [ "$(grep -c '^local-address=127.0.0.1,172.20.0.2$' "$pdns_conf")" -eq 0 ]
+    [ "$(grep -c '^OK pdns config v1$' "$pdns_conf")" -eq 1 ]
+}
+
 # ── recursor.conf independence from auth ─────────────────────────────────────
 
 @test "recursor and auth snapshots are tracked independently" {
