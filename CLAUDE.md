@@ -83,7 +83,7 @@ by configuring which DNS server IP they point to:
   per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA. nginx selects
   the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
-- **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`),
+- **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
   not our PowerDNS recursor. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
   back to the proxy → infinite loop.
 - **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other

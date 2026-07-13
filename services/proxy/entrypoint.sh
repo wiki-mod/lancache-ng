@@ -21,7 +21,11 @@ STREAM_TARGET_FILE="/etc/nginx/stream.d/00-stream-targets.conf"
 IP_STANDARD="${IP_STANDARD:?IP_STANDARD is required}"
 IP_SSL="${IP_SSL:-}"
 SSL_ENABLED="${SSL_ENABLED:-0}"
-NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4}"
+# Last-resort fallback if the container is run without an env_file at all
+# (normal installs always set this via config/{dev,prod}/proxy.env or
+# deploy/quickstart/.env). Matches those shipped defaults, including the
+# bracketed IPv6 servers nginx's resolver directive requires.
+NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]}"
 PROXY_SECURITY_MODE="${PROXY_SECURITY_MODE:-lazy}"
 PROXY_ALLOWED_CLIENT_CIDRS="${PROXY_ALLOWED_CLIENT_CIDRS:-}"
 KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"

@@ -2108,7 +2108,7 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing CACHE_INACTIVE "365d" "$env_file"
 
     append_env_key_if_missing PROXY_ALLOWED_CLIENT_CIDRS "" "$env_file"
-    set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4" "$env_file"
+    set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" "$env_file"
     migrate_proxy_security_mode_for_update "$env_file"
     set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
@@ -3766,7 +3766,7 @@ validate_env_values_for_initial_write \
     "CACHE_VALID_HIT=365d" \
     "CACHE_VALID_ANY=1m" \
     "CACHE_INACTIVE=365d" \
-    "NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4" \
+    "NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" \
     "PROXY_SECURITY_MODE=lazy" \
     "PROXY_ALLOWED_CLIENT_CIDRS=" \
     "CACHE_MAX_GB=${cache_gb}" \
@@ -3834,7 +3834,10 @@ CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
-NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+# Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
+# dual-stack rationale); IPv6 literals are bracketed because nginx's
+# `resolver` directive requires brackets around IPv6 nameservers.
+NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]
 # Keep lazy as the default: it preserves the historical cache-first behavior
 # and avoids breaking downloads when a launcher introduces a new CDN hostname.
 PROXY_SECURITY_MODE=lazy

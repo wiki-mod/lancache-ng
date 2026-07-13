@@ -157,7 +157,7 @@ injects malicious content that the proxy caches and serves to every client.
 **Mitigations**:
 - The proxy fetches origins over TLS with `proxy_ssl_verify on` and the Debian CA
   bundle (`proxy_ssl_trusted_certificate`); see also T8.
-- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`),
+- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
   never the LAN spoof DNS — `services/proxy/entrypoint.sh` refuses to start if the
   resolver is set to a lancache DNS/proxy IP, preventing a resolve-to-self loop.
 - Cache key is `$host$uri` (query-string signatures stripped), so a per-request
