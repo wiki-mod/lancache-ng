@@ -82,7 +82,13 @@ echo "== Confirming proxy is genuinely crash-looping (RestartCount climbing unde
 proxy_deadline=$((SECONDS + 60))
 proxy_restarts=0
 while (( SECONDS < proxy_deadline )); do
-    proxy_cid="$("${compose[@]}" ps -q proxy || true)"
+    # -aq, not -q: `docker compose ps` without -a can transiently omit a
+    # container in the gap between one crash-loop exit and the daemon
+    # relaunching it (see the final re-check below for where this was
+    # confirmed to actually matter); this loop already tolerates a single
+    # empty read by just retrying, but there is no reason to rely on that
+    # tolerance when -aq costs nothing extra.
+    proxy_cid="$("${compose[@]}" ps -aq proxy || true)"
     if [[ -n "$proxy_cid" ]]; then
         proxy_restarts="$(docker inspect --format '{{.RestartCount}}' "$proxy_cid" 2>/dev/null || echo 0)"
         (( proxy_restarts >= 3 )) && break
@@ -147,10 +153,26 @@ echo "Admin UI's /health endpoint answered a real HTTP request while proxy was s
 # Reconfirm proxy is STILL crash-looping at the end, not that it happened to
 # recover on its own during the wait above (which would make this whole run
 # moot -- the point is that the UI stays reachable THROUGHOUT, not before an
-# eventual recovery).
-proxy_cid_final="$("${compose[@]}" ps -q proxy || true)"
-proxy_restarts_final="$(docker inspect --format '{{.RestartCount}}' "$proxy_cid_final" 2>/dev/null || echo 0)"
-proxy_status_final="$(docker inspect --format '{{.State.Status}}' "$proxy_cid_final" 2>/dev/null || echo unknown)"
+# eventual recovery). `ps -aq` (not `ps -q`), and a short retry loop: `docker
+# compose ps` without `-a` only lists containers it considers "up", which can
+# transiently omit a container in the split-second between one crash-loop
+# exit and the daemon relaunching it under `restart: unless-stopped` --
+# confirmed for real (a first version of this script using plain `ps -q`
+# here flaked on exactly that window: RestartCount=5 moments earlier, then an
+# empty ps -q result at this single unretried check).
+proxy_cid_final=""
+proxy_status_final="unknown"
+proxy_restarts_final=0
+final_check_deadline=$((SECONDS + 15))
+while (( SECONDS < final_check_deadline )); do
+    proxy_cid_final="$("${compose[@]}" ps -aq proxy || true)"
+    if [[ -n "$proxy_cid_final" ]]; then
+        proxy_status_final="$(docker inspect --format '{{.State.Status}}' "$proxy_cid_final" 2>/dev/null || echo unknown)"
+        proxy_restarts_final="$(docker inspect --format '{{.RestartCount}}' "$proxy_cid_final" 2>/dev/null || echo 0)"
+        [[ "$proxy_status_final" == "restarting" || "$proxy_status_final" == "running" ]] && break
+    fi
+    sleep 1
+done
 echo "proxy's final state: status=$proxy_status_final, RestartCount=$proxy_restarts_final (still crash-looping throughout the test)."
 if [[ "$proxy_status_final" != "restarting" && "$proxy_status_final" != "running" ]]; then
     echo "::error::proxy's final container status is '$proxy_status_final', neither 'restarting' nor a just-relaunched 'running' -- the crash loop did not stay active for the duration of this test." >&2
