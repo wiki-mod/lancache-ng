@@ -6,17 +6,20 @@
 # board (same constraint documented in gc-pr-staging-images.yml for
 # GHCR_PACKAGE_DELETE_PAT), so this requires PROJECT_AUTOMATION_PAT -- a
 # classic PAT with the `project` scope, created by a repo/org admin and
-# added as a repository secret. Until that secret exists, the step below is
-# skipped (if: secrets.PROJECT_AUTOMATION_PAT != '') rather than running and
-# failing -- actions/add-to-project requires a non-empty github-token input
-# and errors out immediately if it's blank, which would otherwise leave a
-# red, failed run on every single new issue/PR in the documented
-# before-the-secret-exists deployment state. This has to be a step-level
-# `if:`, not a job-level one: GitHub Actions does not allow the `secrets`
-# context in a job's own `if:` condition (only `github`/`inputs`/`needs`/
-# `vars` are available there -- confirmed by actionlint rejecting the
-# job-level form this file originally used). A skipped step still shows the
-# job as green, matching the harmless-no-op behavior this file's header
+# added as a repository secret. Until that secret exists, the second step
+# below is skipped rather than running and failing -- actions/add-to-project
+# requires a non-empty github-token input and errors out immediately if it's
+# blank, which would otherwise leave a red, failed run on every single new
+# issue/PR in the documented before-the-secret-exists deployment state.
+# GitHub Actions does not allow the `secrets` context in ANY `if:`
+# condition -- neither a job's nor a step's (confirmed by actionlint
+# rejecting both the job-level and the step-level form this file previously
+# used: "context 'secrets' is not allowed here"). The only contexts allowed
+# in `if:` include `steps`, so the presence check has to happen in its own
+# earlier step: read the secret into an env var (secrets ARE allowed in
+# `env:`/`run:`), decide there, and publish the boolean as a step output,
+# which the next step's `if:` can then reference. A skipped step still shows
+# the job as green, matching the harmless-no-op behavior this file's header
 # always intended: the item just isn't auto-added; add it manually with
 # `gh project item-add`.
 name: Add to project board
@@ -35,8 +38,19 @@ jobs:
     name: Add to KANBAN-Lancache-NG
     runs-on: ubuntu-latest
     steps:
+      - name: Check for automation PAT
+        id: check-pat
+        env:
+          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: |
+          if [ -n "$PROJECT_AUTOMATION_PAT" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Add issue/PR to project board
-        if: ${{ secrets.PROJECT_AUTOMATION_PAT != '' }}
+        if: steps.check-pat.outputs.available == 'true'
         uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
         with:
           project-url: https://github.com/orgs/wiki-mod/projects/6
