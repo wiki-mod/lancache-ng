@@ -1610,6 +1610,83 @@ assert_prebuilt_image_platform_supported() {
     esac
 }
 
+# Maps `uname -m` to the "linux/<arch>" platform string used throughout
+# release/stack-images.yml and by `docker buildx`. Shared by
+# assert_prebuilt_image_platform_supported's host-only check and by
+# assert_resolved_image_tag_platform_supported below so both checks agree on
+# exactly which architectures are recognized.
+host_image_platform() {
+    local arch="$1"
+    case "$arch" in
+        x86_64|amd64)
+            printf 'linux/amd64\n'
+            ;;
+        aarch64|arm64)
+            printf 'linux/arm64\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# assert_prebuilt_image_platform_supported only checks that this host's
+# architecture is one setup.sh understands at all; it says nothing about
+# whether the specific tag/channel this install actually resolved to
+# (LANCACHE_IMAGE_TAG) has a manifest published for that architecture. A host
+# pinned to a pre-arm64 tag, or to a channel whose current pointer is missing
+# an arm64 leg, would otherwise sail past that earlier guard and only fail
+# deep inside `docker compose pull`, after setup.sh has already written
+# .env/compose state for this install (#665). Call this once the tag is fully
+# resolved and before the first state-mutating write for that install/update.
+#
+# Mirrors scripts/require-image-platforms.sh's `docker buildx imagetools
+# inspect` approach, but inlined rather than shelled out to that script:
+# setup.sh is documented (see README.md) to run standalone via `curl | bash`,
+# so it cannot assume a full repository checkout with scripts/ present on
+# disk. Checks the "dns" image only -- release/stack-images.yml declares an
+# identical platform list for every runtime service and the stack pointer, so
+# one lookup is representative and avoids one registry round-trip per service.
+assert_resolved_image_tag_platform_supported() {
+    local registry="$1" prefix="$2" tag="$3"
+    local arch platform image single_platform inspect_text discovered_platforms
+
+    # Every guard below adds an explicit `return 1` after `die`. In
+    # production this is unreachable (die() calls exit and terminates the
+    # whole process), but it makes the function correctly fail-fast under
+    # test doubles that stub die() as a non-exiting `return` (see
+    # tests/bats/helpers/setup-platform-helpers.sh) instead of silently
+    # falling through to later checks with empty, unset state.
+    arch=$(uname -m)
+    platform=$(host_image_platform "$arch") \
+        || { die "Prebuilt production images are currently published for linux/amd64 and linux/arm64 only. This host reports '${arch}'."; return 1; }
+
+    command -v docker >/dev/null 2>&1 \
+        || { die "docker is required to verify that image tag '${tag}' publishes a ${platform} image before continuing."; return 1; }
+    docker buildx version >/dev/null 2>&1 \
+        || { die "docker buildx is required to verify that image tag '${tag}' publishes a ${platform} image before continuing. Install the docker-buildx-plugin package, then rerun setup.sh."; return 1; }
+
+    image="${registry}/${prefix}/dns:${tag}"
+
+    # shellcheck disable=SC2016 # Go template is evaluated by Docker, not the shell.
+    single_platform=$(docker buildx imagetools inspect "$image" --format '{{if .Image}}{{.Image.OS}}/{{.Image.Architecture}}{{end}}' 2>&1) \
+        || { die "Failed to inspect ${image} to verify it publishes a ${platform} image (${single_platform}). Check network access and registry reachability, then rerun setup.sh."; return 1; }
+
+    if [[ -n "$single_platform" && "$single_platform" != "<no value>/<no value>" && "$single_platform" != "unknown/unknown" ]]; then
+        discovered_platforms="$single_platform"
+    else
+        inspect_text=$(docker buildx imagetools inspect "$image" 2>&1) \
+            || { die "Failed to inspect ${image} manifest to verify it publishes a ${platform} image (${inspect_text}). Check network access and registry reachability, then rerun setup.sh."; return 1; }
+        discovered_platforms=$(printf '%s\n' "$inspect_text" | awk '$1 == "Platform:" && $2 != "unknown/unknown" { print $2 }' | sort -u)
+    fi
+
+    [[ -n "$discovered_platforms" ]] \
+        || { die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."; return 1; }
+
+    printf '%s\n' "$discovered_platforms" | grep -Eq "^${platform}(/.*)?$" \
+        || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
+}
+
 # True if systemctl is present AND the given unit file is known to it. Used to
 # make all convergence-timer handling a no-op on hosts without systemd or
 # without the lancache-converge units installed, instead of erroring out.
@@ -2243,6 +2320,19 @@ migrate_env_for_update() {
     fi
     validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
     validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
+
+    # Verify the newly resolved tag actually publishes an image for this
+    # host's architecture before the pre-update backup/pull sequence below
+    # runs (#665). assert_prebuilt_image_platform_supported at the top of
+    # cmd_update only checked the host architecture in general, not this
+    # specific tag/channel -- an update that silently moves onto a tag/channel
+    # missing this host's platform would otherwise only fail deep inside
+    # `docker compose pull`.
+    assert_resolved_image_tag_platform_supported \
+        "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")" \
+        "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")" \
+        "$(get_env_var LANCACHE_IMAGE_TAG "$env_file")"
+
     set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"
 
@@ -3663,6 +3753,12 @@ EOF
         LANCACHE_IMAGE_CHANNEL="$lancache_image_channel" \
         resolve_lancache_image_tag)
 
+    # Verify the resolved tag actually publishes an image for this secondary
+    # host's architecture before any secondary state below is written (#665).
+    # The earlier assert_prebuilt_image_platform_supported call only checked
+    # the host architecture in general, not this specific tag/channel.
+    assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+
     # Known-good pdns.conf/recursor.conf snapshot retention (#615): same
     # variable and default (3) as config/{dev,prod}/dns-standard.env. The
     # primary's registration response has no opinion on this -- it is a
@@ -4240,6 +4336,13 @@ LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
 LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$env_file")
 LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$env_file")
 LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
+
+# Verify the resolved tag actually publishes an image for this host's
+# architecture before any state below is written (#665). The earlier
+# assert_prebuilt_image_platform_supported call only checked the host
+# architecture in general, not this specific tag/channel.
+assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCACHE_IMAGE_PREFIX" "$LANCACHE_IMAGE_TAG"
+
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)

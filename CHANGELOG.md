@@ -432,6 +432,25 @@ is real, live, running code, not just work sitting in source control.
   original terminator (`\r\n`, `\n`, or none for a final line with no
   trailing newline) instead of being normalized to one file-wide separator
   (#656).
+- Fixed three arm64-rollout gaps left over from native arm64 image builds
+  (#592): `backfill-stack-latest.yml` still required only `linux/amd64` even
+  though `release/stack-images.yml` declares every runtime service's `latest`
+  channel as `linux/amd64` + `linux/arm64` (an operator backfill from an
+  older amd64-only release could have silently reset `latest` to an
+  amd64-only stack); `docs/release-versioning.md`'s Platform Support section
+  still described amd64 as the only supported platform and setup as failing
+  closed on any non-amd64 host; and `setup.sh`'s
+  `assert_prebuilt_image_platform_supported()` only checked the host's
+  architecture in general, never whether the specific resolved
+  `LANCACHE_IMAGE_TAG`/channel actually publishes a manifest for that
+  architecture, so an arm64 host pinned to a pre-arm64 tag could pass that
+  guard and only fail deep inside `docker compose pull`, after setup.sh had
+  already written install state. Added
+  `assert_resolved_image_tag_platform_supported()`, which mirrors
+  `scripts/require-image-platforms.sh`'s `docker buildx imagetools inspect`
+  approach, and calls it right after the tag/channel is resolved and before
+  the first state-mutating write in the install, update, and secondary-node
+  flows (#665).
 
 ## [0.1.0] - 2026-07-06
 
