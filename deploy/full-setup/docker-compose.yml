@@ -315,7 +315,7 @@ services:
       retries: 2
       start_period: 10s
 
-  # Watchtower (issue #611): this harness previously had no watchtower service
+  # Watchtower: this harness previously had no watchtower service
   # and no com.centurylinklabs.watchtower.enable label on any service at all,
   # so the documented, supported watchtower profile (README.md,
   # docs/release-external-images.md, docs/backup-restore.md) was silently

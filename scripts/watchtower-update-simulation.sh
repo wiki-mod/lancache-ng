@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Real end-to-end Watchtower verification (issue #611, sub-item of #398).
+# Real end-to-end Watchtower verification.
 # Watchtower is a documented, supported optional feature (COMPOSE_PROFILES=
 # watchtower; README.md, docs/release-external-images.md,
 # docs/backup-restore.md) whose actual runtime behavior -- detect a new
@@ -46,18 +46,57 @@ upstream_registry="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}"
 upstream_prefix="${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 
-mirror_port="${WATCHTOWER_SIM_REGISTRY_PORT:-5511}"
-mirror_registry="127.0.0.1:${mirror_port}"
+# A fixed registry container name and host port collided across concurrent
+# workflow runs sharing one self-hosted runner host: an unconditional
+# `docker rm -f` under a shared name could delete another run's registry
+# mid-push/pull, and a shared port made two simulations race against the
+# same endpoint instead of validating Watchtower independently. The compose
+# project name doesn't need the same treatment here -- it already arrives
+# pre-derived per run via COMPOSE_PROJECT_NAME, set by the workflow's own
+# per-run network-derivation job.
+#
+# The container name is made collision-free by combining a hash of this
+# run's own identity with this script's own PID ($$), mirroring the
+# hash+$$ idiom dhcp-kea-lease-flow-simulation.sh already uses for its own
+# throwaway per-run resources. $$ alone would not be safely assumed unique
+# across two concurrent runs -- whether two runners' PIDs can collide
+# depends on the runner's process/PID-namespace model, which this script
+# cannot verify -- and a same-name collision here would let the in-loop
+# `docker rm -f "$registry_container"` below delete another run's registry
+# mid-operation, exactly the bug this whole section exists to prevent.
+# Hashing run identity in adds far more entropy than $$ alone while keeping
+# the fix cheap: unlike the port, a name collision only needs to be
+# vanishingly unlikely, not corrected via a bind-failure retry, since
+# there's no OS-level signal to detect a same-name Docker container the way
+# a taken port fails synchronously.
+#
+# The port cannot use that trick ($$ is not a port number). An earlier
+# version of this fix hashed run identity into a small fixed pool (ports
+# 5502-5753, mirroring dhcp-kea-lease-flow-simulation.sh's subnet-octet
+# derivation), but that only *reduces* collision probability -- it doesn't
+# eliminate it. Two concurrent workflow_dispatch runs can still hash into
+# the same bucket and then both try to bind the same host port; `needs:`
+# only serializes jobs within one run, never across separate concurrent
+# runs, so this remained a real (if rarer) flake. Instead, actually attempt
+# to bind each candidate port and detect the failure: `docker run -p
+# 127.0.0.1:PORT:5000 ...` fails synchronously (nonzero exit, "port is
+# already allocated") if anything -- another run's registry or an unrelated
+# listener -- already holds that port. On failure, derive a new candidate
+# (mixing the attempt number into the hash so it lands in a different
+# bucket) and retry, bounded, so a run only fails loudly after genuinely
+# exhausting its attempts instead of racing blind on a single guess.
+run_identity="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-$$}-${RANDOM:-0}"
+run_digest="$(printf '%s' "$run_identity" | sha256sum | cut -c1-8)"
 mirror_prefix="watchtower-sim"
 mirror_tag="watchtower-test"
-mirror_ref="${mirror_registry}/${mirror_prefix}/proxy:${mirror_tag}"
-# Known tracked gap: the registry container name, host port, and compose
-# project name are fixed constants shared with the sibling validation
-# scripts, so two runs on the same host collide instead of isolating per run
-# via a per-run VALIDATION_SUBNET. This is deliberately not fixed here to keep
-# this review pass scoped; the systemic fix across all three scripts is
-# tracked in issue #661.
-registry_container="lancache-ng-watchtower-sim-registry"
+registry_container="lancache-ng-watchtower-sim-registry-${run_digest}-$$"
+# Pinned to an immutable digest per docs/ci-image-pinning-policy.md: this
+# script downloads registry:2 on every CI run, so a mutable tag could start
+# failing or silently run different code with no repository change at all.
+registry_image="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+mirror_port=""
+mirror_registry=""
+mirror_ref=""
 
 work_dir="$repo_root/.watchtower-update-simulation-tmp"
 rm -rf "$work_dir"
@@ -67,15 +106,56 @@ cleanup() {
     local status=$?
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     docker rm -f "$registry_container" >/dev/null 2>&1 || true
-    docker rmi "$mirror_ref" >/dev/null 2>&1 || true
+    [[ -n "$mirror_ref" ]] && docker rmi "$mirror_ref" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
 
-echo "== Starting a throwaway local registry mirror on 127.0.0.1:${mirror_port} =="
-docker rm -f "$registry_container" >/dev/null 2>&1 || true
-docker run -d --name "$registry_container" -p "127.0.0.1:${mirror_port}:5000" registry:2 >/dev/null
+if [[ -n "${WATCHTOWER_SIM_REGISTRY_PORT:-}" ]]; then
+    # An operator-supplied port is a deliberate, explicit override (e.g.
+    # running this script directly outside CI, where no concurrent-run
+    # collision is possible) -- honor it exactly, with no retry, so a
+    # genuine bind failure surfaces immediately instead of silently
+    # picking a different port than the one requested.
+    mirror_port="$WATCHTOWER_SIM_REGISTRY_PORT"
+    mirror_registry="127.0.0.1:${mirror_port}"
+    mirror_ref="${mirror_registry}/${mirror_prefix}/proxy:${mirror_tag}"
+    echo "== Starting a throwaway local registry mirror on 127.0.0.1:${mirror_port} (WATCHTOWER_SIM_REGISTRY_PORT override) =="
+    docker rm -f "$registry_container" >/dev/null 2>&1 || true
+    docker run -d --name "$registry_container" -p "127.0.0.1:${mirror_port}:5000" \
+        "$registry_image" >/dev/null
+else
+    max_port_attempts=20
+    port_attempt=0
+    registry_started=0
+    last_run_err=""
+    while (( port_attempt < max_port_attempts )); do
+        candidate_digest="$(printf '%s' "${run_identity}-${port_attempt}" | sha256sum | cut -c1-8)"
+        candidate_offset=$(( (16#$candidate_digest % 252) + 2 )) # 2..253
+        mirror_port=$(( 5500 + candidate_offset ))
+        mirror_registry="127.0.0.1:${mirror_port}"
+        mirror_ref="${mirror_registry}/${mirror_prefix}/proxy:${mirror_tag}"
+        docker rm -f "$registry_container" >/dev/null 2>&1 || true
+        # Redirect order matters: `2>&1` first duplicates the *current*
+        # stdout (the command-substitution pipe) onto fd2, then `>/dev/null`
+        # sends fd1 (the container-ID line docker prints on success) to
+        # null -- so only stderr (the bind-failure message, if any) ends up
+        # captured in last_run_err. The `if var=$(...)` condition exempts
+        # this from `set -e`, propagating docker run's own exit status.
+        if last_run_err="$(docker run -d --name "$registry_container" -p "127.0.0.1:${mirror_port}:5000" \
+            "$registry_image" 2>&1 >/dev/null)"; then
+            registry_started=1
+            echo "== Starting a throwaway local registry mirror on 127.0.0.1:${mirror_port} (attempt $((port_attempt + 1))/${max_port_attempts}) =="
+            break
+        fi
+        port_attempt=$((port_attempt + 1))
+    done
+    if (( registry_started != 1 )); then
+        echo "::error::could not bind a free registry port after ${max_port_attempts} attempts -- last docker run error: ${last_run_err}" >&2
+        exit 1
+    fi
+fi
 
 echo "== Seeding the mirror with the real, currently published proxy:$image_tag image (generation 1) =="
 docker pull "${upstream_registry}/${upstream_prefix}/proxy:${image_tag}"
@@ -169,7 +249,22 @@ if [[ "$v1_image_id" == "$v2_image_id" ]]; then
     echo "::error::generation-2 image ID is identical to generation 1 ($v1_image_id) -- the derived image did not actually change, so this test cannot prove anything." >&2
     exit 1
 fi
-echo "Mirror now serves generation 2 ($v2_image_id), confirmed different from generation 1 ($v1_image_id)."
+echo "Mirror now serves generation 2 ($v2_image_id) in the registry, confirmed different from generation 1 ($v1_image_id)."
+
+# `docker build -t "$mirror_ref"` above also loaded generation 2 straight
+# into this host's local Docker image cache under the exact tag Watchtower
+# is about to pull. Left as-is, Watchtower's recreate decision could be
+# satisfied entirely from that local cache -- comparing the running
+# (generation 1) container against the already-local generation-2 tag --
+# without ever actually fetching anything from the registry, which would
+# let this job pass even if the push above silently failed or the registry
+# served stale content. That defeats the point of the test: proving
+# Watchtower detects and pulls a real registry-side digest change, not that
+# it can compare two locally-built images. Re-tag the local cache back to
+# generation 1 so the only way "$mirror_ref" can become generation 2 again
+# locally is a genuine `docker pull` against the registry (the fallback
+# path Watchtower itself uses here, see below).
+docker tag "$v1_image_id" "$mirror_ref"
 
 echo "== Running Watchtower once, scoped by the real full-setup compose enable label =="
 # --label-enable plus explicit container names is a real AND, not an
