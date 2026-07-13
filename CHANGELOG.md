@@ -306,6 +306,20 @@ is real, live, running code, not just work sitting in source control.
   test-coverage evidence AG-VAL-022 does not), with explicit citations to the
   upstream CodeQL bugs (github/codeql#19966, #19982, #20659) AG-VAL-022's
   exception rests on (#702).
+- Fixed the proxy image not being rebuilt when a PR only changed
+  `services/dns/cdn-domains.txt`. `services/proxy/Dockerfile` `COPY`s that
+  exact file into the image at build time (the `dns-domains` named build
+  context, baked in as `/etc/nginx/cdn-domains.txt`), but both
+  `.github/workflows/build-push.yml`'s `detect-changes` job and its hand-kept
+  mirror `scripts/detect-full-setup-changes.sh` only treated `services/proxy/`
+  itself as a proxy-touching path, so a domain-list-only change shipped a
+  fresh `dns` image while leaving the proxy image's baked-in domain list
+  stale until some unrelated `services/proxy/` change next happened to
+  rebuild it. Both detectors now also set `proxy=true` for
+  `services/dns/cdn-domains.txt`, fixed together in the same change since
+  `detect-full-setup-changes.sh`'s fail-closed staging guard would otherwise
+  poll for a PR-staging `proxy` tag `build-push.yml` never pushes and time
+  out (#771).
 - Fixed Kea DHCP (`kea-dhcp4`, `kea-ctrl-agent`, `kea-dhcp-ddns`) failing to
   start at all once the `logging` profile's file-log wiring (#633/#756) was
   active. Kea's packaged binaries hard-restrict file-logger `output` paths

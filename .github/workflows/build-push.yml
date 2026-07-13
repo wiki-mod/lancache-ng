@@ -178,7 +178,20 @@ jobs:
             output_bool "watchdog" touches_prefix "services/watchdog/"
             output_bool "dhcp" touches_prefix "services/dhcp/"
             output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
-            output_bool "proxy" touches_prefix "services/proxy/"
+            # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt
+            # into the image at build time (the dns-domains named build
+            # context), so a domain-list-only change must also rebuild the
+            # proxy image or its baked-in /etc/nginx/cdn-domains.txt goes
+            # stale until some unrelated services/proxy/ change next fires
+            # (#771). Added in addition to (not instead of) the
+            # services/proxy/ prefix check in the first condition below, and
+            # the separate dns_image rule just above.
+            if touches_prefix "services/proxy/" \
+              || touches_exact "services/dns/cdn-domains.txt"; then
+              echo "proxy=true"
+            else
+              echo "proxy=false"
+            fi
             output_bool "build_tools" touches_prefix "tools/build-tools/"
             if touches_exact ".github/workflows/build-push.yml" \
               || touches_exact ".github/workflows/build-tools.yml" \

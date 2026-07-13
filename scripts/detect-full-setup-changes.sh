@@ -96,7 +96,21 @@ output_bool() {
 }
 
 emit() {
-    output_bool "proxy" touches_prefix "services/proxy/"
+    # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the
+    # image at build time (the dns-domains named build context), so a
+    # domain-list-only change must also set proxy=true or the proxy image's
+    # baked-in /etc/nginx/cdn-domains.txt goes stale until some unrelated
+    # services/proxy/ change next fires (#771). Independent of (not a
+    # replacement for) the services/proxy/ prefix rule and the dns_image rule
+    # below. Must mirror build-push.yml's detect-changes job exactly (see
+    # SOURCE OF TRUTH NOTE above) so this script's staging-tag guard never
+    # waits on a proxy PR-staging tag build-push.yml doesn't push.
+    if touches_prefix "services/proxy/" \
+        || touches_exact "services/dns/cdn-domains.txt"; then
+        printf 'proxy=true\n'
+    else
+        printf 'proxy=false\n'
+    fi
     output_bool "dns_image" touches_prefix "services/dns/"
     output_bool "ui" touches_prefix "services/ui/"
     output_bool "watchdog" touches_prefix "services/watchdog/"
