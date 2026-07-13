@@ -88,6 +88,7 @@ services:
       - |
         set -e
         mkdir -p /etc/nats
+        mkdir -p /var/log/lancache-nats
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
         }
@@ -98,6 +99,17 @@ services:
         jetstream {
           store_dir: /data
         }
+        # Central logging pipeline (#633): nats-server logs to exactly one
+        # destination -- setting this disables stdout for the process
+        # lifetime (no dual-output mode exists, unlike Kea's
+        # "output-options" array), so `docker logs` on this container goes
+        # quiet while the `logging` compose profile is active; fluent-bit
+        # tails this file instead. Only the initial boot config below sets
+        # this literally -- the Admin UI's own nats.conf write
+        # (routes/secondaries.rs::update_nats_conf) is what actually governs
+        # it after the UI's first startup, using its own NATS_LOG_FILE-
+        # derived config.nats_log_file value, which defaults to this same path.
+        log_file: /var/log/lancache-nats/nats.log
         authorization {
           users = [
             {
@@ -164,6 +176,10 @@ services:
     volumes:
       - nats-data:/data
       - nats-conf:/etc/nats
+      # Central logging pipeline (#633): the Admin UI writes
+      # `log_file: /var/log/lancache-nats/nats.log` into nats.conf here
+      # (routes/secondaries.rs::update_nats_conf); fluent-bit tails it.
+      - nats-logs:/var/log/lancache-nats
     restart: always
     logging:
       driver: json-file
@@ -244,10 +260,434 @@ services:
       - syslog_appname_key=ident
       - -p
       - syslog_message_key=log
+      # Proxy remainder (#633): nginx's error.log and stream.log (SNI
+      # passthrough logging, standard mode) get the identical dual-pipeline
+      # treatment as access.log above -- one local-file copy, one syslog-ng
+      # forward -- just with their own path/tag/db/record values so their
+      # tail offsets and fluent-bit routing never collide with access.log's.
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/error.log
+      - -p
+      - tag=nginx-error.file
+      - -p
+      - db=/data/flb-proxy-error-file.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/error.log
+      - -p
+      - tag=nginx-error.syslog
+      - -p
+      - db=/data/flb-proxy-error-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/stream.log
+      - -p
+      - tag=nginx-stream.file
+      - -p
+      - db=/data/flb-proxy-stream-file.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/nginx/stream.log
+      - -p
+      - tag=nginx-stream.syslog
+      - -p
+      - db=/data/flb-proxy-stream-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -F
+      - record_modifier
+      - -m
+      - nginx-error.syslog
+      - -p
+      - record=host lancache-proxy
+      - -p
+      - record=ident nginx-error
+      - -F
+      - record_modifier
+      - -m
+      - nginx-stream.syslog
+      - -p
+      - record=host lancache-proxy
+      - -p
+      - record=ident nginx-stream
+      - -o
+      - file
+      - -m
+      - nginx-error.file
+      - -p
+      - path=/var/log/lancache
+      - -p
+      - file=nginx-proxy-error.log
+      - -p
+      - format=template
+      - -p
+      - template={log}
+      - -o
+      - syslog
+      - -m
+      - nginx-error.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - file
+      - -m
+      - nginx-stream.file
+      - -p
+      - path=/var/log/lancache
+      - -p
+      - file=nginx-proxy-stream.log
+      - -p
+      - format=template
+      - -p
+      - template={log}
+      - -o
+      - syslog
+      - -m
+      - nginx-stream.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      # Remaining logging-matrix services (#633): one syslog-only
+      # pipeline per service (no local plain-text copy -- that side of the
+      # dual pipeline exists above only because Netdata's web_log module
+      # parses nginx's specific access-log format; none of these services
+      # have an equivalent local consumer). Each tail input uses a glob so
+      # a service with more than one log file (e.g. dns-standard's separate
+      # pdns_server/pdns_recursor files) is picked up by a single input block.
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-dns-standard/*.log
+      - -p
+      - tag=dns-standard.syslog
+      - -p
+      - db=/data/flb-dns-standard-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-dns-ssl/*.log
+      - -p
+      - tag=dns-ssl.syslog
+      - -p
+      - db=/data/flb-dns-ssl-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-dhcp/*.log
+      - -p
+      - tag=dhcp.syslog
+      - -p
+      - db=/data/flb-dhcp-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-dhcp-proxy/*.log
+      - -p
+      - tag=dhcp-proxy.syslog
+      - -p
+      - db=/data/flb-dhcp-proxy-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-ui/*.log
+      - -p
+      - tag=ui.syslog
+      - -p
+      - db=/data/flb-ui-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-watchdog/*.log
+      - -p
+      - tag=watchdog.syslog
+      - -p
+      - db=/data/flb-watchdog-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-nats/*.log
+      - -p
+      - tag=nats.syslog
+      - -p
+      - db=/data/flb-nats-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -i
+      - tail
+      - -p
+      - path=/var/log/lancache-netdata/*.log
+      - -p
+      - tag=netdata.syslog
+      - -p
+      - db=/data/flb-netdata-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -F
+      - record_modifier
+      - -m
+      - dns-standard.syslog
+      - -p
+      - record=host lancache-dns-standard
+      - -p
+      - record=ident pdns
+      - -F
+      - record_modifier
+      - -m
+      - dns-ssl.syslog
+      - -p
+      - record=host lancache-dns-ssl
+      - -p
+      - record=ident pdns
+      - -F
+      - record_modifier
+      - -m
+      - dhcp.syslog
+      - -p
+      - record=host lancache-dhcp
+      - -p
+      - record=ident kea-dhcp4
+      - -F
+      - record_modifier
+      - -m
+      - dhcp-proxy.syslog
+      - -p
+      - record=host lancache-dhcp-proxy
+      - -p
+      - record=ident dnsmasq
+      - -F
+      - record_modifier
+      - -m
+      - ui.syslog
+      - -p
+      - record=host lancache-ui
+      - -p
+      - record=ident lancache-ui
+      - -F
+      - record_modifier
+      - -m
+      - watchdog.syslog
+      - -p
+      - record=host lancache-watchdog
+      - -p
+      - record=ident watchdog
+      - -F
+      - record_modifier
+      - -m
+      - nats.syslog
+      - -p
+      - record=host lancache-nats
+      - -p
+      - record=ident nats-server
+      - -F
+      - record_modifier
+      - -m
+      - netdata.syslog
+      - -p
+      - record=host lancache-netdata
+      - -p
+      - record=ident netdata
+      - -o
+      - syslog
+      - -m
+      - dns-standard.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - dns-ssl.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - dhcp.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - dhcp-proxy.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - ui.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - watchdog.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - nats.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      - -o
+      - syslog
+      - -m
+      - netdata.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
     volumes:
       - proxy-logs:/var/log/nginx:ro
       - logs:/var/log/lancache
       - syslog-data:/data
+      - dns-logs-standard:/var/log/lancache-dns-standard:ro
+      - dns-logs-ssl:/var/log/lancache-dns-ssl:ro
+      - dhcp-logs:/var/log/lancache-dhcp:ro
+      - dhcp-proxy-logs:/var/log/lancache-dhcp-proxy:ro
+      - ui-logs:/var/log/lancache-ui:ro
+      - watchdog-logs:/var/log/lancache-watchdog:ro
+      - nats-logs:/var/log/lancache-nats:ro
+      - netdata-logs:/var/log/lancache-netdata:ro
     depends_on:
       - syslog-ng
     restart: always
@@ -358,6 +798,10 @@ services:
       - pdns-data-standard:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       - pdns-config-snapshots-standard:/var/lib/lancache-dns
+      # Central logging pipeline (#633): PowerDNS has no native file-log
+      # directive (see services/dns/entrypoint.sh's run_auth/run_recursor,
+      # which `tee` each daemon's stdout here instead).
+      - dns-logs-standard:/var/log/lancache-dns
     depends_on:
       - nats
     ports:
@@ -393,6 +837,10 @@ services:
       - pdns-data-ssl:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       - pdns-config-snapshots-ssl:/var/lib/lancache-dns
+      # Central logging pipeline (#633): PowerDNS has no native file-log
+      # directive (see services/dns/entrypoint.sh's run_auth/run_recursor,
+      # which `tee` each daemon's stdout here instead).
+      - dns-logs-ssl:/var/log/lancache-dns
     depends_on:
       - nats
     ports:
@@ -437,6 +885,20 @@ services:
   watchdog:
     container_name: lancache-watchdog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    # Central logging pipeline (#633): watchdog.sh writes only to stdout
+    # (its log() function, see services/watchdog/watchdog.sh) and is never
+    # itself changed -- this entrypoint override tees that stdout into a
+    # file in addition to the container's normal stdout, so `docker logs`
+    # keeps working unchanged while fluent-bit also gets a file to tail.
+    # Process substitution (`> >(...)`) requires bash, not the image's
+    # default entrypoint form; `exec` still replaces this shell with
+    # watchdog.sh itself, so it stays PID 1 and signal handling (restart/
+    # stop) is unaffected.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        mkdir -p /var/log/lancache-watchdog
+        exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - CHECK_INTERVAL=30
@@ -470,6 +932,7 @@ services:
       # would mount it `:ro`), watchdog needs read-write access here since
       # maybe_prune_syslog() deletes files.
       - logs-syslog-ng:/var/log/lancache-syslog-ng
+      - watchdog-logs:/var/log/lancache-watchdog
     depends_on:
       - docker-socket-proxy
     networks:
@@ -502,6 +965,9 @@ services:
       - DHCP_RANGE_END=${DHCP_RANGE_END:-}
     volumes:
       - ${KEA_DATA_DIR:-./kea}:/var/lib/kea
+      # Central logging pipeline (#633): Kea's loggers dual-write here (see
+      # kea-dhcp4.conf.template's "output-options") in addition to stdout.
+      - dhcp-logs:/var/log/lancache-dhcp
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -538,6 +1004,9 @@ services:
       # Known-good dnsmasq config snapshots (#415): persistent, service-owned
       # volume so rollback survives container restarts/recreates.
       - dhcp-proxy-config-snapshots:/var/lib/lancache-dhcp-proxy
+      # Central logging pipeline (#633): dnsmasq's own `log-facility=`
+      # directive (see dnsmasq.conf.template) writes here.
+      - dhcp-proxy-logs:/var/log/lancache-dhcp-proxy
     environment:
       - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
       - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
@@ -608,6 +1077,9 @@ services:
       # snapshots into config-snapshots/ here (#614), never touching Kea's
       # own kea-dhcp4.conf/kea-leases4.csv/etc. in the same directory.
       - ${KEA_DATA_DIR:-./kea}:/var/lib/kea
+      # Central logging pipeline (#633): main.rs's init_tracing() writes
+      # UI_LOG_FILE (default matches this path) alongside stdout.
+      - ui-logs:/var/log/lancache-ui
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
@@ -684,6 +1156,10 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Central logging pipeline (#633): netdata writes health/collector/
+      # error logs under /var/log/netdata by default; mount that onto a
+      # shared volume so fluent-bit can tail it.
+      - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
     restart: always
     labels:
@@ -731,6 +1207,20 @@ volumes:
   netdatacache:
   logs:
   syslog-data:
+  # Per-service source logs (#633): each service writes here (dual-output
+  # alongside stdout where the underlying daemon supports it, single-
+  # destination where it doesn't -- see docs/architecture-ng.md's logging
+  # matrix for which), and the `syslog` (fluent-bit) service tails these
+  # read-only and forwards to syslog-ng. Same "rotated log output, not
+  # operational state" classification as `logs`/`syslog-data` above.
+  dns-logs-standard:
+  dns-logs-ssl:
+  dhcp-logs:
+  dhcp-proxy-logs:
+  ui-logs:
+  watchdog-logs:
+  nats-logs:
+  netdata-logs:
   logs-syslog-ng:
   pdns-data-standard:
   pdns-data-ssl:
