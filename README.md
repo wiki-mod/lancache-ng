@@ -679,6 +679,17 @@ NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
 NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
 NATS_CALLOUT_PASSWORD=<generate-a-secret>
+```
+
+`SECONDARY_REGISTRATION_TOKEN` is different from the values above: it is
+always required, even on a single-node install that never registers a
+secondary DNS node. The Admin UI's boot-time check refuses to start on an
+empty value or on the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
+placeholder (an empty token previously allowed unauthenticated secondary
+registration — see issue #659), so replace it with a real secret regardless
+of whether you plan to use secondary DNS:
+
+```env
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 ```
 
