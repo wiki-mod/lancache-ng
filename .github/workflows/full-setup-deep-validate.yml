@@ -572,7 +572,12 @@ jobs:
   setup-cli-simulation:
     # Runs the real setup.sh installer end-to-end. This exercises the
     # installer's CLI/migration/rollback behaviour, which is independent of PR
-    # image CONTENT (setup.sh resolves the edge channel by design), so it is
+    # image CONTENT (setup.sh resolves the dev channel by design -- see
+    # scripts/setup-cli-simulation.sh's comment on its LANCACHE_IMAGE_CHANNEL
+    # choice: dev, not edge, is the channel actually promoted from this
+    # vX.Y.Z integration branch; edge tracks master, which is frozen during
+    # v0.2.0 stabilization and can be badly out of sync with this checkout's
+    # own env-var/API contract, as issue #796 found the hard way), so it is
     # deliberately NOT gated on the staging-image step and does not thread the
     # PR tag -- its value is driving setup.sh itself, not a specific image.
     name: setup.sh CLI simulation

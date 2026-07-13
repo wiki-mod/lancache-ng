@@ -136,10 +136,24 @@ proc expect_prompt {pattern reply} {
 # "default to the stable latest channel unless asked otherwise" behavior
 # (see resolve_lancache_image_channel's comment) means an unqualified fresh
 # install correctly refuses to proceed with a clear error right now --
-# confirmed directly against a real run. edge is what actually has published
-# images (see docs/release-versioning.md), so request it explicitly, exactly
-# as setup.sh's own error message suggests.
-set env(LANCACHE_IMAGE_CHANNEL) "edge"
+# confirmed directly against a real run.
+#
+# dev, not edge: per docs/release-versioning.md, `edge` is promoted only from
+# pushes to master, while `dev` is promoted from pushes to any vX.Y.Z-pattern
+# branch (build-push.yml's promote-stack step). This checkout runs from the
+# v0.2.0 integration branch, not master -- master has been effectively frozen
+# during the v0.2.0 stabilization phase and is hundreds of commits behind. An
+# `edge` image is therefore built from source that can predate this
+# checkout's own env-var/API contract. Confirmed directly (issue #796): with
+# `edge` selected, the published `ui` image was still built from a pre-#583
+# commit that read the old NATS_DNS_READER_USER/PASSWORD env vars, while this
+# checkout's setup.sh (post-#583) writes the renamed NATS_DNS_REPLICA_USER/
+# PASSWORD instead -- the stale image never saw its expected variables, so
+# nats_dns_reader_user/password came out empty at runtime and the `ui`
+# container crash-looped on "NATS username cannot be empty". `dev` is the
+# channel that is actually kept in sync with this branch, so it is the
+# correct choice for exercising the real setup.sh CLI end-to-end.
+set env(LANCACHE_IMAGE_CHANNEL) "dev"
 spawn bash setup.sh
 
 expect_prompt {Server IP \(Standard mode\)} "127.0.0.2"
@@ -261,11 +275,11 @@ wait_for_stack_healthy
 
 # LANCACHE_IMAGE_TAG/CHANNEL are excluded from the byte-diff for the same
 # reason Phase 3 already excludes them below: this fixture stays on the
-# "edge" channel from Phase 1's fresh install, so resolve_lancache_image_tag()
+# "dev" channel from Phase 1's fresh install, so resolve_lancache_image_tag()
 # re-resolves it through a real `docker pull` of the channel pointer image on
 # every update call. That is expected, not drift -- only a real regression
 # would flip it to a *different* digest between two calls made seconds apart
-# with no new edge image published in between.
+# with no new dev image published in between.
 diff -q \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.after-first-update") \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
@@ -281,10 +295,10 @@ echo "== Phase 3: rollback safety (forced platform-preflight failure during upda
 
 cp "$install_dir/.env" "$install_dir/.env.before-forced-failure"
 # LANCACHE_IMAGE_CHANNEL must move to "pinned" too, not just the tag: with
-# channel=edge still set (from the fresh install in Phase 1),
-# resolve_lancache_image_tag() resolves the tag from the edge channel
+# channel=dev still set (from the fresh install in Phase 1),
+# resolve_lancache_image_tag() resolves the tag from the dev channel
 # pointer and never even looks at the literal LANCACHE_IMAGE_TAG value --
-# confirmed directly, the update just silently re-pulled the real edge
+# confirmed directly, the update just silently re-pulled the real dev
 # images and succeeded instead of failing. pinned is the one channel value
 # that makes resolution use LANCACHE_IMAGE_TAG verbatim. The fake tag still
 # has to match the real sha-* format (validate_lancache_image_tag rejects
