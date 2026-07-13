@@ -5159,6 +5159,23 @@ jobs:
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Promote only repoints already-built, already-pushed sha-* images at
+    # mutable channel tags -- it is idempotent and fast, unlike the rest of
+    # this workflow (build/test/scan/build-images), which is slow and where
+    # cancelling stale in-flight work for a superseded commit is desirable.
+    # Sharing the workflow-level "Build & Push-publish" concurrency group
+    # (see top of file) ties promote's own scheduling to that same single
+    # pending slot, so a rapid burst of pushes can starve it just like the
+    # slow stages, and any future tightening of that group's cancellation
+    # behavior for faster build feedback would also risk killing an in-flight
+    # promote (#777). This job-level group isolates promote's own concurrency
+    # axis from that decision entirely. backfill-stack-latest.yml
+    # deliberately joins this exact same group name (not
+    # "Build & Push-publish") so the two tag-moving workflows still serialize
+    # against each other; keep both in sync if this name ever changes.
+    concurrency:
+      group: ${{ github.workflow }}-promote
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -5237,6 +5254,33 @@ jobs:
             exit "$status"
           }
           trap rollback_promotions EXIT
+
+          # Debounce/coalesce (#777): mutable channel tags (dev/edge) are
+          # branch-driven, and giving promote its own concurrency group above
+          # only stops it competing for the SAME slot as the rest of this
+          # workflow -- it does not stop several of these runs from queuing
+          # up back-to-back across a burst of merges, each pointing at a
+          # moment-in-time commit that a later one will immediately
+          # supersede. Before actually moving any tag, re-resolve the ref's
+          # current tip directly from the remote and bail out as a no-op if
+          # a newer commit already landed: that later commit's own promote
+          # run (already queued or about to be) will move the tag correctly,
+          # so this run briefly (and pointlessly) setting dev/edge to an
+          # already-stale commit would only add churn, not value. This only
+          # applies to branch refs -- a release/rc tag push targets one
+          # fixed, immutable ref that cannot "move out from under" this run,
+          # so vX.Y.Z/latest promotion is never skipped by this check.
+          if [[ "$GITHUB_REF" == refs/heads/* ]]; then
+            current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
+            if [[ -z "$current_tip" ]]; then
+              echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to promote blind."
+              exit 1
+            fi
+            if [[ "$current_tip" != "$COMMIT_SHA" ]]; then
+              echo "::notice::${GITHUB_REF} has already moved to ${current_tip} since this run was triggered for ${COMMIT_SHA}; skipping channel promotion so the run already targeting the current tip can supersede it."
+              exit 0
+            fi
+          fi
 
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(edge)
