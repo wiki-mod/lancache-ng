@@ -18,20 +18,20 @@ When working across this repository's documentation and governance stack, confli
 
 When an agent encounters a real inconsistency or conflict between two governance/documentation sources, apply this precedence order to determine which source takes priority:
 
-1. **Executable checks and current code behavior** — What the code actually does today and what the CI checks actually enforce today are the ground truth. If documentation claims behavior that contradicts what the code or CI verifiably does, the documentation is stale.
-2. **`AGENTS.md` (this file)** — Repository-wide hard rules for agent behavior, workflow, validation, and governance apply to all work in this repository.
-3. **Area-specific AGENTS files** (e.g., `.github/AGENTS.md` for GitHub Actions work) — Specialized guidance for specific areas takes precedence over general guidance once you have identified that your work falls into that area.
-4. **`SECURITY.md`** — Security-specific behavior and constraints are documented separately and take precedence for security-relevant work.
-5. **Architecture and release documentation** (e.g., `docs/architecture-ng.md`, `docs/release-versioning.md`, `docs/release-external-images.md`, `docs/threat-model.md`) — System design and release procedures are documented here with rationale.
-6. **`README.md` and user-facing documentation** (e.g., `docs/install-ca-cert.md`) — End-user guides and high-level project descriptions are placed last because they are more likely to lag behind operational or technical changes.
+1. **[AG-DOC-002] Executable checks and current code behavior** — What the code actually does today and what the CI checks actually enforce today are the ground truth. If documentation claims behavior that contradicts what the code or CI verifiably does, the documentation is stale.
+2. **[AG-DOC-003] `AGENTS.md` (this file)** — Repository-wide hard rules for agent behavior, workflow, validation, and governance apply to all work in this repository, except where a more specific source lower in this list carries scoped precedence within its own area. Two such sources currently make that kind of claim, and both take precedence over this file's general guidance within their own stated scope: the area-specific AGENTS files in item 3 (Rule-Ref: AG-DOC-004), once you have identified that your work falls into that area, as item 3 itself states; and `SECURITY.md` in item 4 (Rule-Ref: AG-DOC-005), for security-relevant work, as item 4 itself states.
+3. **[AG-DOC-004] Area-specific AGENTS files** (e.g., `.github/AGENTS.md` for GitHub Actions work) — Specialized guidance for specific areas takes precedence over general guidance once you have identified that your work falls into that area.
+4. **[AG-DOC-005] `SECURITY.md`** — Security-specific behavior and constraints are documented separately and take precedence for security-relevant work.
+5. **[AG-DOC-006] Architecture and release documentation** (e.g., `docs/architecture-ng.md`, `docs/release-versioning.md`, `docs/release-external-images.md`, `docs/threat-model.md`) — System design and release procedures are documented here with rationale.
+6. **[AG-DOC-007] `README.md` and user-facing documentation** (e.g., `docs/install-ca-cert.md`) — End-user guides and high-level project descriptions are placed last because they are more likely to lag behind operational or technical changes.
 
 **Surfacing and resolving conflicts:**
 
 When an agent finds a real conflict between two of these sources (not a misreading, but a genuine inconsistency that reflects stale documentation or outdated guidance):
 
-- **Do not silently pick a side and proceed.** This masks the problem and allows drift to accumulate.
-- **Surface the conflict explicitly** — note it in a PR comment, a dedicated issue, or a follow-up task description. Explain which sources disagree and what real-world behavior you observed.
-- **Fix one side of the conflict or ask for guidance** — either update the stale documentation to match reality, or update the code/CI if the documentation is more correct. Only ask for guidance when the correct behavior is genuinely ambiguous or depends on a user decision. Per the user-context rule (see "Agent Autonomy and User-Context Rule" below), agents are expected to make technical decisions independently; guidance is only needed when there is real operational impact (hardware, cost, network topology) or when the correct target behavior is not determinable from code and documentation alone.
+- **[AG-DOC-008] Do not silently pick a side and proceed.** This masks the problem and allows drift to accumulate.
+- **[AG-DOC-009] Surface the conflict explicitly** — note it in a PR comment, a dedicated issue, or a follow-up task description. Explain which sources disagree and what real-world behavior you observed.
+- **[AG-DOC-010] Fix one side of the conflict or ask for guidance** — either update the stale documentation to match reality, or update the code/CI if the documentation is more correct. Only ask for guidance when the correct behavior is genuinely ambiguous or depends on a user decision. Per the user-context rule (see "Agent Autonomy and User-Context Rule" below), agents are expected to make technical decisions independently; guidance is only needed when there is real operational impact (hardware, cost, network topology) or when the correct target behavior is not determinable from code and documentation alone.
 
 This precedence order exists because this project touches DNS, DHCP, TLS interception, Docker startup behavior, cache correctness, and local network availability — all areas where documentation drift is not a stylistic gap but a real operational risk.
 
@@ -80,7 +80,7 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 - **[AG-WF-012]** When writing GitHub issue or pull-request bodies/comments from local files, verify the API call uploads file content and not the literal file path. Read the GitHub object back immediately and treat bodies such as `@/tmp/...` as malformed failed writes that must be corrected before continuing.
 - When sending Markdown through GraphQL string variables, pass the raw file content with the CLI's file-upload mode instead of pre-encoding it as JSON. Read the object back and treat leading JSON quotes, escaped newlines, or literal file paths as malformed failed writes.
 - **[AG-VAL-001]** Treat warnings as errors for repository work. Do not list a check as successful when it emitted warnings, failed setup, or used a broken fallback.
-- **Known conflict with the warnings-as-errors rule, tracked in issue #394**: GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation of its `rust-analyzer`-based extraction, not because of a defect in this repository's code. A strict, unscoped reading of "warnings are errors" would block CodeQL runs on essentially every Rust PR. Until upstream resolves this, treat these specific, named CodeQL extraction warnings as a carved-out, explicitly tracked exception: they do not block a PR by themselves, but every instance must stay referenced in #394, and #394 must be periodically reevaluated rather than left as a permanent blanket excuse. This exception is scoped to CodeQL Rust macro-expansion extraction warnings only — it does not extend to `cargo check`/`cargo clippy` warnings, which remain hard failures under the rule above.
+- **[AG-VAL-022] Known conflict with the warnings-as-errors rule, tracked in issue #394**: GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation of its `rust-analyzer`-based extraction, not because of a defect in this repository's code. A strict, unscoped reading of "warnings are errors" would block CodeQL runs on essentially every Rust PR. Until upstream resolves this, treat these specific, named CodeQL extraction warnings as a carved-out, explicitly tracked exception: they do not block a PR by themselves, but every instance must stay referenced in #394, and #394 must be periodically reevaluated rather than left as a permanent blanket excuse. This exception is scoped to CodeQL Rust macro-expansion extraction warnings only — it does not extend to `cargo check`/`cargo clippy` warnings, which remain hard failures under the rule above. A separate worked example (Rule-Ref: AG-VAL-021) illustrates this same exception in the "Documented Exceptions to Hard Rules" format below — as of this writing that worked example's wording has not yet been reconciled with this rule (issue #702, open); this rule's text here is the current, correct scope.
 - **[AG-VAL-002]** Treat standard failures such as `command not found`, missing files, missing environment variables, permission denied, malformed commands, empty required outputs, and failed tool setup as hard failures.
 - **[AG-VAL-003]** Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
 - **[AG-VAL-004]** Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
@@ -223,12 +223,14 @@ reading the document for anything that needs human judgment.
 
 - **[AG-CODE-001]** Comment only when the code would not otherwise be quickly understandable. Well-named identifiers already say what trivial code does (setting a variable, calling a function, reading a file) — do not restate that in a comment.
 - **[AG-CODE-002]** Comment concrete cases where the WHY is non-obvious: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious/standard approach. Also comment when omitting the note would let someone later reintroduce the same mistake. If removing the comment would not confuse a future reader, remove it.
-- Code must stay human-readable. Silent or hard-to-follow changes are not acceptable — if a change needs explanation to be trusted, write the comment; don't ship it silently.
-- Short structural/orientation comments that label the steps of a longer sequential procedure (e.g. `// Step 1: Fetch current config`, `// Step 2: Validate and normalize`) are also acceptable and encouraged, even when they don't explain a hidden WHY — they help a reader scan a long function without re-deriving its structure. Reviewers (including automated ones) must not flag this style as "unnecessary" or "restates the code" just because `Comment Style` otherwise favors minimal comments; readability-oriented step labels are a distinct, allowed category from WHY-comments, not a violation of this section.
-- A missing comment is a defect too, not just a neutral default. When touching code in an area that should already have a WHY-comment under the categories above (complex logic, a guard, a fallback, a security decision, a non-obvious side effect) but doesn't — whether it was missed originally or never added — add it as part of the change. Do not leave the gap just because it predates your edit; "there wasn't one before" is not a reason to skip adding one now.
+- **[AG-CODE-006]** Code must stay human-readable. Silent or hard-to-follow changes are not acceptable — if a change needs explanation to be trusted, write the comment; don't ship it silently.
+- **[AG-CODE-007]** Short structural/orientation comments that label the steps of a longer sequential procedure (e.g. `// Step 1: Fetch current config`, `// Step 2: Validate and normalize`) are also acceptable and encouraged, even when they don't explain a hidden WHY — they help a reader scan a long function without re-deriving its structure. Reviewers (including automated ones) must not flag this style as "unnecessary" or "restates the code" just because `Comment Style` otherwise favors minimal comments; readability-oriented step labels are a distinct, allowed category from WHY-comments, not a violation of this section.
+- **[AG-CODE-008]** A missing comment is a defect too, not just a neutral default. When touching any part of a file, check the **entire file** — not only the specific lines you edited — for places that should already have a WHY-comment under the categories above (complex logic, a guard, a fallback, a security decision, a non-obvious side effect) but don't, whether the gap was missed originally or never added, and add it as part of the change. Do not leave the gap just because it predates your edit or sits outside your diff; "there wasn't one before" and "it's not part of what I changed" are not reasons to skip adding one now.
 - **[AG-CODE-003]** Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123", "added by the CR-9 pass"). That belongs in the PR/commit description, not in code that outlives the change.
 - **[AG-CODE-004]** When documenting a known limitation or deliberately deferred fix (not a bug you're fixing now), prefer a structured note over a one-liner: state the problem, the mitigation/fix direction if one exists, and a dated status line describing the current real-world state (e.g. "STATUS: as of 2026-07-02, X still uses the old path; once Y migrates, this fallback becomes dead code"). This lets a future reader tell a documented tradeoff apart from an accidental gap.
 - **[AG-CODE-005]** Placeholder/scaffold markers (e.g. `TODO(#123): ...`) must be removed the moment the referenced work is actually implemented in that same change. A stale TODO claiming work is still needed, sitting next to code that already does it, is worse than no comment — it actively misleads the next reader/reviewer. Before finishing a fix that started from a TODO/scaffold marker, grep for and delete the marker it replaces.
+- **[AG-CODE-009]** A descriptive identifier or name alone — including a `#[test]` function name — is not a valid comment. When the WHY behind a non-obvious edge case, security invariant, race condition, or off-by-one scenario isn't clear from the name, the reasoning must be spelled out explicitly: not what is being asserted (already visible in the code), but why this specific case would otherwise silently break something.
+- **[AG-CODE-010]** For this project specifically, every `#[test]` function must carry at least a short comment explaining its purpose, regardless of whether the case looks "obvious" on its own. This project's domain (nginx/DNS/DHCP/Kea/Rust systems code) is complex enough that this intentionally overrides the general minimal-comment default (see Rule-Ref: AG-CODE-001) for test code — the same liberal standard applies to non-test code whenever in doubt.
 
 ## File Headers
 
@@ -275,7 +277,7 @@ reading the document for anything that needs human judgment.
 
 Hard rules in this governance exist to prevent real failures — runtime crashes, security exposures, documentation drift, stale CI gates, and cascading operational risk. A rule must be clearly broken only when there is a documented reason, and exceptions must state that reason explicitly, name what still must be validated despite the exception, and be narrowly scoped.
 
-Every documented exception must follow this format:
+**[AG-DOC-011]** Every documented exception must follow this format:
 
 - **Scope**: What the exception narrows (e.g., "Rust builder images for service X" or "CodeQL analysis for auto-generated code in path Y").
 - **Reason**: Why the normal rule does not apply in this case (e.g., "generator output is deterministic and pre-audited," or "this image must use rust:latest because...").
@@ -283,7 +285,9 @@ Every documented exception must follow this format:
 - **Validation**: What validation is still required despite the exception. Omitting validation because "the exception lets us skip it" misses the point — the exception narrows the rule, but safety verification must land somewhere else.
 - **Non-Expansion**: What the exception explicitly does NOT cover (e.g., "this exception applies only to service X, not to other services" or "only to CodeQL analysis, not to other security checks").
 
-### Example: Rust Macro Expansion and CodeQL Analysis (issue #394)
+### [AG-VAL-021] Example: Rust Macro Expansion and CodeQL Analysis (issue #394)
+
+**Known open contradiction (issue #702, open):** this worked example's Scope/Reason/Validation below still describe macro-*generated* code, while the general rule it illustrates (Rule-Ref: AG-VAL-022, above) correctly scopes the exception to ordinary macro *invocations* in normal, human-authored source. Do not follow this worked example's text over AG-VAL-022's when they disagree — AG-VAL-022 is the current, correct scope. This ID exists so the disputed text has a stable citation for tracking purposes, not because its content is settled.
 
 - **Scope**: CodeQL analysis of Rust code generated by macros that expand to large intermediate representations.
 - **Reason**: Rust procedural macros can generate code that CodeQL reports as overly complex or unreachable, even though the actual compiled binary and test behavior are correct. The generated code is not human-readable and is not part of the reviewable source surface. Blocking on CodeQL false positives in generated code delays legitimate security fixes.
@@ -309,7 +313,7 @@ A closing report must document:
 
 6. **Known open risks** — Anything that feels incomplete, partially implemented, or dependent on follow-up work must be stated (e.g., "admin UI does not yet expose the new feature" or "the exception needs re-evaluation once upstream macro behavior changes"). Acknowledge what's outstanding rather than implying the task is fully shipped.
 
-7. **Documentation checked/updated for drift** — Did you read the relevant documentation (README.md, threat-model.md, architecture docs) to verify it still describes the code behavior correctly? If you found drift, did you fix it? If not, why not? (Reference rule **[AG-DOC-001]** — documentation drift is a defect.) State explicitly whether documentation was checked or skipped, and if skipped, why (e.g., "documentation changes are out of scope for this PR and tracked in issue #XXX").
+7. **Documentation checked/updated for drift** — Did you read the relevant documentation (README.md, threat-model.md, architecture docs) to verify it still describes the code behavior correctly? If you found drift, did you fix it? If not, why not? (Reference rule Rule-Ref: AG-DOC-001 — documentation drift is a defect.) State explicitly whether documentation was checked or skipped, and if skipped, why (e.g., "documentation changes are out of scope for this PR and tracked in issue #XXX").
 
 8. **Follow-up issue reference or explicit "none"** — If this work creates or depends on a follow-up task, cite it (e.g., "depends on #500 being merged first" or "follow-up: #502 will add Admin UI support for this feature"). If there is no follow-up work, state "no follow-up required" explicitly, rather than omitting it. An omission looks like incomplete thought; an explicit statement closes the loop.
 
@@ -375,6 +379,8 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
 | AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
 | AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-021 | CodeQL #394 macro-expansion carve-out worked example | Manual review. **Known gap**: this worked example's own wording still contradicts the general carve-out rule (Rule-Ref: AG-VAL-022, line ~83) — see issue #702, open. Do not treat this ID as settling that contradiction; AG-VAL-022 is the current, correct scope. |
+| AG-VAL-022 | General CodeQL #394 macro-expansion carve-out (correct scope: ordinary macros in human-authored source) | Manual review |
 | AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
 | AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
 | AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
@@ -411,11 +417,26 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-OP-012 | Do not use `proxy_cache_key $request_uri` | Code review (nginx config inspection) |
 | AG-OP-013 | Convergence/idempotence PRs answer the 5 questions | Manual review (PR body inspection) |
 | AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
+| AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
+| AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
+| AG-DOC-004 | Precedence: area-specific AGENTS files (item 3) | Manual review |
+| AG-DOC-005 | Precedence: `SECURITY.md` (item 4) | Manual review |
+| AG-DOC-006 | Precedence: architecture/release documentation (item 5) | Manual review |
+| AG-DOC-007 | Precedence: `README.md`/user-facing docs (item 6) | Manual review |
+| AG-DOC-008 | Do not silently pick a side on a real conflict | Manual review |
+| AG-DOC-009 | Surface conflicts explicitly | Manual review |
+| AG-DOC-010 | Fix one side of a conflict or ask for guidance | Manual review |
+| AG-DOC-011 | Documented exceptions must follow the Scope/Reason/Tracking/Validation/Non-Expansion format | Manual review |
 | AG-CODE-001 | Default: no comments | Manual review |
 | AG-CODE-002 | Comments document WHY | Manual review |
 | AG-CODE-003 | No task/PR refs in comments | Manual review |
 | AG-CODE-004 | Structured notes for deferred work | Manual review |
 | AG-CODE-005 | Remove TODO markers once implemented | Manual review + grep before finishing PR |
+| AG-CODE-006 | Code must stay human-readable | Manual review |
+| AG-CODE-007 | Structural/orientation step-comments allowed | Manual review |
+| AG-CODE-008 | Touching any part of a file requires checking the entire file for missing WHY-comments | Manual review |
+| AG-CODE-009 | A descriptive name/identifier alone is not a valid comment | Manual review |
+| AG-CODE-010 | Every `#[test]` function needs at least a short comment | Manual review |
 
 **Known Gaps and Planned Improvements:**
 
