@@ -114,7 +114,7 @@ Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restrict
 - DHCPv4 + DHCPv6 (dual-stack)
 - IP ranges as start–end (no CIDR required)
 - Static assignments: MAC → IP, editable via UI
-- DDNS → PowerDNS: lease = automatically A + PTR in the configured DHCP domain via TSIG-secured nsupdate (RFC 2136)
+- DDNS → PowerDNS: lease = automatically an A record in the configured DHCP domain via TSIG-secured nsupdate (RFC 2136). PTR (reverse) updates are **not** currently applied — confirmed broken in production (issue #768): Kea's D2 daemon sends every reverse update's on-wire zone as the literal `in-addr.arpa.`, which has no matching PowerDNS zone (only narrower private-range subzones exist), so PowerDNS rejects every PTR update regardless of octet. See [docs/dhcp-modes.md](dhcp-modes.md) for the full detail.
 - REST API (Kea Control Agent) for Admin UI
 
 ## Admin UI security headers

@@ -292,7 +292,7 @@ None run on the host's real network interface by default:
 | Check | What it answers | Where it runs | Invasive? |
 |---|---|---|---|
 | **Conflict discovery** (`services/ui/dhcp-probe.sh`) | Does *any* DHCP server answer on this LAN segment (broadcast discover via `nmap`), and does a client dry-run on the host's own detected default interface also succeed? | Admin UI DHCP page, on demand | The client dry-run leg uses `dhclient -sf /bin/true` so it never applies the negotiated lease to the host interface, but it does run against the host's real detected interface. |
-| **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
+| **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? And does a granted lease produce a matching PowerDNS **forward (A record)** DDNS update? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container, a throwaway PowerDNS container, and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
 | **Kea Control Agent mutation round-trip** (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
 | **dnsmasq-proxy PXE simulation** (`scripts/dhcp-proxy-pxe-simulation.sh`) | Does *our own* dnsmasq-proxy ProxyDHCP mode reply to a real, synthetically-crafted PXE-tagged DHCPDISCOVER with the correct external boot server address, architecture-appropriate boot filename, and LanCache NG DNS servers -- for both legacy BIOS and UEFI clients -- while still ignoring an ordinary, non-PXE-tagged DISCOVER? | `dhcp-proxy-pxe-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway dnsmasq-proxy container and a throwaway synthetic-PXE-client container (scapy), both on a dedicated Docker bridge network the script creates and destroys itself. No host interface is ever involved, and the external PXE boot server it asserts against is never a real listening service -- just a configured address, per issue #705's scope of pointing at operator infrastructure this project does not itself run. |
 
@@ -324,9 +324,26 @@ every asserted value explicitly (to the job log and, in CI,
 **What the Kea lease-flow simulation does NOT verify** (documented here per
 its own design -- see the script's header comment for the full rationale):
 
-- DHCP-DDNS lease-event follow-through (a granted lease producing a real
-  PowerDNS record via TSIG-authenticated DDNS) -- tracked separately in
-  issue #557.
+- Reverse (PTR) DDNS updates. Confirmed **broken in production** (issue
+  #768, discovered while verifying forward DDNS for issue #706): Kea's D2
+  daemon sends every reverse update's on-wire zone as the literal
+  `in-addr.arpa.`, but no PowerDNS zone with that exact name exists (only
+  narrower private-range subzones), so PowerDNS rejects every PTR update
+  regardless of octet.
+- Whether `dns-ssl` (the SSL-mode PowerDNS instance) also receives DHCP
+  lease records. It doesn't, under normal operation (issue #770, discovered
+  during PR #769's review): `services/dhcp/kea-dhcp-ddns.conf` lists both
+  DNS servers in one `dns-servers` array, but Kea's D2 daemon treats that
+  list as first-to-last **failover**, not fan-out -- as long as
+  `dns-standard` is healthy (the first entry in prod/quickstart), it is the
+  only PowerDNS instance that ever receives the update. Clients that only
+  resolve against the SSL-mode DNS IP do not currently get DHCP-issued LAN
+  hostnames. This predates #706/#769 (before those fixes, DDNS reached
+  *neither* instance), so it isn't a regression, but it also isn't fixed by
+  them; real fan-out to both independent PowerDNS databases needs its own
+  design (zone replication or NATS-mediated delivery) and is tracked as new
+  work for v0.3.0 in issue #770, not squeezed into the v0.2.0 stabilization
+  fix this document otherwise describes.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path
   (`services/dhcp-proxy`), covered instead by the PXE simulation below.
 

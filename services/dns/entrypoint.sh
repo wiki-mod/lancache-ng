@@ -18,6 +18,40 @@ DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 DDNS_TSIG_KEY="${DDNS_TSIG_KEY:-}"
 DDNS_TSIG_NAME="${DDNS_TSIG_NAME:-lancache-ddns-key}"
 DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
+
+# Fail closed when no real TSIG key is configured (PR #769 review follow-up).
+# deploy/prod/docker-compose.yml's DDNS_ALLOW_FROM override sets this to the
+# host's real LAN IP(s) (IP_STANDARD/IP_SSL) unconditionally, for the case
+# DDNS_TSIG_KEY *is* set. But PowerDNS's own documented default is
+# dnsupdate-require-tsig=no (confirmed against the upstream docs), which
+# means "zones without TSIG keys can be updated by unauthenticated agents
+# operating from an allowed address range" -- i.e. allow-dnsupdate-from
+# alone, with no TSIG key configured at all, would accept an *unsigned* DNS
+# UPDATE from anything that can send (or spoof, trivially on a shared LAN
+# segment/UDP) a packet with that source IP. Forcing
+# `dnsupdate-require-tsig=yes` globally in pdns.conf.template would close
+# this cleanly, but this image's pdns-server (Debian Trixie, 4.9.x) predates
+# that setting (added upstream only in PowerDNS 5.0.0) -- `--config=check`
+# would reject it as an unknown setting and the container would refuse to
+# start or roll back to a known-good snapshot. So the fix here is on the
+# other side of the same equation: when DDNS_TSIG_KEY is empty (the shipped
+# default until an operator generates one) or still a placeholder, there is
+# no real auth control for DDNS at all, so allow-dnsupdate-from must not be
+# widened past loopback regardless of what the environment/compose
+# requested -- matching configure_ddns_tsig's own case pattern below and
+# making docs/threat-model.md's existing "DDNS_TSIG_KEY is fail-closed"
+# claim actually true. The CHANGE_ME*/changeme* placeholder case doesn't
+# strictly need this (configure_ddns_tsig already exits 1 before pdns_server
+# ever starts, further down this script), but is included anyway so this
+# check doesn't silently rely on staying in sync with that later exit.
+case "$DDNS_TSIG_KEY" in
+    ""|CHANGE_ME*|changeme*)
+        if [ "$DDNS_ALLOW_FROM" != "127.0.0.1" ]; then
+            echo "[lancache-dns] No usable DDNS_TSIG_KEY is configured; forcing DDNS_ALLOW_FROM back to 127.0.0.1 (was: ${DDNS_ALLOW_FROM}) so unsigned DNS UPDATE packets from LAN hosts are not accepted."
+            DDNS_ALLOW_FROM="127.0.0.1"
+        fi
+        ;;
+esac
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
@@ -59,7 +93,62 @@ if [ ${#PDNS_API_KEY} -lt 16 ]; then
     exit 1
 fi
 
-export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
+# detect_pdns_local_address
+# Determines this container's own real, non-loopback IPv4 address at
+# runtime, so pdns_server (dnsupdate=yes) can bind a second, real listener
+# alongside 127.0.0.1 -- DDNS updates from the separate `dhcp`
+# container/host (network_mode: host in prod, a completely different
+# container in dev) can only reach a loopback-only bind if they originate
+# inside this same container, which they never do (issue #706). No fixed IP
+# is knowable ahead of time and none is hardcoded: dev's dns-standard
+# happens to get a static compose-assigned IP, but prod's container gets a
+# dynamically-assigned Docker bridge-network IP on every start -- the same
+# runtime self-detection below runs in both, with no per-environment
+# special-casing. First tier mirrors setup.sh's detect_secondary_listen_ip
+# (same "src" parsing of `ip route get`, the address the kernel would
+# actually use to reach the internet, i.e. this container's real bridge
+# address). Deliberately does NOT reuse that function's second-tier
+# fallback verbatim: that fallback excludes 172.x addresses because it is
+# hunting a *host's* real LAN IP, but this container's own address usually
+# *is* a 172.x Docker bridge address -- the same exclusion here would
+# reject exactly the address needed.
+detect_pdns_local_address() {
+    local ip
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' \
+        || true)
+    if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+
+    # Fallback: first non-loopback IPv4 address on any interface, for the
+    # rare case this container has no default route yet but is already
+    # reachable on its own bridge address.
+    ip=$(ip -4 addr show \
+        | awk '/inet / && $2 !~ /^127\./ { sub(/\/.*/, "", $2); print $2; exit }' \
+        || true)
+    if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+
+    return 1
+}
+
+# Fails loud on failure, deliberately not silently falling back to
+# 127.0.0.1: `pdns_server --config=check` (used below) validates syntax
+# only, not reachability, so a silent fallback here would reintroduce the
+# exact loopback-only-bind bug this is fixing without any startup error to
+# catch it.
+if ! PDNS_LOCAL_ADDRESS="$(detect_pdns_local_address)"; then
+    echo "[lancache-dns] FATAL: could not detect this container's own non-loopback IPv4 address."
+    echo "[lancache-dns] pdns_server must bind a real address (alongside 127.0.0.1) or DDNS updates from the dhcp container/host can never reach it."
+    exit 1
+fi
+echo "[lancache-dns] pdns_server will bind local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}"
+
+export PDNS_API_KEY DDNS_ALLOW_FROM PDNS_LOCAL_ADDRESS ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 
 # ────────────────────────────────────────────────────────────────────────────
 # Known-good configuration snapshot library (#415, #615)
@@ -480,6 +569,25 @@ _dns_auth_validate_snapshot_or_rollback() {
         if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
             echo "[lancache-dns] WARNING: the restored pdns.conf's api-key does not match the current PDNS_API_KEY. The authoritative server's REST API (port 8081) is now authenticating with a stale key while recursor.conf, the Admin UI, and nats-subscriber use the current one -- domain writes/reconciliation calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
         fi
+
+        # #706 follow-up (PR #769 review): the restored snapshot's
+        # local-address line still holds whichever Docker bridge IP this
+        # container had when *that* snapshot was created (pdns.conf.template
+        # bakes in the dynamic $PDNS_LOCAL_ADDRESS). If this container was
+        # recreated since then, that address may no longer exist on any
+        # interface here -- and `pdns_server --config=check` never catches
+        # this, because it doesn't validate whether an address is actually
+        # bindable (same "doesn't parse eagerly" limitation noted above for
+        # allow-dnsupdate-from). Left alone, pdns_server would restart-loop
+        # trying to bind a dead address after a rollback that itself
+        # reported success. Re-stamp the restored file with this session's
+        # freshly-detected address (byte-identical to what
+        # render_template_atomic would have emitted) before returning --
+        # deliberately not re-validated, since this substitution only
+        # touches the one value the check-only validator already ignores.
+        if [ -n "${PDNS_LOCAL_ADDRESS:-}" ]; then
+            sed -i "s/^local-address=.*/local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}/" "$pdns_conf"
+        fi
         return 0
     fi
 
@@ -502,7 +610,7 @@ _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || exit 1
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable names.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE"
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE"
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
