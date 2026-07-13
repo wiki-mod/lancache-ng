@@ -3,11 +3,19 @@
 
 use regex::Regex;
 use serde::Serialize;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::process::Command;
 use std::sync::OnceLock;
+
+// Backward-read chunk size for `parse_log_tail`. A typical nginx access log
+// line here is ~150-300 bytes, so 64 KiB comfortably covers the largest
+// `limit` any caller passes today (200, from routes/logs.rs) in a single
+// read; larger `limit`s just cost one or two extra reads rather than a full
+// linear scan. Small enough to avoid ever reading more than a tiny fraction
+// of a multi-GB log for a normal tail request.
+const TAIL_CHUNK_SIZE: u64 = 64 * 1024;
 
 static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
 static STUB_STATUS_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -105,33 +113,121 @@ pub struct LogStats {
     pub hit_pct: f64,
 }
 
-// Streams the file line-by-line rather than reading it fully into memory,
-// keeping only the last `limit` lines in a bounded ring buffer (VecDeque).
-// Access logs can grow to gigabytes, so this avoids holding the whole file
-// in memory just to show the operator its most recent entries.
+// Reads only the last `limit` lines of the file, seeking from the end and
+// pulling fixed-size chunks backwards (`read_last_lines`) instead of
+// scanning every line from byte 0. Issue #75 already fixed the *memory*
+// side of this (a bounded ring buffer instead of loading the whole file
+// into one String); this fixes the remaining *time* side — every `/logs`
+// or dashboard page load used to be O(total log size) even though it only
+// ever wants the last 10-200 lines. Access logs can grow to gigabytes, so
+// both properties matter.
+//
+// Returned lines are in the same order the previous forward-scanning
+// implementation produced: oldest-first within the tail window (i.e. plain
+// file order, restricted to the last `limit` lines). Callers rely on this —
+// routes/logs.rs reverses the result itself to show newest-first, and
+// templates/dashboard.html documents that this function's output is
+// "simply the tail of the file". Do not reverse the order here; that would
+// silently double-reverse the logs.rs case.
 pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
     if limit == 0 {
         return vec![];
     }
 
-    let Ok(file) = File::open(path) else {
+    let Ok(mut file) = File::open(path) else {
         return vec![];
     };
 
-    let reader = BufReader::new(file);
     let re = log_regex();
-    let mut tail = VecDeque::with_capacity(limit);
-
-    for line in reader.lines().map_while(Result::ok) {
-        if tail.len() == limit {
-            tail.pop_front();
-        }
-        tail.push_back(line);
-    }
-
-    tail.iter()
+    read_last_lines(&mut file, limit)
+        .iter()
         .filter_map(|line| parse_log_line(re, line))
         .collect()
+}
+
+// Returns up to `limit` complete lines from the end of `file`, in file
+// order (oldest of the returned lines first). Never reads more of the file
+// than necessary: it seeks to EOF and pulls `TAIL_CHUNK_SIZE` chunks
+// backwards, growing a byte buffer leftward, until either enough newlines
+// have been seen or byte 0 is reached.
+fn read_last_lines(file: &mut File, limit: usize) -> Vec<String> {
+    let Ok(file_len) = file.seek(SeekFrom::End(0)) else {
+        return vec![];
+    };
+    if file_len == 0 {
+        return vec![];
+    }
+
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut pos = file_len;
+
+    loop {
+        // Requiring strictly MORE than `limit` newlines (not >=) before
+        // stopping leaves one line of margin. Without it, the leading
+        // segment of `buffer` — which we always discard below because a
+        // chunk boundary may have split it mid-line — could be the one
+        // that was needed to reach exactly `limit` complete lines,
+        // producing an off-by-one short result.
+        let newline_count = buffer.iter().filter(|&&b| b == b'\n').count();
+        if pos == 0 || newline_count > limit {
+            break;
+        }
+
+        let chunk_len = TAIL_CHUNK_SIZE.min(pos);
+        pos -= chunk_len;
+
+        if file.seek(SeekFrom::Start(pos)).is_err() {
+            break;
+        }
+        let mut chunk = vec![0u8; chunk_len as usize];
+        // A short/failed read here would silently corrupt the reconstructed
+        // tail (bytes missing from the middle), so bail out to whatever
+        // complete lines are already in `buffer` rather than risk that.
+        if file.read_exact(&mut chunk).is_err() {
+            break;
+        }
+        chunk.extend_from_slice(&buffer);
+        buffer = chunk;
+    }
+
+    // `buffer` now holds a contiguous byte range [pos, file_len) of the
+    // file, i.e. bytes 0..file_len if we walked all the way to the start.
+    let reached_start = pos == 0;
+    let ends_with_newline = buffer.last() == Some(&b'\n');
+
+    let mut segments: Vec<&[u8]> = buffer.split(|&b| b == b'\n').collect();
+
+    // A trailing '\n' (the common case: every complete line, including the
+    // last, is newline-terminated) produces one spurious empty segment
+    // after the final delimiter — drop it, it is not a line.
+    if ends_with_newline {
+        segments.pop();
+    }
+
+    // Unless the buffer starts at byte 0 of the file, its first segment's
+    // beginning was cut off by our chunk boundary and is not a real line —
+    // the true start of that line is further left, outside `buffer`.
+    if !reached_start && !segments.is_empty() {
+        segments.remove(0);
+    }
+
+    let start_idx = segments.len().saturating_sub(limit);
+    segments[start_idx..]
+        .iter()
+        .map(|s| bytes_to_line(s))
+        .collect()
+}
+
+// Strips a trailing '\r' (CRLF logs) to mirror `BufRead::lines()`'s
+// line-ending handling, and uses a lossy UTF-8 conversion — rather than
+// discarding the line or propagating an error — so a single malformed byte
+// sequence anywhere in the tail window can't panic or (as the old
+// `map_while(Result::ok)` forward scan effectively did) truncate every line
+// after it; invalid sequences become U+FFFD and the line is still returned,
+// though `parse_log_line`'s regex will typically then just fail to match it.
+fn bytes_to_line(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
@@ -317,6 +413,195 @@ mod tests {
         assert_eq!(stats.total_requests, 1);
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 0);
+
+        fs::remove_file(path).expect("remove temp log");
+    }
+
+    // Unique temp-file path per test, mirroring `shared_log_path_is_counted_once`'s
+    // pattern above; the nanosecond suffix avoids collisions between tests
+    // running in parallel in the same process.
+    fn temp_log_path(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("lancache-ui-tail-{label}-{unique}.log"))
+    }
+
+    #[test]
+    fn parse_log_tail_missing_file_returns_empty() {
+        // `File::open` fails for a nonexistent path; `parse_log_tail` must
+        // return an empty Vec rather than panicking, since a proxy log file
+        // may not exist yet on a fresh deployment.
+        let result = parse_log_tail("/nonexistent/path/does-not-exist.log", 10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn read_last_lines_empty_file_returns_empty() {
+        let path = temp_log_path("empty");
+        File::create(&path).expect("create empty temp log");
+
+        let mut file = File::open(&path).expect("reopen temp log");
+        let lines = read_last_lines(&mut file, 10);
+        assert!(lines.is_empty());
+
+        fs::remove_file(path).expect("remove temp log");
+    }
+
+    #[test]
+    fn read_last_lines_smaller_than_chunk_returns_all_in_order() {
+        // File is far smaller than TAIL_CHUNK_SIZE, so the whole thing is
+        // read in a single backward chunk (`pos` reaches 0 immediately).
+        // Requesting more lines than exist must return exactly what exists,
+        // in the same oldest-first file order the old forward scan used.
+        let path = temp_log_path("small");
+        let mut file = File::create(&path).expect("create temp log");
+        for i in 0..5 {
+            writeln!(
+                file,
+                r#"127.0.0.1 - [29/Jun/2026:00:00:00 +0000] "GET /foo/{i} HTTP/1.1" 200 1024 "HIT" "example.com""#
+            )
+            .expect("write temp log");
+        }
+        drop(file);
+
+        let mut file = File::open(&path).expect("reopen temp log");
+        let lines = read_last_lines(&mut file, 100);
+        assert_eq!(lines.len(), 5);
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains(&format!("/foo/{i} ")),
+                "line {i} out of order or wrong content: {line}"
+            );
+        }
+
+        fs::remove_file(path).expect("remove temp log");
+    }
+
+    #[test]
+    fn read_last_lines_handles_missing_trailing_newline() {
+        // Access logs are usually append-only with every line
+        // newline-terminated, but the very last line at the moment of
+        // reading could still be mid-write with no trailing '\n' yet. That
+        // final partial line must still come back as its own entry, not be
+        // dropped or merged with the previous line.
+        let path = temp_log_path("no-trailing-newline");
+        let mut file = File::create(&path).expect("create temp log");
+        // First line newline-terminated as normal; the second (last) line
+        // intentionally has none, simulating an in-progress write.
+        writeln!(
+            file,
+            r#"127.0.0.1 - [29/Jun/2026:00:00:00 +0000] "GET /foo/0 HTTP/1.1" 200 1024 "HIT" "example.com""#
+        )
+        .expect("write temp log");
+        write!(
+            file,
+            r#"127.0.0.1 - [29/Jun/2026:00:00:01 +0000] "GET /foo/1 HTTP/1.1" 200 1024 "HIT" "example.com""#
+        )
+        .expect("write temp log");
+        drop(file);
+
+        let mut file = File::open(&path).expect("reopen temp log");
+        let lines = read_last_lines(&mut file, 10);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("/foo/0 "));
+        assert!(lines[1].contains("/foo/1 "));
+        assert!(!lines[1].ends_with('\n'));
+
+        fs::remove_file(path).expect("remove temp log");
+    }
+
+    #[test]
+    fn tail_returns_correct_last_n_lines_from_larger_file() {
+        // Checks CONTENT and ORDER, not just count: a bug that returned the
+        // right number of lines but the wrong slice (e.g. off-by-one, or
+        // the first N instead of the last N) would still pass a
+        // count-only assertion.
+        let path = temp_log_path("larger");
+        let mut file = File::create(&path).expect("create temp log");
+        for i in 0..500 {
+            writeln!(
+                file,
+                r#"127.0.0.1 - [29/Jun/2026:00:00:00 +0000] "GET /foo/{i:04} HTTP/1.1" 200 1024 "HIT" "example.com""#
+            )
+            .expect("write temp log");
+        }
+        drop(file);
+
+        let mut file = File::open(&path).expect("reopen temp log");
+        let lines = read_last_lines(&mut file, 10);
+        assert_eq!(lines.len(), 10);
+        // Oldest-first within the window: lines 490..499, in that order.
+        for (offset, line) in lines.iter().enumerate() {
+            let expected_index = 490 + offset;
+            assert!(
+                line.contains(&format!("/foo/{expected_index:04} ")),
+                "position {offset}: expected /foo/{expected_index:04}, got: {line}"
+            );
+        }
+
+        fs::remove_file(path).expect("remove temp log");
+    }
+
+    #[test]
+    fn tail_reconstructs_line_split_across_chunk_boundary() {
+        // Engineers a file where one specific line's bytes are physically
+        // split across the TAIL_CHUNK_SIZE backward-read boundary, then
+        // asserts that exact line comes back byte-for-byte intact — not
+        // truncated, duplicated, or dropped. Every line is the same fixed
+        // byte length, so the split line's index (and thus its expected
+        // content) can be computed from real offsets instead of guessed.
+        fn make_line(i: usize) -> String {
+            format!(
+                r#"127.0.0.1 - [29/Jun/2026:00:00:00 +0000] "GET /foo/{i:06} HTTP/1.1" 200 1024 "HIT" "example.com""#
+            )
+        }
+
+        let line_len = make_line(0).len() + 1; // +1 for the trailing '\n'
+                                               // Enough lines to span a few TAIL_CHUNK_SIZE reads with margin.
+        let total_lines = (TAIL_CHUNK_SIZE as usize / line_len) * 3;
+        let file_len = (total_lines * line_len) as u64;
+        assert!(
+            file_len > TAIL_CHUNK_SIZE,
+            "fixture must exceed one chunk to exercise multi-chunk reads"
+        );
+
+        let boundary_pos = file_len - TAIL_CHUNK_SIZE;
+        let split_line_index = (boundary_pos as usize) / line_len;
+        // If the boundary landed exactly on a line start there's nothing to
+        // split — fail loudly so the fixture gets adjusted rather than
+        // silently skip the scenario this test exists to cover.
+        assert_ne!(
+            (boundary_pos as usize) % line_len,
+            0,
+            "chunk boundary landed on a line start; adjust the fixture to force a mid-line split"
+        );
+
+        let path = temp_log_path("chunk-boundary");
+        let mut file = File::create(&path).expect("create temp log");
+        for i in 0..total_lines {
+            writeln!(file, "{}", make_line(i)).expect("write temp log");
+        }
+        drop(file);
+
+        // +5 lines of margin beyond the split line so it's comfortably
+        // inside the requested window, not right at its edge.
+        let limit = total_lines - split_line_index + 5;
+        let mut file = File::open(&path).expect("reopen temp log");
+        let lines = read_last_lines(&mut file, limit);
+
+        assert_eq!(lines.len(), limit);
+        let expected_first_index = total_lines - limit;
+        assert_eq!(lines[0], make_line(expected_first_index));
+        assert_eq!(lines[lines.len() - 1], make_line(total_lines - 1));
+
+        let split_offset_in_result = split_line_index - expected_first_index;
+        assert_eq!(
+            lines[split_offset_in_result],
+            make_line(split_line_index),
+            "line straddling the chunk boundary was not reconstructed correctly"
+        );
 
         fs::remove_file(path).expect("remove temp log");
     }
