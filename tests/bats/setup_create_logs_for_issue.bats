@@ -114,8 +114,14 @@ EOF
 @test "logbundle_redact_stream scrubs a secret value embedded mid-string, not just on its own line" {
     secrets_file="$BATS_TEST_TMPDIR/secrets.txt"
     printf '%s\n' "supersecretvaluelong123456" > "$secrets_file"
+    input_file="$BATS_TEST_TMPDIR/input.txt"
+    printf "connect nats://user:supersecretvaluelong123456@host:4222\nother line untouched\n" > "$input_file"
 
-    run bash -c 'printf "connect nats://user:supersecretvaluelong123456@host:4222\nother line untouched\n" | logbundle_redact_stream "$1"' _ "$secrets_file"
+    # Redirect from a file rather than piping from a `bash -c` subshell: a
+    # subshell doesn't inherit this function (only sourced, never `export -f`'d),
+    # matching the real call sites in setup.sh (e.g. the .env redaction call),
+    # which also redirect from a file rather than pipe into this function.
+    run logbundle_redact_stream "$secrets_file" < "$input_file"
     [ "$status" -eq 0 ]
     [[ "$output" == *"nats://user:[REDACTED]@host:4222"* ]]
     [[ "$output" == *"other line untouched"* ]]
@@ -125,7 +131,10 @@ EOF
 @test "logbundle_redact_stream is a no-op copy when no secrets are configured" {
     secrets_file="$BATS_TEST_TMPDIR/empty-secrets.txt"
     : > "$secrets_file"
-    run bash -c 'printf "plain text, nothing to redact\n" | logbundle_redact_stream "$1"' _ "$secrets_file"
+    input_file="$BATS_TEST_TMPDIR/input.txt"
+    printf "plain text, nothing to redact\n" > "$input_file"
+
+    run logbundle_redact_stream "$secrets_file" < "$input_file"
     [ "$status" -eq 0 ]
     [ "$output" = "plain text, nothing to redact" ]
 }
