@@ -1318,6 +1318,67 @@ runtime_env_file_for_install_dir() {
     fi
 }
 
+# True if this install currently relies on the remote-secondary NATS
+# host-binding override (docker-compose.nats-secondary.yml) being active, so
+# update/validate must keep passing it on every subsequent compose invocation
+# instead of silently reverting to the base compose file's NATS wiring (which
+# only `expose`s 4222 internally, dropping the host port publish remote
+# secondary DNS nodes depend on). NATS_BIND_IP has exactly one purpose in
+# this codebase: it is the value the override's `ports:` mapping requires via
+# `${NATS_BIND_IP:?...}` (see docker-compose.nats-secondary.yml), so a
+# non-empty NATS_BIND_IP is used as the activation signal instead of
+# inventing a separate marker file. The override file's own header comment
+# documents its PRIMARY activation example as a shell-exported
+# `NATS_BIND_IP=<ip> docker compose ... up -d`, not a persisted .env.local
+# assignment, so the process environment is checked first -- mirroring
+# Compose's own variable-interpolation precedence, where a shell variable
+# always wins over an --env-file value. Only if the shell has nothing set do
+# we fall back to the runtime env file, covering operators who persisted
+# NATS_BIND_IP into .env.local so the override keeps working across shell
+# sessions (the file's documented secondary activation path). Either path
+# means the operator has, by construction, committed to running with the
+# override active.
+nats_secondary_override_active_for_install_dir() {
+    local install_dir="$1" env_file="$2" bind_ip
+
+    [[ -f "$install_dir/docker-compose.nats-secondary.yml" ]] || return 1
+    if [[ -n "${NATS_BIND_IP:-}" ]]; then
+        return 0
+    fi
+    bind_ip=$(get_env_var_nonempty NATS_BIND_IP "$env_file" 2>/dev/null || true)
+    [[ -n "$bind_ip" ]]
+}
+
+# Builds the -f argument list a compose invocation for install_dir needs:
+# the base file, an operator-provided docker-compose.override.yml/.yaml when
+# present, and the NATS-secondary override when
+# nats_secondary_override_active_for_install_dir() says it is active. The
+# base file must always be passed explicitly the moment any -f is added at
+# all: Compose disables its cwd auto-discovery of docker-compose.yml (and,
+# with it, the auto-discovery/merge of a sibling docker-compose.override.yml)
+# as soon as one -f is given, so a call site that appended only the
+# NATS-secondary override would both (a) run the stack from that
+# partial-services fragment alone and (b) silently drop any operator
+# override customizations that Compose would otherwise have auto-merged.
+# Detecting and re-adding the override file here keeps that auto-merge
+# behavior intact even though this function must pass -f explicitly.
+compose_file_args_for_install_dir() {
+    local install_dir="$1" env_file="$2" override_file
+    local -a args=(-f "$install_dir/docker-compose.yml")
+
+    for override_file in "$install_dir/docker-compose.override.yml" "$install_dir/docker-compose.override.yaml"; do
+        if [[ -f "$override_file" ]]; then
+            args+=(-f "$override_file")
+            break
+        fi
+    done
+
+    if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
+        args+=(-f "$install_dir/docker-compose.nats-secondary.yml")
+    fi
+    printf '%s\n' "${args[@]}"
+}
+
 # Copies the quickstart compose file and helper scripts into install_dir (used
 # on both first install and every update, so copied installs always run the
 # current container wiring). See the inline comment for the #538 workaround
@@ -2476,9 +2537,11 @@ compose_stack_start() {
 validate_compose_config() {
     local install_dir="$1"
     local env_file
+    local -a compose_files
     print_step "Validating Docker Compose configuration"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    (cd "$install_dir" && docker compose --env-file "$env_file" -f "$install_dir/docker-compose.yml" config --quiet) \
+    mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
+    (cd "$install_dir" && docker compose --env-file "$env_file" "${compose_files[@]}" config --quiet) \
         || die "Docker Compose configuration is not valid. The stack was not pulled or restarted."
     print_ok "Docker Compose configuration is valid"
 }
@@ -2779,6 +2842,32 @@ EOF
 # files/volumes and whatever migrate_env_for_update managed to write to .env
 # before failing are left on disk either way; rerun `setup.sh update` once the
 # reported problem is fixed.
+#
+# If the archived install tree has no .env.local (a backup that predates the
+# .env.local split, or a deploy/prod backup taken before an operator ever
+# created one), moves any .env.local currently sitting at install_dir out of
+# the way instead of leaving it in place. Without this, rsync (deliberately
+# run without --delete, see cmd_restore's own comment below) leaves a
+# pre-restore .env.local completely untouched, and
+# runtime_env_file_for_install_dir() prefers .env.local over .env whenever it
+# exists -- so every subsequent compose/update/debug call would keep reading
+# the stale pre-restore override instead of the archive's just-restored
+# .env, silently defeating the point of a rollback restore. The stale file is
+# renamed rather than deleted outright, so it stays available for manual
+# recovery instead of being silently lost. Idempotent: a second restore of
+# the same archive against the same target finds no .env.local left to move
+# and is a no-op.
+restore_clear_stale_env_local_if_unarchived() {
+    local archived_install_root="$1" install_dir="$2" stale_target
+
+    [[ -f "$archived_install_root/.env.local" ]] && return 0
+    [[ -f "$install_dir/.env.local" ]] || return 0
+
+    stale_target="$install_dir/.env.local.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$install_dir/.env.local" "$stale_target"
+    print_warn "Archived backup has no .env.local; moved the stale pre-restore override to $(basename "$stale_target") so the restored .env takes effect."
+}
+
 cmd_restore() {
     local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
     install_dir=$(realpath -m "$install_dir")
@@ -2870,6 +2959,10 @@ cmd_restore() {
     if [[ -d "$root/$rel_install" ]]; then
         mkdir -p "$install_dir"
         rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/"
+        # Must run before the path-rewrite sed loop below: a stale .env.local
+        # that the archive doesn't account for should be moved aside, not
+        # rewritten in place as if it were part of the restored config.
+        restore_clear_stale_env_local_if_unarchived "$root/$rel_install" "$install_dir"
         if [[ "$archived_install" != "$install_dir" ]]; then
             for path in "$install_dir/.env" "$install_dir/.env.local"; do
                 [[ -f "$path" ]] || continue
@@ -3071,12 +3164,22 @@ EOF
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
+    local -a compose_files
     install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
+    # Query the activation state directly rather than inferring it from
+    # ${#compose_files[@]}: that count now also grows when a
+    # docker-compose.override.yml/.yaml is auto-detected (see
+    # compose_file_args_for_install_dir), so array length alone can no longer
+    # distinguish "NATS override active" from "operator override present".
+    if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
+        print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
+    fi
 
     UPDATE_CONVERGENCE_PAUSED=0
     UPDATE_CONVERGENCE_COMPLETED=0
@@ -3107,13 +3210,13 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling selected images"
-    docker compose --env-file "$env_file" pull \
+    docker compose --env-file "$env_file" "${compose_files[@]}" pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
     validate_compose_config "$install_dir"
 
     print_step "Restarting containers"
-    docker compose --env-file "$env_file" up -d --remove-orphans
+    docker compose --env-file "$env_file" "${compose_files[@]}" up -d --remove-orphans
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
