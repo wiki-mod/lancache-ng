@@ -467,6 +467,14 @@ services:
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     profiles: [logging]
     command:
+      # -H/-P enable fluent-bit's built-in HTTP monitoring server (default
+      # bind 0.0.0.0, no separate --listen flag exists -- confirmed via
+      # `fluent-bit --help` and a live `/api/v1/health` probe) for operator
+      # visibility (e.g. Netdata scraping); NOT the healthcheck mechanism
+      # below, which cannot reach it (see the healthcheck block's comment).
+      - -H
+      - -P
+      - "2020"
       - -f
       - "5"
       - -b
@@ -957,6 +965,19 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
+    # Cannot mirror syslog-ng's `syslog-ng-ctl healthcheck` shape exactly:
+    # this image ships no shell and no wget/curl (see the `command:` comment
+    # above), so neither a CMD-SHELL script nor an HTTP probe against the
+    # monitoring port above can run *inside* the container. `fluent-bit -V`
+    # is the one self-contained exec-form check available -- it only proves
+    # the binary is intact and executable, not that the live pipeline is
+    # healthy (weaker than syslog-ng's check by necessity, not by choice).
+    healthcheck:
+      test: ["CMD", "/fluent-bit/bin/fluent-bit", "-V"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - syslog-ng
     restart: always

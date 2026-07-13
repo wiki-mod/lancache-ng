@@ -190,6 +190,22 @@ is real, live, running code, not just work sitting in source control.
   `logs-syslog-ng` volume into the `watchdog` service; documented as
   commented samples in `deploy/prod/.env`, matching the existing
   `SYSLOG_MAX_FILE_MB` precedent.
+- Added `scripts/check-logging-matrix.sh` (#633, follow-up to #453/#632),
+  wired into the `validate-compose` CI job right after the existing naming
+  consistency check: compares `docs/architecture-ng.md`'s logging matrix
+  table against the real Compose service list (via
+  `docker compose config --services`, all profiles activated, across
+  `dev`/`prod`/`quickstart`) and fails if a service has no matrix row, or a
+  row names a service that no longer exists. Filled in the matrix's 2
+  previously-missing rows (`docker-socket-proxy`, `watchtower` -- both
+  third-party pinned images with no application log stream of their own to
+  forward) so the guard starts green. Also added a `healthcheck` block to
+  the `syslog` (fluent-bit) service in all 3 Compose files, plus its `-H -P
+  2020` HTTP monitoring server flags: the pinned
+  `cr.fluentbit.io/fluent/fluent-bit:3.2.10` image ships no shell and no
+  `wget`/`curl`/`ss` at all, so `syslog-ng`'s `CMD-SHELL` healthcheck shape
+  can't be mirrored exactly -- `fluent-bit -V` (exec form, binary-integrity
+  check only) is the one self-contained probe that image supports.
 
 ### Changed
 
