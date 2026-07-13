@@ -170,11 +170,23 @@ services:
       context: ../../services/watchdog
     env_file:
       - ../../config/dev/watchdog.env
+    # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
+    # watchdog does not touch this path at all on installs that never opt
+    # into the `logging` profile. Unlike every other consumer of this
+    # volume (fluent-bit's syslog-ng destination reads/writes it as the
+    # owner; a future Admin UI reader would mount it `:ro`), watchdog needs
+    # read-write access here since maybe_prune_syslog() deletes files.
+    environment:
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - SYSLOG_LOG_ROOT=${SYSLOG_LOG_ROOT:-/var/log/lancache-syslog-ng}
     volumes:
       # Watchdog validates the unified cache path in dev; it should not grow a
       # second standard/ssl split-cache convention.
       - proxy-cache:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
+      - logs-syslog-ng:/var/log/lancache-syslog-ng
     depends_on:
       - docker-socket-proxy
     networks:

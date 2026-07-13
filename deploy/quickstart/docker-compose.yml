@@ -449,11 +449,23 @@ services:
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - SSL_ENABLED=${SSL_ENABLED:-0}
+      # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
+      # watchdog does not touch this path at all on installs that never opt
+      # into the `logging` profile.
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - SYSLOG_LOG_ROOT=${SYSLOG_LOG_ROOT:-/var/log/lancache-syslog-ng}
     volumes:
       # The watchdog reports and purges the same shared cache path the proxy uses.
       # Do not point this at a per-mode subdirectory; the split paths no longer exist.
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
+      # Unlike every other consumer of this volume (fluent-bit's syslog-ng
+      # destination reads/writes it as the owner; a future Admin UI reader
+      # would mount it `:ro`), watchdog needs read-write access here since
+      # maybe_prune_syslog() deletes files.
+      - logs-syslog-ng:/var/log/lancache-syslog-ng
     depends_on:
       - docker-socket-proxy
     networks:

@@ -143,6 +143,7 @@ Lightweight container with Docker socket access (restart permission).
 **Scheduled purge (cron, daily):**
 - Remove cache entries older than `CACHE_VALID_HIT` (`find -mtime`)
 - Complements nginx `inactive` (which works by access time)
+- Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
 
 **Disk monitoring:**
 - Warning in UI at 85% full (yellow)
@@ -160,12 +161,12 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - Compression: rotated files are compressed with `zstd -T0` at `SYSLOG_COMPRESSION_LEVEL` (default 19); falls back to `gzip` if `zstd` cannot be installed at container start (e.g. no network egress).
 - Config for both `syslog` and `syslog-ng` is generated at container start (CLI flags for fluent-bit, an inline heredoc for syslog-ng) rather than bind-mounted, so `quickstart` — which has no local repo checkout — runs the identical pipeline as `dev`/`prod`.
 - Only the proxy/nginx access log is wired end to end today.
+- Storage-budget retention: `watchdog.sh`'s `maybe_prune_syslog()` (opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above.
 
 **Not implemented yet (tracked in follow-up #633):**
 - The remaining per-container logging matrix (DNS, DHCP, Admin UI, watchdog, NATS, netdata, dhcp-probe logs are not yet routed to syslog-ng).
 - Admin UI log reading from the central path (the UI still reads `STANDARD_LOG`/`SSL_LOG` directly).
 - Per-service log level configuration in the Admin UI.
-- The full `SYSLOG_MAX_GB` / `SYSLOG_RETENTION_DAYS` size-priority retention budget engine — today's rotation is a fixed per-file size threshold, not an overall storage budget.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
 - A CI guard that fails when a new container is added without a declared logging path.
 

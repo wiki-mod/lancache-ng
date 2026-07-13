@@ -170,11 +170,25 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/watchdog.env
+    # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
+    # watchdog does not touch this path at all on installs that never opt
+    # into the `logging` profile. Unlike every other consumer of this
+    # path (fluent-bit's syslog-ng destination reads/writes it as the
+    # owner; a future Admin UI reader would mount it `:ro`), watchdog needs
+    # read-write access here since maybe_prune_syslog() deletes files. Same
+    # bind-mount source as the syslog-ng service (SYSLOG_NG_LOG_DIR) so an
+    # operator-overridden host path is honored consistently by both.
+    environment:
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - SYSLOG_LOG_ROOT=${SYSLOG_LOG_ROOT:-/var/log/lancache-syslog-ng}
     volumes:
       # Watchdog sees the same cache tree as nginx so disk alerts and purge
       # decisions match the real proxy cache, not a stale split-cache path.
       - proxy-cache:/var/cache/lancache
       - watchdog-status:/var/run/watchdog
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
     depends_on:
       - docker-socket-proxy
     networks:
