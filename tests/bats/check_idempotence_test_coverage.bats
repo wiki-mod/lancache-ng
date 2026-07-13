@@ -86,6 +86,21 @@ mod tests {
 }
 EOF
 
+    # zone_snapshots.rs (#628) is its own evidence file too, like
+    # secondaries.rs below -- self-referential (writer == evidence), no
+    # extra_marker needed since it's a brand-new fixture path with nothing
+    # unrelated in it that could accidentally satisfy the generic marker.
+    mkdir -p "$fixture_root/services/dns/nats-subscriber/src"
+    cat > "$fixture_root/services/dns/nats-subscriber/src/zone_snapshots.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn create_snapshot_repeat_writes_converge_to_retention_limit() {
+        assert!(true);
+    }
+}
+EOF
+
     # The name below deliberately contains both the generic marker
     # ("repeated") AND the NATS-specific extra_marker ("nats_conf") the real
     # WRITER_TEST_EVIDENCE entry requires -- see "fails when the NATS
