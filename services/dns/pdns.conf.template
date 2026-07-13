@@ -12,7 +12,12 @@ allow-dnsupdate-from=${DDNS_ALLOW_FROM}
 webserver=yes
 webserver-address=0.0.0.0
 webserver-port=8081
-webserver-allow-from=127.0.0.1,172.16.0.0/12
+# Full RFC1918 range, not just Docker's default address-pool (172.16.0.0/12):
+# operators can set custom default-address-pools in daemon.json (e.g.
+# 10.0.0.0/8 or 192.168.0.0/16 bridge networks), and the UI container's calls
+# to this authoritative API must still be allowed through. Matches the
+# already-widened allow_from in recursor.conf.template's own REST API.
+webserver-allow-from=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 api=yes
 api-key=${PDNS_API_KEY}
 

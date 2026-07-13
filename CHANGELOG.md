@@ -169,6 +169,15 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed the PowerDNS authoritative server's `webserver-allow-from` in
+  `services/dns/pdns.conf.template` only permitting `127.0.0.1` and
+  `172.16.0.0/12` — Docker's default address-pool range. Operators who
+  customize `/etc/docker/daemon.json`'s `default-address-pools` to use
+  `10.0.0.0/8` or `192.168.0.0/16` bridge networks had the UI container's
+  calls to this API (port 8081) rejected. Widened to the full RFC1918 range,
+  matching the pattern already used by `recursor.conf.template`'s own REST
+  API `allow_from` (port 8082). Standard installs (Docker's default
+  `172.17.0.0/16`–`172.31.0.0/16` pools) were never affected (#654).
 - Fixed `build-tools.yml`'s branch-triggered publish path writing an
   unconditional, bare branch-name-derived mutable tag to the `build-tools`
   GHCR package. Because the integration branch is literally named `v0.2.0`,
