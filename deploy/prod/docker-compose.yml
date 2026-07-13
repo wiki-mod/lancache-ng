@@ -93,6 +93,7 @@ services:
     expose:
       - "8081"
       - "8082"
+      - "8083"
     healthcheck:
       test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
@@ -135,6 +136,7 @@ services:
     expose:
       - "8081"
       - "8082"
+      - "8083"
     healthcheck:
       test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
       interval: 30s
@@ -1153,6 +1155,12 @@ services:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
+      # Zone/record known-good snapshot rollback listener (#628), scoped to
+      # dns-standard only for now -- same single-primary convention
+      # PDNS_AUTH_URL/PDNS_REC_URL already use (see services/ui/src/routes/
+      # dns_snapshots.rs's module doc comment for why dns-ssl isn't wired up
+      # here yet).
+      - DNS_ROLLBACK_URL=http://dns-standard:8083
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}

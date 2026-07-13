@@ -28,6 +28,12 @@ NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
 KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
 DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
+# Zone/record rollback listener (#628, nats-subscriber's own process -- see
+# services/dns/nats-subscriber/src/rollback_listener.rs). Bound to 0.0.0.0,
+# not 127.0.0.1: the Admin UI reaching this port lives in a different
+# container/network-namespace, the same reasoning that already applies to
+# PowerDNS's own 8081/8082 (see rollback_listener.rs's module doc comment).
+DNS_ROLLBACK_LISTEN_ADDR="${DNS_ROLLBACK_LISTEN_ADDR:-0.0.0.0:8083}"
 RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
 PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 # Central logging pipeline (#633): PowerDNS has no native "log to file"
@@ -60,6 +66,12 @@ if [ ${#PDNS_API_KEY} -lt 16 ]; then
 fi
 
 export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
+# #628: nats-subscriber (the child process started below by
+# run_nats_subscriber) reads these three directly -- KEEP_KNOWN_GOOD_CONFIGS
+# and DNS_CONFIG_SNAPSHOT_DIR are shared with the recursor.conf/pdns.conf
+# static-file adapter above (#615), DNS_ROLLBACK_LISTEN_ADDR is new for the
+# zone/record rollback listener.
+export KEEP_KNOWN_GOOD_CONFIGS DNS_CONFIG_SNAPSHOT_DIR DNS_ROLLBACK_LISTEN_ADDR
 
 # ────────────────────────────────────────────────────────────────────────────
 # Known-good configuration snapshot library (#415, #615)

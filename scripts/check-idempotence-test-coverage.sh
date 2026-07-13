@@ -52,6 +52,12 @@ WRITER_TEST_EVIDENCE=(
     "services/proxy/entrypoint.sh|tests/bats/proxy_known_good_snapshot.bats"
     "services/dhcp-proxy/entrypoint.sh|tests/bats/dhcp_proxy_known_good_snapshot.bats"
     "services/ui/src/kea_snapshots.rs|services/ui/src/routes/dhcp.rs"
+    # zone_snapshots.rs (#628) is its own evidence file, like secondaries.rs
+    # below -- it's a brand-new file as of #628, so unlike secondaries.rs
+    # there is no risk yet of an unrelated pre-existing test elsewhere in it
+    # accidentally satisfying the generic repeat/idempoten/converge marker,
+    # hence no extra_marker needed.
+    "services/dns/nats-subscriber/src/zone_snapshots.rs|services/dns/nats-subscriber/src/zone_snapshots.rs"
     # secondaries.rs is its own evidence file (the NATS writer's tests live
     # inline, not in a separate test file), so an unrelated pre-existing test
     # elsewhere in the same file whose name merely contains "repeat" (e.g.

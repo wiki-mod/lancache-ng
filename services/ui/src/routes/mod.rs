@@ -7,6 +7,7 @@
 
 pub mod dashboard;
 pub mod dhcp;
+pub mod dns_snapshots;
 pub mod domains;
 pub mod logs;
 pub mod netdata_proxy;

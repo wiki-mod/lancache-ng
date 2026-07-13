@@ -107,6 +107,13 @@ pub struct Config {
     pub hsts_mode: HstsMode,
     pub pdns_auth_url: String,
     pub pdns_rec_url: String,
+    // Zone/record known-good snapshot rollback listener (#628), a new
+    // process-local HTTP API `services/dns/nats-subscriber` exposes
+    // alongside PowerDNS's own pdns_auth_url/pdns_rec_url ports. Scoped to
+    // dns-standard only for now, matching pdns_auth_url/pdns_rec_url's own
+    // single-primary default -- see routes/dns_snapshots.rs's module doc
+    // comment for why dns-ssl isn't wired up here yet.
+    pub dns_rollback_url: String,
     pub pdns_api_key: String,
     pub nats_url: String,
     pub nats_ui_user: String,
@@ -228,6 +235,7 @@ impl fmt::Debug for Config {
             .field("ui_session_ttl_seconds", &self.ui_session_ttl_seconds)
             .field("pdns_auth_url", &self.pdns_auth_url)
             .field("pdns_rec_url", &self.pdns_rec_url)
+            .field("dns_rollback_url", &self.dns_rollback_url)
             .field("pdns_api_key", &"***REDACTED***")
             .field("nats_url", &self.nats_url)
             .field("nats_ui_user", &self.nats_ui_user)
@@ -516,6 +524,7 @@ impl Config {
             hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
+            dns_rollback_url: env_str("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
             nats_ui_user: env_str("NATS_UI_USER", ""),
