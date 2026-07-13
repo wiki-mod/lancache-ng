@@ -52,6 +52,15 @@ is real, live, running code, not just work sitting in source control.
   #730: this whole mechanism assumes the `dns-standard`/`dns-ssl`
   container is reachable, which is not guaranteed in the crash-loop
   scenario it exists to help recover from -- tracked separately as #763.
+  Also added a real end-to-end CI test (`scripts/dns-zone-rollback-
+  simulation.sh`, wired into `.github/workflows/full-setup-deep-
+  validate.yml`'s `dns-zone-rollback-simulation` job) that drives two real
+  DNS writes through the actual UI/NATS path, calls the rollback listener's
+  real HTTP endpoints (auth, list, rollback) against a live `dns-standard`
+  container, and confirms via real `dig` queries that both PowerDNS's data
+  and the recursor's cache were actually rolled back -- proving the
+  PATCH/DELETE round-trip and cache-flush behavior the crate's unit tests
+  cannot exercise against a live PowerDNS instance.
 - Added the repeat-run/idempotence test that was still missing for NATS's
   static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
   Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config
