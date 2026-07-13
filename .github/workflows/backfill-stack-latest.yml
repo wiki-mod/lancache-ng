@@ -30,7 +30,13 @@ permissions:
 concurrency:
   # `latest` writes must serialize with the normal release promotion job in
   # build-push.yml so rollback state cannot interleave across workflows.
-  group: "Build & Push-publish"
+  # build-push.yml's `promote` job moved off the shared "Build & Push-publish"
+  # workflow-level group into its own job-level "Build & Push-promote" group
+  # (#777, so a burst of pushes can't starve promote by tying it to the same
+  # slow build/test/scan queue) -- match that group name here rather than the
+  # publish one, or a manual backfill and an automatic channel promotion could
+  # run concurrently and race each other's tag moves.
+  group: "Build & Push-promote"
   cancel-in-progress: false
 
 defaults:

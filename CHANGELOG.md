@@ -379,6 +379,26 @@ is real, live, running code, not just work sitting in source control.
   `is_sccache_failure` now also matches `sccache: Job failed on server`, so
   builds degrade gracefully to a local (non-distributed) compile instead of
   failing outright.
+- Fixed `build-push.yml`'s `promote` job (moves the mutable `:dev`/`:edge`
+  GHCR channel tags) sharing the workflow-level `"Build & Push-publish"`
+  concurrency group with the rest of the pipeline. During a burst of rapid
+  merges to `v0.2.0`, each push's run competes for that same single pending
+  slot as the slow build/test/scan stages, so a whole run for an intermediate
+  commit -- including its `promote` job -- can be superseded and thrown away
+  before it ever starts, leaving `:dev`/`:edge` stuck on a pre-burst image for
+  the rest of the window (confirmed live: PR #765's own run never started a
+  single job, superseded by the next merge's push). `promote` now has its own
+  job-level `"Build & Push-promote"` concurrency group, decoupling its
+  scheduling from the heavy pipeline's queue; `backfill-stack-latest.yml`
+  joins the same new group so the two tag-moving workflows still serialize
+  against each other. `promote` also re-resolves the branch ref's current tip
+  via `git ls-remote` immediately before moving any tag and skips as a no-op
+  if a newer commit has already landed, so a run that does get to execute
+  never briefly points `dev`/`edge` at a commit it already knows is stale
+  (#777). Note: this does not resurrect commits whose entire pipeline run was
+  never scheduled in the first place (no `sha-*` images exist to promote for
+  those) -- that is a separate build-throughput-vs-merge-rate problem the
+  issue's own "possible directions" left undecided.
 - Fixed `AGENTS.md`'s two CodeQL macro-expansion carve-out rules (AG-VAL-021,
   AG-VAL-022) contradicting each other: AG-VAL-021's worked example described
   macro-*generated* code while the general rule it illustrated (AG-VAL-022)
