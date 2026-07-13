@@ -245,6 +245,35 @@ is real, live, running code, not just work sitting in source control.
   disk for the harness to read back. Made that per-run temp directory
   world-writable so dhclient's post-privilege-drop identity can write the
   lease file the harness's option-verification depends on (#712).
+- Fixed Kea's Control Agent rejecting `lease4-del` with result code 2
+  (`CONTROL_RESULT_COMMAND_UNSUPPORTED`) because `services/dhcp/kea-dhcp4.conf`
+  never loaded the `lease_cmds` hook library that command requires. This
+  broke the Admin UI's "release lease" button (`release_lease()` in
+  `services/ui/src/routes/dhcp.rs`, `POST /dhcp/lease/release`) in
+  production on every real Kea instance, not just the new mutation test that
+  surfaced it — every release attempt returned an error instead of freeing
+  the lease. Fixed by adding a `hooks-libraries` entry for
+  `libdhcp_lease_cmds.so` (shipped by `kea-common`, already a hard
+  dependency of `kea-dhcp4-server` in `services/dhcp/Dockerfile`, so no new
+  package is needed) (#694, Codex review finding). The hook's install path
+  is architecture-specific (Debian's multiarch lib directory differs
+  between amd64 and arm64), so `services/dhcp/entrypoint.sh` resolves it
+  dynamically at startup (`find /usr/lib -maxdepth 5 -name
+  libdhcp_lease_cmds.so`) instead of hardcoding either path, and
+  `migrate_dhcp4_config` now also adds this `hooks-libraries` entry to an
+  already-deployed installation's runtime `kea-dhcp4.conf` on upgrade, so
+  existing Kea data volumes gain `lease_cmds` on the next container start
+  without an operator having to reset the volume.
+  **Note:** an earlier version of this fix documented the rationale above
+  with a `//` WHY-comment directly inside `services/dhcp/kea-dhcp4.conf`.
+  Kea's own config parser tolerates `//` line comments, but
+  `migrate_dhcp4_config` and `tests/bats/dhcp_kea_config_generation.bats`
+  both parse that same file with `jq`, which does not support any comment
+  syntax and aborted on it (`jq: parse error: Invalid numeric literal`,
+  caught by a live `full-setup-validate` run before this change merged).
+  `kea-dhcp4.conf` must stay comment-free, unlike Kea's own runtime files,
+  for exactly this reason — do not re-add a `//` comment to it; put such
+  rationale in this CHANGELOG or the commit message instead.
 
 ## [0.1.0] - 2026-07-06
 

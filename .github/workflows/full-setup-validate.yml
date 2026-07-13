@@ -565,12 +565,22 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve build-tools image
-        # BUILD_TOOLS_REQUIRE_PUBLISHED=true: same reasoning as
-        # ssl-mitm-cache-simulation's own step above.
+        # Unlike dhcp-kea-lease-flow-simulation (which genuinely needs
+        # isc-dhcp-client/dhclient, not yet present in any published
+        # build-tools image), this job's own script
+        # (scripts/nats-secondary-auth-callout-simulation.sh) only drives
+        # curl/awk-style HTTP checks against the real Admin UI/nats-server/
+        # nats-subscriber containers it starts -- confirmed directly by
+        # reading that script. It has no unpublished-tool dependency, so
+        # BUILD_TOOLS_REQUIRE_PUBLISHED=true is safe here and avoids an
+        # unnecessary full branch-local tools/build-tools Docker build on
+        # every workflow_dispatch run of this otherwise lightweight job.
         id: build-tools-image
+        env:
+          BUILD_TOOLS_REQUIRE_PUBLISHED: "true"
         run: |
           set -euo pipefail
-          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          image="$(bash scripts/select-build-tools-image.sh)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run NATS auth-callout simulation
@@ -584,3 +594,77 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/nats-secondary-auth-callout-simulation.sh
+
+  dhcp-kea-ctrl-agent-mutation-simulation:
+    # Real Kea Control Agent mutation round-trip (issue #634): the sibling
+    # dhcp-kea-lease-flow-simulation job above proves our Kea service hands
+    # out correct DHCP options, but never mutates Kea's config, so it never
+    # exercises the Admin UI's kea_config_modify() code path (the function
+    # whose config-get/config-test/config-set/config-write sequence had a
+    # real, previously-undetected bug because every existing `cargo test` for
+    # it mocks Kea's response instead of hitting a real Control Agent). This
+    # job adds and removes a real static host reservation through the actual
+    # Admin UI HTTP route (POST /dhcp/static/add and /dhcp/static/remove),
+    # against a real Kea container built from this checkout's services/dhcp,
+    # and asserts a SUBSEQUENT real DHCP lease request actually reflects each
+    # change -- not just that the API call returned success or that the
+    # config file was written. See
+    # scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh's own header comment
+    # and docs/dhcp-modes.md for exactly what is and is not verified.
+    # Independent of the full-setup-validate compose project's own running
+    # containers (it starts docker-socket-proxy/proxy/nats/ui and a
+    # standalone Kea container itself, tearing all of them down again), so
+    # like dhcp-kea-lease-flow-simulation it does not need to chain after the
+    # earlier jobs for IP-collision reasons -- chained after
+    # nats-auth-callout-simulation (the current last job in this workflow's
+    # serial chain) anyway simply to keep every job running one at a time on
+    # the shared self-hosted runner tier rather than introducing new
+    # concurrency here.
+    name: DHCP Kea Control Agent mutation simulation
+    needs: [compute-validation-network, nats-auth-callout-simulation]
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      # Threaded through so this job's own compose project name matches the
+      # rest of this workflow's per-run derivation (#661/#690) instead of the
+      # script's old hardcoded default -- see this job's own script,
+      # scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh, for why the
+      # underlying 172.30.99.0/24 addresses are still fixed (#703).
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      # Paired with COMPOSE_PROJECT_NAME here purely for consistency with
+      # ssl-mitm-cache-simulation and nats-secondary-auth-callout-simulation,
+      # which set this same pair for every job that references
+      # deploy/full-setup/docker-compose.yml under this shared compose
+      # project -- not because this job's own script actually needs it: its
+      # standalone Admin UI container never publishes a host port (started
+      # via `compose run` without --service-ports, per this job's own
+      # script), and the compose file's own `${VALIDATION_UI_PORT:-9090}`
+      # default already makes an unset value harmless either way.
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
+        # dhcp-kea-lease-flow-simulation's own reasoning: confirmed directly
+        # (both the published :latest and :edge build-tools images) that
+        # isc-dhcp-client (dhclient) is not yet present in any published
+        # build-tools image, only in this checkout's
+        # tools/build-tools/Dockerfile. This workflow only ever runs via
+        # workflow_dispatch (event_name != pull_request), so
+        # select-build-tools-image.sh's trusted-ref path already always
+        # builds a fresh branch-local image instead of trying the published
+        # tag first.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run DHCP Kea Control Agent mutation simulation
+        env:
+          DHCP_CTRL_AGENT_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh
