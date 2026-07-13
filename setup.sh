@@ -1426,6 +1426,32 @@ deploy_prod_repo_input_paths() {
     [[ -f "$repo_root/scripts/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/docker-socket-proxy.sh"
 }
 
+# Resolves the config files cmd_update_ip must edit for a given install_dir.
+# Prints exactly three lines: deploy_env, dns_standard_env, dns_ssl_env. The
+# latter two are empty for quickstart installs (the default /opt/lancache-ng
+# tree and any other directory install_quickstart_compose_assets populated):
+# deploy/quickstart/docker-compose.yml wires PROXY_IP straight from
+# ${IP_STANDARD}/${IP_SSL} in deploy_env, so there is no separate
+# dns-standard.env/dns-ssl.env to edit. Only a manual deploy/prod checkout
+# (identified the same way runtime_env_file_for_install_dir already does, via
+# is_deploy_prod_install_dir) has those files, two levels up from install_dir
+# at repo_root/config/prod -- see deploy/prod/docker-compose.yml's env_file
+# references and deploy_prod_repo_root().
+resolve_update_ip_config_paths() {
+    local install_dir="$1"
+    local deploy_env dns_standard_env="" dns_ssl_env=""
+
+    deploy_env=$(runtime_env_file_for_install_dir "$install_dir")
+    if is_deploy_prod_install_dir "$install_dir"; then
+        local repo_root
+        repo_root=$(deploy_prod_repo_root "$install_dir")
+        dns_standard_env="$repo_root/config/prod/dns-standard.env"
+        dns_ssl_env="$repo_root/config/prod/dns-ssl.env"
+    fi
+
+    printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
+}
+
 # Full .env rewrites keep the original owner/mode because the file contains
 # runtime tokens and may already be locked down to 0600.
 write_env_file() {
@@ -2745,7 +2771,9 @@ Commands:
                        default when no command is given, so this remains safe
                        for curl | bash installation.
   update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
-  update-ip           Change the configured standard and SSL listener IPs.
+  update-ip [install-dir]
+                       Change the configured standard and SSL listener IPs.
+                       Default dir: /opt/lancache-ng
   debug [install-dir]  Print diagnostic information for an existing stack.
   secondary [options]  Register and launch a secondary DNS node.
   backup [options]     Create a config-only or full rollback backup.
@@ -2787,10 +2815,11 @@ EOF
             ;;
         update-ip|--reconfigure|reconfigure)
             cat <<EOF
-Usage: ./setup.sh update-ip
+Usage: ./setup.sh update-ip [install-dir]
 
-Interactively changes the standard and SSL listener IP addresses in the
-production configuration, then restarts the production stack.
+Interactively changes the standard and SSL listener IP addresses for an
+existing installation, then restarts its stack. If [install-dir] is omitted,
+/opt/lancache-ng is used.
 
 Compatibility: ./setup.sh --reconfigure still works and runs this command.
 EOF
@@ -2967,10 +2996,16 @@ cmd_debug() {
 }
 
 # ── update-ip subcommand ───────────────────────────────────────────────────────
-# update-ip is the compatibility reconfiguration path for existing installs. It
-# changes only listener/DNS IP references and restarts the current production
-# compose stack.
+# update-ip is the reconfiguration path for an existing install. It changes
+# only listener/DNS IP references and restarts that install's compose stack.
+# Mirrors cmd_update's install_dir resolution (${1:-/opt/lancache-ng}) so the
+# guided-install hint banner's suggested invocation actually operates on the
+# real running install instead of always reading/writing the repo checkout's
+# own deploy/prod tree (#666).
 cmd_update_ip() {
+    local install_dir="${1:-/opt/lancache-ng}"
+    install_dir=$(realpath -m "$install_dir")
+
     printf "\n"
     printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
     printf "${BOLD}║  LanCache-NG — Reconfigure IPs        ║${RESET}\n"
@@ -2978,25 +3013,41 @@ cmd_update_ip() {
     printf "\n"
 
     [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh update-ip)."
+        || die "This script must be run as root (sudo ./setup.sh update-ip [install-dir])."
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
 
-    local prod_dir="$SCRIPT_DIR/deploy/prod"
-    local deploy_env
-    local dns_standard_env="$SCRIPT_DIR/config/prod/dns-standard.env"
-    local dns_ssl_env="$SCRIPT_DIR/config/prod/dns-ssl.env"
+    local deploy_env dns_standard_env dns_ssl_env
+    { read -r deploy_env; read -r dns_standard_env; read -r dns_ssl_env; } \
+        < <(resolve_update_ip_config_paths "$install_dir")
 
-    deploy_env=$(runtime_env_file_for_install_dir "$prod_dir")
     [[ -f "$deploy_env" ]] || die "Configuration not found: $deploy_env"
-    [[ -f "$dns_standard_env" ]] || die "Configuration not found: $dns_standard_env"
-    [[ -f "$dns_ssl_env" ]] || die "Configuration not found: $dns_ssl_env"
+    if [[ -n "$dns_standard_env" ]]; then
+        [[ -f "$dns_standard_env" ]] || die "Configuration not found: $dns_standard_env"
+        [[ -f "$dns_ssl_env" ]] || die "Configuration not found: $dns_ssl_env"
+    fi
 
     local current_ip_standard current_ip_ssl
     local new_ip_standard new_ip_ssl
     current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env")
     current_ip_ssl=$(get_env_var IP_SSL "$deploy_env")
+
+    # UI_BIND_IP and DHCP_DNS_PRIMARY/SECONDARY default to IP_STANDARD/IP_SSL
+    # at install time (see cmd_setup below) and, for a default quickstart
+    # install, are written into deploy_env as concrete values rather than
+    # staying empty -- Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback never
+    # kicks in. Read them here so the update below can tell "still the
+    # install-time default" apart from "operator set this explicitly" and
+    # only rewrite the former (e.g. 127.0.0.1 or a custom DNS IP survives).
+    local current_ui_bind_ip current_dhcp_mode
+    local current_dhcp_dns_primary current_dhcp_dns_secondary
+    current_ui_bind_ip=$(get_env_var UI_BIND_IP "$deploy_env")
+    current_dhcp_mode=$(get_env_var DHCP_MODE "$deploy_env")
+    current_dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$deploy_env")
+    current_dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$deploy_env")
 
     printf "\n  ${BOLD}Current configuration:${RESET}\n"
     printf "    Standard IP: %s\n" "$current_ip_standard"
@@ -3040,16 +3091,62 @@ cmd_update_ip() {
     sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
     print_ok "Updated: $deploy_env"
 
-    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env"
-    print_ok "Updated: $dns_standard_env"
+    # Keep UI_BIND_IP in sync only while it still equals the pre-update
+    # Standard IP -- that is the install-time default (see cmd_setup), so an
+    # unmodified default install would otherwise stay bound to the address
+    # docker-compose.yml just removed. An explicit override such as
+    # 127.0.0.1 will not match current_ip_standard and is left alone. The
+    # `-n` guard also leaves a deliberately empty UI_BIND_IP= untouched: that
+    # empty state already tracks IP_STANDARD automatically via Compose's
+    # ${UI_BIND_IP:-${IP_STANDARD}} fallback (see line ~1114), so rewriting
+    # it here is unnecessary and would just turn it into a fixed value.
+    if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
+        sed -i "s|^UI_BIND_IP=.*|UI_BIND_IP=$new_ip_standard|" "$deploy_env"
+        print_ok "Updated: $deploy_env (UI_BIND_IP)"
+    fi
 
-    sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env"
-    print_ok "Updated: $dns_ssl_env"
+    # Same idea for the proxy-DHCP/PXE DNS options: DHCP_DNS_PRIMARY/SECONDARY
+    # default to IP_STANDARD/IP_SSL at install time and are only actually
+    # consumed by deploy/quickstart/docker-compose.yml's dhcp-proxy service
+    # when DHCP_MODE=dnsmasq-proxy (the Kea dhcp service re-derives its DNS
+    # options from IP_STANDARD/IP_SSL directly and never goes stale). Only
+    # rewrite values that still match the pre-update defaults so an operator
+    # who pointed proxy-DHCP clients at real DNS servers keeps that choice.
+    if [[ "$current_dhcp_mode" = "dnsmasq-proxy" ]]; then
+        if [[ -n "$current_dhcp_dns_primary" && "$current_dhcp_dns_primary" = "$current_ip_standard" ]]; then
+            sed -i "s|^DHCP_DNS_PRIMARY=.*|DHCP_DNS_PRIMARY=$new_ip_standard|" "$deploy_env"
+            print_ok "Updated: $deploy_env (DHCP_DNS_PRIMARY)"
+        fi
+        if [[ -n "$current_dhcp_dns_secondary" && "$current_dhcp_dns_secondary" = "$current_ip_ssl" ]]; then
+            sed -i "s|^DHCP_DNS_SECONDARY=.*|DHCP_DNS_SECONDARY=$new_ip_ssl|" "$deploy_env"
+            print_ok "Updated: $deploy_env (DHCP_DNS_SECONDARY)"
+        fi
+    fi
+
+    # Quickstart installs have no separate dns-standard.env/dns-ssl.env --
+    # deploy/quickstart/docker-compose.yml reads PROXY_IP straight from
+    # IP_STANDARD/IP_SSL in deploy_env above, so there's nothing more to edit.
+    if [[ -n "$dns_standard_env" ]]; then
+        sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_standard|" "$dns_standard_env"
+        print_ok "Updated: $dns_standard_env"
+
+        sed -i "s|^PROXY_IP=.*|PROXY_IP=$new_ip_ssl|" "$dns_ssl_env"
+        print_ok "Updated: $dns_ssl_env"
+    fi
 
     print_step "Restarting containers"
 
-    (cd "$prod_dir" && docker compose --env-file "$deploy_env" -f "$prod_dir/docker-compose.yml" up -d) \
-        && print_ok "Stack restarted"
+    # `cmd1 && cmd2` as a bare statement is exempt from set -e when cmd1 is
+    # not the list's last command (verified: `set -e; false && echo hi` does
+    # NOT exit) -- so a failing `docker compose up -d` here would silently
+    # fall through to the "Reconfiguration complete!" banner below even
+    # though the running containers are still bound to the old IPs. Branch
+    # explicitly and die() so a restart failure is fatal and visible.
+    if (cd "$install_dir" && docker compose --env-file "$deploy_env" -f "$install_dir/docker-compose.yml" up -d); then
+        print_ok "Stack restarted"
+    else
+        die "Failed to restart the stack: 'docker compose up -d' exited non-zero. The .env files were already updated with the new IPs, but the running containers may still be bound to the old ones -- fix the issue (e.g. confirm the new IP is assigned to this host) and rerun: docker compose --env-file $deploy_env -f $install_dir/docker-compose.yml up -d"
+    fi
 
     printf "\n"
     printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
@@ -3408,7 +3505,7 @@ case "${1:-install}" in
             print_command_help update-ip
             exit 0
         fi
-        cmd_update_ip; exit 0 ;;
+        cmd_update_ip "${2:-/opt/lancache-ng}"; exit 0 ;;
     help|--help|-h) print_usage; exit 0 ;;
     *)           die "Unknown command: $1\nRun './setup.sh --help' for available commands." ;;
 esac
