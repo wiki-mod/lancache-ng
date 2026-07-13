@@ -19,6 +19,19 @@ services:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
       - IP_STANDARD=${VALIDATION_PROXY_IP:-172.30.99.2}
+      # VALIDATION_PROXY_SSL_IP (issue #668): this container is never
+      # actually reachable at this address on the `validation` network --
+      # see the `networks:` block below, which binds only VALIDATION_PROXY_IP.
+      # IP_SSL is passed to entrypoint.sh purely as a logical value: it gates
+      # SSL_ENABLED, is embedded in the default cert's IP SAN, and is
+      # surfaced by the Admin UI. Prod gives IP_SSL a real, separately
+      # reachable LAN address by binding a second host NIC IP and Docker-
+      # port-publishing it into this same container at a different container
+      # port (see entrypoint.sh's "Docker routes IP_SSL:443->container:443
+      # and IP_STANDARD:443->container:8443" comment); that host-level
+      # mechanism has no equivalent for this harness's container-to-
+      # container bridge traffic, which always reaches the container's real
+      # listening ports directly.
       - IP_SSL=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - SSL_ENABLED=1
       - CACHE_MEM_MB=64

@@ -64,6 +64,13 @@ docker run --rm \
             fi
         }
 
+        # dns-standard and dns-ssl are both checked against the same
+        # $proxy_ip on purpose in this harness (issue #668) -- see the long
+        # comment above the equivalent check in
+        # scripts/ssl-mitm-cache-simulation.sh for why prod uses two
+        # distinct LAN addresses (host-IP-scoped Docker port publishing)
+        # while this bridge-network validation topology cannot reach the
+        # proxy any other way than through its one real container address.
         check_dns dns-standard "$VALIDATION_DNS_STANDARD_IP"
         check_dns dns-ssl "$VALIDATION_DNS_SSL_IP"
 
