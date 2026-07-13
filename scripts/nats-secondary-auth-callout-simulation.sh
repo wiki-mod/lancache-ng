@@ -28,7 +28,13 @@ mkdir -p "$work_dir/shared"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}-auth-callout"
 network_name="${compose_project}_validation"
-ui_ip="172.30.99.9"
+# See ssl-mitm-cache-simulation.sh's identical comment: must track
+# deploy/full-setup/docker-compose.yml's own VALIDATION_UI_IP default so this
+# matches the real ui container IP `docker compose up` below assigns. Falls
+# back to the fixed IP when unset (manual full-setup-validate.yml); the
+# automatic full-setup-deep-validate.yml gate (#715) sets it per-run (Codex
+# review finding on #764).
+ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 registration_token="validation-secondary-registration-token"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
