@@ -446,6 +446,6 @@ This matrix maps the hard rules defined above to how they are currently enforced
 
 - **AG-GH-001 and related language rules**: Enforced by human reviewers reading PRs, not by an automated language detector. An automated spell-checker or language-detection tool could help, but none is currently integrated.
 
-- **AG-GH-008**: No CI check currently blocks merge on missing labels/Milestone/Project-board placement. A full v0.2.0-era backlog audit (2026-07-13) found 38 of 41 open PRs had zero labels, zero Milestone, and zero Project-board entry despite otherwise-correct content — this rule exists because that gap was silent and large, not hypothetical. Until an automated check exists, treat this as a mandatory manual step at PR-creation time, not a later cleanup pass.
+- **AG-GH-008**: No CI check currently blocks merge on missing labels/Milestone/Project-board placement; enforcement is manual review only. A future CI job could query the GitHub API for each open PR's labels, milestone, and project-board membership and fail if any is empty. Until such a check exists, treat this rule as a mandatory step at PR-creation time, not a later cleanup pass.
 
 - Several operational rules (AG-OP-*) and comment style rules (AG-CODE-*) rely entirely on manual code review. No linting tools currently enforce these at CI time.
