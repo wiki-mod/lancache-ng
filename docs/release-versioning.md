@@ -135,13 +135,20 @@ release gate.
 
 ## Platform Support
 
-The current supported prebuilt production platform is `linux/amd64`.
-`release/stack-images.yml`, the build workflow, and `setup.sh` must agree on
-that platform. Until the project deliberately enables another platform, setup
-fails closed on non-amd64 hosts before pulling prebuilt production images.
+The currently supported prebuilt production platforms are `linux/amd64` and
+`linux/arm64`. `release/stack-images.yml`, the build workflow, and `setup.sh`
+must agree on that platform list. `setup.sh` fails closed before pulling
+prebuilt production images if either:
 
-Adding `linux/arm64` or another platform requires updating the manifest, build
-workflow, setup platform guard, release notes, and validation together.
+- the host architecture is not one setup.sh recognizes (only x86_64/amd64 and
+  aarch64/arm64 are supported), or
+- the specific tag/channel this install resolved to does not actually publish
+  a manifest for this host's architecture (checked via `docker buildx
+  imagetools inspect`, mirroring `scripts/require-image-platforms.sh`'s
+  release/promotion guard).
+
+Adding another platform beyond amd64/arm64 requires updating the manifest,
+build workflow, setup platform guards, release notes, and validation together.
 
 ## External Images
 
