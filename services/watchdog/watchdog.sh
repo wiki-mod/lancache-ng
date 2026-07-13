@@ -403,6 +403,12 @@ maybe_prune_syslog() {
     # days' un-rotated files are just closed, not actively written), skipping
     # anything named after today's date is sufficient protection without
     # needing to coordinate a reopen with syslog-ng. #757 review.
+    #
+    # `date -u` here must match the date syslog-ng's own $YEAR$MONTH$DAY
+    # destination macro renders. Neither this container nor the syslog-ng
+    # container sets TZ in any compose file, so both default to the base
+    # image's UTC clock and stay in agreement; if a TZ override is ever
+    # added to only one of the two, this match would need to change too.
     local today_name; today_name="$(date -u +%Y%m%d).log"
     while IFS=$'\t' read -r _mtime file; do
         [ "$size_bytes" -le "$budget_bytes" ] && break
