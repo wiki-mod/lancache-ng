@@ -227,24 +227,33 @@ runs on the host's real network interface by default:
 | Check | What it answers | Where it runs | Invasive? |
 |---|---|---|---|
 | **Conflict discovery** (`services/ui/dhcp-probe.sh`) | Does *any* DHCP server answer on this LAN segment (broadcast discover via `nmap`), and does a client dry-run on the host's own detected default interface also succeed? | Admin UI DHCP page, on demand | The client dry-run leg uses `dhclient -sf /bin/true` so it never applies the negotiated lease to the host interface, but it does run against the host's real detected interface. |
-| **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container and a throwaway client container, both on a dedicated Docker bridge network the script creates and destroys itself. Neither container's interface, nor any host interface, is ever configured with the negotiated lease. |
+| **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
 | **Kea Control Agent mutation round-trip** (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
 
 The second check exists because the first only tells you a DHCP server
 answered -- it does not prove ours behaves correctly, and it does not report
 individual option values. `scripts/dhcp-kea-lease-flow-simulation.sh` is the
-authoritative check for "did Kea hand out what I configured," and its output
-(printed to the job log and, in CI, `$GITHUB_STEP_SUMMARY`) lists every
-offered value explicitly so a wrong option is easy to spot.
+authoritative check for "did Kea hand out what I configured, and does it
+honor a static reservation the way an operator using the Admin UI's DHCP
+page would expect" -- its output (printed to the job log and, in CI,
+`$GITHUB_STEP_SUMMARY`) lists every offered value and both reservation
+outcomes explicitly so a wrong result is easy to spot.
+
+This is a different layer than issue #634's Kea Control Agent mutation test:
+that one drives a reservation add/remove through the Admin UI's own real
+HTTP routes on a full stack, proving the Rust `kea_config_modify()` code
+path is correct end to end. `dhcp-kea-lease-flow-simulation.sh` instead
+drives the same underlying Kea Control Agent commands directly, on its own
+lightweight single-Kea-container setup, to prove Kea's own runtime honors a
+reservation for the right client and only the right client -- complementary
+coverage, not a duplicate.
 
 **What the Kea lease-flow simulation does NOT verify** (documented here per
 its own design -- see the script's header comment for the full rationale):
 
-- Static host reservations (a known MAC address receiving its reserved,
-  out-of-pool address) -- now covered by the Kea Control Agent mutation
-  round-trip below, not this script.
 - DHCP-DDNS lease-event follow-through (a granted lease producing a real
-  PowerDNS record via TSIG-authenticated DDNS) -- issue #557.
+  PowerDNS record via TSIG-authenticated DDNS) -- tracked separately in
+  issue #557.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path
   (`services/dhcp-proxy`), not exercised by this script at all.
 

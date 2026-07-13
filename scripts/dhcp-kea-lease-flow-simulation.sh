@@ -32,13 +32,29 @@
 #     nothing to gate behind an opt-in flag. It only ever runs via
 #     workflow_dispatch (full-setup-validate.yml), never on every PR.
 #
+# Static host reservations (issue #707): after the base Discover/Offer/
+# Request/Ack scenario above, this script also configures a real static
+# reservation directly through Kea's own Control Agent API -- the same
+# config-get (strip "hash") -> config-test -> config-set -> config-write
+# sequence services/ui/src/routes/dhcp.rs's kea_config_modify() drives for
+# the Admin UI's /dhcp/static/add route, just called here without going
+# through the Admin UI HTTP layer -- and then runs a SECOND and THIRD real
+# dhclient client (assert_static_reservation_honored below) to prove Kea's
+# own runtime actually honors it: the reserved MAC receives the reserved,
+# out-of-pool address, and a second, unrelated MAC still receives a normal
+# pool address rather than leaking the reservation. This is a different
+# layer than issue #634's Kea Control Agent mutation test (which proves the
+# Admin UI's own Rust code path applies a reservation correctly against a
+# real Kea, through a full Admin UI + compose stack): this script proves Kea
+# itself, given that exact API surface, honors the reservation for the right
+# client and only the right client, using the lightweight single-container
+# setup already established above.
+#
 # What this script does NOT verify (documented per the issue's "must
 # document what is verified and what is not verified" criterion):
 #   - DHCP-DDNS lease-event follow-through (a real PowerDNS TSIG update
 #     firing from the granted lease) -- Refs #557, which scopes that
 #     specifically as part of its own DHCP Kea end-to-end scenario.
-#   - Static host reservations (a known MAC receiving its reserved,
-#     out-of-pool address) -- also Refs #557 for the same reason.
 #   - The dnsmasq-proxy DHCP mode (services/dhcp-proxy) -- entirely
 #     different code path, out of scope for this script.
 set -euo pipefail
@@ -311,6 +327,241 @@ if [[ "$domain_name" != "lancache-dhcp448-test.lan" ]]; then
     fail=1
 fi
 
+# ─── Static host reservation scenario (issue #707) ───
+#
+# Appended as its own self-contained step rather than interleaved into the
+# base scenario above, on purpose: issue #706 (DHCP-DDNS follow-through) is
+# being added to this same script independently and in parallel, and keeping
+# each new scenario as an isolated block minimizes merge conflicts between
+# the two.
+#
+# Two fixed, locally-administered (0x02 high nibble, never a real vendor
+# OUI) test MACs -- one that gets the reservation, one that deliberately does
+# not. Both incorporate this shell's own PID so concurrent local runs of
+# this script never collide on the same MAC, mirroring the run-identity
+# uniqueness already used for $network_name/$kea_container above. Their
+# fourth/fifth octets are fixed and distinct from each other so the two MACs
+# themselves can never collide even if $$ happens to match across runs.
+reserved_mac="$(printf '02:07:07:aa:bb:%02x' "$(( $$ % 256 ))")"
+other_mac="$(printf '02:07:07:cc:dd:%02x' "$(( $$ % 256 ))")"
+# Deliberately outside both the dynamic pool ($pool_start-$pool_end, the
+# second half of the /24) and Docker's own --ip-range for this network
+# (172.31.${octet}.0/25, the first half) -- the whole point of a static
+# reservation is that Kea must hand out this exact address even though
+# ordinary dynamic allocation never would, and it must never collide with
+# Docker's own container-address bookkeeping either.
+reserved_ip="172.31.${octet}.210"
+
+# kea_ctrl_command <json_command_body>
+# POSTs a raw, already-valid Kea Control Agent JSON command body (read from
+# stdin, via -d @-, rather than interpolated into a shell string) to the real
+# Control Agent inside $kea_container, printing its raw JSON response on
+# stdout. Kept as a single thin transport primitive -- reading/writing the
+# JSON itself is done with python3 on the host below (already a dependency
+# of this script, see the address-in-pool check above), not jq inside the
+# container, specifically to avoid nesting a jq filter's own double-quoted
+# JSON keys inside this function's already single-quoted `sh -c` string,
+# which is exactly the unreadable, error-prone quoting-inside-quoting this
+# function exists to sidestep.
+kea_ctrl_command() {
+    docker exec -i "$kea_container" sh -c '
+        curl -sf -u "admin:$1" -H "Content-Type: application/json" -d @- "http://127.0.0.1:8000/"
+    ' -- "$kea_ctrl_token" <<<"$1"
+}
+
+# kea_ctrl_result_ok <response_json>
+# True (exit 0) if a Kea Control Agent response's top-level result code is 0
+# (success). Kea's own convention, matching kea_result() in
+# services/ui/src/routes/dhcp.rs.
+kea_ctrl_result_ok() {
+    python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+sys.exit(0 if d and d[0].get("result") == 0 else 1)
+' "$1"
+}
+
+# kea_ctrl_add_reservation <mac> <ip>
+# Adds a real static host reservation for <mac> -> <ip> directly through
+# Kea's own Control Agent API, driving the exact config-get (strip "hash")
+# -> config-test -> config-set -> config-write sequence
+# services/ui/src/routes/dhcp.rs's kea_config_modify() uses for the Admin
+# UI's /dhcp/static/add route (see that file's own comment on why "hash"
+# must be stripped: Kea 2.6.3's config-get response embeds a server-computed
+# digest that config-test/config-set reject outright if fed straight back) --
+# just called here directly against the Control Agent instead of through the
+# Admin UI HTTP layer. Kea's compiled-in global host-reservation-identifiers
+# default already includes "hw-address" (services/dhcp/kea-dhcp4.conf sets no
+# override, and issue #693 removed the subnet-scope write that used to break
+# this), so no extra identifiers config is needed here for the reservation to
+# actually match on subsequent lease requests.
+kea_ctrl_add_reservation() {
+    local mac="$1" ip="$2" get_resp modified_args resp
+
+    get_resp="$(kea_ctrl_command '{"command":"config-get","service":["dhcp4"]}')"
+    if ! kea_ctrl_result_ok "$get_resp"; then
+        echo "config-get failed: $get_resp" >&2
+        return 1
+    fi
+
+    modified_args="$(GET_RESP="$get_resp" python3 - "$mac" "$ip" <<'PYEOF'
+import json, os, sys
+mac, ip = sys.argv[1], sys.argv[2]
+resp = json.loads(os.environ["GET_RESP"])
+args = resp[0]["arguments"]
+args.pop("hash", None)  # see kea_ctrl_add_reservation's own comment above
+for subnet in args["Dhcp4"]["subnet4"]:
+    if subnet.get("id") == 1:
+        subnet.setdefault("reservations", []).append({"hw-address": mac, "ip-address": ip})
+print(json.dumps(args))
+PYEOF
+    )"
+
+    for cmd in config-test config-set; do
+        resp="$(kea_ctrl_command "{\"command\":\"$cmd\",\"service\":[\"dhcp4\"],\"arguments\":${modified_args}}")"
+        if ! kea_ctrl_result_ok "$resp"; then
+            echo "$cmd failed: $resp" >&2
+            return 1
+        fi
+    done
+
+    resp="$(kea_ctrl_command '{"command":"config-write","service":["dhcp4"]}')"
+    if ! kea_ctrl_result_ok "$resp"; then
+        echo "config-write failed: $resp" >&2
+        return 1
+    fi
+}
+
+# kea_ctrl_reservation_present <mac> <ip>
+# Prints "yes"/"no": whether Kea's OWN config-get (not this script's local
+# copy of the config it sent) currently shows a reservation matching <mac>
+# and <ip> -- the same "ideally reflected in a follow-up config-get"
+# assertion issue #634's Control Agent mutation test makes for the Admin-UI
+# route, done here directly against the Control Agent instead.
+kea_ctrl_reservation_present() {
+    local mac="$1" ip="$2" get_resp
+    get_resp="$(kea_ctrl_command '{"command":"config-get","service":["dhcp4"]}')"
+    MAC="$mac" IP="$ip" python3 -c '
+import json, os, sys
+resp = json.loads(sys.argv[1])
+mac, ip = os.environ["MAC"].lower(), os.environ["IP"]
+subnets = resp[0]["arguments"]["Dhcp4"]["subnet4"]
+found = any(
+    r.get("hw-address", "").lower() == mac and r.get("ip-address") == ip
+    for s in subnets
+    for r in s.get("reservations", [])
+)
+print("yes" if found else "no")
+' "$get_resp"
+}
+
+# assert_static_reservation_honored <label> <mac> <state_subdir>
+# Runs one fresh, one-shot dhclient container for <mac> (a distinct
+# --mac-address per call, unlike the base scenario's client above which
+# relies on Docker's own auto-assigned MAC) and prints the offered IPv4
+# address, using the identical -sf /bin/true no-op-lease-apply / poll-for-
+# "^}" / force-kill technique as the base scenario above -- see that
+# section's own comments for why each of those choices is safe and
+# necessary. Kept as its own function (not inlined) so it can be called once
+# for the reserved MAC and once for the unrelated MAC below without
+# duplicating this logic.
+assert_static_reservation_honored() {
+    local label="$1" mac="$2" state_subdir="$3" client_container
+    client_container="lancache-ng-dhcp448-client-${state_subdir}-${octet}-$$"
+    mkdir -p "$work_dir/$state_subdir"
+    chmod 0777 "$work_dir/$state_subdir"
+
+    docker run -d --name "$client_container" \
+        --network "$network_name" --mac-address "$mac" \
+        --cap-add NET_ADMIN --cap-add NET_RAW \
+        -v "$work_dir/$state_subdir:/dhcp-test" \
+        "$client_tool_image" \
+        bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /dhcp-test/dhclient.pid -lf /dhcp-test/dhclient.leases eth0 >/dhcp-test/dhclient.out 2>&1; echo DONE >> /dhcp-test/dhclient.out' \
+        >/dev/null
+
+    local deadline=$((SECONDS + 30)) obtained=0
+    while (( SECONDS < deadline )); do
+        if [[ -s "$work_dir/$state_subdir/dhclient.leases" ]] && grep -q '^}' "$work_dir/$state_subdir/dhclient.leases" 2>/dev/null; then
+            obtained=1
+            break
+        fi
+        sleep 1
+    done
+    docker rm -f "$client_container" >/dev/null 2>&1 || true
+
+    # Diagnostics go to stderr, not stdout: this function's stdout is
+    # captured via command substitution by every caller below (the offered
+    # address is the only thing that must appear there).
+    {
+        echo "::group::$label: raw dhclient output"
+        cat "$work_dir/$state_subdir/dhclient.out" 2>/dev/null || echo "(no client output captured)"
+        echo "::endgroup::"
+    } >&2
+
+    if [[ "$obtained" -ne 1 ]]; then
+        echo "::error::$label: dhclient never obtained a lease for $mac within 30s." >&2
+        return 1
+    fi
+
+    local parsed
+    parsed="$(dhcp_lease_parse_latest "$work_dir/$state_subdir/dhclient.leases")" || {
+        echo "::error::$label: a lease file was written but could not be parsed." >&2
+        return 1
+    }
+    dhcp_lease_field "$parsed" address || true
+}
+
+echo "== Adding a real static host reservation ($reserved_mac -> $reserved_ip) via Kea's Control Agent API =="
+if ! kea_ctrl_add_reservation "$reserved_mac" "$reserved_ip"; then
+    echo "::error::Failed to add the static reservation directly through Kea's Control Agent API." >&2
+    docker logs "$kea_container" >&2 || true
+    exit 1
+fi
+
+reservation_present="$(kea_ctrl_reservation_present "$reserved_mac" "$reserved_ip")"
+if [[ "$reservation_present" != "yes" ]]; then
+    echo "::error::Kea's own config-get does not show the reservation that was just added ($reserved_mac -> $reserved_ip)." >&2
+    exit 1
+fi
+echo "Kea's live config-get confirms the reservation ($reserved_mac -> $reserved_ip) is present."
+
+echo "== Positive case: requesting a lease for the reserved MAC -- must receive the reserved address =="
+reserved_offered="$(assert_static_reservation_honored "reserved-mac" "$reserved_mac" "client-state-reserved")" || {
+    docker logs "$kea_container" >&2 || true
+    exit 1
+}
+reservation_honored=0
+if [[ "$reserved_offered" == "$reserved_ip" ]]; then
+    reservation_honored=1
+    echo "Confirmed: a real DHCP request for the reserved MAC $reserved_mac received the reserved address $reserved_ip."
+else
+    echo "::error::Reserved MAC $reserved_mac received '${reserved_offered:-<none>}', expected the reserved address $reserved_ip." >&2
+    fail=1
+fi
+
+echo "== Negative case: requesting a lease for an unrelated MAC -- must NOT receive the reserved address =="
+other_offered="$(assert_static_reservation_honored "other-mac" "$other_mac" "client-state-other")" || {
+    docker logs "$kea_container" >&2 || true
+    exit 1
+}
+other_in_pool="$(python3 - "$other_offered" "$pool_start" "$pool_end" <<'PYEOF'
+import ipaddress, sys
+addr, start, end = (ipaddress.ip_address(a) for a in sys.argv[1:4])
+print("yes" if start <= addr <= end else "no")
+PYEOF
+)"
+reservation_isolated=0
+if [[ "$other_offered" != "$reserved_ip" && "$other_in_pool" == "yes" ]]; then
+    reservation_isolated=1
+    echo "Confirmed: a real DHCP request for the unrelated MAC $other_mac received an ordinary dynamic-pool address ($other_offered), not the reservation."
+elif [[ "$other_offered" == "$reserved_ip" ]]; then
+    echo "::error::Unrelated MAC $other_mac was also handed the reserved address $reserved_ip -- the reservation leaked to a client it does not belong to." >&2
+    fail=1
+else
+    echo "::error::Unrelated MAC $other_mac received '${other_offered:-<none>}', which is outside the dynamic pool ($pool_start - $pool_end)." >&2
+    fail=1
+fi
+
 report=$(cat <<REPORT
 == DHCP Kea lease-flow result (issue #448) ==
 Offered address:      ${offered_address:-<none>}
@@ -321,14 +572,25 @@ NTP servers:          ${ntp_servers:-<none>}
 Lease time (s):       ${lease_time:-<none>}
 Domain name:          ${domain_name:-<none>}
 
+== Static host reservation result (issue #707) ==
+Reserved MAC:          ${reserved_mac} -> ${reserved_ip}
+Reserved-MAC lease:    ${reserved_offered:-<none>} $( [[ "$reservation_honored" -eq 1 ]] && echo "(reserved address received -- honored)" || echo "(MISMATCH)" )
+Unrelated MAC:         ${other_mac}
+Unrelated-MAC lease:   ${other_offered:-<none>} $( [[ "$reservation_isolated" -eq 1 ]] && echo "(ordinary pool address -- reservation did not leak)" || echo "(MISMATCH)" )
+
 Verified: a real Discover/Offer/Request/Ack flow completed against our own
 Kea service on an isolated Docker bridge network, and the address/server-
 identifier/router/DNS/NTP/lease-time/domain-name options above matched what
-this run configured Kea with.
+this run configured Kea with. Also verified: a static host reservation added
+directly through Kea's own Control Agent API (the same config-get/
+config-test/config-set/config-write sequence the Admin UI's
+kea_config_modify() drives) was honored by a real, subsequent DHCP lease
+request for the reserved MAC, and a second, unrelated MAC still received an
+ordinary dynamic-pool address rather than the reservation.
 
 NOT verified by this script (see header comment / docs/dhcp-modes.md):
-static host reservations and DHCP-DDNS lease-event follow-through (Refs
-#557), and the dnsmasq-proxy DHCP mode (out of scope here).
+DHCP-DDNS lease-event follow-through (Refs #557), and the dnsmasq-proxy DHCP
+mode (out of scope here).
 REPORT
 )
 echo "$report"
@@ -341,8 +603,8 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 fi
 
 if [[ "$fail" -ne 0 ]]; then
-    echo "::error::dhcp-kea-lease-flow-simulation FAILED: one or more offered options did not match configuration." >&2
+    echo "::error::dhcp-kea-lease-flow-simulation FAILED: one or more offered options or the static reservation scenario did not match expectations." >&2
     exit 1
 fi
 
-echo "dhcp-kea-lease-flow-simulation passed: real lease flow completed and all reported options matched configuration."
+echo "dhcp-kea-lease-flow-simulation passed: real lease flow, static reservation (positive case), and reservation isolation (negative case) all completed and matched expectations."
