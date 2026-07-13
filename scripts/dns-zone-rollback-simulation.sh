@@ -191,6 +191,41 @@ poll_for_new_snapshot() {
     return 1
 }
 
+# dns-standard's Docker healthcheck (rec_control ping) only proves
+# pdns_recursor itself answers -- it says nothing about nats-subscriber,
+# a separate process entrypoint.sh backgrounds AFTER run_auth/run_recursor
+# (see services/dns/entrypoint.sh's run_nats_subscriber). That process must
+# still connect to NATS and set up its JetStream consumer before it ever
+# reaches the tokio::spawn that binds DNS_ROLLBACK_LISTEN_ADDR (rollback_
+# listener.rs, default 0.0.0.0:8083) -- so "healthy" can be true seconds
+# before 8083 is actually listening. Observed in CI (run 29287590206, job
+# "DNS zone/record rollback simulation"): containers reported healthy at
+# 21:55:31.767Z, then this script's very first request to 8083 got
+# `curl: (7) ... Connection refused ... after 0ms` at 21:55:32.132Z --
+# exactly the "not bound yet" signature, not a timeout. Every other network
+# call below already tolerates this kind of lag by polling for a specific
+# expected VALUE (verify_record_resolves, poll_for_new_snapshot); this one
+# can't do that because the very first read here is baseline_snapshot_id,
+# which is legitimately allowed to be empty on a fresh container (see
+# poll_for_new_snapshot's own comment) -- so instead poll for the listener
+# to merely accept a TCP connection at all, then read the value once.
+wait_for_rollback_listener() {
+    local attempt
+    for attempt in $(seq 1 30); do
+        if run_client "curl -sS -o /dev/null -H 'X-API-Key: $pdns_api_key' 'http://$dns_standard_ip:$rollback_port/snapshots'"; then
+            echo "Rollback listener on $dns_standard_ip:$rollback_port is accepting connections (attempt $attempt)."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "::error::Rollback listener on $dns_standard_ip:$rollback_port never accepted a connection after 30 attempts." >&2
+    "${compose[@]}" logs --no-color dns-standard
+    return 1
+}
+
+echo "== Waiting for the rollback listener (dns-standard's nats-subscriber, port $rollback_port) to be reachable =="
+wait_for_rollback_listener
+
 echo "== Recording the baseline known-good snapshot state for zone lan. before this test changes anything =="
 baseline_snapshot_id="$(get_newest_lan_snapshot_id)"
 echo "Baseline snapshot id: '${baseline_snapshot_id:-<none>}'"
