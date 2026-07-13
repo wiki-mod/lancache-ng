@@ -697,12 +697,13 @@ jobs:
     # options match what this run configured. Also configures a real static
     # host reservation directly through Kea's Control Agent API and asserts
     # it is honored by a subsequent real lease request for that MAC, and NOT
-    # by a lease request for a different, unrelated MAC (issue #707). See
-    # scripts/dhcp-kea-lease-flow-simulation.sh's own header comment and
-    # docs/dhcp-modes.md for exactly what is and is not verified (DHCP-DDNS
-    # follow-through is explicitly out of scope here; Refs #557). Independent
-    # of the full-setup-validate compose project (its own network/containers,
-    # not deploy/full-setup's), so it
+    # by a lease request for a different, unrelated MAC (issue #707). It also
+    # starts a real PowerDNS container and verifies the granted lease
+    # produces a matching A record via a TSIG-authenticated DDNS update from
+    # kea-dhcp-ddns (issue #706). See scripts/dhcp-kea-lease-flow-simulation.sh's
+    # own header comment and docs/dhcp-modes.md for exactly what is and is
+    # not verified (Refs #557). Independent of the full-setup-validate
+    # compose project (its own network/containers, not deploy/full-setup's), so it
     # does not need to chain after those jobs for IP-collision reasons the
     # way ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation do --
     # chained after setup-cli-simulation anyway simply to keep this

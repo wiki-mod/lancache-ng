@@ -1654,13 +1654,13 @@ jobs:
             exit 1
           fi
 
-          grep -F "set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY \"\$(resolve_lancache_image_registry \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+          grep -F 'lancache_image_registry=$(resolve_lancache_image_registry "$env_file")' setup.sh >/dev/null \
             || { echo "::error::Update migration must resolve LANCACHE_IMAGE_REGISTRY from existing config instead of hard-coding it."; exit 1; }
-          grep -F "set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX \"\$(resolve_lancache_image_prefix \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+          grep -F 'lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")' setup.sh >/dev/null \
             || { echo "::error::Update migration must resolve LANCACHE_IMAGE_PREFIX from existing config instead of hard-coding it."; exit 1; }
-          grep -F "set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL \"\$(resolve_lancache_image_channel \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+          grep -F 'lancache_image_channel=$(resolve_lancache_image_channel "$env_file")' setup.sh >/dev/null \
             || { echo "::error::Update migration must resolve LANCACHE_IMAGE_CHANNEL from existing config instead of hard-coding it."; exit 1; }
-          grep -F "set_env_key LANCACHE_IMAGE_TAG \"\$(resolve_lancache_image_tag \"\$env_file\")\" \"\$env_file\"" setup.sh >/dev/null \
+          grep -F 'lancache_image_tag=$(resolve_lancache_image_tag "$env_file")' setup.sh >/dev/null \
             || { echo "::error::Update migration must refresh LANCACHE_IMAGE_TAG with resolve_lancache_image_tag."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag.' setup.sh >/dev/null \
             || { echo "::error::Pinned image channel must fail closed when LANCACHE_IMAGE_TAG is missing."; exit 1; }

@@ -305,6 +305,23 @@ port and answers `pdns_control rping` normally). This is a pre-existing
 PowerDNS behavior, not a gap introduced by preferring the simpler
 check-only flag over a full start.
 
+The same "`--config=check` doesn't validate bind-ability" limitation applies
+to `local-address` (issue #706): `pdns.conf.template` bakes in this
+container's own dynamically-detected, non-loopback IPv4 address
+(`$PDNS_LOCAL_ADDRESS`, needed so DNS UPDATE packets from the separate
+`dhcp` container/host can actually reach this daemon), which means every
+snapshot also captures whichever bridge IP the container happened to have
+at that moment. If pdns.conf is later rolled back to an older snapshot, its
+`local-address` line would otherwise still hold that stale address — valid
+syntax, so `--config=check` passes it, but not necessarily bindable if this
+container was recreated with a different address since. To avoid a rollback
+that "succeeds" on paper but then restart-loops `pdns_server` on a dead
+bind address, `_dns_auth_validate_snapshot_or_rollback()` re-stamps the
+restored file's `local-address` line with the current session's
+`$PDNS_LOCAL_ADDRESS` immediately after a successful rollback, without
+re-running `--config=check` (safe precisely because that check already
+ignores this value either way).
+
 Ordering matters here in a way it does not for nginx/dnsmasq: pdns.conf
 validation/rollback runs *before* any `pdnsutil` call in the entrypoint
 (zone creation, TSIG import), because those calls also read `pdns.conf` via
