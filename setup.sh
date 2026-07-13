@@ -2255,6 +2255,7 @@ migrate_env_for_update() {
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
+    local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     [[ -f "$env_file" ]] \
@@ -2263,6 +2264,51 @@ migrate_env_for_update() {
     print_step "Checking runtime .env"
 
     require_env_value_for_update IP_STANDARD "$env_file"
+
+    # Resolve, verify, and persist the image registry/prefix/channel/tag
+    # before any other .env mutation below (#665). This used to run after
+    # several unrelated normalizations (session TTL, cache/state directory
+    # migration, PROXY_SECURITY_MODE, ...), so a host whose resolved tag
+    # lacks this platform would still have all of those already rewritten
+    # into .env by the time assert_resolved_image_tag_platform_supported
+    # aborted the update -- more partial state than necessary, even though
+    # cmd_update's pre-update backup (taken before this function runs) still
+    # makes it recoverable. Resolving into local variables first and calling
+    # assert_resolved_image_tag_platform_supported before writing anything
+    # means a platform failure here leaves every key in the rest of this
+    # function's migration untouched, not just these four.
+    lancache_image_registry=$(resolve_lancache_image_registry "$env_file")
+    validate_lancache_image_registry "$lancache_image_registry"
+    lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")
+    validate_lancache_image_prefix "$lancache_image_prefix"
+    lancache_image_channel=$(resolve_lancache_image_channel "$env_file")
+    existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    if [[ "$preserve_image_tag" = "1" ]] \
+        && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+        # Restoring a backup to roll back a bad channel-tracked image: keep
+        # the archived immutable tag as-is instead of re-resolving it below,
+        # which would silently pull whatever the channel (edge/latest)
+        # currently points to -- right after a bad release that is likely
+        # still the same bad tag, defeating the whole point of the restore.
+        validate_lancache_image_tag "$existing_image_tag"
+        lancache_image_tag="$existing_image_tag"
+    else
+        # resolve_lancache_image_tag independently re-derives the same
+        # tag-implies-channel inference resolve_lancache_image_channel just
+        # computed (see its own docstring: "mirrors, and is deliberately more
+        # specific than" that precedence) by reading env_file directly, so it
+        # does not need lancache_image_channel written into .env first to
+        # reach the same result -- verified by tracing every branch of both
+        # functions.
+        lancache_image_tag=$(resolve_lancache_image_tag "$env_file")
+    fi
+    assert_resolved_image_tag_platform_supported \
+        "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$lancache_image_registry" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
+    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
+    set_env_key LANCACHE_IMAGE_TAG "$lancache_image_tag" "$env_file"
+
     ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
     ui_session_ttl="${ui_session_ttl:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
     validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
@@ -2342,35 +2388,10 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" "$env_file"
     migrate_proxy_security_mode_for_update "$env_file"
     set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$(resolve_lancache_image_registry "$env_file")" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$(resolve_lancache_image_prefix "$env_file")" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$(resolve_lancache_image_channel "$env_file")" "$env_file"
-    existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
-    if [[ "$preserve_image_tag" = "1" ]] \
-        && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
-        # Restoring a backup to roll back a bad channel-tracked image: keep
-        # the archived immutable tag as-is instead of re-resolving it below,
-        # which would silently pull whatever the channel (edge/latest)
-        # currently points to -- right after a bad release that is likely
-        # still the same bad tag, defeating the whole point of the restore.
-        validate_lancache_image_tag "$existing_image_tag"
-    else
-        set_env_key LANCACHE_IMAGE_TAG "$(resolve_lancache_image_tag "$env_file")" "$env_file"
-    fi
-    validate_lancache_image_registry "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")"
-    validate_lancache_image_prefix "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")"
-
-    # Verify the newly resolved tag actually publishes an image for this
-    # host's architecture before the pre-update backup/pull sequence below
-    # runs (#665). assert_prebuilt_image_platform_supported at the top of
-    # cmd_update only checked the host architecture in general, not this
-    # specific tag/channel -- an update that silently moves onto a tag/channel
-    # missing this host's platform would otherwise only fail deep inside
-    # `docker compose pull`.
-    assert_resolved_image_tag_platform_supported \
-        "$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file")" \
-        "$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file")" \
-        "$(get_env_var LANCACHE_IMAGE_TAG "$env_file")"
+    # LANCACHE_IMAGE_REGISTRY/PREFIX/CHANNEL/TAG (including the #731
+    # preserve_image_tag restore-rollback exception) were already resolved,
+    # verified, and written near the top of this function, before any of the
+    # migration above -- see the #665 comment there.
 
     set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$(get_env_var IP_STANDARD "$env_file")" "$env_file"

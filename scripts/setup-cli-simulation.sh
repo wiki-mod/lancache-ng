@@ -277,7 +277,7 @@ diff -q "$install_dir/.secrets-after-first-update" "$install_dir/.secrets-after-
 
 echo "A second consecutive setup.sh update with no input change left .env and all stable secrets byte-identical."
 
-echo "== Phase 3: rollback safety (forced pull failure during update) =="
+echo "== Phase 3: rollback safety (forced platform-preflight failure during update) =="
 
 cp "$install_dir/.env" "$install_dir/.env.before-forced-failure"
 # LANCACHE_IMAGE_CHANNEL must move to "pinned" too, not just the tag: with
@@ -302,8 +302,15 @@ set -e
 
 [[ "$update_exit_code" -ne 0 ]] \
     || { echo "::error::setup.sh update did not fail as expected against a non-existent image tag." >&2; cat "$install_dir/update-failure.log" >&2; exit 1; }
-grep -qF 'Failed to pull required container images' "$install_dir/update-failure.log" \
-    || { echo "::error::setup.sh update failed for an unexpected reason; expected an image pull failure." >&2; cat "$install_dir/update-failure.log" >&2; exit 1; }
+# assert_resolved_image_tag_platform_supported (#665) now runs at the very
+# top of migrate_env_for_update, before the image pull this phase used to
+# rely on failing -- `docker buildx imagetools inspect` against this
+# non-existent sha-0000000 tag should fail closed with "Failed to inspect
+# ...", not the old "Failed to pull required container images" from further
+# down in cmd_update: with the platform preflight in place, this scenario is
+# expected to never reach the actual `docker compose pull` step at all.
+grep -qF 'Failed to inspect' "$install_dir/update-failure.log" \
+    || { echo "::error::setup.sh update failed for an unexpected reason; expected the image-tag platform preflight to reject the non-existent tag." >&2; cat "$install_dir/update-failure.log" >&2; exit 1; }
 
 [[ -s "$install_dir/.env" ]] \
     || { echo "::error::setup.sh update left .env empty after a failed update -- unsafe partial state." >&2; exit 1; }
@@ -313,7 +320,7 @@ diff -q \
     || { echo "::error::setup.sh update changed unrelated .env keys during a failed update -- unsafe partial state." >&2; exit 1; }
 find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . \
     || { echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2; exit 1; }
-echo "setup.sh update failed safely on a broken image tag: .env is intact and a rollback backup exists."
+echo "setup.sh update failed safely on a broken image tag at the platform preflight: .env is intact and a rollback backup exists."
 
 # Not asserted: that the stack stays up and healthy through the failed
 # attempt above. cmd_backup --config itself stops and restarts the stack
