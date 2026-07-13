@@ -367,6 +367,18 @@ is real, live, running code, not just work sitting in source control.
   end-to-end instead of a shared-address assumption. Also updated
   `scripts/full-setup-client-simulation.sh`'s DNS check to expect the two
   nameservers' now-genuinely-different answers.
+- Fixed `cargo-with-sccache-fallback`'s `is_sccache_failure` check missing the
+  sccache-dist remote-build failure signature (issue #783): when a
+  compile-farm host's sccache-dist server itself rejects a C-dependency
+  build (observed: a `bwrap` sandbox on one dist server failing to mount
+  `/proc`, surfaced by `cc-rs`/`zstd-sys`/`aws-lc-sys` as a generic
+  `ToolExecError`/exit-254 with no other sccache-recognizable string), the
+  action's local-compile fallback never triggered and the job went straight
+  to a hard failure -- confirmed across 4 real CI reruns on one PR, all
+  landing on the same dist server, none of which matched the prior regex.
+  `is_sccache_failure` now also matches `sccache: Job failed on server`, so
+  builds degrade gracefully to a local (non-distributed) compile instead of
+  failing outright.
 - Fixed `AGENTS.md`'s two CodeQL macro-expansion carve-out rules (AG-VAL-021,
   AG-VAL-022) contradicting each other: AG-VAL-021's worked example described
   macro-*generated* code while the general rule it illustrated (AG-VAL-022)
