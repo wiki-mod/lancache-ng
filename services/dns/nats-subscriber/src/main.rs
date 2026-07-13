@@ -183,6 +183,19 @@ async fn main() {
         match fetch_result {
             Ok(mut messages) => {
                 let mut had_stream_error = false;
+                // Codex review (PR #738) finding 1: `consumer.fetch()` uses
+                // async-nats's `no_wait: true` batch mode (confirmed in
+                // async-nats 0.49.1's `FetchBuilder::messages()`), so it
+                // returns immediately with whatever is already available
+                // instead of waiting up to `expires` for new messages. If a
+                // retryable PDNS failure stops a batch below, the NAK'd
+                // message (and, during a real outage, likely more backlog
+                // behind it) can be immediately available again on the very
+                // next iteration of this outer `loop`, with nothing pacing
+                // the fetch/HTTP-call rate. Track that here so we can apply
+                // the same backoff used for stream/fetch errors instead of
+                // busy-spinning HTTP calls at a down PDNS.
+                let mut had_retryable_batch_stop = false;
 
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
@@ -190,12 +203,34 @@ async fn main() {
                             let result = handle_message(&msg, &pdns_api_key, &http_client).await;
                             // #653 fix: what to do with THIS message is decided by the pure
                             // `decide_msg` (unit-tested below via `simulate_batch_processing`)
-                            // so the ack/nak-and-stop decision itself -- not just this call
-                            // site -- is covered by tests without a real NATS connection.
+                            // so the ack/nak decision itself -- not just this call site -- is
+                            // covered by tests without a real NATS connection.
                             match decide_msg(result) {
                                 MsgDecision::AckAndContinue => {
                                     if let Err(e) = msg.ack().await {
                                         eprintln!("Error acknowledging message: {}", e);
+                                    }
+                                }
+                                MsgDecision::NakAndContinue => {
+                                    // Codex review (PR #738) finding 3: a retryable
+                                    // `lancache.dns.flush` failure (recursor cache-flush
+                                    // endpoint down/erroring) does NOT create the same
+                                    // stale-record-clobber hazard that a `lancache.dns.record`
+                                    // failure does -- flush order relative to other flushes
+                                    // isn't safety-critical the way record-update order is.
+                                    // Stopping the whole batch behind a flush failure would
+                                    // needlessly delay unrelated, healthy record updates later
+                                    // in the same batch. So: NAK with a short delay (still
+                                    // better than the pre-#653 "just don't ack" approach) but
+                                    // keep consuming the rest of the batch, matching the
+                                    // pre-#653 behavior for this message class.
+                                    if let Err(e) = msg
+                                        .ack_with(jetstream::AckKind::Nak(Some(
+                                            Duration::from_millis(100),
+                                        )))
+                                        .await
+                                    {
+                                        eprintln!("Error naking message: {}", e);
                                     }
                                 }
                                 MsgDecision::NakAndStopBatch => {
@@ -221,6 +256,21 @@ async fn main() {
                                     // own after AckWait -- no message is lost, they're just
                                     // deferred to a later fetch cycle where ordering relative
                                     // to this retry is no longer at risk.
+                                    //
+                                    // NOTE (Codex review, PR #738, finding 2): a narrower,
+                                    // *cross-batch* version of this same race is still
+                                    // possible -- an even-newer update for the same key could
+                                    // arrive in the *next* fetch (issued immediately after this
+                                    // `break`, since `fetch()` is `no_wait`) and get acked
+                                    // before this abandoned tail redelivers via AckWait. Closing
+                                    // that fully requires either strict single-message
+                                    // processing or key-aware/sequence-aware writes and is out
+                                    // of scope for this targeted fix; see the reply on that
+                                    // review thread for why NAK-ing the tail to a short delay
+                                    // (which looks like an obvious fix) would actually make
+                                    // ordering *worse*, not better, by racing this abandoned
+                                    // message's redelivery against the same short delay used by
+                                    // the message that triggered the stop.
                                     if let Err(e) = msg
                                         .ack_with(jetstream::AckKind::Nak(Some(
                                             Duration::from_millis(100),
@@ -229,6 +279,7 @@ async fn main() {
                                     {
                                         eprintln!("Error naking message: {}", e);
                                     }
+                                    had_retryable_batch_stop = true;
                                     break;
                                 }
                             }
@@ -244,12 +295,25 @@ async fn main() {
                     }
                 }
 
-                // Apply backoff on stream errors, or reset on a clean batch.
-                // Stream errors surface via messages.next(), not fetch(), so we
-                // must handle them here rather than in the Err(fetch) arm.
+                // Apply backoff on stream errors or a retryable-failure batch
+                // stop, or reset on a fully clean batch. Stream errors surface
+                // via messages.next(), not fetch(), so we must handle them
+                // here rather than in the Err(fetch) arm. The batch-stop case
+                // is handled the same way (Codex review, PR #738, finding 1):
+                // without this, a PDNS outage with backlogged messages causes
+                // an immediate re-fetch (see the `had_retryable_batch_stop`
+                // comment above on why `fetch()` doesn't wait on its own) and
+                // this loop busy-spins HTTP calls at a service that's down.
                 if had_stream_error {
                     eprintln!(
                         "Stream error(s); backing off for {} second(s)",
+                        backoff_secs
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                } else if had_retryable_batch_stop {
+                    eprintln!(
+                        "Retryable PDNS failure stopped batch processing; backing off for {} second(s)",
                         backoff_secs
                     );
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
@@ -273,29 +337,60 @@ async fn main() {
     }
 }
 
-/// What to do with a single fetched message, given whether `handle_message`
-/// succeeded. This is the actual decision `main`'s batch loop acts on (see
-/// the `match decide_msg(result)` call site) -- pulled out as a pure
-/// function so the #653 fix ("on a retryable failure, nak this message AND
+/// Outcome of handling a single fetched message, distinguishing WHICH kind
+/// of retry is needed. Codex review (PR #738) finding 3: the original #653
+/// fix mapped every `handle_message` failure to a full batch-stop, but the
+/// stale-record-clobber hazard that justifies stopping the batch (see
+/// `MsgDecision::NakAndStopBatch` below) is specific to `lancache.dns.record`
+/// updates, which are keyed by zone/name/type and can race against a newer
+/// update for that same key. `lancache.dns.flush` (PDNS Recursor cache
+/// flush) has no such key-ordering hazard -- flushing late doesn't clobber a
+/// newer flush -- so a flush failure blocking unrelated, healthy record
+/// updates later in the same batch would be an unnecessary regression versus
+/// the pre-#653 behavior (which never stopped the batch for ANY failure
+/// type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandleOutcome {
+    /// Succeeded (or was an unrecoverable/malformed message already logged
+    /// and intentionally not retried): ack it.
+    Ack,
+    /// Retryable failure with no batch-ordering hazard (currently: flush):
+    /// nak with delay, but keep consuming the rest of the batch.
+    RetryContinueBatch,
+    /// Retryable failure that COULD create a stale-record-clobber race if
+    /// later same-batch messages were allowed to proceed (currently: record
+    /// updates): nak with delay and stop consuming the rest of the batch.
+    RetryStopBatch,
+}
+
+/// What to do with a single fetched message, given its `HandleOutcome`. This
+/// is the actual decision `main`'s batch loop acts on (see the
+/// `match decide_msg(result)` call site) -- pulled out as a pure function so
+/// the #653 fix ("on a retryable record-update failure, nak this message AND
 /// stop consuming the rest of the batch") is unit-testable without a real
-/// NATS connection, and so a test exercising it is exercising the same
-/// logic the production loop runs, not a reimplementation of it.
+/// NATS connection, and so a test exercising it is exercising the same logic
+/// the production loop runs, not a reimplementation of it.
 #[derive(Debug, PartialEq, Eq)]
 enum MsgDecision {
     /// `handle_message` succeeded: ack this message, keep consuming the batch.
     AckAndContinue,
-    /// `handle_message` returned a retryable (5xx/network) failure: nak this
-    /// message (with delay) and stop consuming the rest of the batch, so no
-    /// later same-batch message (e.g. a newer update for the same
-    /// zone/name/type) can get acked ahead of this pending retry.
+    /// `handle_message` returned a retryable failure with no ordering
+    /// hazard (e.g. a flush failure): nak this message (with delay) but
+    /// keep consuming the rest of the batch.
+    NakAndContinue,
+    /// `handle_message` returned a retryable (5xx/network) record-update
+    /// failure: nak this message (with delay) and stop consuming the rest
+    /// of the batch, so no later same-batch message (e.g. a newer update
+    /// for the same zone/name/type) can get acked ahead of this pending
+    /// retry.
     NakAndStopBatch,
 }
 
-fn decide_msg(handled_ok: bool) -> MsgDecision {
-    if handled_ok {
-        MsgDecision::AckAndContinue
-    } else {
-        MsgDecision::NakAndStopBatch
+fn decide_msg(outcome: HandleOutcome) -> MsgDecision {
+    match outcome {
+        HandleOutcome::Ack => MsgDecision::AckAndContinue,
+        HandleOutcome::RetryContinueBatch => MsgDecision::NakAndContinue,
+        HandleOutcome::RetryStopBatch => MsgDecision::NakAndStopBatch,
     }
 }
 
@@ -303,24 +398,36 @@ async fn handle_message(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
     http_client: &Arc<Client>,
-) -> bool {
+) -> HandleOutcome {
     let subject = msg.subject.as_ref();
 
     if subject.starts_with("lancache.dns.heartbeat") {
         // Ignore heartbeat messages
-        return true;
+        return HandleOutcome::Ack;
     }
 
     if subject == "lancache.dns.record" {
-        return handle_dns_record(msg, pdns_api_key, http_client).await;
+        return if handle_dns_record(msg, pdns_api_key, http_client).await {
+            HandleOutcome::Ack
+        } else {
+            // Record updates carry the stale-clobber ordering hazard -- stop
+            // the batch (see `HandleOutcome::RetryStopBatch` doc comment).
+            HandleOutcome::RetryStopBatch
+        };
     }
 
     if subject == "lancache.dns.flush" {
-        return handle_dns_flush(msg, pdns_api_key, http_client).await;
+        return if handle_dns_flush(msg, pdns_api_key, http_client).await {
+            HandleOutcome::Ack
+        } else {
+            // Flush has no ordering hazard -- retry without blocking the
+            // rest of the batch (see `HandleOutcome::RetryContinueBatch`).
+            HandleOutcome::RetryContinueBatch
+        };
     }
 
     println!("Unknown subject: {}", subject);
-    true
+    HandleOutcome::Ack
 }
 
 fn dns_record_to_zone_update(record: &DNSRecord) -> Result<ZoneUpdate, String> {
@@ -783,28 +890,30 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum BatchOutcome {
         Acked,
+        NakedAndContinued,
         NakedAndBatchStopped,
         SkippedDueToEarlierFailure,
     }
 
     // Replays `decide_msg` -- the exact function the production batch loop
-    // calls -- over a synthetic ordered sequence of `handle_message` results,
-    // and additionally models the loop's `break` on `NakAndStopBatch` (a
-    // real NATS `Messages` stream can't be driven from a plain unit test, so
-    // this is the closest test double for "the rest of the batch is left
-    // unconsumed").
-    fn simulate_batch_processing(handle_results: &[bool]) -> Vec<BatchOutcome> {
+    // calls -- over a synthetic ordered sequence of `handle_message`
+    // outcomes, and additionally models the loop's `break` on
+    // `NakAndStopBatch` (a real NATS `Messages` stream can't be driven from
+    // a plain unit test, so this is the closest test double for "the rest of
+    // the batch is left unconsumed").
+    fn simulate_batch_processing(handle_results: &[HandleOutcome]) -> Vec<BatchOutcome> {
         let mut outcomes = Vec::with_capacity(handle_results.len());
         let mut stopped = false;
 
-        for &ok in handle_results {
+        for &outcome in handle_results {
             if stopped {
                 outcomes.push(BatchOutcome::SkippedDueToEarlierFailure);
                 continue;
             }
 
-            match decide_msg(ok) {
+            match decide_msg(outcome) {
                 MsgDecision::AckAndContinue => outcomes.push(BatchOutcome::Acked),
+                MsgDecision::NakAndContinue => outcomes.push(BatchOutcome::NakedAndContinued),
                 MsgDecision::NakAndStopBatch => {
                     outcomes.push(BatchOutcome::NakedAndBatchStopped);
                     stopped = true;
@@ -816,28 +925,48 @@ mod tests {
     }
 
     #[test]
-    fn decide_msg_acks_on_success_and_naks_and_stops_on_failure() {
-        assert_eq!(decide_msg(true), MsgDecision::AckAndContinue);
-        assert_eq!(decide_msg(false), MsgDecision::NakAndStopBatch);
+    fn decide_msg_acks_on_success_and_naks_and_stops_on_record_failure() {
+        assert_eq!(decide_msg(HandleOutcome::Ack), MsgDecision::AckAndContinue);
+        assert_eq!(
+            decide_msg(HandleOutcome::RetryStopBatch),
+            MsgDecision::NakAndStopBatch
+        );
     }
 
-    // Proves the #653 fix: a retryable failure for an earlier message in a
-    // batch (e.g. message A, an older update for zone/name/type X) must stop
-    // the rest of that batch from being consumed -- otherwise a later
-    // message for the same key (message B, a newer update for X) could
-    // reach handle_message, succeed, and get acked while A is still pending
-    // redelivery. A's later redelivery would then reapply stale data over
-    // B's newer state. This test uses a synthetic handle_message result
-    // sequence (no real NATS connection) to check that nothing after the
-    // first `false` is ever processed ("Acked") within the same batch.
+    // Codex review (PR #738) finding 3: a retryable failure with no
+    // ordering hazard (flush) must NAK but keep the batch going, unlike a
+    // record-update failure.
     #[test]
-    fn batch_processing_stops_after_first_retryable_failure() {
+    fn decide_msg_naks_and_continues_on_no_hazard_failure() {
+        assert_eq!(
+            decide_msg(HandleOutcome::RetryContinueBatch),
+            MsgDecision::NakAndContinue
+        );
+    }
+
+    // Proves the #653 fix: a retryable record-update failure for an earlier
+    // message in a batch (e.g. message A, an older update for
+    // zone/name/type X) must stop the rest of that batch from being
+    // consumed -- otherwise a later message for the same key (message B, a
+    // newer update for X) could reach handle_message, succeed, and get
+    // acked while A is still pending redelivery. A's later redelivery would
+    // then reapply stale data over B's newer state. This test uses a
+    // synthetic handle_message result sequence (no real NATS connection) to
+    // check that nothing after the first `RetryStopBatch` is ever processed
+    // ("Acked") within the same batch.
+    #[test]
+    fn batch_processing_stops_after_first_retryable_record_failure() {
         // Index 0: unrelated message succeeds.
         // Index 1: message A fails transiently (simulated 5xx).
         // Index 2: message B, a newer update for the same key as A, is
         //          later in this same batch and must NOT be acked now.
         // Index 3: any further message in the batch must also be skipped.
-        let handle_results = vec![true, false, true, true];
+        let handle_results = vec![
+            HandleOutcome::Ack,
+            HandleOutcome::RetryStopBatch,
+            HandleOutcome::Ack,
+            HandleOutcome::Ack,
+        ];
 
         let outcomes = simulate_batch_processing(&handle_results);
 
@@ -857,7 +986,7 @@ mod tests {
     // halts batches even without a failure.
     #[test]
     fn batch_processing_continues_when_all_succeed() {
-        let handle_results = vec![true, true, true];
+        let handle_results = vec![HandleOutcome::Ack, HandleOutcome::Ack, HandleOutcome::Ack];
 
         let outcomes = simulate_batch_processing(&handle_results);
 
@@ -871,11 +1000,15 @@ mod tests {
         );
     }
 
-    // A failure as the very first message in the batch must stop
-    // immediately -- nothing at all gets acked this cycle.
+    // A record-update failure as the very first message in the batch must
+    // stop immediately -- nothing at all gets acked this cycle.
     #[test]
-    fn batch_processing_stops_immediately_on_first_message_failure() {
-        let handle_results = vec![false, true, true];
+    fn batch_processing_stops_immediately_on_first_record_failure() {
+        let handle_results = vec![
+            HandleOutcome::RetryStopBatch,
+            HandleOutcome::Ack,
+            HandleOutcome::Ack,
+        ];
 
         let outcomes = simulate_batch_processing(&handle_results);
 
@@ -884,6 +1017,38 @@ mod tests {
             vec![
                 BatchOutcome::NakedAndBatchStopped,
                 BatchOutcome::SkippedDueToEarlierFailure,
+                BatchOutcome::SkippedDueToEarlierFailure,
+            ]
+        );
+    }
+
+    // Codex review (PR #738) finding 3 regression test: a flush failure
+    // must NOT stop the batch -- a later, unrelated record update in the
+    // same batch must still be processed and acked, unlike the record-
+    // failure case above.
+    #[test]
+    fn batch_processing_continues_past_flush_failure_but_stops_on_record_failure() {
+        // Index 0: flush fails transiently (e.g. recursor 5xx) -- has no
+        //          ordering hazard, so processing must continue.
+        // Index 1: unrelated record update succeeds right after it.
+        // Index 2: a record update fails transiently -- THIS must stop the
+        //          batch, unlike the flush failure at index 0.
+        // Index 3: must be skipped, since it's after the record failure.
+        let handle_results = vec![
+            HandleOutcome::RetryContinueBatch,
+            HandleOutcome::Ack,
+            HandleOutcome::RetryStopBatch,
+            HandleOutcome::Ack,
+        ];
+
+        let outcomes = simulate_batch_processing(&handle_results);
+
+        assert_eq!(
+            outcomes,
+            vec![
+                BatchOutcome::NakedAndContinued,
+                BatchOutcome::Acked,
+                BatchOutcome::NakedAndBatchStopped,
                 BatchOutcome::SkippedDueToEarlierFailure,
             ]
         );
