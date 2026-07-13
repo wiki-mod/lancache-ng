@@ -522,7 +522,15 @@ setup() {
     # output, not just in the shell environment -- i.e. this is the assert
     # half of the test, proving envsubst substituted the live value rather
     # than some cached/default one.
+    #
+    # Expected value has a trailing dot (issue #706), not just the raw
+    # DHCP_DOMAIN: the template hardcodes "${DHCP_DOMAIN}." because Kea's
+    # D2 daemon matches this "name" field as a DNS-name suffix, and without
+    # the trailing dot it's parsed as a bare, non-fully-qualified label that
+    # never matches any real (dotted) FQDN D2 tries to update -- see
+    # services/dhcp/entrypoint.sh's comment above its kea-dhcp-ddns.conf
+    # rendering step for the full empirical finding.
     run jq -r '.DhcpDdns["forward-ddns"]["ddns-domains"][0].name' "$ddns_output"
     [ "$status" -eq 0 ]
-    [ "$output" = "example.com" ]
+    [ "$output" = "example.com." ]
 }

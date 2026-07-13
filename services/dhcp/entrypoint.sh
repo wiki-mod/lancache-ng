@@ -61,7 +61,13 @@ fi
 : "${DDNS_TSIG_KEY:=}"
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 : "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
-: "${DHCP_DDNS_PORT:=53}"
+# 5300, not 53 (issue #706): 5300 is pdns_server's (the authoritative
+# daemon, the only PowerDNS process with dnsupdate=yes) actual DNS-protocol
+# port, per services/dns/pdns.conf.template's local-port=5300. Port 53 is
+# pdns_recursor's port -- it does not relay the DNS UPDATE opcode to the
+# authoritative backend, so DDNS updates sent there simply time out
+# (confirmed empirically) with no error on either side.
+: "${DHCP_DDNS_PORT:=5300}"
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
 # Verify KEA_CTRL_TOKEN is set to a non-default secret.
@@ -402,6 +408,23 @@ fi
 
 # The DHCP-DDNS daemon config is not edited by the UI. Regenerate it on start
 # so upgrades can fix D2 schema or target changes without touching DHCP subnets.
+#
+# services/dhcp/kea-dhcp-ddns.conf's forward-ddns/reverse-ddns "name" fields
+# (issue #706) carry a literal trailing dot ("${DHCP_DOMAIN}.",
+# "in-addr.arpa.") that can't be documented inline in that file itself: it
+# is validated as plain JSON elsewhere (tests/bats/dhcp_kea_config_generation.bats
+# runs `jq empty` on the rendered output), and Kea's own config format,
+# while it does tolerate `//`/`/* */` comments as an extension, would break
+# that strict-JSON check. Kea's D2 daemon matches an outgoing update's
+# target FQDN against each ddns-domains "name" by treating it as a DNS-name
+# suffix, not a substring -- without the trailing dot, "name" is parsed as a
+# bare, non-fully-qualified label and D2 never finds a match for any real
+# (dotted, fully-qualified) FQDN it tries to update, silently discarding
+# every forward/reverse change with a "no match" error instead of sending
+# it (confirmed empirically against a real Kea 2.6.3 D2 instance -- issue
+# #706's DDNS-follow-through test is what first exercised this path
+# end-to-end). Kea's own config parser does not add the trailing dot
+# itself, so it must be literal in the template.
 DDNS_TEMPLATE="/etc/kea/kea-dhcp-ddns.conf.template"
 DDNS_RUNTIME="/var/lib/kea/kea-dhcp-ddns.conf"
 DDNS_NEXT="$(mktemp)"

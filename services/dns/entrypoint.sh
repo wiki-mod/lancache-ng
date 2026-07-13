@@ -59,7 +59,62 @@ if [ ${#PDNS_API_KEY} -lt 16 ]; then
     exit 1
 fi
 
-export PDNS_API_KEY DDNS_ALLOW_FROM ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
+# detect_pdns_local_address
+# Determines this container's own real, non-loopback IPv4 address at
+# runtime, so pdns_server (dnsupdate=yes) can bind a second, real listener
+# alongside 127.0.0.1 -- DDNS updates from the separate `dhcp`
+# container/host (network_mode: host in prod, a completely different
+# container in dev) can only reach a loopback-only bind if they originate
+# inside this same container, which they never do (issue #706). No fixed IP
+# is knowable ahead of time and none is hardcoded: dev's dns-standard
+# happens to get a static compose-assigned IP, but prod's container gets a
+# dynamically-assigned Docker bridge-network IP on every start -- the same
+# runtime self-detection below runs in both, with no per-environment
+# special-casing. First tier mirrors setup.sh's detect_secondary_listen_ip
+# (same "src" parsing of `ip route get`, the address the kernel would
+# actually use to reach the internet, i.e. this container's real bridge
+# address). Deliberately does NOT reuse that function's second-tier
+# fallback verbatim: that fallback excludes 172.x addresses because it is
+# hunting a *host's* real LAN IP, but this container's own address usually
+# *is* a 172.x Docker bridge address -- the same exclusion here would
+# reject exactly the address needed.
+detect_pdns_local_address() {
+    local ip
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' \
+        || true)
+    if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+
+    # Fallback: first non-loopback IPv4 address on any interface, for the
+    # rare case this container has no default route yet but is already
+    # reachable on its own bridge address.
+    ip=$(ip -4 addr show \
+        | awk '/inet / && $2 !~ /^127\./ { sub(/\/.*/, "", $2); print $2; exit }' \
+        || true)
+    if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+
+    return 1
+}
+
+# Fails loud on failure, deliberately not silently falling back to
+# 127.0.0.1: `pdns_server --config=check` (used below) validates syntax
+# only, not reachability, so a silent fallback here would reintroduce the
+# exact loopback-only-bind bug this is fixing without any startup error to
+# catch it.
+if ! PDNS_LOCAL_ADDRESS="$(detect_pdns_local_address)"; then
+    echo "[lancache-dns] FATAL: could not detect this container's own non-loopback IPv4 address."
+    echo "[lancache-dns] pdns_server must bind a real address (alongside 127.0.0.1) or DDNS updates from the dhcp container/host can never reach it."
+    exit 1
+fi
+echo "[lancache-dns] pdns_server will bind local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}"
+
+export PDNS_API_KEY DDNS_ALLOW_FROM PDNS_LOCAL_ADDRESS ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 
 # ────────────────────────────────────────────────────────────────────────────
 # Known-good configuration snapshot library (#415, #615)
@@ -502,7 +557,7 @@ _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || exit 1
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable names.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE"
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE"
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
