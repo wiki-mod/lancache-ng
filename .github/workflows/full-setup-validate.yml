@@ -976,3 +976,41 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/ui-reachability-crash-loop-simulation.sh
+
+  setup-reset-kea-config-simulation:
+    # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
+    # reset-to-last-known-good-config kea` must genuinely roll a real,
+    # running Kea server back to an earlier config via its Control Agent API,
+    # not just return success. See
+    # scripts/setup-reset-kea-config-simulation.sh's own header for exactly
+    # what this does and does not prove. Chained after
+    # ui-reachability-crash-loop-simulation (the current last job in this
+    # workflow's serial chain) for the same one-job-at-a-time reason every
+    # other job here chains onto the previous one.
+    name: setup.sh reset-to-last-known-good-config (Kea) simulation
+    needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve build-tools image
+        # This job's own script only drives curl checks against the real ui
+        # container it starts (see dhcp-kea-ctrl-agent-mutation-simulation's
+        # identical reasoning above) -- no unpublished-tool dependency.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run setup.sh reset-to-last-known-good-config (Kea) simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/setup-reset-kea-config-simulation.sh

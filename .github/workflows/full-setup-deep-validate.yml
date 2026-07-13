@@ -971,6 +971,61 @@ jobs:
           set -euo pipefail
           bash scripts/ui-reachability-crash-loop-simulation.sh
 
+  setup-reset-kea-config-simulation:
+    # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
+    # reset-to-last-known-good-config kea` must genuinely roll a real,
+    # running Kea server back to an earlier config via its Control Agent API,
+    # not just return success. Builds Kea from THIS checkout's services/dhcp
+    # (like dhcp-kea-lease-flow-simulation above), so it needs no staging tag
+    # for that image; only the published `ui` image is pulled. See
+    # scripts/setup-reset-kea-config-simulation.sh's own header for exactly
+    # what this does and does not prove.
+    name: setup.sh reset-to-last-known-good-config (Kea) simulation
+    needs: [plan, compute-validation-network, ensure-pr-staging-images, ui-reachability-crash-loop-simulation]
+    if: >-
+      always() &&
+      needs.plan.outputs.should_run == 'true' &&
+      needs['compute-validation-network'].result != 'failure' &&
+      needs['compute-validation-network'].result != 'cancelled' &&
+      needs['ensure-pr-staging-images'].result != 'failure' &&
+      needs['ensure-pr-staging-images'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
+      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
+      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
+      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
+      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
+      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
+      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
+      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
+      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Resolve build-tools image
+        # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
+        # preference, matching every other job in this suite.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
+            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
+          else
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run setup.sh reset-to-last-known-good-config (Kea) simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/setup-reset-kea-config-simulation.sh
+
   # THE REQUIRED CHECK. Always runs (even when the suite was skipped for a
   # docs-only PR, or a sim failed), so branch protection always sees a real
   # conclusion from a job named "deep full-setup validation" -- never a
@@ -991,6 +1046,7 @@ jobs:
       - nats-auth-callout-simulation
       - dns-zone-rollback-simulation
       - ui-reachability-crash-loop-simulation
+      - setup-reset-kea-config-simulation
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
@@ -1008,6 +1064,7 @@ jobs:
           NATS_RESULT: ${{ needs['nats-auth-callout-simulation'].result }}
           DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
           UI_REACHABILITY_RESULT: ${{ needs['ui-reachability-crash-loop-simulation'].result }}
+          RESET_KEA_CONFIG_RESULT: ${{ needs['setup-reset-kea-config-simulation'].result }}
         run: |
           set -euo pipefail
 
@@ -1060,6 +1117,7 @@ jobs:
           check "nats-auth-callout-simulation" "$NATS_RESULT"
           check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
           check "ui-reachability-crash-loop-simulation" "$UI_REACHABILITY_RESULT"
+          check "setup-reset-kea-config-simulation" "$RESET_KEA_CONFIG_RESULT"
 
           if [[ "$overall" -ne 0 ]]; then
             echo "::error::Deep full-setup validation failed -- see the failing job(s) above."
