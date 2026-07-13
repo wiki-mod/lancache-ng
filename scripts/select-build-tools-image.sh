@@ -6,14 +6,45 @@
 # refs (pushes, or same-repo pull requests) — untrusted forked pull requests
 # never trigger a fallback build. Prints the chosen image reference on stdout.
 #
-# IMPORTANT: This script resolves mutable `:latest` tags to their immutable
-# digest-qualified references before returning. Do not call this script
-# expecting a mutable tag in the output; the returned reference is always
-# pinned to a digest or a branch-local validation image.
+# IMPORTANT: This script resolves the mutable channel tag it selects (`:dev`
+# or `:edge`, see channel_ref below) to its immutable digest-qualified
+# reference before returning. Do not call this script expecting a mutable tag
+# in the output; the returned reference is always pinned to a digest or a
+# branch-local validation image.
 set -euo pipefail
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
-published_image="ghcr.io/${repository}/build-tools:latest"
+
+# Resolves to the mutable channel tag build-push.yml's own promote job would
+# have just written for this exact ref, instead of hardcoding `:latest`.
+# `:latest` only moves on a stable vX.Y.Z release tag (release/stack-
+# images.yml) -- and this project has not cut one yet (see
+# full-setup-validate.yml's own image_tag comment) -- so it can sit stale for
+# weeks while `:dev` (written on every push to a v[0-9]* integration branch
+# such as v0.2.0) and `:edge` (written on every push to master) stay current.
+# Confirmed directly during issue #775's investigation: `:latest` was still
+# pinned to a build predating the Dockerfile's dhclient/expect additions
+# while `:dev` already had them, which is exactly why a job asking for
+# `BUILD_TOOLS_REQUIRE_PUBLISHED=true` kept silently getting a stale image.
+# GITHUB_BASE_REF (set only for pull_request events, to the PR's target
+# branch) takes priority over GITHUB_REF_NAME so a PR opened from a feature
+# branch still resolves against what it will actually merge into, not the
+# feature branch's own name.
+channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
+case "$channel_ref" in
+  master)
+    build_tools_channel="edge"
+    ;;
+  *)
+    # Every other ref this script is realistically invoked against --
+    # v0.2.0 itself, or a feature/claude/* branch forked from it without an
+    # open PR yet (e.g. a manual workflow_dispatch run) -- is v0.2.0-line
+    # work, so `dev` (the channel v0.2.0 pushes actually promote) is the
+    # correct default rather than the stable-only `latest`.
+    build_tools_channel="dev"
+    ;;
+esac
+published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 event_name="${GITHUB_EVENT_NAME:-${EVENT_NAME:-}}"
@@ -33,9 +64,9 @@ fail() {
 }
 
 # smoke_test_image verifies the provided image contains all required CI tools (cargo,
-# rustc, distcc, docker, etc.) before it is trusted. The published :latest tag is
-# mutable and could become stale, broken, or missing tools between publication and use,
-# so explicit verification is preferable to assuming the tag is current and valid.
+# rustc, distcc, docker, etc.) before it is trusted. The published channel tag (:dev or
+# :edge) is mutable and could become stale, broken, or missing tools between publication
+# and use, so explicit verification is preferable to assuming the tag is current and valid.
 smoke_test_image() {
   local image="$1"
 
@@ -66,6 +97,9 @@ smoke_test_image() {
       openssl
       rsync
       envsubst
+      dhclient
+      expect
+      tcpdump
     )
 
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
@@ -85,6 +119,13 @@ smoke_test_image() {
     sccache --version >/dev/null
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
+    expect -v >/dev/null
+
+    # python3-scapy has no standalone binary worth checking via command -v
+    # (see tools/build-tools/Dockerfile'\''s own verification step for the
+    # same caveat) -- verify the importable module scripts/dhcp-proxy-pxe-
+    # simulation.sh actually depends on instead.
+    python3 -c "import scapy.all"
   '
 }
 
