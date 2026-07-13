@@ -88,7 +88,12 @@ jobs:
           SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
           EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
           EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
-          REQUIRED_PLATFORMS: linux/amd64
+          # release/stack-images.yml declares every runtime service's "latest"
+          # channel (and the stack pointer) as linux/amd64 + linux/arm64; keep
+          # this in sync with that manifest so a backfill from an older
+          # amd64-only release tag cannot silently reset latest to an
+          # amd64-only stack and break arm64 installs on the default channel (#665).
+          REQUIRED_PLATFORMS: linux/amd64,linux/arm64
         run: |
           set -euo pipefail
 
