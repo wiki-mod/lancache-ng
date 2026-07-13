@@ -42,6 +42,13 @@ is real, live, running code, not just work sitting in source control.
     triggers on changes to the guard script itself, so its own fixture suite
     runs on script-only PRs instead of only the real-repo happy-path check
     in `build-push.yml`.
+- Extended `scripts/dhcp-kea-lease-flow-simulation.sh` with a static host
+  reservation scenario (#707): after its existing Discover/Offer/Request/Ack
+  check, it now adds a real reservation for a known MAC directly through
+  Kea's own Control Agent API and confirms a subsequent real DHCP lease
+  request for that MAC receives the reserved address, plus a companion
+  negative case confirming a different, unrelated MAC still receives an
+  ordinary dynamic-pool address rather than the reservation.
 - Added a known-good configuration snapshot mechanism for the nginx proxy and
   dnsmasq `dhcp-proxy` adapters: generated config is validated (`nginx -t`,
   `dnsmasq --test`) before being snapshotted to a persistent, service-owned
