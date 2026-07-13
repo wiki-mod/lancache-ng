@@ -471,6 +471,24 @@ apt_compose_package() {
     fi
 }
 
+# Picks the best available Buildx plugin package name for this apt index, same
+# preference-order pattern as apt_compose_package: Docker's own apt repo names
+# it docker-buildx-plugin, while Debian's/Ubuntu's native repos package the
+# same CLI plugin as docker-buildx. Returns non-zero (not a die()) when
+# neither is available so callers can treat provisioning it as best-effort --
+# assert_resolved_image_tag_platform_supported (#665) still fails closed later
+# with its own actionable "install docker-buildx-plugin" message if Buildx
+# ends up missing regardless.
+apt_buildx_package() {
+    if apt_package_available docker-buildx-plugin; then
+        printf '%s\n' docker-buildx-plugin
+    elif apt_package_available docker-buildx; then
+        printf '%s\n' docker-buildx
+    else
+        return 1
+    fi
+}
+
 # Docker bootstrap is a first-install convenience, not a build environment
 # contract. Changes here affect production setup directly and must stay separate
 # from future dev-mode/compiler-farm decisions.
@@ -543,7 +561,8 @@ install_docker_apt_repo() {
 # index has no Compose v2 package. Uses the lighter docker.io + ensure_apt_docker_client
 # path when possible instead of always pulling in Docker's own docker-ce group.
 install_docker_apt() {
-    local compose_package=""
+    local compose_package="" buildx_package=""
+    local -a docker_packages=()
 
     apt-get update -y
     if ! compose_package=$(apt_compose_package); then
@@ -553,10 +572,23 @@ install_docker_apt() {
             || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
     fi
 
+    # assert_resolved_image_tag_platform_supported (#665) hard-requires
+    # `docker buildx` before the first pull. Install it alongside Docker/Compose
+    # here so that check does not immediately abort a fresh install right after
+    # setup.sh finished installing its own prerequisites -- best-effort only:
+    # if this apt index has neither buildx package name, skip it and let the
+    # later platform check fail closed with its own actionable message instead
+    # of failing this whole Docker install over an unrelated package gap.
+    buildx_package=$(apt_buildx_package) || buildx_package=""
+
     if [[ "$compose_package" = docker-compose-plugin ]]; then
-        apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io "$compose_package"
+        docker_packages=(docker-ce docker-ce-cli containerd.io "$compose_package")
+        [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
+        apt-get install -y --no-install-recommends "${docker_packages[@]}"
     else
-        apt-get install -y --no-install-recommends docker.io "$compose_package"
+        docker_packages=(docker.io "$compose_package")
+        [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
+        apt-get install -y --no-install-recommends "${docker_packages[@]}"
         # Debian Trixie splits the Docker client into docker-cli, so install it
         # only when docker.io did not already provide /usr/bin/docker.
         ensure_apt_docker_client
@@ -684,7 +716,14 @@ install_docker_rpm() {
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
-        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+        # docker-buildx-plugin is included here (not just docker-compose-plugin)
+        # so a fresh full Docker install already satisfies
+        # assert_resolved_image_tag_platform_supported's (#665) `docker buildx`
+        # requirement -- this repo_url is always Docker's own official repo
+        # (see docker_rpm_repo_url above), which publishes docker-buildx-plugin
+        # directly, unlike the apt path where it must be probed for (see
+        # apt_buildx_package).
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
     fi
 
     for package in "${packages[@]}"; do
@@ -761,13 +800,13 @@ install_docker() {
 
     if command -v apt-get >/dev/null 2>&1; then
         print_warn "Docker is missing."
-        printf "  Required packages: docker.io and an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)\n"
+        printf "  Required packages: docker.io, an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose), and Buildx (docker-buildx-plugin or docker-buildx) when this apt index has one\n"
         if ! confirm "Install these packages now? [y/N]" "N"; then
             die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
         fi
         install_docker_apt || die "Failed to install Docker."
     elif command -v dnf >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -776,7 +815,7 @@ install_docker() {
         fi
         install_docker_rpm dnf || die "Failed to install Docker."
     elif command -v yum >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -785,7 +824,7 @@ install_docker() {
         fi
         install_docker_rpm yum || die "Failed to install Docker."
     elif command -v pacman >/dev/null 2>&1; then
-        packages=(docker docker-compose)
+        packages=(docker docker-compose docker-buildx)
         install_packages "Docker is missing." "${packages[@]}" \
             || die "Failed to install Docker."
     else
