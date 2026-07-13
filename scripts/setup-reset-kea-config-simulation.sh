@@ -49,12 +49,30 @@ network_name="${compose_project}_validation"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required (an image providing curl, e.g. the build-tools image)}"
 
-# Matches dhcp-kea-ctrl-agent-mutation-simulation.sh's own fixed IP choice and
-# rationale: .2-.9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/
-# netdata/nats/ui in deploy/full-setup/docker-compose.yml, .21 avoids that
-# sibling script's own .20 so both can run concurrently on a shared runner
-# without colliding if ever scheduled in parallel.
-kea_ip="172.30.99.21"
+# full-setup-deep-validate.yml's compute-validation-network job derives a
+# COLLISION-FREE per-run subnet (e.g. 172.30.147.0/24), not always the fixed
+# 172.30.99.0/24 dhcp-kea-ctrl-agent-mutation-simulation.sh's own comment
+# describes -- that sibling script only gets away with a hardcoded subnet
+# because it is manual-workflow-only (full-setup-validate.yml), where this
+# job's env block does not thread VALIDATION_SUBNET through at all (#703).
+# THIS script's job DOES thread it, so every address below must be derived
+# from the real subnet in effect this run, not assumed fixed -- confirmed the
+# hard way: a first version of this script hardcoded 172.30.99.x and failed
+# with "no configured subnet contains IP address 172.30.99.21" the first time
+# it actually ran against a per-run-derived, non-default subnet.
+subnet_cidr="${VALIDATION_SUBNET:-172.30.99.0/24}"
+subnet_prefix="${subnet_cidr%.*/*}"
+ui_ip="${VALIDATION_UI_IP:-${subnet_prefix}.9}"
+gateway_ip="${VALIDATION_GATEWAY:-${subnet_prefix}.1}"
+# .2-.9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/netdata/
+# nats/ui in deploy/full-setup/docker-compose.yml (see compute-validation-network's
+# derivation), .21 avoids dhcp-kea-ctrl-agent-mutation-simulation.sh's own .20
+# so both could run concurrently on a shared runner without colliding.
+kea_ip="${subnet_prefix}.21"
+dhcp_pool_start="${subnet_prefix}.100"
+dhcp_pool_end="${subnet_prefix}.150"
+reservation_ip_a="${subnet_prefix}.223"
+reservation_ip_b="${subnet_prefix}.224"
 
 kea_ctrl_token="$(openssl rand -hex 32)"
 ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"
@@ -111,10 +129,10 @@ docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
     -v "$work_dir/kea-data:/var/lib/kea" \
-    -e DHCP_SUBNET="172.30.99.0/24" \
-    -e DHCP_RANGE_START="172.30.99.100" \
-    -e DHCP_RANGE_END="172.30.99.150" \
-    -e DHCP_GATEWAY="172.30.99.1" \
+    -e DHCP_SUBNET="$subnet_cidr" \
+    -e DHCP_RANGE_START="$dhcp_pool_start" \
+    -e DHCP_RANGE_END="$dhcp_pool_end" \
+    -e DHCP_GATEWAY="$gateway_ip" \
     -e DHCP_DOMAIN="lancache-resetkea-test.lan" \
     -e DHCP_LEASE_TIME=1800 \
     -e DHCP_NTP_SERVERS="" \
@@ -178,7 +196,7 @@ run_client() {
 }
 
 echo "== UI: establishing a session and extracting its CSRF token =="
-run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://172.30.99.9:8080/dhcp'"
+run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://${ui_ip}:8080/dhcp'"
 cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
 [[ -n "$cookie_value" ]] || { echo "::error::No lancache_ui_session cookie was set by GET /dhcp." >&2; exit 1; }
 csrf_token="$(cut -d. -f3 <<<"$cookie_value")"
@@ -187,14 +205,14 @@ echo "Session established, CSRF token extracted."
 
 echo "== UI: adding reservation A (creates known-good snapshot S_A) =="
 mac_a="02:11:22:33:55:$(printf '%02x' "$(( $$ % 256 ))")"
-ip_a="172.30.99.223"
+ip_a="$reservation_ip_a"
 add_a_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-a-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'subnet_id=1' \
     --data-urlencode 'mac=$mac_a' \
     --data-urlencode 'ip=$ip_a' \
     --data-urlencode 'hostname=resetkea-a' \
-    'http://172.30.99.9:8080/dhcp/static/add'")"
+    'http://${ui_ip}:8080/dhcp/static/add'")"
 if [[ "$add_a_code" != "303" ]]; then
     echo "::error::POST /dhcp/static/add (reservation A) returned HTTP $add_a_code, expected 303." >&2
     run_client "cat /shared/add-a-response" || true
@@ -204,14 +222,14 @@ echo "Reservation A added ($mac_a -> $ip_a)."
 
 echo "== UI: adding reservation B (creates known-good snapshot S_AB) =="
 mac_b="02:11:22:33:66:$(printf '%02x' "$(( $$ % 256 ))")"
-ip_b="172.30.99.224"
+ip_b="$reservation_ip_b"
 add_b_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-b-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'subnet_id=1' \
     --data-urlencode 'mac=$mac_b' \
     --data-urlencode 'ip=$ip_b' \
     --data-urlencode 'hostname=resetkea-b' \
-    'http://172.30.99.9:8080/dhcp/static/add'")"
+    'http://${ui_ip}:8080/dhcp/static/add'")"
 if [[ "$add_b_code" != "303" ]]; then
     echo "::error::POST /dhcp/static/add (reservation B) returned HTTP $add_b_code, expected 303." >&2
     run_client "cat /shared/add-b-response" || true
