@@ -17,7 +17,13 @@ mkdir -p /var/lib/kea
 # same "file on shared volume" pattern proxy/nginx already uses -- Kea itself
 # never creates a missing parent directory for a logger's file output, it
 # just fails to start, so this must exist before either daemon runs.
-mkdir -p /var/log/lancache-dhcp
+# MUST be exactly /var/log/kea (issue #773): Kea 2.6.3's packaged binaries
+# hard-restrict file-logger `output` paths to that one directory as a
+# security hardening against arbitrary file writes via a malicious
+# config-set -- any other path (the project's usual /var/log/lancache-dhcp
+# convention included) fails config load with "invalid path in `output`",
+# refusing to start at all, not just losing the file log.
+mkdir -p /var/log/kea
 
 case "${1:-}" in
     nmap|/usr/bin/nmap|/bin/nmap)
@@ -268,7 +274,7 @@ migrate_dhcp4_config() {
         --argjson max_lease_time "$DHCP_MAX_LEASE_TIME" \
         --argjson ntp_migration_map "$ntp_migration_map" \
         --arg lease_cmds_hook_path "$KEA_LEASE_CMDS_HOOK_PATH" \
-        --arg kea_log_file "/var/log/lancache-dhcp/kea-dhcp4.log" \
+        --arg kea_log_file "/var/log/kea/kea-dhcp4.log" \
         '
         def is_ipv4:
           type == "string"
