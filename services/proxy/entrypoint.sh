@@ -21,7 +21,11 @@ STREAM_TARGET_FILE="/etc/nginx/stream.d/00-stream-targets.conf"
 IP_STANDARD="${IP_STANDARD:?IP_STANDARD is required}"
 IP_SSL="${IP_SSL:-}"
 SSL_ENABLED="${SSL_ENABLED:-0}"
-NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4}"
+# Last-resort fallback if the container is run without an env_file at all
+# (normal installs always set this via config/{dev,prod}/proxy.env or
+# deploy/quickstart/.env). Matches those shipped defaults, including the
+# bracketed IPv6 servers nginx's resolver directive requires.
+NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]}"
 PROXY_SECURITY_MODE="${PROXY_SECURITY_MODE:-lazy}"
 PROXY_ALLOWED_CLIENT_CIDRS="${PROXY_ALLOWED_CLIENT_CIDRS:-}"
 KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
@@ -513,6 +517,14 @@ _collect_domain_rows() {
 
 _collect_domain_rows
 
+# set -f (noglob) around this loop: NGINX_UPSTREAM_RESOLVER is intentionally
+# expanded unquoted below so its whitespace-separated tokens split into
+# multiple resolver entries, but a bracketed IPv6 literal such as
+# [2001:4860:4860::8888] is also a valid bash bracket-glob (matches any
+# single character in the set). Without noglob, bash would silently replace
+# that token with a matching filename from the cwd if one ever existed,
+# instead of comparing the literal resolver value.
+set -f
 for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
     resolver="$(_normalize_resolver_token "$resolver")"
     if [ "$resolver" = "$IP_STANDARD" ] || { [ -n "$IP_SSL" ] && [ "$resolver" = "$IP_SSL" ]; }; then
@@ -521,6 +533,7 @@ for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
         exit 1
     fi
 done
+set +f
 
 case "$PROXY_SECURITY_MODE" in
     lazy|strict) ;;
