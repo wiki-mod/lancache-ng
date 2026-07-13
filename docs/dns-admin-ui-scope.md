@@ -36,7 +36,16 @@ runtime state with no corresponding env var at all.
 These are read once at container start by `services/dns/entrypoint.sh` and
 baked into `pdns.conf` / `recursor.conf` via `render_template_atomic()`. The
 Admin UI has no route that writes any of them. Changing one means editing the
-compose `.env` file and restarting the `dns-standard`/`dns-ssl` containers.
+compose `.env` file and restarting the `dns-standard`/`dns-ssl` containers —
+**except `PDNS_API_KEY`, which is a shared value with more than one
+consumer**: the `ui` container reads the same env var once at startup via
+`Config::from_env()` (`services/ui/src/config.rs`) and uses it as the
+`X-API-Key` header for every PowerDNS authoritative/recursor API call the
+Admin UI makes (`services/ui/src/routes/domains.rs`). Restarting only
+`dns-standard`/`dns-ssl` after rotating `PDNS_API_KEY` leaves the `ui`
+container running with the stale key, so its `/domains` fetch/flush calls
+start failing with 401 until `ui` is restarted/recreated too. As a rule,
+restart every consumer of a shared env var, not just the DNS containers.
 
 | Variable | Purpose |
 |---|---|
@@ -59,10 +68,10 @@ made once at deploy time, not tuned routinely.
 
 | Setting | Route | Mechanism |
 |---|---|---|
-| CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/add`, `POST /domains/remove` (`services/ui/src/routes/domains.rs`) | Direct atomic file write to the shared `cdn-domains.txt`, plus a per-domain recursor cache flush and (SSL mode only) an SSL proxy restart. **The RPZ zone itself is not live-reloaded by this route**: `services/dns/entrypoint.sh` regenerates `/var/lib/powerdns/rpz.zone` from `cdn-domains.txt` only at DNS container startup, and `recursor.lua`'s `rpzFile(...)` call has no `refresh` polling configured, so the recursor only picks up an added/removed domain's RPZ policy after the `dns-standard`/`dns-ssl` container is restarted — the cache flush alone does not make a newly added domain resolve to the proxy |
+| CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/dns/add`, `POST /domains/dns/remove` (`services/ui/src/routes/domains.rs`) | `write_domain_file_atomic()` writes via a temp-file-plus-rename, which is atomic — **except in the default Compose deployments**, which bind-mount `cdn-domains.txt` as an individual file (not a directory). Replacing an individual file bind mount by rename fails with `EBUSY`, so on that (default) path the function falls back to `write_domain_file_in_place()`: a non-atomic truncate-then-write that can leave the file partially written if the process is killed mid-write. Directory-mount deployments stay on the atomic rename path. Plus a per-domain recursor cache flush and (SSL mode only) an SSL proxy restart. **The RPZ zone itself is not live-reloaded by this route**: `services/dns/entrypoint.sh` regenerates `/var/lib/powerdns/rpz.zone` from `cdn-domains.txt` only at DNS container startup, and `recursor.lua`'s `rpzFile(...)` call has no `refresh` polling configured, so the recursor only picks up an added/removed domain's RPZ policy after the `dns-standard`/`dns-ssl` container is restarted — the cache flush alone does not make a newly added domain resolve to the proxy |
 | LAN records in the `lan.` zone (A/AAAA/CNAME/MX/TXT) — add/remove | `POST /domains/lan/add`, `POST /domains/lan/remove` | Publishes a `lancache.dns.record` NATS message to the `LANCACHE_DNS` JetStream stream (durability comes from JetStream persisting the publish itself); every node's `nats-subscriber` consumes that message and applies it to its own local PowerDNS instance via the PowerDNS API — the subscriber does not re-publish the message, so JetStream's own replay/redelivery is what secondaries rely on for replication, not a subscriber-side re-publish |
 | Global AAAA-response filter (suppress all AAAA answers) | `POST /domains/aaaa-filter` | Writes/removes a marker file on the shared `powerdns-state` volume, read live (no caching, `dq.variable=true`) by `filter-aaaa.lua`'s recursor `preresolve` hook — takes effect immediately, no restart |
-| Secondary node registration, credential rotation, removal | `services/ui/src/routes/secondaries.rs` (`/secondaries` page + `/secondaries/register`, `/secondaries/{name}/rotate`, `/secondaries/{name}` DELETE) | Per-secondary NATS auth-callout credential (issue #583); `nats.conf` itself is static and never rewritten per secondary, so revocation works by `authorize_secondary` re-checking the `secondaries` table on every connection attempt — a removed/rotated credential is rejected starting from that node's *next* reconnect, not on its already-established connection (see `services/ui/src/nats_auth_callout.rs` module docs) |
+| Secondary node registration, credential rotation, removal | `services/ui/src/routes/secondaries.rs` (`/secondaries` page + `POST /api/secondary/register`, `POST /api/secondary/{name}/rotate-token`, `DELETE /api/secondary/{name}`) | Per-secondary NATS auth-callout credential (issue #583); `nats.conf` itself is static and never rewritten per secondary, so revocation works by `authorize_secondary` re-checking the `secondaries` table on every connection attempt — a removed/rotated credential is rejected starting from that node's *next* reconnect, not on its already-established connection (see `services/ui/src/nats_auth_callout.rs` module docs) |
 | Recursor cache flush for a specific name | Internal helper (`flush_recursor_cache`, called by the add/remove routes above) | PowerDNS Recursor `cache/flush?domain=` API call, plus a NATS `lancache.dns.flush` broadcast so every recursor instance (not just the one this UI process talks to) drops its cached answer for that exact name |
 
 **Doc-drift note found during this investigation:** `docs/architecture-ng.md`'s
@@ -97,9 +106,22 @@ all created idempotently by `services/dns/entrypoint.sh` on every start
 arbitrary zones — it only manages *records inside* the fixed `lan.` zone
 (see 1b) and the CDN domain list that drives RPZ. `local.lan.` and the
 reverse zones exist and are created, but have no Admin UI record-management
-route at all today; their record content comes entirely from DDNS (Kea lease
-updates via `nsupdate`) — see 3b below for why NATS-driven secondary
-reconciliation does *not* cover these zones today, only `lan.`.
+route at all today, and — unlike `lan.` — neither is actually populated by
+DDNS by default today either. `services/dhcp/kea-dhcp-ddns.conf`'s
+`forward-ddns` sends lease host-record updates to `${DHCP_DOMAIN}`, which
+defaults to `lan` (`config/dev/dhcp.env`, `config/prod/dhcp.env`), so Kea's
+forward DDNS records land in the already-UI-managed `lan.` zone, not
+`local.lan.` — `local.lan.` is TSIG-enabled for updates
+(`configure_ddns_tsig()` grants it the same as every other zone in
+`DDNS_UPDATE_ZONES`) but nothing in the default config actually targets it.
+The reverse zones are `reverse-ddns`'s intended target
+(`services/dhcp/kea-dhcp-ddns.conf`'s `reverse-ddns.ddns-domains` names
+`in-addr.arpa.`), but that update currently always fails in practice: no
+PowerDNS zone is literally named `in-addr.arpa.` (only the narrower
+per-octet `PRIVATE_REVERSE_ZONES` subzones exist), so every reverse update
+is rejected with NOTAUTH — see #768 for the live-verified failure and root
+cause. See 3b below for why NATS-driven secondary reconciliation does *not*
+cover any of these 19 zones today, only `lan.`.
 
 **Intentionally out of scope (not planned):**
 - Arbitrary zone creation/deletion via the Admin UI. The zone list is a fixed
@@ -117,9 +139,11 @@ reconciliation does *not* cover these zones today, only `lan.`.
 
 **Planned but unbuilt (candidate v0.3.0 scope):**
 - Record management for `local.lan.` and the private reverse zones. Today
-  only `lan.` has an Admin UI CRUD surface; the other 19 zones that DDNS
-  actually populates have no manual override path if an operator needs to fix
-  or inspect a record PowerDNS-side without going through Kea.
+  only `lan.` has an Admin UI CRUD surface; the other 19 zones (TSIG-enabled
+  for DDNS the same as `lan.`, but not actually reached by DDNS in the
+  default config — see the DDNS note above and #768 for the reverse-zone
+  case specifically) have no manual override path if an operator needs to
+  fix or inspect a record PowerDNS-side without going through Kea.
 - A PTR-record checkbox alongside LAN A-record creation.
   `docs/architecture-ng.md` currently states "DNS: create zones, host
   entries, PTR checkbox for LAN IPs" under "Admin UI" — verified against
@@ -177,15 +201,24 @@ secondary automatically.
 
 **Intended end state vs. current state:** the identity/credential model
 (register/rotate/revoke per secondary) is complete per #583. What is not yet
-built is any Admin UI visibility into *replication health* — the
-`/secondaries` page shows `last_seen` per secondary (from the `secondaries`
-table) but nothing surfaces whether a specific secondary's local zone data
-has actually converged with the primary's, or is lagging/diverged for some
-reason (e.g. that secondary's `nats-subscriber` crashed after a partial
-batch — see #653, a currently-open related bug in the batch queue this issue
-belongs to, about a stale update surviving a same-batch failure). A
-convergence/health indicator per secondary is planned-but-unbuilt, candidate
-v0.3.0 scope, not started.
+built is any Admin UI visibility into *replication health* at all — not even
+a basic liveness timestamp. The `secondaries` table has a `last_seen`
+column and `services/ui/src/templates/secondaries.html` will render it if
+present, but nothing in the codebase ever writes a non-NULL value to it:
+`register_secondary` always inserts `last_seen = NULL`
+(`services/ui/src/routes/secondaries.rs`), and no other code path — not
+`nats_auth_callout`, not the `nats-subscriber` process, not any periodic
+job — updates that column afterwards. So the column is dead state today,
+not a working-but-shallow health signal: the `/secondaries` page cannot
+currently show *when* a secondary was last seen, let alone whether its
+local zone data has actually converged with the primary's or is
+lagging/diverged for some reason (e.g. that secondary's `nats-subscriber`
+crashed after a partial batch — see #653, a currently-open related bug in
+the batch queue this issue belongs to, about a stale update surviving a
+same-batch failure). A liveness/convergence health indicator per secondary
+is planned-but-unbuilt, candidate v0.3.0 scope, not started — the
+`last_seen` column is schema groundwork for that future work, not an
+implemented feature.
 
 ## 4. Known-good config snapshot / rollback (#415/#616) — Admin UI perspective
 
