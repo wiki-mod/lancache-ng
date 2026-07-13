@@ -473,6 +473,34 @@ is real, live, running code, not just work sitting in source control.
   approach, and calls it right after the tag/channel is resolved and before
   the first state-mutating write in the install, update, and secondary-node
   flows (#665).
+- Fixed the `setup.sh CLI simulation` and `deep full-setup validation` jobs in
+  `full-setup-deep-validate.yml` failing on every PR since #744 merged. #744
+  added `assert_resolved_image_tag_platform_supported()`, which hard-requires
+  a working `docker buildx` before continuing; that check runs inside the
+  `build-tools` image (`tools/build-tools/Dockerfile`), which never installed
+  a `docker buildx` CLI plugin at all, so it failed closed with "docker
+  buildx is required ... Install the docker-buildx-plugin package". Built
+  `docker buildx` from source in the existing `actionlint-builder` stage
+  (same CVE-staleness rationale already applied to the Docker CLI and
+  docker-compose there) and installed it as a CLI plugin alongside them.
+  Buildx v0.35.0 pins `github.com/containerd/containerd/v2` at v2.2.4, which
+  carries three HIGH-severity CVEs (CVE-2026-53488/53489/53492) fixed in
+  2.2.5+ -- caught by this image's own Trivy scan step during development of
+  this fix -- so the build now `go get`s that one module up to v2.2.6 before
+  building buildx, the same way the Dockerfile already deliberately accepts
+  (via `.trivyignore.yaml`) that `github.com/docker/docker`'s v28.5.2 pin
+  cannot be bumped the same way (no v29.x Go module tags exist upstream).
+  Also, buildx's release tag ships a committed `vendor/` directory, which Go
+  auto-selects over the network fetch once `go get` touches `go.mod` --
+  `go mod vendor` re-syncs it before the build to avoid an "inconsistent
+  vendoring" failure. Filed #791 as a deliberate follow-up (not done here)
+  to widen `scripts/select-build-tools-image.sh`'s smoke test for `docker
+  buildx version`, matching the #775 precedent: that check can only be
+  added once the published `:dev`/`:edge` build-tools image actually
+  contains buildx, i.e. after this fix merges and republishes -- adding it
+  in this same PR would fail the strict, no-fallback `validate-compose` and
+  `shellcheck (GitHub-hosted fallback)` jobs against the still-stale
+  currently-published image (#787).
 
 ## [0.1.0] - 2026-07-06
 

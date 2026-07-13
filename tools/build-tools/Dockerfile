@@ -9,21 +9,35 @@ FROM golang:latest AS actionlint-builder
 ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.6.1
 ARG DOCKER_COMPOSE_VERSION=5.2.0
+ARG DOCKER_BUILDX_VERSION=0.35.0
+# buildx v0.35.0's go.mod pins github.com/containerd/containerd/v2 at v2.2.4,
+# which carries three HIGH-severity CVEs (CVE-2026-53488/53489/53492) fixed in
+# 2.2.5+ -- confirmed directly via Trivy scanning this image's first buildx
+# build attempt. Unlike the docker/docker v28.5.2+incompatible case just below
+# (no v29.x module tags exist at all, so that one genuinely cannot be bumped),
+# containerd/containerd/v2 does publish a newer, non-breaking 2.2.x tag, so
+# `go get` this exact module up to the fixed version before building instead
+# of carrying the vulnerability forward.
+ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# actionlint, the Docker CLI, and docker-compose are all Go binaries, and Go
-# statically embeds its entire standard library into every compiled binary --
-# unlike a dynamically-linked C tool, there is no way to get security fixes
-# into an already-built Go binary short of recompiling it. Each of these
-# three projects only cuts a new upstream release when the tool itself has a
-# feature/fix to ship, not on every Go stdlib security release, so their
+# actionlint, the Docker CLI, docker-compose, and the buildx CLI plugin are
+# all Go binaries, and Go statically embeds its entire standard library into
+# every compiled binary -- unlike a dynamically-linked C tool, there is no way
+# to get security fixes into an already-built Go binary short of recompiling
+# it. Each upstream project only cuts a new release when the tool itself has
+# a feature/fix to ship, not on every Go stdlib security release, so their
 # latest available release binaries can (and have: confirmed via Trivy
 # scanning the exact official static binaries for actionlint v1.7.12 and
 # Docker CLI/compose v29.6.1/v5.2.0) carry known stdlib CVEs from whatever Go
 # toolchain happened to be current when that release was cut. Building from
 # source with whatever Go toolchain `golang:latest` resolves to at build time
-# is the only way to get a current, patched stdlib into these tools.
+# is the only way to get a current, patched stdlib into these tools. buildx
+# is built from source here as the same preventive measure for consistency,
+# even though its official release binary hasn't been Trivy-scanned
+# separately (issue #787 only required adding `docker buildx` support, not
+# reproducing the CVE-2026-39822 investigation for it).
 # cargo-audit and cargo-tarpaulin below don't have this problem: they are
 # Rust binaries, not Go, so they carry no equivalent statically-embedded
 # runtime to go stale.
@@ -39,9 +53,32 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # target as if it were the main module, and `exclude` is only valid in a
 # genuine main module) -- cloning and running a real local `go build` from
 # within the checkout sidesteps that restriction.
+# docker/buildx has neither the vendor.mod nor the exclude-directive problem
+# (a plain go.mod, verified against its v0.35.0 tag), but it does need the
+# containerd bump described above, which `go install pkg@version` has no way
+# to apply (there is no go.mod in scope to `go get` against) -- so it is built
+# the same clone-and-`go build` way as docker-compose below, not via a plain
+# `go install` like actionlint. Its cmd package is named `buildx`, not
+# `docker-buildx`, so the build output is named explicitly to match the
+# `docker-<subcommand>` filename Docker's CLI plugin discovery requires.
+# Unlike docker-compose, buildx's release tag ships a committed vendor/
+# directory, which Go's toolchain auto-selects (`-mod=vendor`) whenever a
+# vendor/modules.txt is present and go.mod's go directive is >= 1.14 -- `go
+# get` alone only updates go.mod/go.sum, leaving vendor/modules.txt
+# referencing the old containerd version, which then fails the build outright
+# ("inconsistent vendoring") rather than silently using the wrong version.
+# `go mod vendor` re-syncs vendor/ to the bumped go.mod before the build runs.
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
     /out/actionlint --version; \
+    buildx_src="$(mktemp -d)"; \
+    git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
+    ( cd "$buildx_src" \
+      && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+      && go mod vendor \
+      && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
+    rm -rf "$buildx_src"; \
+    /out/docker-buildx version; \
     docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
     install -d "$(dirname "$docker_cli_src")"; \
     git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"; \
@@ -119,9 +156,9 @@ RUN set -euo pipefail; \
 # unlike sccache, neither needs a non-default feature set -- so building
 # them from source would only add build time for no behavioral difference.
 # Fetch and checksum-verify the official release asset for each instead,
-# matching the shellspec pattern below. actionlint, docker, and docker-compose
-# are not included here -- see the actionlint-builder stage above for why
-# those three are built from source instead.
+# matching the shellspec pattern below. actionlint, docker, docker-compose,
+# and buildx are not included here -- see the actionlint-builder stage above
+# for why those four are built from source instead.
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
@@ -162,14 +199,19 @@ RUN set -euo pipefail; \
     shellspec --version
 
 # Built from source in the actionlint-builder stage above (see its comment):
-# the official static binaries for these exact versions carry a known,
+# the official static binaries for docker/docker-compose carry a known,
 # fixed-upstream Go stdlib CVE (confirmed via Trivy) that only a rebuild
-# against a current Go toolchain resolves.
+# against a current Go toolchain resolves; buildx is built from source there
+# too, as the same preventive measure (issue #787: the build-tools image
+# lacked a `docker buildx` plugin at all, which broke setup.sh's
+# assert_resolved_image_tag_platform_supported() platform check in CI).
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=actionlint-builder /out/docker /usr/local/bin/docker
 COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=actionlint-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 RUN docker --version; \
-    docker compose version
+    docker compose version; \
+    docker buildx version
 
 # isc-dhcp-client (dhclient) is needed by
 # scripts/dhcp-kea-lease-flow-simulation.sh (issue #448) to perform a real
@@ -341,6 +383,7 @@ RUN set -euo pipefail; \
     shellcheck --version; \
     docker --version; \
     docker compose version; \
+    docker buildx version; \
     expect -v; \
     printf 'PATH=%s\n' "$PATH"; \
     case ":$PATH:" in \
