@@ -294,6 +294,19 @@ is real, live, running code, not just work sitting in source control.
   path now write to `/var/log/kea/*.log`, and the `dhcp-logs` volume mount
   plus fluent-bit's tail source were remapped to match in all three Compose
   files (#773).
+- Fixed `scripts/select-build-tools-image.sh` silently trusting a stale,
+  incomplete published build-tools image. Its `BUILD_TOOLS_REQUIRE_PUBLISHED=true`
+  strict path hardcoded `:latest`, a channel that only moves on a stable
+  `vX.Y.Z` release tag (none exist yet) and so can sit stale for weeks, while
+  `:dev` (promoted on every `v0.2.0` push) and `:edge` (promoted on every
+  `master` push) stay current; it now resolves the channel that actually
+  matches the current ref instead. Its `smoke_test_image()` tool list was
+  also missing `dhclient`, `expect`, `tcpdump`, and any `python3-scapy`
+  check, even though `tools/build-tools/Dockerfile` genuinely installs and
+  verifies all of these -- letting the stale `:latest` image pass the smoke
+  test anyway. Confirmed as the root cause of PR #764's `DHCP Kea lease-flow
+  simulation` job failing with `dhclient: command not found` even after
+  #773's Kea log-path fix landed (#775).
 - Fixed the PowerDNS authoritative server's `webserver-allow-from` in
   `services/dns/pdns.conf.template` only permitting `127.0.0.1` and
   `172.16.0.0/12` — Docker's default address-pool range. Operators who
