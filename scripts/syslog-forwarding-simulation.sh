@@ -371,7 +371,14 @@ echo "== Trigger 3/6: nats -- a real client connection with a unique consumer na
 # (the same one scripts/nats-secondary-auth-callout-simulation.sh drives),
 # rather than reimplementing a NATS client -- a genuine connection attempt,
 # not a fabricated log line.
-dns_image="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${SETUP_SIM_IMAGE_TAG:-${LANCACHE_IMAGE_TAG:-edge}}"
+# On a same-repo PR, SETUP_SIM_IMAGE_TAG is the pinned pr-<N>-sha tag Phase 1
+# just installed with (the common, tested case). On workflow_dispatch/fork/
+# Dependabot it is deliberately empty (see this script's own CI job comment)
+# and SETUP_SIM_IMAGE_CHANNEL instead carries the resolved channel word
+# (e.g. "edge"/"dev") -- falling through to LANCACHE_IMAGE_TAG here would be
+# wrong, since that var is never set as a job-level env for this script.
+dns_image_tag="${SETUP_SIM_IMAGE_TAG:-${SETUP_SIM_IMAGE_CHANNEL:-edge}}"
+dns_image="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${dns_image_tag}"
 nats_user="$(grep '^NATS_DNS_WRITER_USER=' "$install_dir/.env" | cut -d= -f2-)"
 nats_pass="$(grep '^NATS_DNS_WRITER_PASSWORD=' "$install_dir/.env" | cut -d= -f2-)"
 docker run --rm --network "$network_name" \
