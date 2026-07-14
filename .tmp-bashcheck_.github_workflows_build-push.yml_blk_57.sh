@@ -1,0 +1,2 @@
+set -euo pipefail
+mkdir -p "/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}"

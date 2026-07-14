@@ -2019,8 +2019,13 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
           UI_TOUCHED: ${{ needs['detect-changes'].outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs['detect-changes'].outputs.build_tools }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           # Mirrors build/build-arm64's "Determine whether this service
           # needs building" should-build override exactly: a workflow/CI-
@@ -2070,7 +2075,12 @@ jobs:
             should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
 
             if [[ "$should_exist" == "true" ]]; then
-              if docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
+              # Wrapped in ghcr_retry: unlike merge-manifests' per-arch
+              # probes, a missing tag here is always a real error (this job
+              # runs after merge-manifests, so a touched service's PR staging
+              # tag is expected to already exist) -- retrying protects
+              # against a transient 401 being misreported as "never pushed".
+              if ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
                 echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
                 continue
               fi
@@ -2080,7 +2090,8 @@ jobs:
 
             base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
             echo "::notice::$service is untouched by this PR; (re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
-            docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
 
       - name: Build full-setup validation image
@@ -2144,6 +2155,8 @@ jobs:
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
           LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -2157,6 +2170,8 @@ jobs:
 
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           lock_root="/tmp/lancache-validation-locks"
           max_attempts=10
@@ -2214,7 +2229,7 @@ jobs:
           PYEOF
           }
 
-          docker compose pull --quiet
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose pull --quiet
 
           reserved_octet=""
           holder_pid=""

@@ -380,12 +380,19 @@ jobs:
       # merge-build-tools-manifests combines this with build-tools-arm64's tag
       # into the real sha-<commit> tag; mutable branch/latest tags are
       # promoted only after that combined tag exists.
+      # #822: unlike build-push.yml's build/build-arm64 (fixed by #541), this
+      # publish step had ZERO retry -- a single bare docker/build-push-action
+      # attempt. Now shares the same ghcr-build-push-retry composite action
+      # (4 total attempts) build-push.yml uses, instead of staying an
+      # unguarded copy of the same push pattern.
       - name: Build and push amd64 build-tools image
         id: build
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         timeout-minutes: 60
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
           push: true
@@ -608,12 +615,16 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
+      # #822: same shared retry wrapper as build-tools's amd64 leg -- see that
+      # step's comment.
       - name: Build and push arm64 build-tools image
         id: build
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         timeout-minutes: 60
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
           push: true
@@ -704,8 +715,14 @@ jobs:
 
       - name: Create multi-platform manifest
         id: merge
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           short_sha="${GITHUB_SHA::7}"
           amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-amd64"
@@ -725,7 +742,8 @@ jobs:
           # build-push.yml's promote job.
           build_tools_description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
-          docker buildx imagetools create -t "$source_tag" "$amd64_image" "$arm64_image" \
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create -t "$source_tag" "$amd64_image" "$arm64_image" \
             --annotation "index:org.opencontainers.image.description=${build_tools_description}"
 
           printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
@@ -736,16 +754,25 @@ jobs:
       # silently resolved to the wrong architecture, and that would only
       # surface later as a confusing per-runner-class failure downstream.
       - name: Verify merged manifest exposes both platforms
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           bash scripts/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
 
       - name: Resolve merged manifest digest
         id: merged-digest
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          digest="$(docker buildx imagetools inspect "${{ steps.merge.outputs.source-tag }}" --format '{{json .Manifest.Digest}}')"
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "${{ steps.merge.outputs.source-tag }}" --format '{{json .Manifest.Digest}}')"
           digest="${digest%\"}"
           digest="${digest#\"}"
           if [[ -z "$digest" || "$digest" = "null" ]]; then
@@ -792,8 +819,13 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
           MERGED_DIGEST: ${{ steps.merged-digest.outputs.digest }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
           if [ -z "$sanitized_ref" ]; then
@@ -836,7 +868,13 @@ jobs:
 
           source_ref="${BUILD_TOOLS_IMAGE}@${MERGED_DIGEST}"
 
-          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
+          # Deliberately one line each (no backslash continuation): the
+          # validate-compose contract job in build-push.yml extracts this
+          # step's derivation logic verbatim by scanning up to (but not
+          # including) the first line containing "docker buildx imagetools
+          # create" -- a continued line here would splice into whatever that
+          # extraction appends next. See that job's own comment.
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
           fi
