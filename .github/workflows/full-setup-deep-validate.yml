@@ -1119,17 +1119,28 @@ jobs:
         # simulation is sufficient (not a distributed lock): the collision
         # can only happen between two runs sharing the same Docker daemon,
         # i.e. the same physical host, which is exactly what a per-host lock
-        # file serializes. Uses its own lock file (not
-        # setup-cli-simulation's) since the two scripts don't actually need
-        # to serialize against EACH OTHER, only against other concurrent
-        # runs of themselves.
+        # file serializes. MUST be the SAME lock file setup-cli-simulation.sh
+        # uses, not a separate one: this job's own `needs:` is deliberately
+        # hoisted to [plan, ensure-pr-staging-images] (see the TODO(#453)
+        # above) rather than chained after the existing serial sim sequence,
+        # so within a single PR's own CI run this job can run genuinely
+        # CONCURRENTLY with setup-cli-simulation -- and both drive the exact
+        # same fixed container names from the exact same
+        # deploy/quickstart/docker-compose.yml. A separate lock file (the
+        # first version of this fix) only serialized this job against
+        # OTHER runs of itself, not against setup-cli-simulation running at
+        # the same time in the same workflow run -- confirmed as the actual
+        # cause of a repeat `nats did not become healthy` failure even after
+        # that first fix landed (docker-socket-proxy's own access log showed
+        # a `POST /containers/lancache-nats/restart` mid-run, i.e. two
+        # simulations fighting over the same container).
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
         run: |
           set -euo pipefail
-          exec {lock_fd}>/tmp/lancache-syslog-forwarding-simulation.lock
+          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
           flock "$lock_fd"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
