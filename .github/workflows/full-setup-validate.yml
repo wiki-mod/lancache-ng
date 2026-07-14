@@ -646,10 +646,34 @@ jobs:
         # the same reasoning) not something a real operator would hit, since
         # setup.sh always runs directly on the host in production, never
         # inside a container without host networking.
+        # flock (#819 follow-up): scripts/setup-cli-simulation.sh installs a
+        # real quickstart stack, whose compose file pins FIXED container
+        # names (lancache-nats, lancache-ui, ...) for a real operator's
+        # single-host install -- deliberately, see #669 item 6. Those names
+        # are NOT project-name-prefixed the way volumes/networks are, so two
+        # concurrent runs of this job that land on the SAME physical runner
+        # host (this repo registers several runner instances per host, all
+        # sharing one Docker daemon; concurrency: above only serializes
+        # *this ref's own* runs, never across different PRs/branches) fight
+        # over the exact same container names. Confirmed as the real cause
+        # of a `nats has no running container` failure during a genuine
+        # rollback-safety test: at that exact failure's timestamp, several
+        # *other* branches' Full-Setup Deep Validate runs were independently
+        # in flight too. Not the #820/#821 class (that fix only covers the
+        # per-octet Docker *network* subnet full-setup-validate/deep-validate
+        # reserve for their own throwaway stacks) -- this job never goes
+        # through that reservation at all, since it installs the real
+        # quickstart flow with real fixed names instead. A host-local flock
+        # around the whole simulation is sufficient (not a distributed lock):
+        # the collision can only happen between two runs sharing the same
+        # Docker daemon, i.e. the same physical host, which is exactly what a
+        # per-host lock file serializes.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
+          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
+          flock "$lock_fd"
           docker run --rm \
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
