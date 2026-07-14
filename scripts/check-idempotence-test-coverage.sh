@@ -4,13 +4,15 @@
 # Guards the requirement #456's convergence/idempotence audit and its #640
 # follow-up both state explicitly: every stateful config-writer entrypoint
 # (setup.sh's .env migration, the nginx/dnsmasq/PowerDNS/Kea known-good-
-# snapshot adapters, NATS's static nats.conf writer, the watchdog restart/
-# status loop) must have at least one repeat-run/idempotence test that
-# drives the REAL function twice and asserts the result converges, not just
-# a one-shot "it works once" test. That pattern is easy to add for a new
-# writer and just as easy to silently skip under time pressure -- this
-# script makes "no repeat-run coverage" a CI failure instead of something
-# that has to be remembered during review.
+# snapshot adapters, the NATS entrypoint's static nats.conf generator AND the
+# Admin UI's separate auth_callout.conf fragment writer -- two distinct NATS
+# config-writers since issue #811 split them -- the watchdog restart/status
+# loop) must have at least one repeat-run/idempotence test that drives the
+# REAL function twice and asserts the result converges, not just a one-shot
+# "it works once" test. That pattern is easy to add for a new writer and just
+# as easy to silently skip under time pressure -- this script makes "no
+# repeat-run coverage" a CI failure instead of something that has to be
+# remembered during review.
 #
 # This is deliberately a small, self-contained script with its own bats
 # coverage (tests/bats/check_idempotence_test_coverage.bats), matching the
@@ -68,6 +70,22 @@ WRITER_TEST_EVIDENCE=(
     # reporting OK. The extra_marker "nats_conf" narrows the match to test
     # names that are actually about the nats.conf writer.
     "services/ui/src/routes/secondaries.rs|services/ui/src/routes/secondaries.rs|nats_conf"
+    # The NATS entrypoint's static nats.conf generator. Since issue #811 this is
+    # a config-writer distinct from secondaries.rs above: the entrypoint owns
+    # nats.conf (regenerated on every restart) while secondaries.rs owns only the
+    # auth_callout.conf fragment. Because the `nats` service runs the upstream
+    # nats:2-alpine image (no Dockerfile to hold a services/nats/entrypoint.sh),
+    # the generator is inline in each deploy/*/docker-compose.yml `command:`
+    # block; nats_conf_entrypoint_idempotence.bats extracts and drives the real
+    # block twice (see tests/bats/helpers/nats-entrypoint-helpers.sh). All three
+    # generating compose files are listed so deleting/renaming any one surfaces
+    # here; the bats suite additionally asserts the three do not drift apart.
+    # full-setup's compose is deliberately NOT listed: it prebakes a static
+    # nats.conf (fixed validation-* users, no env-driven template) rather than
+    # generating one, so it is not a config-writer in this sense.
+    "deploy/dev/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
+    "deploy/prod/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
+    "deploy/quickstart/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
 )
 
 # A marker substring is required inside a *test name*, not just anywhere in
