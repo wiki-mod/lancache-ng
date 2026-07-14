@@ -122,6 +122,46 @@ LANCACHE_IMAGE_TAG=sha-<commit>
 They exist so operators can later point the stack at a private mirror without
 editing every compose file.
 
+## Automated Patch (Z) Tagging
+
+The `promote` job in `build-push.yml` computes and cuts patch releases
+automatically; it does not wait for a maintainer to push a `vX.Y.Z` tag by
+hand for ordinary image-affecting changes.
+
+On every push to the release-bearing branch (`master`), after the existing
+channel-tag promotion and its `#777` debounce/coalesce check both succeed,
+`promote` additionally:
+
+1. resolves the current release with `git describe --tags --match
+   'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0`;
+2. classifies every change since that tag's commit with
+   `scripts/classify-image-impact.sh` -- the same classifier `detect-changes`
+   uses, not a second copy;
+3. if that diff is image-affecting (`IMAGE_IMPACT=true`), computes the next
+   patch version with `scripts/compute-next-release-tag.sh` and pushes an
+   annotated `vX.Y.Z` tag using the `PROJECT_AUTOMATION_PAT` secret;
+4. otherwise cuts nothing and moves on.
+
+Diffing from the last release's own commit (not "the previous push") means a
+burst of several merges landing on `master` between two `promote` runs still
+produces exactly one patch bump reflecting the whole burst, matching the
+`#777` debounce this step runs after.
+
+The tag is pushed with `PROJECT_AUTOMATION_PAT`, not `GITHUB_TOKEN`, because
+GitHub does not re-trigger workflow runs for tags pushed by the default
+`GITHUB_TOKEN` (a documented anti-recursion behavior). Pushing with a PAT
+means the tag genuinely re-triggers `build-push.yml` on `refs/tags/v*`, so the
+existing tag-triggered `release` job (GitHub release, `latest` move) runs
+exactly as it does for a manually pushed tag -- this step never performs the
+release itself, only cuts and pushes the tag.
+
+Minor (`X`) and major (`Y`) bumps stay a deliberate, manual maintainer tag
+push; nothing in this mechanism ever chooses to bump past a patch on its own.
+
+This mechanism requires at least one real `vX.Y.Z` tag to already exist as its
+starting point. Until that first tag is bootstrapped, the step is a documented
+no-op (`::notice::`, not a failure) rather than guessing a starting version.
+
 ## Release Candidates
 
 Tags matching `vX.Y.Z-rc.N` are release candidates. They must create or update a

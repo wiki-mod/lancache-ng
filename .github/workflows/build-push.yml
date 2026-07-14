@@ -5104,8 +5104,14 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      # fetch-depth: 0 is required by the version-bump step below: `git
+      # describe --tags` and the classify-image-impact.sh merge-base diff both
+      # need full tag/commit history, which a default shallow checkout does
+      # not have.
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -5333,6 +5339,101 @@ jobs:
           for channel_tag in "${channel_tags[@]}"; do
             docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
           done
+
+      # Automated SemVer patch (Z) tagging (#819). Gated to the release-
+      # bearing branch (master) only -- on any other ref (including this
+      # workflow's current v0.2.0 host branch) this step is a deliberate
+      # no-op until master itself starts receiving pushes, which is the
+      # still-undesigned "v0.2.0 -> master" promotion event tracked in #825.
+      # Minor/major bumps stay a manual maintainer tag push; only Z is ever
+      # computed here (see scripts/compute-next-release-tag.sh).
+      #
+      # `if:` is written as `success() && ...`, not a bare `github.ref == ...`
+      # condition, for the same reason the job-level `if:` above carries its
+      # own long comment: a step's own `if:` REPLACES (does not extend) the
+      # implicit `success()` GitHub Actions would otherwise apply, so leaving
+      # `success()` out here would let this step run even after the
+      # "Promote coherent stack tags" step above it failed.
+      - name: Cut an automated patch release tag for image-affecting master changes
+        if: ${{ success() && github.ref == 'refs/heads/master' }}
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: |
+          set -euo pipefail
+
+          # This is core release machinery on the release-bearing branch, not
+          # optional convenience automation, so a missing PAT fails closed
+          # rather than silently skipping the release (AGENTS.md: do not hide
+          # required-command failures).
+          : "${PROJECT_AUTOMATION_PAT:?PROJECT_AUTOMATION_PAT is required to push an automated release tag (GITHUB_TOKEN-authored tag pushes do not re-trigger this workflow, a documented GitHub anti-recursion behavior, so the tag-triggered release job would never run).}"
+
+          # A missing bootstrap tag is an expected, one-time prerequisite gap
+          # (see #819 Point 4), not a broken-release-machinery state -- the
+          # channel-tag promotion in the step above this one has already
+          # succeeded by the time this runs. Failing the whole job here would
+          # misreport "bootstrap not done yet" as "promotion is broken," so
+          # this is a skip (::notice:: + exit 0), not a hard failure. Once the
+          # maintainer cuts the first vX.Y.Z tag, this same push (or the next
+          # one) picks it up automatically.
+          base_tag="$(git describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 2>/dev/null || true)"
+          if [[ -z "$base_tag" ]]; then
+            echo "::notice::No vX.Y.Z release tag exists yet on this history; skipping automated patch tagging until the first release tag is bootstrapped (see #819 Point 4)."
+            exit 0
+          fi
+          base_commit="$(git rev-list -n1 "$base_tag")"
+
+          # Reuse the SAME classifier detect-changes and the earlier channel
+          # promotion above both rely on (#819 Point 1: do not invent a
+          # parallel classifier). Diffing from the last release's own commit
+          # (not just "the previous push") means a burst of N merges landing
+          # on master between two promote runs still yields exactly ONE
+          # bump reflecting the whole burst, not N.
+          image_impact="$(bash scripts/classify-image-impact.sh "$base_commit" "$COMMIT_SHA" | grep -x 'IMAGE_IMPACT=true' || true)"
+          if [[ -z "$image_impact" ]]; then
+            echo "::notice::No image-affecting change between ${base_tag} (${base_commit}) and ${COMMIT_SHA}; no patch release cut."
+            exit 0
+          fi
+
+          next_tag="$(bash scripts/compute-next-release-tag.sh "$base_tag")"
+
+          # Cheap end-of-run re-check, independent of and in addition to the
+          # debounce check the "Promote coherent stack tags" step already
+          # performed earlier in this same job: re-resolve master's tip again
+          # immediately before pushing the version tag itself. Two releases
+          # landing back-to-back within the few seconds between that earlier
+          # check and this one is a low-probability ("lottery odds") window,
+          # but it is a single, near-free git ls-remote call, so there is no
+          # reason not to close it -- this run must never tag a commit that a
+          # later push has already superseded.
+          current_tip="$(git ls-remote origin refs/heads/master | cut -f1)"
+          if [[ -z "$current_tip" ]]; then
+            echo "::error::Could not resolve the current tip of refs/heads/master via git ls-remote; refusing to cut a release tag blind."
+            exit 1
+          fi
+          if [[ "$current_tip" != "$COMMIT_SHA" ]]; then
+            echo "::notice::refs/heads/master has already moved to ${current_tip} since this run was triggered for ${COMMIT_SHA}; skipping the version-tag cut so the run already targeting the current tip can supersede it."
+            exit 0
+          fi
+
+          # Idempotency: if this exact tag somehow already exists remotely
+          # (a re-run, or a previous attempt that pushed the tag but failed a
+          # later step), do not fail or push a duplicate -- another run
+          # already covered this commit's release.
+          if [[ -n "$(git ls-remote --tags origin "refs/tags/${next_tag}" 2>/dev/null)" ]]; then
+            echo "::notice::${next_tag} already exists on origin; nothing to do."
+            exit 0
+          fi
+
+          git tag -a "$next_tag" "$COMMIT_SHA" -m "Automated patch release ${next_tag}"
+          # PROJECT_AUTOMATION_PAT (not secrets.GITHUB_TOKEN) authors this
+          # push so the tag push actually re-triggers build-push.yml on
+          # refs/tags/v* -- GITHUB_TOKEN-authored pushes are deliberately not
+          # re-triggered by GitHub (anti-recursion), which would otherwise
+          # leave this tag published but its own release job never run.
+          git push "https://x-access-token:${PROJECT_AUTOMATION_PAT}@github.com/${REPOSITORY}.git" "refs/tags/${next_tag}"
+          echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
       - name: Attest stack pointer provenance
         if: ${{ steps.promote-stack.outputs.stack-pointer-digest != '' }}
