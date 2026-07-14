@@ -74,6 +74,31 @@ git config --global --add safe.directory "$repo_root"
 # (this checkout, bind-mounted from the same host path the workflow step
 # runs in) is the only path both sides agree on, so the install directory
 # has to live under it instead of under /tmp.
+# deploy/quickstart/docker-compose.yml pins a static top-level `name:
+# lancache-ng`, and Compose prefers that yaml name over the --project-
+# directory basename it would otherwise derive -- so every docker compose
+# call below resolves to the SAME project (and therefore the same
+# container/volume names) on every run unless COMPOSE_PROJECT_NAME is set,
+# regardless of install_dir already being unique per run. Confirmed directly
+# (run 29322035897): two concurrent runs on the shared self-hosted runner
+# pool both resolved to project "lancache-ng", and setup.sh's own
+# guard_restore_shared_project_volumes (#669) then correctly refused to
+# proceed once it saw another active install under that name -- the guard
+# is doing its job, this script just never gave concurrent runs the
+# isolation it assumes. Deriving the project name from install_dir's own
+# basename keeps it unique per run with zero new randomness/collision
+# surface. Compose validates an explicit COMPOSE_PROJECT_NAME against
+# ^[a-z0-9][a-z0-9_-]*$ (lowercase alnum/dash/underscore only), so the
+# mktemp basename (e.g. "install.Tm4lJy": a literal dot, mixed-case letters)
+# must be sanitized first, not exported verbatim. A real end-user install is
+# unaffected: it never sets SETUP_SIM_INSTALL_DIR, so this function is only
+# ever called by this simulation script -- the static "lancache-ng" name
+# from the compose yaml stays exactly as-is for real installs (see #669 item
+# 6 for why that stays intentionally fixed there).
+sim_compose_project_name() {
+    printf 'lancache-ng-sim-%s\n' "$(basename "$1" | tr 'A-Z.' 'a-z-')"
+}
+
 mkdir -p "$repo_root/.setup-cli-simulation-tmp"
 install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
 # cmd_backup's --dest defaults to /var/backups/lancache-ng and cmd_update
@@ -82,6 +107,8 @@ install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
 # effect outside this script's own container.
 backup_root="/var/backups/lancache-ng"
 export SETUP_SIM_INSTALL_DIR="$install_dir"
+COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"
+export COMPOSE_PROJECT_NAME
 
 cleanup() {
     local status=$?
@@ -241,6 +268,12 @@ while true; do
         rm -rf "$install_dir"
         install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
         export SETUP_SIM_INSTALL_DIR="$install_dir"
+        # Re-derive to match the new install_dir -- the preceding `down` call
+        # above still ran under the OLD exported COMPOSE_PROJECT_NAME (correct:
+        # it must tear down the failed attempt's own project), so this must be
+        # reassigned only after that, not before.
+        COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"
+        export COMPOSE_PROJECT_NAME
         fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
         attempt=$((attempt + 1))
         sleep 10

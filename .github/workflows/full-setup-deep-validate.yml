@@ -257,64 +257,142 @@ jobs:
             docker:latest \
             docker compose -f docker-compose.yml config >/dev/null
 
-      # Defense-in-depth against a leftover bridge from a crashed prior run;
-      # see build-push.yml's identical step for the full rationale. Networks
-      # named for our own compose project are ignored (docker recreates them
-      # by name); only a foreign overlap fails the run with a clear message.
-      - name: Check for a validation subnet collision
-        run: |
-          set -euo pipefail
-          target_subnet="${VALIDATION_SUBNET:-172.30.99.0/24}"
-          conflict="$(python3 - "$target_subnet" <<'PYEOF'
-          import ipaddress, os, subprocess, sys
-          target = ipaddress.ip_network(sys.argv[1])
-          own_prefix = os.environ.get("COMPOSE_PROJECT_NAME", "lancache-ng-validation")
-          ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
-          for network_id in ids:
-              fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
-              line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
-              name, _, subnets_str = line.partition("|")
-              if name.startswith(own_prefix):
-                  continue
-              for subnet_str in subnets_str.split():
-                  try:
-                      existing = ipaddress.ip_network(subnet_str)
-                  except ValueError:
-                      continue
-                  if target.overlaps(existing):
-                      print(f"docker network {name} ({subnet_str})")
-          route_output = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
-          for line in route_output.splitlines():
-              parts = line.split()
-              try:
-                  inet_index = parts.index("inet")
-                  iface = parts[1]
-                  cidr = parts[inet_index + 1]
-              except (ValueError, IndexError):
-                  continue
-              try:
-                  existing = ipaddress.ip_interface(cidr).network
-              except ValueError:
-                  continue
-              if target.overlaps(existing):
-                  print(f"host interface {iface} ({cidr})")
-          PYEOF
-          )"
-          if [[ -n "$conflict" ]]; then
-            echo "::error::Validation subnet $target_subnet overlaps existing network state on this runner: $conflict. Set VALIDATION_SUBNET (and matching VALIDATION_*_IP / VALIDATION_GATEWAY) to a free range and re-run."
-            exit 1
-          fi
-          echo "Validation subnet $target_subnet is free."
-
-      - name: Start full-setup validation stack
+      # The pre-#703 approach here was a single fail-hard "Check for a
+      # validation subnet collision" pre-flight followed by a plain
+      # `docker compose up` -- with no host-local lock and no retry. Two
+      # concurrent runs deriving the same octet (only 252 buckets), or one
+      # run losing the check-then-create race to another mid-flight, made
+      # this job hard-fail with "Pool overlaps"/"overlaps existing network
+      # state" and forced a manual re-run (real recurrence: run 29287590206).
+      # #703 already fixed exactly this for the manual full-setup-validate.yml
+      # via scripts/lib/reserve-validation-subnet.sh's flock + retry; this
+      # job now adopts the same pattern (issue #820). Unlike the simulation
+      # jobs -- which reserve, run, and release within one script invocation
+      # via scripts/lib/run-in-validation-subnet.sh -- this job holds the
+      # octet lock across SEPARATE steps (up here, then the health-check,
+      # client-simulation, and teardown steps below), so the holder PID is
+      # threaded through $GITHUB_ENV and released in the teardown step.
+      #
+      # A successful `docker compose up` here still only means the containers
+      # were created, not that they are healthy -- the "Wait for the stack to
+      # stabilize" step below is what catches a service that starts and then
+      # immediately crash-loops.
+      - name: Reserve a validation subnet and start the stack (locked, retries on collision)
+        id: reserve-and-start
         working-directory: deploy/full-setup
         env:
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
         run: |
           set -euo pipefail
+
+          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+          : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is required for safe validation-subnet locking."
+            exit 1
+          fi
+
+          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+
+          # Same host-local lock root the simulation wrapper and the manual
+          # full-setup-validate.yml both use, so every concurrent run on this
+          # host coordinates on one shared per-octet lock namespace.
+          lock_root="/tmp/lancache-validation-locks"
+          max_attempts=10
+
+          # Defense-in-depth ahead of `docker compose up`: a leftover bridge
+          # interface Docker no longer tracks (a killed container's orphan, a
+          # VPN, another NIC) still makes the kernel refuse an overlapping
+          # bridge, so checking the live `ip addr` view lets the retry skip
+          # that octet cleanly. validation_subnet_conflicts (sourced above)
+          # is the single shared definition of this check -- issue #820
+          # consolidated what used to be a copy-pasted python block per
+          # caller (this step, the simulation wrapper, and now the DHCP
+          # scripts) into one place in the lib, so all of them stay in sync.
+
           docker compose pull --quiet
-          docker compose up -d
+
+          reserved_octet=""
+          holder_pid=""
+          next_attempt=1
+
+          while [[ -z "$reserved_octet" && "$next_attempt" -le "$max_attempts" ]]; do
+            reservation="$(validation_subnet_reserve "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+              echo "::error::Could not lock a free validation subnet octet after $max_attempts attempts."
+              exit 1
+            }
+            attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
+            octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
+            candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+
+            # Export the full VALIDATION_* set for THIS candidate octet before
+            # anything reads it: validation_subnet_conflicts needs the
+            # matching COMPOSE_PROJECT_NAME to recognise our own leftover
+            # networks, and `docker compose up` below needs the whole
+            # address set to place every service inside the reserved subnet.
+            validation_subnet_export_env "$octet"
+            target_subnet="172.30.${octet}.0/24"
+
+            conflict="$(validation_subnet_conflicts "$target_subnet" "$COMPOSE_PROJECT_NAME")"
+            if [[ -n "$conflict" ]]; then
+              echo "Octet $octet's subnet $target_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+              validation_subnet_release "$candidate_pid"
+              next_attempt=$((attempt + 1))
+              continue
+            fi
+
+            echo "Attempting to start the validation stack on locked, pre-checked subnet $target_subnet (attempt $attempt)."
+            if up_output="$(docker compose up -d 2>&1)"; then
+              echo "$up_output"
+              reserved_octet="$octet"
+              holder_pid="$candidate_pid"
+              break
+            fi
+
+            echo "$up_output"
+            validation_subnet_release "$candidate_pid"
+
+            if ! validation_subnet_output_is_collision "$up_output"; then
+              echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
+              exit 1
+            fi
+
+            echo "docker compose up failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
+            next_attempt=$((attempt + 1))
+          done
+
+          if [[ -z "$reserved_octet" ]]; then
+            echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
+            exit 1
+          fi
+
+          echo "Validation stack is up on subnet 172.30.${reserved_octet}.0/24 (lock held by PID $holder_pid)."
+
+          # Persist the winning octet's whole env set (already exported into
+          # this shell by validation_subnet_export_env above) plus the lock
+          # holder PID, so every later step in this job -- health check,
+          # client simulation, and the teardown step's release -- targets the
+          # actually-running stack instead of the stale, first-guess job-level
+          # env, and can release the exact lock this step acquired.
+          {
+            echo "VALIDATION_LOCK_HOLDER_PID=$holder_pid"
+            echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+            echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
+            echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
+            echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
+            echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
+            echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
+            echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
+            echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
+            echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
+            echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
+            echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
+            echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
+            echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
+          } >> "$GITHUB_ENV"
 
       - name: Wait for the stack to stabilize and check container health
         working-directory: deploy/full-setup
@@ -393,6 +471,14 @@ jobs:
         run: |
           set -euo pipefail
           docker compose down --volumes --remove-orphans || true
+
+          # Release the host-local subnet lock the reserve step acquired, so
+          # the octet frees up for the next run immediately instead of waiting
+          # for this whole job's process tree to exit. Only set if that step
+          # actually reserved a lock before any later failure.
+          if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
+            kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
+          fi
 
       - name: Clean up image
         if: always()
@@ -478,7 +564,13 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/ssl-mitm-cache-simulation.sh
+          # Reserve a collision-free 172.30.<octet>.0/24 subnet (flock + retry,
+          # issue #820) and run the sim inside it, instead of racing the single
+          # job-level VALIDATION_SUBNET against every other concurrent run on
+          # this host. The wrapper exports the whole VALIDATION_* set (incl.
+          # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
+          # standard-passthrough-shim this sim relies on) for the octet it wins.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
 
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
@@ -533,7 +625,9 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/ui-nats-dns-integration-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it rather than racing the shared job-level subnet.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-nats-dns-integration-simulation.sh
 
   watchtower-update-simulation:
     # Real Watchtower verification: it seeds a private mirror from the
@@ -574,7 +668,12 @@ jobs:
       - name: Run Watchtower update simulation
         run: |
           set -euo pipefail
-          bash scripts/watchtower-update-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it. This sim already retries its own registry HOST PORT,
+          # but its full-setup compose stack still read the shared job-level
+          # VALIDATION_SUBNET with no subnet retry -- the wrapper closes that
+          # remaining gap.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/watchtower-update-simulation.sh
 
   setup-cli-simulation:
     # Runs the real setup.sh installer end-to-end (fresh install, update/
@@ -756,7 +855,11 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/nats-secondary-auth-callout-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it. This is the exact job whose octet-22 stack died on
+          # "Pool overlaps" in run 29287590206 -- the concrete recurrence this
+          # wrapper eliminates.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/nats-secondary-auth-callout-simulation.sh
 
   dns-zone-rollback-simulation:
     # Real end-to-end test (#628) of the PowerDNS zone/record known-good
@@ -820,7 +923,9 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/dns-zone-rollback-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it rather than racing the shared job-level subnet.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/dns-zone-rollback-simulation.sh
 
   # THE REQUIRED CHECK. Always runs (even when the suite was skipped for a
   # docs-only PR, or a sim failed), so branch protection always sees a real

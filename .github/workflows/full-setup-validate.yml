@@ -98,11 +98,22 @@ jobs:
     # actually-reserved octet by that same step, alongside
     # VALIDATION_SUBNET/GATEWAY/*_IP, for the same reason.
     #
-    # Downstream jobs (ssl-mitm-cache-simulation and later) are unaffected:
-    # they deliberately use the fixed 172.30.99.0/24 default subnet rather
-    # than a derived one (see their own comments), so they never enter this
-    # job's retry loop at all and can keep reading
-    # compute-validation-network's outputs directly at job level.
+    # Downstream jobs (ssl-mitm-cache-simulation and later) are unaffected by
+    # THIS job's own retry loop specifically, but were NOT actually safe
+    # before issue #820: an earlier version of this comment claimed they
+    # "deliberately use the fixed 172.30.99.0/24 default subnet" as if that
+    # were an intentional, harmless choice -- it was not. They simply never
+    # had VALIDATION_SUBNET/GATEWAY/*_IP threaded to them at all (only
+    # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT), so every one of them fell
+    # back to that literal subnet unconditionally, which is a deterministic
+    # collision the moment two such networks exist on the same host at once
+    # -- confirmed for real (#820): this workflow's own nats-auth-callout-
+    # simulation and dhcp-kea-ctrl-agent-mutation-simulation jobs both died
+    # on "Pool overlaps" for the identical reason. Each downstream job now
+    # wraps its own script invocation in scripts/lib/run-in-validation-
+    # subnet.sh, which performs its OWN independent host-locked reservation
+    # (not reading compute-validation-network's output at all) -- see each
+    # job's own header comment.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -214,50 +225,15 @@ jobs:
           # create an overlapping bridge for it -- confirmed for real in
           # #703's linked run: this exact check found zero Docker-network
           # conflicts while `docker compose up` still failed with "Pool
-          # overlaps".
-          subnet_conflicts() {
-            local target_subnet="$1"
-            python3 - "$target_subnet" <<'PYEOF'
-          import ipaddress, os, subprocess, sys
-          target = ipaddress.ip_network(sys.argv[1])
-          # A leftover network from our own project (e.g. an aborted prior run
-          # that never reached the teardown step) is not a real collision --
-          # docker compose reuses/recreates it by name. Only flag networks
-          # that aren't ours.
-          own_prefix = os.environ.get("COMPOSE_PROJECT_NAME", "lancache-ng-validation")
-
-          ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
-          for network_id in ids:
-              fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
-              line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
-              name, _, subnets_str = line.partition("|")
-              if name.startswith(own_prefix):
-                  continue
-              for subnet_str in subnets_str.split():
-                  try:
-                      existing = ipaddress.ip_network(subnet_str)
-                  except ValueError:
-                      continue
-                  if target.overlaps(existing):
-                      print(f"docker network {name} ({subnet_str})")
-
-          route_output = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
-          for line in route_output.splitlines():
-              parts = line.split()
-              try:
-                  inet_index = parts.index("inet")
-                  iface = parts[1]
-                  cidr = parts[inet_index + 1]
-              except (ValueError, IndexError):
-                  continue
-              try:
-                  existing = ipaddress.ip_interface(cidr).network
-              except ValueError:
-                  continue
-              if target.overlaps(existing):
-                  print(f"host interface {iface} ({cidr})")
-          PYEOF
-          }
+          # overlaps". validation_subnet_conflicts (sourced above) is the
+          # single shared definition of this check -- issue #820 consolidated
+          # what used to be this step's own copy-pasted python block (plus
+          # near-identical copies in full-setup-deep-validate.yml's reserve
+          # step, scripts/lib/run-in-validation-subnet.sh, and the DHCP
+          # simulation scripts) into one place in the lib, closing off exactly
+          # the kind of silent divergence that had left this step's own copy
+          # one step behind (a bare `startswith(own_prefix)` rather than the
+          # delimited-child match the other copies already used).
 
           docker compose pull --quiet
 
@@ -281,9 +257,10 @@ jobs:
             # job-level outputs -- i.e. from the FIRST octet ever tried,
             # attempt 1 -- which stayed wrong for the rest of this loop on
             # any actual retry (a different octet). That mattered in two
-            # ways: (1) subnet_conflicts() below reads COMPOSE_PROJECT_NAME
-            # to recognize a leftover Docker network from THIS SAME run's own
-            # earlier (crashed, never torn down) attempt at the CURRENT
+            # ways: (1) validation_subnet_conflicts below reads
+            # COMPOSE_PROJECT_NAME to recognize a leftover Docker network from
+            # THIS SAME run's own earlier (crashed, never torn down) attempt
+            # at the CURRENT
             # candidate octet as "ours" rather than a foreign conflict -- a
             # stale value would misidentify a genuinely reusable leftover as
             # a foreign collision and waste a retry; (2) two different,
@@ -299,7 +276,7 @@ jobs:
             export VALIDATION_UI_PORT=$((9000 + octet))
 
             target_subnet="172.30.${octet}.0/24"
-            conflict="$(subnet_conflicts "$target_subnet")"
+            conflict="$(validation_subnet_conflicts "$target_subnet" "$COMPOSE_PROJECT_NAME")"
             if [[ -n "$conflict" ]]; then
               echo "Octet $octet's subnet $target_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
               validation_subnet_release "$candidate_pid"
@@ -490,27 +467,38 @@ jobs:
     # deploy/full-setup/docker-compose.yml (NATS, networking, healthchecks
     # already proven there).
     # Independent of full-setup-validate above (this job starts only
-    # proxy/dns-standard/dns-ssl/nats, not the full compose profile), but
-    # shares the same compose project name and fixed validation-network
-    # IPs, so it must not run concurrently with that job -- confirmed
-    # directly during #403/#594 that two jobs binding the same fixed
-    # addresses on this shared runner tier collide.
-    #
+    # proxy/dns-standard/dns-ssl/nats, not the full compose profile).
     # `needs:` here exists purely to serialize onto the shared runner tier
-    # and avoid the network/port collision above -- it is NOT expressing a
-    # real success dependency on full-setup-validate's own result. `if:
+    # (this job's own subnet reservation below is already collision-safe
+    # against a concurrent full-setup-validate, issue #820 -- it does not
+    # need that job to have finished first) -- it is NOT expressing a real
+    # success dependency on full-setup-validate's own result. `if:
     # always()` is what keeps that distinction real: without it, a failure
     # in full-setup-validate would cascade-skip this job (GitHub Actions'
     # default), silently losing this job's own independent diagnostic
     # signal for a completely unrelated part of the stack. Every later job
     # in this file chains the same way for the same reason.
+    #
+    # Real, previously-undiscovered gap (issue #820): unlike its
+    # full-setup-deep-validate.yml namesake, this job never had
+    # VALIDATION_SUBNET/GATEWAY/*_IP threaded to it at all -- only
+    # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (below, now removed). Every
+    # invocation of scripts/ssl-mitm-cache-simulation.sh in THIS workflow
+    # therefore always fell back to deploy/full-setup/docker-compose.yml's
+    # own hardcoded ${VALIDATION_SUBNET:-172.30.99.0/24} default, regardless
+    # of the run's own derived octet -- a deterministic collision the
+    # moment any two such networks (from any job, any concurrent run) existed
+    # at once, not a rare birthday-paradox event. scripts/lib/
+    # run-in-validation-subnet.sh (issue #820) now wraps this job's script
+    # invocation: it reserves a host-locked, overlap-checked octet per
+    # attempt, exports the complete VALIDATION_* set (superseding the
+    # removed job-level COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT, which the
+    # wrapper's own export would have shadowed within this step anyway), and
+    # retries on a genuine collision.
     name: SSL MITM cache simulation
     needs: [compute-validation-network, full-setup-validate]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -534,12 +522,14 @@ jobs:
         # the existing scripts/full-setup-client-simulation.sh pattern);
         # starting the real proxy/dns-standard/dns-ssl/nats containers
         # happens directly via the runner's own docker, same as
-        # full-setup-validate's own steps above.
+        # full-setup-validate's own steps above. Wrapped in
+        # run-in-validation-subnet.sh (issue #820) -- see this job's own
+        # header comment.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
 
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test
@@ -548,16 +538,17 @@ jobs:
     # DNS query, removes it, verifies it's gone. Building this surfaced
     # three independent, real product bugs (see #607) that made this
     # feature completely non-functional -- fixed in the same PR as this job.
-    # Shares the ssl-mitm-cache-simulation job's collision constraint: same
-    # compose project name and fixed validation-network IPs as
-    # full-setup-validate, so it must not run concurrently with either.
+    # Wrapped in run-in-validation-subnet.sh (issue #820) for the same
+    # reason as ssl-mitm-cache-simulation's own header comment: this job
+    # never had VALIDATION_SUBNET/GATEWAY/*_IP threaded to it, only
+    # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (now removed, superseded by
+    # the wrapper's own export) -- so it always fell back to the compose
+    # file's hardcoded 172.30.99.0/24 default, a deterministic collision
+    # magnet shared with every other unwrapped job on this same subnet.
     name: UI/NATS/DNS integration simulation
     needs: [compute-validation-network, ssl-mitm-cache-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -575,25 +566,27 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/ui-nats-dns-integration-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-nats-dns-integration-simulation.sh
 
   watchtower-update-simulation:
     # Real Watchtower verification: detect a genuine image digest change,
     # recreate only the affected container, come back healthy, and don't
-    # misfire full-setup-validate's crash-loop heuristic. Shares the earlier
-    # jobs' collision constraint: same compose project name and fixed
-    # validation-network IPs as full-setup-validate, so it must not run
-    # concurrently with any of them. No BUILD_TOOLS_IMAGE client container is
-    # needed here (unlike the two simulations above) -- this test drives
-    # docker/docker compose directly on the runner, the same as
-    # full-setup-validate's own steps.
+    # misfire full-setup-validate's crash-loop heuristic. No BUILD_TOOLS_IMAGE
+    # client container is needed here (unlike the two simulations above) --
+    # this test drives docker/docker compose directly on the runner, the
+    # same as full-setup-validate's own steps.
+    #
+    # Wrapped in run-in-validation-subnet.sh (issue #820) for the same reason
+    # as ssl-mitm-cache-simulation's own header comment: this job never had
+    # VALIDATION_SUBNET/GATEWAY/*_IP threaded to it, only
+    # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (now removed, superseded by the
+    # wrapper's own export). This script's own retry only ever covered its
+    # throwaway registry-mirror HOST PORT -- its compose stack's SUBNET had
+    # no retry at all until now.
     name: Watchtower update simulation
     needs: [compute-validation-network, ui-nats-dns-integration-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -606,7 +599,7 @@ jobs:
           LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/watchtower-update-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/watchtower-update-simulation.sh
 
   setup-cli-simulation:
     # Runs the real setup.sh CLI end-to-end (fresh install through its
@@ -814,22 +807,24 @@ jobs:
     # secondary. See scripts/nats-secondary-auth-callout-simulation.sh's own
     # header comment for the exact properties verified.
     #
-    # Uses deploy/full-setup/docker-compose.yml with its fixed
-    # validation-network IPs (172.30.99.0/24), so it shares that compose
-    # project's network state with full-setup-validate,
-    # ssl-mitm-cache-simulation, and ui-nats-dns-integration-simulation and
-    # must not run concurrently with any of them. Chained at the end of this
+    # Uses deploy/full-setup/docker-compose.yml. Chained at the end of this
     # workflow's serial job sequence to keep every job running one at a time on
     # the shared self-hosted runner tier rather than introducing new
     # concurrency here (matching dhcp-kea-lease-flow-simulation's own rationale
     # for being chained rather than parallel).
+    #
+    # Wrapped in run-in-validation-subnet.sh (issue #820) for the same reason
+    # as ssl-mitm-cache-simulation's own header comment: this job never had
+    # VALIDATION_SUBNET/GATEWAY/*_IP threaded to it, only
+    # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (now removed, superseded by the
+    # wrapper's own export) -- so its own compose stack always fell back to
+    # the hardcoded 172.30.99.0/24 default, confirmed for real: this exact
+    # job died on "Pool overlaps" for lancache-ng-validation-69-auth-callout_
+    # validation in the run that surfaced this gap.
     name: NATS auth-callout simulation
     needs: [compute-validation-network, dhcp-proxy-pxe-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -862,7 +857,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/nats-secondary-auth-callout-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/nats-secondary-auth-callout-simulation.sh
 
   dhcp-kea-ctrl-agent-mutation-simulation:
     # Real Kea Control Agent mutation round-trip (issue #634): the sibling
@@ -889,27 +884,22 @@ jobs:
     # serial chain) anyway simply to keep every job running one at a time on
     # the shared self-hosted runner tier rather than introducing new
     # concurrency here.
+    # Wrapped in run-in-validation-subnet.sh (issue #820): this job's own
+    # script used to hardcode 172.30.99.0/24 unconditionally, with no per-run
+    # derivation and no retry at all -- worse than the birthday-paradox-odds
+    # bug its siblings had, since EVERY invocation of this exact script, from
+    # ANY concurrent run, requested the identical literal subnet (a
+    # deterministic collision, not a rare one). Confirmed for real: this
+    # exact job died on "Pool overlaps" for lancache-ng-validation-69_
+    # validation in the run that surfaced this gap. The script itself
+    # (scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh) now reads
+    # VALIDATION_SUBNET/GATEWAY/UI_IP with the same fallback-default pattern
+    # its siblings use, so wrapping it here is sufficient -- no separate
+    # per-job env threading is needed, the wrapper supplies the complete set.
     name: DHCP Kea Control Agent mutation simulation
     needs: [compute-validation-network, nats-auth-callout-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      # Threaded through so this job's own compose project name matches the
-      # rest of this workflow's per-run derivation (#661/#690) instead of the
-      # script's old hardcoded default -- see this job's own script,
-      # scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh, for why the
-      # underlying 172.30.99.0/24 addresses are still fixed (#703).
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      # Paired with COMPOSE_PROJECT_NAME here purely for consistency with
-      # ssl-mitm-cache-simulation and nats-secondary-auth-callout-simulation,
-      # which set this same pair for every job that references
-      # deploy/full-setup/docker-compose.yml under this shared compose
-      # project -- not because this job's own script actually needs it: its
-      # standalone Admin UI container never publishes a host port (started
-      # via `compose run` without --service-ports, per this job's own
-      # script), and the compose file's own `${VALIDATION_UI_PORT:-9090}`
-      # default already makes an unset value harmless either way.
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -936,4 +926,4 @@ jobs:
           LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh

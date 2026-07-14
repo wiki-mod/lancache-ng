@@ -375,6 +375,47 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed recurring `Pool overlaps with other one on this address space` /
+  `overlaps existing network state` failures in every full-setup validation
+  path when two runs shared a self-hosted runner host (#820) -- eliminated
+  for the whole bug class, not just the jobs that happened to fail visibly.
+  `full-setup-deep-validate.yml`'s stack-starting jobs never adopted the
+  #703 flock-plus-retry validation-subnet reservation that the manual
+  `full-setup-validate.yml` already used: its `full-setup-validate` job used
+  a single fail-hard pre-flight check followed by a plain `docker compose
+  up`, and its five compose-stack simulation jobs (SSL MITM, UI/NATS/DNS,
+  Watchtower, NATS auth-callout, DNS zone rollback) started stacks on one
+  shared hash-derived octet with no lock and no retry. Two concurrent runs
+  deriving the same octet (only 252 buckets), or one losing the
+  check-then-create race mid-flight, hard-failed and forced a manual re-run
+  (real recurrence: run `29287590206`'s NATS auth-callout job died on octet
+  22). Separately, `dhcp-kea-lease-flow-simulation.sh` (172.31.0.0/16) and
+  `dhcp-proxy-pxe-simulation.sh` (172.29.0.0/16) had their own,
+  self-contained instance of the identical bug: each derived its own subnet
+  octet from a bare hash with no lock and no retry, then called `docker
+  network create` directly -- the PID-based object naming these two scripts
+  already had only prevents Docker object *name* collisions, not subnet
+  *CIDR* collisions, which Docker's IPAM tracks daemon-wide regardless of
+  name; verified this was a real, not merely theoretical, gap before fixing
+  it (no structural proof of safety was possible -- the birthday-paradox
+  math is identical to the deep-validate case, just on a different `/16`).
+  All eight jobs across both workflows now reserve a host-locked,
+  overlap-checked octet and retry on a genuine subnet collision only, via
+  the shared `scripts/lib/reserve-validation-subnet.sh` primitives (new
+  `validation_subnet_export_env` / `validation_subnet_output_is_collision`
+  / `validation_subnet_conflicts` helpers -- the last one consolidates what
+  used to be a copy-pasted overlap-check python block across five separate
+  callers, including `full-setup-validate.yml`'s own pre-existing #703 copy,
+  into one shared definition) and a new single-command wrapper
+  `scripts/lib/run-in-validation-subnet.sh` for the five deep-validate
+  simulation jobs. The two DHCP scripts adopt the same reserve-check-create-
+  retry loop directly (their subnet-dependent addresses are computed only
+  after a candidate octet's `docker network create` actually succeeds), each
+  in its own lock namespace so 172.29/172.30/172.31 contention never
+  cross-serializes. Because every octet is chosen against the runner's live
+  `docker network`/`ip addr` state at claim-time and retried on collision,
+  this also self-heals around a leftover bridge interface a crashed run
+  left behind, independent of any host-side cleanup hook.
 - Fixed `setup.sh` writing an unescaped backtick in a comment inside the
   main `.env`-writing heredoc (found during a real end-to-end install test,
   2026-07-14): since that heredoc is deliberately unquoted (`<<EOF`, not
@@ -715,6 +756,31 @@ is real, live, running code, not just work sitting in source control.
   in this same PR would fail the strict, no-fallback `validate-compose` and
   `shellcheck (GitHub-hosted fallback)` jobs against the still-stale
   currently-published image (#787).
+- Fixed `scripts/setup-cli-simulation.sh` (shared by the `setup.sh CLI
+  simulation` job in both `full-setup-deep-validate.yml` and
+  `full-setup-validate.yml`) colliding with itself across concurrent CI runs
+  on the shared self-hosted runner pool: `deploy/quickstart/docker-compose.yml`
+  pins a static top-level `name: lancache-ng`, which Compose prefers over the
+  `--project-directory` basename it would otherwise derive, so every run
+  resolved to the identical Compose project (and therefore identical
+  container/volume names) regardless of each run already using its own
+  unique `mktemp`-derived install directory. Confirmed live (run
+  `29322035897`): two concurrent runs both resolved to project `lancache-ng`,
+  and `setup.sh`'s own `guard_restore_shared_project_volumes` (#669) correctly
+  refused to proceed once it saw another active install under that name --
+  the guard was doing its job; this script simply never gave concurrent runs
+  the per-run isolation it assumes. Same failure family as #820 (shared-host,
+  concurrent-CI, no per-run isolation), a different specific resource (Compose
+  project name, not a subnet octet). The script now exports a
+  `COMPOSE_PROJECT_NAME` derived from its own already-unique install
+  directory's basename (sanitized to Compose's `^[a-z0-9][a-z0-9_-]*$`
+  requirement) before every `docker compose` call, in both places the script
+  can mint a fresh install directory (initial run and the port-collision
+  retry loop); a real end-user install is unaffected, since it never sets the
+  simulation-only env var this derivation depends on, and the compose yaml's
+  static `name: lancache-ng` is deliberately left unchanged for real installs
+  (see #669 item 6 for why per-install-dir project naming stays out of scope
+  for that case).
 
 ## [0.1.0] - 2026-07-06
 

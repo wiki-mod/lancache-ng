@@ -192,3 +192,137 @@ validation_subnet_reserve() {
 
     return 1
 }
+
+# validation_subnet_conflicts <target_subnet> [own_prefix]
+# Prints a human-readable description of every EXISTING Docker network or
+# host interface whose subnet overlaps <target_subnet>; empty output means
+# the candidate looks free. This is defense-in-depth ahead of whatever
+# actually claims the subnet (`docker compose up`, `docker network create`,
+# ...): a leftover bridge interface Docker's own bookkeeping no longer
+# tracks (another NIC, a VPN, an orphan from a killed container) still makes
+# the kernel refuse an overlapping bridge, so checking the live `ip addr`
+# view here lets a caller's retry loop skip that octet cleanly instead of
+# discovering it only via a failed create.
+#
+# <own_prefix>, when given and non-empty, marks a network as this caller's
+# OWN reusable-by-name resource (e.g. a Compose project docker recreates by
+# name) rather than a real collision -- matched by exact name or a
+# well-delimited child ("<own_prefix>-"/"<own_prefix>_"), NOT a bare
+# `startswith`, so e.g. octet 22's project ("lancache-ng-validation-22...")
+# is never misread as octet 220's ("lancache-ng-validation-220..."). Callers
+# with no reusable-by-name resource at all (a script that always creates a
+# brand-new, PID-unique network with no intent to reuse it) should omit
+# <own_prefix> entirely, so every existing network is a real candidate
+# collision.
+#
+# Single, shared definition used by full-setup-deep-validate.yml's own
+# reserve-and-start step, scripts/lib/run-in-validation-subnet.sh, and the
+# DHCP simulation scripts (issue #820) -- previously copy-pasted per caller,
+# which is exactly the kind of divergence risk this consolidation removes.
+# python3 is an inline stdlib CIDR-overlap calculator only (AG-REL-001
+# local-one-off allowance); nothing from it enters the committed runtime.
+validation_subnet_conflicts() {
+    local target_subnet="$1" own_prefix="${2:-}"
+    OWN_PREFIX="$own_prefix" python3 - "$target_subnet" <<'PYEOF'
+import ipaddress, os, subprocess, sys
+
+target = ipaddress.ip_network(sys.argv[1])
+own_prefix = os.environ.get("OWN_PREFIX", "")
+
+def is_ours(name: str) -> bool:
+    if not own_prefix:
+        return False
+    return name == own_prefix or name.startswith(own_prefix + "-") or name.startswith(own_prefix + "_")
+
+ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
+for network_id in ids:
+    fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
+    line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
+    name, _, subnets_str = line.partition("|")
+    if is_ours(name):
+        continue
+    for subnet_str in subnets_str.split():
+        try:
+            existing = ipaddress.ip_network(subnet_str)
+        except ValueError:
+            continue
+        if target.overlaps(existing):
+            print(f"docker network {name} ({subnet_str})")
+
+route_output = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
+for line in route_output.splitlines():
+    parts = line.split()
+    try:
+        inet_index = parts.index("inet")
+        iface = parts[1]
+        cidr = parts[inet_index + 1]
+    except (ValueError, IndexError):
+        continue
+    try:
+        existing = ipaddress.ip_interface(cidr).network
+    except ValueError:
+        continue
+    if target.overlaps(existing):
+        print(f"host interface {iface} ({cidr})")
+PYEOF
+}
+
+# validation_subnet_export_env <octet>
+# Exports the COMPLETE per-run validation environment for a reserved octet:
+# the 172.30.<octet>.0/24 subnet, its gateway, every fixed service IP, the
+# per-run Compose project name, and the per-run Admin UI host port. The
+# address layout deliberately mirrors .github/actions/derive-validation-
+# network's own output block byte-for-byte (same octet -> same subnet,
+# gateway, and .2..10 service IPs, same lancache-ng-validation-<octet>
+# project name, same 9000+octet UI port), so a driver that reserves a
+# freshly-locked octet at claim-time produces the identical wiring that
+# action would have produced up front -- just with an octet proven free on
+# THIS host right now instead of a statically-derived guess.
+#
+# VALIDATION_STANDARD_SHIM_IP (.10, issue #668) is exported even though most
+# callers never read it directly: deploy/full-setup/docker-compose.yml
+# consumes it as the standard-passthrough-shim service's Compose IP, so
+# omitting it would leave that container pinned to the fixed .99.10 default
+# and therefore OUTSIDE a reserved .<octet>.0/24 subnet -- the exact
+# cross-subnet placement bug the per-run derivation exists to avoid. Every
+# other VALIDATION_* value that any full-setup service or simulation script
+# reads is exported here for the same reason: the reserved octet must own
+# the whole address set, not just the subnet CIDR.
+validation_subnet_export_env() {
+    local octet="$1"
+
+    export VALIDATION_SUBNET="172.30.${octet}.0/24"
+    export VALIDATION_GATEWAY="172.30.${octet}.1"
+    export VALIDATION_PROXY_IP="172.30.${octet}.2"
+    export VALIDATION_DNS_STANDARD_IP="172.30.${octet}.3"
+    export VALIDATION_PROXY_SSL_IP="172.30.${octet}.4"
+    export VALIDATION_DNS_SSL_IP="172.30.${octet}.5"
+    export VALIDATION_WATCHDOG_IP="172.30.${octet}.6"
+    export VALIDATION_NETDATA_IP="172.30.${octet}.7"
+    export VALIDATION_NATS_IP="172.30.${octet}.8"
+    export VALIDATION_UI_IP="172.30.${octet}.9"
+    export VALIDATION_STANDARD_SHIM_IP="172.30.${octet}.10"
+    export COMPOSE_PROJECT_NAME="lancache-ng-validation-${octet}"
+    export VALIDATION_UI_PORT=$((9000 + octet))
+}
+
+# validation_subnet_output_is_collision <output>
+# Returns 0 (true) when <output> carries one of Docker's own subnet/address
+# contention signatures, 1 otherwise. This is the single, shared definition
+# of "this failure is a subnet collision worth retrying on a different
+# octet" -- as opposed to a real, deterministic failure (a bad image, a
+# missing env var, a genuine test assertion) that would fail identically on
+# every octet and so must be surfaced immediately instead of burning through
+# the whole retry budget. "Pool overlaps" is the daemon's error when a new
+# bridge's subnet overlaps an existing one; the "already in use" / "Address
+# already in use" variants cover a host port or address a concurrent run
+# grabbed first. Kept here, beside the reservation logic these strings drive
+# the retry decision for, so both the full-setup-validate compose-up path
+# and the run-in-validation-subnet.sh simulation wrapper classify a failure
+# by exactly the same rule.
+validation_subnet_output_is_collision() {
+    local output="$1"
+    [[ "$output" == *"Pool overlaps"* \
+        || "$output" == *"already in use"* \
+        || "$output" == *"Address already in use"* ]]
+}
