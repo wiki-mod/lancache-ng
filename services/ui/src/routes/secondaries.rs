@@ -542,7 +542,8 @@ mod tests {
     // on-disk fragment converges to byte-identical content with no leftover
     // `.tmp-*` file from either write.
     #[test]
-    fn nats_conf_auth_callout_fragment_write_converges_across_repeated_writes_of_unchanged_config() {
+    fn nats_conf_auth_callout_fragment_write_converges_across_repeated_writes_of_unchanged_config()
+    {
         let dir = temp_dir("nats-conf-repeat-run");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("auth_callout.conf");
