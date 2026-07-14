@@ -64,13 +64,22 @@ ghcr_relogin() {
 # ghcr_retry <registry> <username> <password> -- <command> [args...]
 #
 # Runs <command> up to $GHCR_RETRY_MAX_ATTEMPTS times. On every failed
-# attempt except the last, sleeps $GHCR_RETRY_BACKOFF_SECONDS and calls
-# ghcr_relogin before retrying. Returns the final attempt's exit status.
+# attempt except the last, sleeps $GHCR_RETRY_BACKOFF_SECONDS, then -- if
+# both <username> and <password> are non-empty -- calls ghcr_relogin before
+# retrying. Returns the final attempt's exit status.
 #
-# Re-logs-in before every retry (not just once): #822 could not distinguish
-# between "the registry itself was transiently unavailable" and "the earlier
-# login session's push token had already gone stale" as the root cause, and a
-# fresh login costs nothing extra if the real cause was the former.
+# <registry> is always required, but <username>/<password> may each be an
+# empty string: a caller with no credentials in scope (e.g.
+# scripts/require-image-platforms.sh run ad hoc outside CI) still gets
+# backoff+retry, just without a fresh login between attempts -- strictly
+# better than the single bare attempt every call site had before #822, even
+# without credentials to relogin with.
+#
+# Re-logs-in before every retry (not just once) when credentials are given:
+# #822 could not distinguish between "the registry itself was transiently
+# unavailable" and "the earlier login session's push token had already gone
+# stale" as the root cause, and a fresh login costs nothing extra if the real
+# cause was the former.
 #
 # <command>'s own stdout/stderr pass through untouched on every attempt
 # (including failed ones) -- callers that capture output via `$(...)` rely on
@@ -80,8 +89,8 @@ ghcr_relogin() {
 # ghcr_retry as-is).
 ghcr_retry() {
   local registry="${1:?ghcr_retry: registry is required}"
-  local username="${2:?ghcr_retry: username is required}"
-  local password="${3:?ghcr_retry: password is required}"
+  local username="${2-}"
+  local password="${3-}"
   shift 3
   if [[ "${1:-}" != "--" ]]; then
     echo "::error::ghcr_retry: expected -- before the command to run" >&2
@@ -100,10 +109,14 @@ ghcr_retry() {
       echo "::error::GHCR operation failed after ${GHCR_RETRY_MAX_ATTEMPTS} attempts (exit ${status}): $*" >&2
       return "$status"
     fi
-    echo "::warning::GHCR operation failed (attempt ${attempt}/${GHCR_RETRY_MAX_ATTEMPTS}, exit ${status}); waiting ${GHCR_RETRY_BACKOFF_SECONDS}s and re-authenticating to ${registry} before retry: $*" >&2
+    echo "::warning::GHCR operation failed (attempt ${attempt}/${GHCR_RETRY_MAX_ATTEMPTS}, exit ${status}); waiting ${GHCR_RETRY_BACKOFF_SECONDS}s before retry: $*" >&2
     sleep "$GHCR_RETRY_BACKOFF_SECONDS"
-    if ! ghcr_relogin "$registry" "$username" "$password"; then
-      echo "::warning::Re-authentication before retry failed; the retried command may fail again for the same auth reason." >&2
+    if [[ -n "$username" && -n "$password" ]]; then
+      if ! ghcr_relogin "$registry" "$username" "$password"; then
+        echo "::warning::Re-authentication before retry failed; the retried command may fail again for the same auth reason." >&2
+      fi
+    else
+      echo "::warning::No credentials passed to ghcr_retry; retrying without a fresh login." >&2
     fi
     attempt=$((attempt + 1))
   done

@@ -5372,6 +5372,8 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -5400,8 +5402,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
@@ -5421,7 +5428,7 @@ jobs:
             local image=$1
             local digest
 
-            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
             digest="${digest%\"}"
             digest="${digest#\"}"
             if [[ -z "$digest" || "$digest" = "null" ]]; then
@@ -5433,9 +5440,9 @@ jobs:
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${TAG_NAME}"
-          docker buildx imagetools inspect "$build_tools_image" >/dev/null
-          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
-          docker pull "$build_tools_image" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$build_tools_image" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$build_tools_image" >/dev/null
           rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
           golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
           if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then

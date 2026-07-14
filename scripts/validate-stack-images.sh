@@ -222,13 +222,26 @@ require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_
 require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must preserve single-platform service image metadata when moving channel tags'
+# #822: every actions/attest invocation now goes through the
+# ghcr-attest-retry composite action (retry + fresh re-login on a transient
+# GHCR 401) instead of a bare `uses: actions/attest@...` step, so the literal
+# "actions/attest@" pin and its `push-to-registry: true` input live in that
+# composite action's own action.yml, not in build-push.yml.
+require_grep 'uses: \./\.github/actions/ghcr-attest-retry' \
+  .github/workflows/build-push.yml \
+  'release workflow must create provenance attestations for published first-party images through the shared GHCR retry wrapper'
 require_grep 'actions/attest@' \
-  .github/workflows/build-push.yml \
-  'release workflow must create provenance attestations for published first-party images'
+  .github/actions/ghcr-attest-retry/action.yml \
+  'the attestation retry wrapper must still call the real actions/attest action'
 require_grep 'push-to-registry: true' \
-  .github/workflows/build-push.yml \
+  .github/actions/ghcr-attest-retry/action.yml \
   'provenance attestations must be pushed to the registry'
-require_grep 'subject-digest: \$\{\{ steps.retry-build.outputs.digest \|\| steps.build.outputs.digest \}\}' \
+# build/build-arm64's "Build and push" step (#822) now runs through
+# ghcr-build-push-retry instead of a bare docker/build-push-action + inline
+# "retry-build" sibling step, so steps.build.outputs.digest already resolves
+# to whichever internal attempt succeeded -- there is no separate
+# "retry-build" step id left to fall back to.
+require_grep 'subject-digest: \$\{\{ steps\.build\.outputs\.digest \}\}' \
   .github/workflows/build-push.yml \
   'provenance attestations must bind to the pushed image digest'
 require_grep 'digest_for_image\(\)' \
