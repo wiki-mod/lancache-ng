@@ -1047,6 +1047,77 @@ jobs:
           set -euo pipefail
           bash scripts/setup-reset-kea-config-simulation.sh
 
+  syslog-forwarding-simulation:
+    # Real end-to-end proof for #453's last two comments: not just "a log
+    # line reached syslog-ng on disk" (which #756/#757/#758 already covered
+    # at the config/render-time level via scripts/check-logging-matrix.sh),
+    # but "the operator can actually see that line through the real Admin UI
+    # /logs route" -- the gap the maintainer identified as the same #822
+    # Pattern G shape ("a check that never really looked"). See
+    # scripts/syslog-forwarding-simulation.sh's header comment for the full
+    # design (compose base, per-service trigger mechanisms, and why dhcp/
+    # dhcp-proxy are explicit, tracked follow-up rather than silently
+    # skipped).
+    #
+    # NEEDS is deliberately hoisted to [plan, ensure-pr-staging-images]
+    # rather than chained after dns-zone-rollback-simulation while this job
+    # is still being iterated on in CI: chaining last would mean waiting on
+    # the entire existing ~10-job serial suite for every single iteration.
+    # TODO(#453): once this job is green, move it back to
+    # `needs: [plan, ensure-pr-staging-images, dns-zone-rollback-simulation]`
+    # to match every other simulation job's serial position ahead of the
+    # aggregate.
+    name: Syslog forwarding + Admin UI visibility simulation
+    needs: [plan, ensure-pr-staging-images]
+    if: >-
+      always() &&
+      needs.plan.outputs.should_run == 'true' &&
+      needs['ensure-pr-staging-images'].result != 'failure' &&
+      needs['ensure-pr-staging-images'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Resolve build-tools image
+        # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
+        # setup.sh CLI fresh install, same reason setup-cli-simulation.sh
+        # needs it) from build-tools. Same PR-staging-tag preference as
+        # setup-cli-simulation above, for the same reason (Codex review
+        # finding on #764).
+        id: build-tools-image
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
+            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
+          else
+            image="$(bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run syslog forwarding + Admin UI visibility simulation
+        # Mounted at the SAME absolute path inside the container as on the
+        # host, same reason as setup-cli-simulation.sh's identical step: the
+        # script's own `docker compose` calls (through the bind-mounted host
+        # socket) resolve bind-mount sources against the HOST daemon.
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
+          SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            -e SETUP_SIM_IMAGE_CHANNEL \
+            -e SETUP_SIM_IMAGE_TAG \
+            -e GITHUB_RUN_ID \
+            -e GITHUB_RUN_ATTEMPT \
+            "$BUILD_TOOLS_IMAGE" \
+            bash scripts/syslog-forwarding-simulation.sh
+
   # THE REQUIRED CHECK. Always runs (even when the suite was skipped for a
   # docs-only PR, or a sim failed), so branch protection always sees a real
   # conclusion from a job named "deep full-setup validation" -- never a
@@ -1068,6 +1139,7 @@ jobs:
       - dns-zone-rollback-simulation
       - ui-reachability-crash-loop-simulation
       - setup-reset-kea-config-simulation
+      - syslog-forwarding-simulation
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
@@ -1086,6 +1158,7 @@ jobs:
           DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
           UI_REACHABILITY_RESULT: ${{ needs['ui-reachability-crash-loop-simulation'].result }}
           RESET_KEA_CONFIG_RESULT: ${{ needs['setup-reset-kea-config-simulation'].result }}
+          SYSLOG_FORWARDING_RESULT: ${{ needs['syslog-forwarding-simulation'].result }}
         run: |
           set -euo pipefail
 
@@ -1139,6 +1212,7 @@ jobs:
           check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
           check "ui-reachability-crash-loop-simulation" "$UI_REACHABILITY_RESULT"
           check "setup-reset-kea-config-simulation" "$RESET_KEA_CONFIG_RESULT"
+          check "syslog-forwarding-simulation" "$SYSLOG_FORWARDING_RESULT"
 
           if [[ "$overall" -ne 0 ]]; then
             echo "::error::Deep full-setup validation failed -- see the failing job(s) above."
