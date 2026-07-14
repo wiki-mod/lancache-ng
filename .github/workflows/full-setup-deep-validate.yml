@@ -1101,12 +1101,36 @@ jobs:
         # host, same reason as setup-cli-simulation.sh's identical step: the
         # script's own `docker compose` calls (through the bind-mounted host
         # socket) resolve bind-mount sources against the HOST daemon.
+        #
+        # flock (#453 follow-up, same #819-follow-up class as
+        # setup-cli-simulation.sh): this script's own header says it reuses
+        # setup-cli-simulation.sh's "unique COMPOSE_PROJECT_NAME + loopback
+        # IP + retry-on-collision" isolation against deploy/quickstart/
+        # docker-compose.yml -- but that compose file pins FIXED container
+        # names (lancache-nats, lancache-ui, ...) for a real operator's
+        # single-host install, deliberately (#669 item 6), which
+        # COMPOSE_PROJECT_NAME does not scope. Two concurrent runs of this
+        # job (or of this job and setup-cli-simulation's) landing on the
+        # SAME physical runner host fight over the exact same container
+        # names -- confirmed as the real cause of `nats did not become
+        # healthy` / `ui did not become healthy` here, matching the
+        # container-name collision class setup-cli-simulation's own flock
+        # already guards against. A host-local flock around the whole
+        # simulation is sufficient (not a distributed lock): the collision
+        # can only happen between two runs sharing the same Docker daemon,
+        # i.e. the same physical host, which is exactly what a per-host lock
+        # file serializes. Uses its own lock file (not
+        # setup-cli-simulation's) since the two scripts don't actually need
+        # to serialize against EACH OTHER, only against other concurrent
+        # runs of themselves.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
         run: |
           set -euo pipefail
+          exec {lock_fd}>/tmp/lancache-syslog-forwarding-simulation.lock
+          flock "$lock_fd"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
