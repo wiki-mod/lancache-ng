@@ -866,6 +866,7 @@ async fn main() -> Result<()> {
         .route("/stats", get(routes::stats::stats_page))
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
+        .route("/setup/update", post(routes::setup::update_stack_settings))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/static/admin.css", get(admin_css))

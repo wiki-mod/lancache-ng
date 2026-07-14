@@ -3747,6 +3747,117 @@ cmd_auto_update() {
     fi
 }
 
+# ── converge-reconcile subcommand (#819) ──────────────────────────────────────
+# Internal entry point, not meant for interactive use: invoked as the first
+# ExecStart of lancache-converge.service, immediately before its existing
+# `docker compose up -d --remove-orphans` convergence (see the "Installing
+# systemd watchdog" step). Bridges the Admin UI's release-channel/scheduled-
+# update control (services/ui/src/routes/setup.rs's update_stack_settings)
+# onto the host.
+#
+# That control can only write into the ui-data Docker-managed *named volume*
+# (routes/dhcp.rs's persist_ui_settings/write_ui_settings_file target) -- a
+# plain host script cannot read that as a filesystem path. Rather than
+# migrate ui-data to a LANCACHE_STATE_DIR bind-mount (a real, irreversible-
+# if-wrong change to every existing install's already-saved DHCP settings),
+# this reads the volume's content through a throwaway read-only container,
+# the same idiom backup_compose_volumes already uses for exactly this reason.
+#
+# Only two keys are ever pulled: LANCACHE_IMAGE_CHANNEL and
+# AUTO_UPDATE_ENABLED, validated independently of the wider
+# validate_lancache_image_channel (which `die`s on an unrecognized value --
+# unsuitable here, since an unexpected value from the UI must be a silent
+# no-op tick, not an aborted systemd service run). Only "stable"/"edge" are
+# accepted, matching exactly what routes/setup.rs's is_valid_ui_channel
+# offers the operator; this intentionally does not widen to "dev"/"pinned"
+# even once another codepath's validator learns those, since this control was
+# never meant to set them.
+lancache_ui_channel_override_is_valid() {
+    case "$1" in
+        stable|edge) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Reads a single KEY=value line out of the ui-data volume's
+# lancache-ui-settings.env, or prints nothing if the volume doesn't exist yet
+# (a fresh install before the UI container has ever started), Docker itself
+# isn't available, or the settings file hasn't been written yet. Deliberately
+# checks `docker volume inspect` before `docker run -v`: mounting a
+# not-yet-existing named volume silently CREATES an empty one as a side
+# effect, which would turn this read-only helper into an accidental write.
+lancache_read_ui_settings_override() {
+    local install_dir="$1" env_file="$2" key="$3" project volume raw
+    command -v docker >/dev/null 2>&1 || return 0
+    project=$(compose_project_name "$install_dir" "$env_file")
+    volume="${project}_ui-data"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+    raw=$(docker run --rm -v "${volume}:/volume:ro" alpine \
+        sh -c 'cat /volume/lancache-ui-settings.env 2>/dev/null') 2>/dev/null || return 0
+    printf '%s\n' "$raw" | sed -n "s/^${key}=//p" | tail -1
+}
+
+# Makes lancache-auto-update.timer's actual systemctl enabled/active state
+# match .env's current AUTO_UPDATE_ENABLED, regardless of how that value got
+# there (an Admin UI override just folded in below, or a direct manual .env
+# edit) -- this is the one place that keeps the timer's real state honest,
+# called on every convergence tick. A no-op if the unit was never installed
+# (systemd unavailable, or "Installing systemd watchdog" never ran).
+reconcile_auto_update_timer_state() {
+    local env_file="$1" desired
+    systemd_unit_exists lancache-auto-update.timer || return 0
+    desired=$(get_env_var AUTO_UPDATE_ENABLED "$env_file")
+    if [[ "$desired" = "1" ]]; then
+        systemctl is-enabled --quiet lancache-auto-update.timer 2>/dev/null \
+            || systemctl enable --now lancache-auto-update.timer >/dev/null 2>&1 \
+            || true
+    else
+        if systemctl is-enabled --quiet lancache-auto-update.timer 2>/dev/null; then
+            systemctl disable --now lancache-auto-update.timer >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+cmd_converge_reconcile() {
+    local install_dir="${1:-/opt/lancache-ng}" env_file
+    local ui_channel ui_auto_update current_channel current_auto_update
+
+    install_dir=$(realpath -m "$install_dir")
+    # A converge tick can fire before the very first install completes (the
+    # timer/service are both installed, then enabled, in that order -- see
+    # "Installing systemd watchdog"/"Starting stack"); silently skip rather
+    # than die, exactly like the pre-existing `docker compose up -d
+    # --remove-orphans` ExecStart this runs alongside would also have nothing
+    # to converge yet.
+    [[ -f "$install_dir/docker-compose.yml" ]] || return 0
+    command -v docker >/dev/null 2>&1 || return 0
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || return 0
+
+    ui_channel=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LANCACHE_IMAGE_CHANNEL")
+    if [[ -n "$ui_channel" ]] && lancache_ui_channel_override_is_valid "$ui_channel"; then
+        current_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file")
+        if [[ "$ui_channel" != "$current_channel" ]]; then
+            set_env_key LANCACHE_IMAGE_CHANNEL "$ui_channel" "$env_file"
+            print_ok "Release channel updated from Admin UI: ${current_channel:-<unset>} -> $ui_channel"
+        fi
+    fi
+
+    ui_auto_update=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "AUTO_UPDATE_ENABLED")
+    if [[ "$ui_auto_update" = "0" || "$ui_auto_update" = "1" ]]; then
+        current_auto_update=$(get_env_var AUTO_UPDATE_ENABLED "$env_file")
+        if [[ "$ui_auto_update" != "$current_auto_update" ]]; then
+            set_env_key AUTO_UPDATE_ENABLED "$ui_auto_update" "$env_file"
+            print_ok "Scheduled automatic updates setting updated from Admin UI: ${ui_auto_update} (was ${current_auto_update:-0})"
+        fi
+    fi
+
+    # Reconciles the timer against .env's CURRENT value regardless of whether
+    # the block above just changed it or it was already correct -- covers a
+    # direct manual .env edit too, not only the Admin UI path.
+    reconcile_auto_update_timer_state "$env_file"
+}
+
 # ── debug subcommand ──────────────────────────────────────────────────────────
 # Debug is read-only diagnostics. It must not repair, update, or rewrite config;
 # operators use it when the stack is already in an unknown state.
@@ -4727,6 +4838,12 @@ case "${1:-install}" in
             exit 0
         fi
         cmd_auto_update "${2:-/opt/lancache-ng}"; exit 0 ;;
+    converge-reconcile)
+        # Internal-only (#819): invoked by lancache-converge.service, not
+        # documented in print_command_help/print_usage and not meant for
+        # interactive use -- see cmd_converge_reconcile's own comment for what
+        # it does and why.
+        cmd_converge_reconcile "${2:-/opt/lancache-ng}"; exit 0 ;;
     debug)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help debug
@@ -5538,6 +5655,16 @@ After=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=${INSTALL_DIR}
+# Ordered ExecStart lines run in sequence (#819): the reconcile step folds
+# any Admin UI release-channel/scheduled-update override into .env and syncs
+# lancache-auto-update.timer's state to match, BEFORE the pre-existing
+# container-drift convergence below runs. systemd does not invoke ExecStart
+# through a shell, so a leading "-" (not shell "||") is systemd's own syntax
+# for "run this, but never let its exit code fail the unit" -- a non-zero
+# exit from the reconcile step must never take down the convergence tick it
+# normally still needs to run, even though cmd_converge_reconcile is already
+# internally defensive and should not normally fail at all.
+ExecStart=-${INSTALL_DIR}/setup.sh converge-reconcile ${INSTALL_DIR}
 ExecStart=docker compose up -d --remove-orphans
 EOF
 
