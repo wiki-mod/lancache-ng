@@ -347,6 +347,30 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed recurring `Pool overlaps with other one on this address space` /
+  `overlaps existing network state` failures in `full-setup-deep-validate.yml`
+  when two runs shared a self-hosted runner host (#820). The deep-validate
+  suite's stack-starting jobs never adopted the #703 flock-plus-retry
+  validation-subnet reservation that the manual `full-setup-validate.yml`
+  already uses: its `full-setup-validate` job used a single fail-hard
+  pre-flight check followed by a plain `docker compose up`, and its five
+  compose-stack simulation jobs (SSL MITM, UI/NATS/DNS, Watchtower, NATS
+  auth-callout, DNS zone rollback) started stacks on the one shared
+  hash-derived octet with no lock and no retry. Two concurrent runs deriving
+  the same octet (only 252 buckets), or one losing the check-then-create race
+  mid-flight, hard-failed and forced a manual re-run (real recurrence: run
+  `29287590206`'s NATS auth-callout job died on octet 22). All six jobs now
+  reserve a host-locked, overlap-checked octet and retry on a genuine subnet
+  collision only, via the shared `scripts/lib/reserve-validation-subnet.sh`
+  primitives (new `validation_subnet_export_env` /
+  `validation_subnet_output_is_collision` helpers) and a new single-command
+  wrapper `scripts/lib/run-in-validation-subnet.sh`. Because the octet is
+  chosen against the runner's live `docker network`/`ip addr` state at
+  claim-time and retried on collision, this also self-heals around a leftover
+  bridge interface a crashed run left behind, independent of any host-side
+  cleanup hook. The self-derived DHCP simulations (`172.31`/`172.29`, PID-named
+  objects) are a separate, lower-probability instance of the same class and
+  are tracked for follow-up rather than changed here.
 - Fixed `setup.sh` writing an unescaped backtick in a comment inside the
   main `.env`-writing heredoc (found during a real end-to-end install test,
   2026-07-14): since that heredoc is deliberately unquoted (`<<EOF`, not

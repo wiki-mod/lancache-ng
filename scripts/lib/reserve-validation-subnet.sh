@@ -192,3 +192,63 @@ validation_subnet_reserve() {
 
     return 1
 }
+
+# validation_subnet_export_env <octet>
+# Exports the COMPLETE per-run validation environment for a reserved octet:
+# the 172.30.<octet>.0/24 subnet, its gateway, every fixed service IP, the
+# per-run Compose project name, and the per-run Admin UI host port. The
+# address layout deliberately mirrors .github/actions/derive-validation-
+# network's own output block byte-for-byte (same octet -> same subnet,
+# gateway, and .2..10 service IPs, same lancache-ng-validation-<octet>
+# project name, same 9000+octet UI port), so a driver that reserves a
+# freshly-locked octet at claim-time produces the identical wiring that
+# action would have produced up front -- just with an octet proven free on
+# THIS host right now instead of a statically-derived guess.
+#
+# VALIDATION_STANDARD_SHIM_IP (.10, issue #668) is exported even though most
+# callers never read it directly: deploy/full-setup/docker-compose.yml
+# consumes it as the standard-passthrough-shim service's Compose IP, so
+# omitting it would leave that container pinned to the fixed .99.10 default
+# and therefore OUTSIDE a reserved .<octet>.0/24 subnet -- the exact
+# cross-subnet placement bug the per-run derivation exists to avoid. Every
+# other VALIDATION_* value that any full-setup service or simulation script
+# reads is exported here for the same reason: the reserved octet must own
+# the whole address set, not just the subnet CIDR.
+validation_subnet_export_env() {
+    local octet="$1"
+
+    export VALIDATION_SUBNET="172.30.${octet}.0/24"
+    export VALIDATION_GATEWAY="172.30.${octet}.1"
+    export VALIDATION_PROXY_IP="172.30.${octet}.2"
+    export VALIDATION_DNS_STANDARD_IP="172.30.${octet}.3"
+    export VALIDATION_PROXY_SSL_IP="172.30.${octet}.4"
+    export VALIDATION_DNS_SSL_IP="172.30.${octet}.5"
+    export VALIDATION_WATCHDOG_IP="172.30.${octet}.6"
+    export VALIDATION_NETDATA_IP="172.30.${octet}.7"
+    export VALIDATION_NATS_IP="172.30.${octet}.8"
+    export VALIDATION_UI_IP="172.30.${octet}.9"
+    export VALIDATION_STANDARD_SHIM_IP="172.30.${octet}.10"
+    export COMPOSE_PROJECT_NAME="lancache-ng-validation-${octet}"
+    export VALIDATION_UI_PORT=$((9000 + octet))
+}
+
+# validation_subnet_output_is_collision <output>
+# Returns 0 (true) when <output> carries one of Docker's own subnet/address
+# contention signatures, 1 otherwise. This is the single, shared definition
+# of "this failure is a subnet collision worth retrying on a different
+# octet" -- as opposed to a real, deterministic failure (a bad image, a
+# missing env var, a genuine test assertion) that would fail identically on
+# every octet and so must be surfaced immediately instead of burning through
+# the whole retry budget. "Pool overlaps" is the daemon's error when a new
+# bridge's subnet overlaps an existing one; the "already in use" / "Address
+# already in use" variants cover a host port or address a concurrent run
+# grabbed first. Kept here, beside the reservation logic these strings drive
+# the retry decision for, so both the full-setup-validate compose-up path
+# and the run-in-validation-subnet.sh simulation wrapper classify a failure
+# by exactly the same rule.
+validation_subnet_output_is_collision() {
+    local output="$1"
+    [[ "$output" == *"Pool overlaps"* \
+        || "$output" == *"already in use"* \
+        || "$output" == *"Address already in use"* ]]
+}

@@ -146,3 +146,65 @@ teardown() {
     [ "$status" -eq 1 ]
     [ -z "$output" ]
 }
+
+@test "export_env sets the complete VALIDATION_* set for the octet, incl. the shim IP" {
+    # The wrapper's whole correctness rests on exporting the FULL address set
+    # for a reserved octet, not just the subnet: a missing var silently falls
+    # back to the fixed .99 default and lands a service OUTSIDE the reserved
+    # /24. Assert every var the derive action emits is present and octet-scoped.
+    validation_subnet_export_env 42
+
+    [ "$VALIDATION_SUBNET" = "172.30.42.0/24" ]
+    [ "$VALIDATION_GATEWAY" = "172.30.42.1" ]
+    [ "$VALIDATION_PROXY_IP" = "172.30.42.2" ]
+    [ "$VALIDATION_DNS_STANDARD_IP" = "172.30.42.3" ]
+    [ "$VALIDATION_PROXY_SSL_IP" = "172.30.42.4" ]
+    [ "$VALIDATION_DNS_SSL_IP" = "172.30.42.5" ]
+    [ "$VALIDATION_WATCHDOG_IP" = "172.30.42.6" ]
+    [ "$VALIDATION_NETDATA_IP" = "172.30.42.7" ]
+    [ "$VALIDATION_NATS_IP" = "172.30.42.8" ]
+    [ "$VALIDATION_UI_IP" = "172.30.42.9" ]
+    # .10 (#668): compose reads this to place standard-passthrough-shim; it is
+    # the var most easily forgotten because most sim scripts never read it
+    # directly, yet omitting it strands the shim on the .99 default subnet.
+    [ "$VALIDATION_STANDARD_SHIM_IP" = "172.30.42.10" ]
+    [ "$COMPOSE_PROJECT_NAME" = "lancache-ng-validation-42" ]
+    [ "$VALIDATION_UI_PORT" = "9042" ]
+}
+
+@test "export_env's project name/UI port match derive-validation-network's own formula" {
+    # The uncontested attempt-1 case must reproduce EXACTLY what the derive
+    # action computed up front (project name = lancache-ng-validation-<octet>,
+    # UI port = 9000+octet), so a run that never hits contention keeps the
+    # identical wiring rather than a subtly different one.
+    validation_subnet_export_env 7
+    [ "$COMPOSE_PROJECT_NAME" = "lancache-ng-validation-7" ]
+    [ "$VALIDATION_UI_PORT" = "9007" ]
+}
+
+@test "output_is_collision matches Docker's real subnet/address contention signatures" {
+    # These three strings are the ONLY failures the wrapper retries on a new
+    # octet; everything else must fail fast. Pin the exact daemon phrasings so
+    # a future Docker wording change that breaks the classifier is caught here
+    # rather than silently turning every collision into a hard failure.
+    run validation_subnet_output_is_collision "Error response from daemon: invalid pool request: Pool overlaps with other one on this address space"
+    [ "$status" -eq 0 ]
+
+    run validation_subnet_output_is_collision "driver failed programming external connectivity: Bind for 0.0.0.0:9042 failed: port is already in use"
+    [ "$status" -eq 0 ]
+
+    run validation_subnet_output_is_collision "listen tcp 0.0.0.0:9042: bind: Address already in use"
+    [ "$status" -eq 0 ]
+}
+
+@test "output_is_collision does NOT match unrelated, non-retryable failures" {
+    # A real test assertion or a bad image fails identically on every octet;
+    # misclassifying it as a collision would waste the whole retry budget and
+    # bury the true error. Assert a representative non-collision failure is
+    # correctly rejected.
+    run validation_subnet_output_is_collision "Error: manifest for ghcr.io/wiki-mod/lancache-ng/proxy:edge not found"
+    [ "$status" -eq 1 ]
+
+    run validation_subnet_output_is_collision "assertion failed: expected cache HIT but got MISS"
+    [ "$status" -eq 1 ]
+}
