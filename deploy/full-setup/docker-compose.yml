@@ -46,8 +46,6 @@ services:
       validation:
         ipv4_address: ${VALIDATION_PROXY_IP:-172.30.99.2}
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null"]
       interval: 10s
@@ -129,8 +127,6 @@ services:
     depends_on:
       - nats
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
       interval: 10s
@@ -156,8 +152,6 @@ services:
     depends_on:
       - nats
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
       interval: 10s
@@ -177,8 +171,6 @@ services:
     networks:
       - validation-api
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
   # Watchdog for health monitoring
   watchdog:
@@ -192,8 +184,6 @@ services:
         ipv4_address: ${VALIDATION_WATCHDOG_IP:-172.30.99.6}
       validation-api:
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD-SHELL", "test -f /var/run/watchdog/status.json || exit 1"]
       interval: 10s
@@ -366,8 +356,6 @@ services:
       - proxy
       - nats
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -394,38 +382,12 @@ services:
       validation:
         ipv4_address: ${VALIDATION_NETDATA_IP:-172.30.99.7}
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19999/api/v1/info >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 2
       start_period: 10s
-
-  # Watchtower: this harness previously had no watchtower service
-  # and no com.centurylinklabs.watchtower.enable label on any service at all,
-  # so the documented, supported watchtower profile (README.md,
-  # docs/release-external-images.md, docs/backup-restore.md) was silently
-  # never exercised here -- it would have watched nothing even if started.
-  # Mirrors deploy/quickstart/docker-compose.yml's watchtower service (same
-  # digest-pinned image, same env vars); nats has no label here either,
-  # matching quickstart -- it's a third-party image pinned to an exact
-  # digest, so Watchtower could never find a "new" image for it regardless of
-  # labeling.
-  # Only active if COMPOSE_PROFILES/--profile contains watchtower;
-  # scripts/watchtower-update-simulation.sh invokes it directly via
-  # `docker compose --profile watchtower run --rm watchtower --run-once ...`.
-  watchtower:
-    profiles: [watchtower]
-    image: ghcr.io/nicholas-fedor/watchtower:latest@sha256:c1dfdf27fe805dcfefe1cf048cee6960a511c097a99aa355b0bc4be6e6bb3bdf
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_LABEL_ENABLE=true
-      - WATCHTOWER_SCHEDULE=0 0 4 * * *
-    restart: unless-stopped
 
 networks:
   validation:
