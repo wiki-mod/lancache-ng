@@ -505,6 +505,25 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash tests/setup-migration-semantics.sh
 
+      - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
+        # check-action-node-versions.sh calls curl against api.github.com to
+        # resolve each pinned action's own action.yml -- runs inside the
+        # build-tools container per AG-VAL-016 (curl must not be a host-local
+        # tool), same as check-pr-tracking-metadata.sh's GraphQL call above.
+        # GH_TOKEN just raises the API rate limit; this also works fine
+        # unauthenticated at this repo's current pin count.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e GH_TOKEN \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-action-node-versions.sh
+
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -536,6 +555,19 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
+
+      - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e GH_TOKEN \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-action-node-versions.sh
 
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
@@ -2923,7 +2955,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Download coverage badge data
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
         with:
           name: rust-coverage-badge
           path: coverage-badge
