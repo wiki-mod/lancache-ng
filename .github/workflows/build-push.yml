@@ -1390,14 +1390,26 @@ jobs:
             && { echo "::error::The build-tools workflow must not reintroduce QEMU emulation for its arm64 leg."; exit 1; }
           awk '
             /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
-            in_publish && /name: / { exit found ? 0 : 1 }
+            # Anchored on an actual step declaration ("- name: ..."), not a
+            # bare /name: / substring match: a `with:` input ending in
+            # "name" (e.g. this PR's "username:"/`ghcr-build-push-retry`
+            # input) also contains the literal substring "name: " and would
+            # otherwise be misread as the next step's boundary, ending the
+            # scan before it ever reaches "pull: true" below.
+            in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
           ' .github/workflows/build-tools.yml \
             || { echo "::error::The build-tools amd64 publish step must pull fresh mutable bases before publishing."; exit 1; }
           awk '
             /name: Build and push arm64 build-tools image/ { in_publish = 1; found = 0; next }
-            in_publish && /name: / { exit found ? 0 : 1 }
+            # Anchored on an actual step declaration ("- name: ..."), not a
+            # bare /name: / substring match: a `with:` input ending in
+            # "name" (e.g. this PR's "username:"/`ghcr-build-push-retry`
+            # input) also contains the literal substring "name: " and would
+            # otherwise be misread as the next step's boundary, ending the
+            # scan before it ever reaches "pull: true" below.
+            in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
           ' .github/workflows/build-tools.yml \

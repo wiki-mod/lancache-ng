@@ -1,3 +1,4 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 name: Docker build and push to GHCR with retry
 description: >-
   Wraps docker/build-push-action with the issue #822 GHCR retry policy:

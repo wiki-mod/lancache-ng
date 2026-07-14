@@ -1,3 +1,4 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 name: Attest image provenance to GHCR with retry
 description: >-
   Wraps actions/attest (push-to-registry: true) with the issue #822 GHCR
