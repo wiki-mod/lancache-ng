@@ -1,6 +1,6 @@
 # Backup, Restore, and Rollback
 
-LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling optional Watchtower helper updates.
+LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling scheduled automatic updates.
 
 For manual production checkouts, keep `deploy/prod/.env` as the checked-in
 template and put real runtime settings in `deploy/prod/.env.local`. `setup.sh`
@@ -75,7 +75,7 @@ The backup command stops the compose stack before copying mutable databases and 
    sudo docker compose ps
    ```
 
-If Watchtower changed an optional helper image, remove `watchtower` from `COMPOSE_PROFILES` in `.env` before starting again so the same helper image is not pulled immediately. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or stable release tag, then run `setup.sh update [install-dir]` to apply it.
+If a scheduled automatic update caused the failure, disable it first (set `AUTO_UPDATE_ENABLED=0` in `.env`, or answer "N" if re-running `setup.sh install`'s interactive prompt) before starting again, so the same update is not retried immediately -- the orchestrator's own health gate and automatic rollback should already have restored a known-good state, but this avoids the timer immediately re-triggering another attempt while you investigate. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or stable release tag, then run `setup.sh update [install-dir]` to apply it.
 
 ## Restore also re-converges `.env`
 

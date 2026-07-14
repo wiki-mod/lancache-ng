@@ -10,8 +10,8 @@
 #     every container is healthy and not crash-looping)...
 #   - ...PLUS every real functional simulation that until now lived only in
 #     the manual-dispatch-only full-setup-validate.yml (SSL/HTTP/HTTPS
-#     caching, UI->NATS->PowerDNS integration, Watchtower update behaviour,
-#     setup.sh CLI, Kea DHCP lease flow, per-secondary NATS auth-callout).
+#     caching, UI->NATS->PowerDNS integration, setup.sh CLI, Kea DHCP lease
+#     flow, per-secondary NATS auth-callout).
 #
 # Neither existing workflow is modified: build-push.yml's shallow job and the
 # manual full-setup-validate.yml both stay exactly as they are, so their fast
@@ -436,8 +436,7 @@ jobs:
               failed=1
             elif (( restart_count > 1 )); then
               # > 1, not > 0: one restart during normal startup ordering is
-              # expected and not a crash loop (same threshold build-push.yml
-              # and watchtower-update-simulation.sh both rely on).
+              # expected and not a crash loop.
               echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
               failed=1
             fi
@@ -629,52 +628,6 @@ jobs:
           # sim inside it rather than racing the shared job-level subnet.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-nats-dns-integration-simulation.sh
 
-  watchtower-update-simulation:
-    # Real Watchtower verification: it seeds a private mirror from the
-    # currently-published proxy:$LANCACHE_IMAGE_TAG, so threading the PR
-    # staging tag makes it exercise the PR's own proxy image.
-    name: Watchtower update simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, ui-nats-dns-integration-simulation]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # See ssl-mitm-cache-simulation's identical block above: this job's own
-      # `docker compose up proxy netdata` call (in
-      # scripts/watchtower-update-simulation.sh) needs these to land on this
-      # run's derived subnet instead of the fixed 172.30.99.0/24 default.
-      # (This does NOT cover the script's own local registry container name /
-      # host port, a separate, already-tracked gap -- see #661.)
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Run Watchtower update simulation
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it. This sim already retries its own registry HOST PORT,
-          # but its full-setup compose stack still read the shared job-level
-          # VALIDATION_SUBNET with no subnet retry -- the wrapper closes that
-          # remaining gap.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/watchtower-update-simulation.sh
-
   setup-cli-simulation:
     # Runs the real setup.sh installer end-to-end (fresh install, update/
     # migration, rollback, restore). Its unique value is driving setup.sh's own
@@ -705,7 +658,15 @@ jobs:
     # setup.sh's channel->stack-pointer->sha path, now only exercised here on
     # dispatch/fork/Dependabot runs rather than on the common same-repo PR).
     name: setup.sh CLI simulation
-    needs: [plan, ensure-pr-staging-images, watchtower-update-simulation]
+    # ui-nats-dns-integration-simulation is included purely for the shared-
+    # runner collision constraint (same compose project name / fixed
+    # validation ports as the other full-setup-deep-validate jobs), not
+    # because this job consumes its outputs. A former
+    # watchtower-update-simulation job used to sit between it and this job in
+    # that same serialization chain; it was removed with Watchtower itself
+    # (#819), so this job now chains directly off
+    # ui-nats-dns-integration-simulation instead.
+    needs: [plan, ensure-pr-staging-images, ui-nats-dns-integration-simulation]
     if: >-
       always() &&
       needs.plan.outputs.should_run == 'true' &&
@@ -942,7 +903,6 @@ jobs:
       - full-setup-validate
       - ssl-mitm-cache-simulation
       - ui-nats-dns-integration-simulation
-      - watchtower-update-simulation
       - setup-cli-simulation
       - dhcp-kea-lease-flow-simulation
       - nats-auth-callout-simulation
@@ -959,7 +919,6 @@ jobs:
           FULL_SETUP_RESULT: ${{ needs['full-setup-validate'].result }}
           SSL_RESULT: ${{ needs['ssl-mitm-cache-simulation'].result }}
           UINATS_RESULT: ${{ needs['ui-nats-dns-integration-simulation'].result }}
-          WATCHTOWER_RESULT: ${{ needs['watchtower-update-simulation'].result }}
           SETUP_RESULT: ${{ needs['setup-cli-simulation'].result }}
           DHCP_RESULT: ${{ needs['dhcp-kea-lease-flow-simulation'].result }}
           NATS_RESULT: ${{ needs['nats-auth-callout-simulation'].result }}
@@ -1011,7 +970,6 @@ jobs:
           check "full-setup-validate" "$FULL_SETUP_RESULT"
           check "ssl-mitm-cache-simulation" "$SSL_RESULT"
           check "ui-nats-dns-integration-simulation" "$UINATS_RESULT"
-          check "watchtower-update-simulation" "$WATCHTOWER_RESULT"
           check "setup-cli-simulation" "$SETUP_RESULT"
           check "dhcp-kea-lease-flow-simulation" "$DHCP_RESULT"
           check "nats-auth-callout-simulation" "$NATS_RESULT"

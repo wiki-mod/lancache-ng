@@ -15,9 +15,9 @@
 # docs/naming-conventions.md's "Two separate name namespaces" section).
 #
 # These are subset relations, not equalities -- ui/watchdog/docker-socket-proxy/
-# netdata/syslog/watchtower deliberately have a container_name but must NOT
-# appear in the allowlist, so this script never asserts the reverse
-# direction (every container_name in the allowlist).
+# netdata/syslog deliberately have a container_name but must NOT appear in the
+# allowlist, so this script never asserts the reverse direction (every
+# container_name in the allowlist).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

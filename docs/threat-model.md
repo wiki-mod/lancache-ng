@@ -308,18 +308,23 @@ sensitive) · **Impact**: Critical (full host compromise)
   of named `lancache-*` containers, and **explicitly denies** generic container
   creation and `exec`. A compromised UI therefore cannot obtain a general Docker
   API.
-- **However, two other services still hold direct socket access** and remain part
-  of this threat's real surface:
+- **However, one other service still holds direct socket access** and remains
+  part of this threat's real surface:
   - `netdata` mounts `/var/run/docker.sock` **read-only** (for metrics).
-  - `watchtower` (optional, `watchtower` profile only) mounts the socket
-    **read-write** for image updates.
-  A compromise of either bypasses the scoped proxy. Operators who do not need
-  auto-updates should leave the `watchtower` profile disabled.
+  A compromise of it bypasses the scoped proxy.
+- **Scheduled automatic updates (#819) do not add a new socket-access
+  surface.** Unlike the removed Watchtower helper (which mounted the socket
+  **read-write** in its own container for image updates), the update
+  orchestrator runs as a host `systemd` timer/service invoking `setup.sh
+  auto-update` directly on the host, with the same access a manual operator
+  running `setup.sh update` already has -- no container is granted expanded
+  Docker-socket or filesystem access to perform it.
 
-**Residual risk**: Medium — the primary control-plane path (UI) is well
-contained; residual risk concentrates in netdata (read-only) and opt-in
-watchtower (read-write). This is a real, documented trade-off, not a solved
-problem.
+**Residual risk**: Low-Medium — the primary control-plane path (UI) is well
+contained; residual risk concentrates in netdata's read-only socket access.
+Removing Watchtower (#819) eliminated the one read-write in-container socket
+exposure this threat previously had to accept as a real, documented
+trade-off.
 
 ---
 
@@ -560,7 +565,9 @@ The following are **not** addressed by lancache-ng:
   posture) or bound to `127.0.0.1`.
 - NATS unpublished (default) or its optional secondary binding firewalled.
 - Kea Control Agent reachable only on Docker-internal ranges (default).
-- `watchtower` profile left disabled unless auto-update is wanted.
+- Scheduled automatic updates left disabled (default) unless wanted -- and
+  even when enabled, it runs on the host, not as a container with expanded
+  socket access.
 
 ### Medium risk
 - Many untrusted or guest devices on the same flat LAN.
@@ -631,8 +638,9 @@ every LAN device) for caching performance, while keeping the *control plane*
 fail-closed: the Admin UI, NATS credentials, the PowerDNS API key, the Kea Control Agent,
 DDNS updates, and secondary registration all refuse to start in an
 insecure/unauthenticated state unless the operator explicitly opts out. The Docker control path for the Admin UI
-is mediated by a deny-by-default socket proxy, though netdata (read-only) and
-optional watchtower (read-write) retain direct socket access.
+is mediated by a deny-by-default socket proxy, though netdata (read-only)
+retains direct socket access. Scheduled automatic updates run on the host
+via `systemd`, not as a container, so they add no socket-access surface.
 
 The operator remains responsible for:
 1. Deploying on a trusted, firewalled LAN and keeping control-plane ports off

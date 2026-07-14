@@ -96,8 +96,8 @@ Documented exceptions:
 
 Rule: lowercase, hyphen-separated, one word per logical responsibility —
 `proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
-`nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`,
-`watchtower`. These names are also the DNS aliases used for
+`nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
+These names are also the DNS aliases used for
 service-to-service HTTP calls inside a Compose network (see "Two separate
 name namespaces" above). They must be identical across `deploy/dev`,
 `deploy/prod`, and `deploy/quickstart` for the same logical service — a
@@ -133,10 +133,11 @@ the Docker socket proxy currently allowlists:
    operator has to mentally parse, and a naming rule with silent,
    unexplained exceptions. This PR adds explicit `container_name:` values
    for these four (`lancache-docker-socket-proxy`, `lancache-watchdog`,
-   `lancache-ui`, `lancache-netdata`) and for the optional `syslog`/
-   `watchtower` services where present, so "every lancache-ng service has a
-   stable, predictable name" is a rule without exceptions instead of a rule
-   with four undocumented ones. See "Migration impact" below — this is a
+   `lancache-ui`, `lancache-netdata`) and for the optional `syslog` service
+   where present (and, at the time, the since-removed `watchtower` service --
+   see #819), so "every lancache-ng service has a stable, predictable name"
+   is a rule without exceptions instead of a rule with four undocumented
+   ones. See "Migration impact" below — this is a
    one-time container recreation, not a data migration.
 
 `netdata` additionally sets `hostname: lancache-netdata` (the in-container
@@ -304,7 +305,7 @@ Nothing that persists state (volume names, bind-mount paths, `LANCACHE_STATE_DIR
 layout, backup archive format) changes.
 
 The one runtime-visible effect: `docker-socket-proxy`, `watchdog`, `ui`, and
-`netdata` (and `syslog`/`watchtower` where present) now have an explicit
+`netdata` (and `syslog` where present) now have an explicit
 `container_name:` where they previously had none. On the next
 `docker compose up -d` after upgrading, Compose recreates exactly these
 containers (new fixed name assigned) because their config changed — this is

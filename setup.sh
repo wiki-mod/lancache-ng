@@ -2366,6 +2366,12 @@ migrate_env_for_update() {
     [[ -n "$ip_ssl" ]] && ssl_enabled=1
     set_env_key_if_empty_or_missing SSL_ENABLED "$ssl_enabled" "$env_file"
 
+    # An install from before #819 has no AUTO_UPDATE_ENABLED key at all; "0"
+    # (disabled) is the safe default, matching the interactive picker's own
+    # opt-in default -- migration must never silently turn scheduled automatic
+    # updates on for an existing install that never asked for them.
+    set_env_key_if_empty_or_missing AUTO_UPDATE_ENABLED "0" "$env_file"
+
     state_root_default=$(production_state_root_default "$install_dir")
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
     state_dir="${state_dir:-$(legacy_state_root_or_default "$state_root_default")}"
@@ -4675,23 +4681,39 @@ else
     done
 fi
 
-# ── 6. Watchtower ─────────────────────────────────────────────────────────────
-print_step "Automatic helper updates (Watchtower)"
+# ── 6. Scheduled automatic updates ────────────────────────────────────────────
+# Replaces the former Watchtower opt-in (#819): Watchtower was removed because
+# it structurally cannot deliver what this project needs from an updater --
+# it never verifies a container/stack is actually healthy after recreating it
+# (its one health-aware mode is documented as incompatible with any container
+# that has dependency links, which this stack's own depends_on topology
+# rules out outright), and it has no rollback path at all. This project's own
+# orchestrator (cmd_auto_update, invoked by a host systemd timer -- see the
+# "Installing systemd watchdog" step below) replaces it: it only acts when
+# the channel pointer actually moved, brings the whole stack up ordered and
+# health-gated with the Admin UI last, and rolls back to the pre-update
+# backup on a failed health check, instead of Watchtower's uncoordinated
+# per-container recreate-and-hope.
+print_step "Scheduled automatic updates"
 
-printf "  LanCache-NG first-party images are pinned to one resolved stack tag.\n"
-printf "  Use ./setup.sh update for first-party updates so .env migrations run first.\n"
-printf "  Watchtower is optional and should only be used for helper image refreshes.\n"
-printf "  Default: disabled.\n\n"
+printf "  A systemd timer can periodically run this project's own update logic:\n"
+printf "  it only proceeds if the release channel actually moved to a new\n"
+printf "  immutable image set, brings every service except the Admin UI up first\n"
+printf "  and verifies it is healthy, updates the Admin UI last, and rolls back to\n"
+printf "  the pre-update backup automatically if a health check fails.\n"
+printf "  Default: disabled — update manually any time with: ./setup.sh update\n\n"
 
-ask "Enable optional Watchtower helper updates? [y/N]" "N"
+ask "Enable scheduled automatic updates? [y/N]" "N"
+AUTO_UPDATE_ENABLED=0
+if [[ "${REPLY,,}" = "y" ]]; then
+    AUTO_UPDATE_ENABLED=1
+    print_ok "Scheduled automatic updates enabled (ordered, health-gated, daily)"
+else
+    print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
+fi
+
 COMPOSE_PROFILES=""
 [[ "$SSL_ENABLED" = "1" ]] && COMPOSE_PROFILES="ssl"
-if [[ "${REPLY,,}" = "y" ]]; then
-    [[ -n "$COMPOSE_PROFILES" ]] && COMPOSE_PROFILES="${COMPOSE_PROFILES},watchtower" || COMPOSE_PROFILES="watchtower"
-    print_ok "Watchtower enabled for optional helper updates (daily at 04:00)"
-else
-    print_warn "Watchtower disabled — manual updates with: ./setup.sh update"
-fi
 
 # ── 7. DHCP mode ─────────────────────────────────────────────────────────────
 print_step "DHCP mode"
@@ -5138,8 +5160,15 @@ NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────
-# ssl = SSL mode active; watchtower = optional helper updates; empty = both disabled
+# ssl = SSL mode active; empty = disabled
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
+
+# ── Scheduled automatic updates ─────────────────────────────────────────────────
+# 1 = the host systemd timer (lancache-auto-update.timer) is enabled and will
+# periodically run ./setup.sh auto-update; 0 = manual updates only
+# (./setup.sh update). See "Scheduled automatic updates" in setup.sh's
+# interactive install flow.
+AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 
 # ── Admin-UI ───────────────────────────────────────────────────────────────────
 # Empty auth values are only allowed when ALLOW_INSECURE_UI=true is set explicitly.
@@ -5250,10 +5279,10 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
 fi
-if [[ "$COMPOSE_PROFILES" = *watchtower* ]]; then
-    printf "  %-26s %s\n" "Watchtower:"              "enabled for helper updates (daily at 04:00)"
+if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"
 else
-    printf "  %-26s %s\n" "Watchtower:"              "disabled"
+    printf "  %-26s %s\n" "Scheduled updates:"        "disabled — manual: ./setup.sh update"
 fi
 if [[ -n "$UI_AUTH_USER" ]]; then
     printf "  %-26s %s\n" "Admin-UI auth:"           "enabled (user: $UI_AUTH_USER)"
