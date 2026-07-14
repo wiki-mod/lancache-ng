@@ -75,30 +75,41 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 client_tool_image="${DHCP_CTRL_AGENT_CLIENT_IMAGE:?DHCP_CTRL_AGENT_CLIENT_IMAGE is required (an image providing dhclient/curl/jq, e.g. the build-tools image)}"
 image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 
-# COMPOSE_PROJECT_NAME is derived per-workflow-run by full-setup-validate.yml's
-# compute-validation-network job (#661/#690) and threaded into this job's env
-# by the workflow, exactly like scripts/ssl-mitm-cache-simulation.sh and
-# scripts/ui-nats-dns-integration-simulation.sh already consume it -- two
-# different, concurrent workflow_dispatch runs sharing one of the self-hosted
-# runner hosts then get distinct compose project names instead of fighting
-# over the same fixed one (#623). The fallback below only matters for a local,
-# outside-CI invocation of this script.
-# The 172.30.99.0/24 addresses below are still fixed, not per-run derived,
-# matching the current (not yet fully derived) state of those same sibling
-# scripts -- full per-run subnet/IP derivation for this shared compose file,
-# not just its project name, is tracked separately in #703.
+# COMPOSE_PROJECT_NAME/VALIDATION_SUBNET/VALIDATION_GATEWAY/VALIDATION_UI_IP
+# are exported by scripts/lib/run-in-validation-subnet.sh (issue #820),
+# which full-setup-validate.yml's own job wraps this script's invocation in
+# -- it reserves a host-locked, overlap-checked 172.30.<octet>.0/24 subnet
+# per attempt and retries on a genuine collision, exactly like this script's
+# siblings (ssl-mitm-cache-simulation.sh, ui-nats-dns-integration-
+# simulation.sh) already consume. This used to hardcode a fixed
+# 172.30.99.0/24 unconditionally, with NO per-run derivation and NO retry at
+# all -- worse than the birthday-paradox-odds bug those siblings had before
+# #820, since EVERY invocation of this exact script, from ANY concurrent
+# run, requested the identical literal subnet: not a rare collision, a
+# deterministic one the moment two such networks existed on the same host at
+# once (confirmed for real: this job died on "Pool overlaps" for
+# lancache-ng-validation-69_validation in the run that surfaced this gap).
+# The fallback defaults below only matter for a local, outside-CI invocation.
+validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/24}"
+# "172.30.<octet>" -- every other script-private (non-compose-service)
+# address below is derived from this same prefix, so kea_ip/pool_start/
+# pool_end/reserved_ip always stay inside whatever subnet this run/job
+# actually reserved instead of drifting onto the old fixed .99 octet while
+# $ui_ip and the surrounding compose stack use a genuinely different one.
+subnet_prefix="${validation_subnet%.0/24}"
+gateway_ip="${VALIDATION_GATEWAY:-172.30.99.1}"
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
-ui_ip="172.30.99.9"
+ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 # .2-.9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/netdata/nats/ui
 # in deploy/full-setup/docker-compose.yml; .20 is unused by any of them.
-kea_ip="172.30.99.20"
-pool_start="172.30.99.100"
-pool_end="172.30.99.150"
+kea_ip="${subnet_prefix}.20"
+pool_start="${subnet_prefix}.100"
+pool_end="${subnet_prefix}.150"
 # Deliberately outside the dynamic pool above: the whole point of a static
 # reservation is that Kea must hand it out even though ordinary dynamic
 # allocation never would.
-reserved_ip="172.30.99.222"
+reserved_ip="${subnet_prefix}.222"
 # A fixed, locally-administered (0x02 high nibble) test MAC -- never a real
 # vendor OUI, and unique enough per run (low bits from this run's PID) that
 # concurrent local runs of this script don't collide on the same reservation.
@@ -179,10 +190,10 @@ docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
     -v "$work_dir/kea-data:/var/lib/kea" \
-    -e DHCP_SUBNET="172.30.99.0/24" \
+    -e DHCP_SUBNET="$validation_subnet" \
     -e DHCP_RANGE_START="$pool_start" \
     -e DHCP_RANGE_END="$pool_end" \
-    -e DHCP_GATEWAY="172.30.99.1" \
+    -e DHCP_GATEWAY="$gateway_ip" \
     -e DHCP_DOMAIN="lancache-dhcp634-test.lan" \
     -e DHCP_LEASE_TIME=1800 \
     -e DHCP_NTP_SERVERS="" \
@@ -212,7 +223,7 @@ if [[ "$kea_ready" -ne 1 ]]; then
     docker logs "$kea_container" >&2 || true
     exit 1
 fi
-echo "Kea DHCPv4 server and Control Agent are up (Subnet: 172.30.99.0/24, Pool: $pool_start - $pool_end)."
+echo "Kea DHCPv4 server and Control Agent are up (Subnet: $validation_subnet, Pool: $pool_start - $pool_end)."
 
 echo "== Starting the real Admin UI (published $image_tag image) pointed at this Kea Control Agent =="
 # `compose run` (not `up`) so this one-off container's DHCP_MODE/DHCP_API_URL/
