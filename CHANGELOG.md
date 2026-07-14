@@ -347,6 +347,16 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `setup.sh` writing an unescaped backtick in a comment inside the
+  main `.env`-writing heredoc (found during a real end-to-end install test,
+  2026-07-14): since that heredoc is deliberately unquoted (`<<EOF`, not
+  `<<'EOF'`) so `${IP_STANDARD}` etc. interpolate, an unescaped backtick in
+  the comment text is real command substitution, not an inert comment.
+  Every install ran `resolver` as a shell command, printing `setup.sh: line
+  4950: resolver: command not found` to stderr and silently deleting the
+  word "resolver" from the written `.env`'s own comment. Escaped the
+  backticks; the `NGINX_UPSTREAM_RESOLVER=` value itself was always correct
+  and unaffected.
 - Fixed `scripts/dns-zone-rollback-simulation.sh` (#809) never pulling fresh
   images before starting its stack, unlike its sibling
   `ssl-mitm-cache-simulation.sh`: Compose's default `pull_policy: missing`

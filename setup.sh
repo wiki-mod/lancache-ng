@@ -4972,7 +4972,13 @@ CACHE_INACTIVE=365d
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
 # Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
 # dual-stack rationale); IPv6 literals are bracketed because nginx's
-# `resolver` directive requires brackets around IPv6 nameservers.
+# \`resolver\` directive requires brackets around IPv6 nameservers. (Backticks
+# escaped: this whole heredoc is deliberately unquoted so ${IP_STANDARD} etc.
+# below interpolate -- an unescaped backtick here is real command
+# substitution, not an inert comment. Confirmed live, 2026-07-14: this exact
+# line ran resolver as a command on every install, printing "resolver:
+# command not found" to stderr and silently deleting the word from the
+# written .env comment.)
 NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]
 # Keep lazy as the default: it preserves the historical cache-first behavior
 # and avoids breaking downloads when a launcher introduces a new CDN hostname.
