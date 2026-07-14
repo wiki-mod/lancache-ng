@@ -1111,6 +1111,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
             -w "$PWD" \
+            -e BUILD_TOOLS_IMAGE \
             -e SETUP_SIM_IMAGE_CHANNEL \
             -e SETUP_SIM_IMAGE_TAG \
             -e GITHUB_RUN_ID \
