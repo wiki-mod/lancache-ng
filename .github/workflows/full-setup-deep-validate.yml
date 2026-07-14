@@ -703,6 +703,10 @@ jobs:
         # Mounted at the SAME absolute path inside the container as on the host
         # so docker compose bind-mount sources (resolved against the HOST
         # daemon) match; see full-setup-validate.yml's identical step comment.
+        # --network host: also required here for the same reason as that
+        # step -- setup.sh's update-flow health gate curls the stack's own
+        # loopback-published addresses (127.0.0.x), which are per-network-
+        # namespace and otherwise unreachable from this sibling container.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           # Which images setup.sh installs (see setup-cli-simulation.sh for the
@@ -717,6 +721,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
             -w "$PWD" \

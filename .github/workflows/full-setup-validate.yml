@@ -627,11 +627,31 @@ jobs:
         # makes any bind mount setup.sh itself declares (e.g.
         # ./scripts/dhcp-probe.sh) resolve correctly no matter which side
         # evaluates it.
+        #
+        # --network host (#819): setup.sh's update flow now runs a real
+        # functional health probe (verify_stack_functional_health) against
+        # the stack's own loopback-published addresses (IP_STANDARD/IP_SSL,
+        # e.g. 127.0.0.2 in this simulation). Loopback addresses are
+        # per-network-namespace -- without --network host, this container has
+        # its OWN isolated 127.0.0.0/8, completely separate from the runner
+        # host's, where the sibling `proxy` container actually publishes its
+        # port. Confirmed directly on a runner: the identical curl from a
+        # sibling container without --network host gets connection-refused
+        # (000) permanently, forever, regardless of how long the health-gate
+        # waits, while the exact same curl from the host (or a sibling
+        # container WITH --network host) succeeds immediately. This is what
+        # caused `setup.sh update`'s new post-update health gate to always
+        # roll back inside this specific simulation harness -- not a flaky
+        # timing issue, not a bug in the health-gate logic itself, and (per
+        # the same reasoning) not something a real operator would hit, since
+        # setup.sh always runs directly on the host in production, never
+        # inside a container without host networking.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
           docker run --rm \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
             -w "$PWD" \
