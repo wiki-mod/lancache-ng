@@ -44,10 +44,22 @@ must stay consistent with that file.
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
 | `latest` | Latest stable release only | Mutable | Default stable install path |
+| `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stack:stable` GHCR tag exists -- `stable` and `latest` resolve to the identical pointer image |
 
 `latest` must not be moved by a normal `master` build. The `master` branch
 publishes `edge` after the required checks pass. Stable release tags publish the
-matching `vX.Y.Z` tag and may move `latest` to the same digest.
+matching `vX.Y.Z` tag and may move `latest` (and, being the same pointer,
+`stable`) to the same digest.
+
+`setup.sh`'s interactive install flow offers exactly two operator-facing
+channel names: `stable` (default) and `edge`, each with an inline explanation
+of what it means. `stable` is not a new GHCR tag -- `resolve_lancache_stack_channel_tag`
+maps it onto the existing `latest` pointer before pulling, so introducing it
+required no change to the promotion/release pipeline. `dev` and `pinned`
+remain valid `LANCACHE_IMAGE_CHANNEL` values (env var / `.env`, or the
+secondary-node registration flow) but are not offered by the interactive
+picker -- `dev` is an internal maintainer-triggered channel (see below), not an
+end-user choice.
 
 `dev` publishes automatically on every push to a branch matching `vX.Y.Z`
 (not a hardcoded branch name, so this keeps working as the active
@@ -91,8 +103,11 @@ the install contract.
 
 Default behavior:
 
-- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=latest`
-- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`
+- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=stable` (written by
+  `setup.sh`'s interactive picker); `LANCACHE_IMAGE_CHANNEL=latest` remains
+  valid and resolves identically for existing installs and manual overrides
+- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`, or choose
+  `edge` at `setup.sh`'s interactive channel prompt
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`

@@ -1863,15 +1863,22 @@ validate_lancache_image_tag() {
         || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
 }
 
-# Enumerates the only four supported LANCACHE_IMAGE_CHANNEL values.
+# Enumerates the supported LANCACHE_IMAGE_CHANNEL values.
+#
+# "stable" is the operator-facing name setup.sh's interactive channel picker
+# writes (#819); "latest" is the original, still-accepted name for the exact
+# same underlying stack:latest pointer -- kept valid (not deprecated/rejected)
+# so existing installs' .env files and any external tooling/docs that already
+# say LANCACHE_IMAGE_CHANNEL=latest keep working unchanged. The two are
+# resolved identically; see resolve_lancache_stack_channel_tag below.
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
-        latest|dev|edge|pinned)
+        stable|latest|dev|edge|pinned)
             return 0
             ;;
     esac
-    die "LANCACHE_IMAGE_CHANNEL must be latest, dev, edge, or pinned."
+    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, dev, edge, or pinned."
 }
 
 # Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
@@ -2059,7 +2066,7 @@ resolve_lancache_image_channel() {
     fi
 
     case "$tag" in
-        latest|dev|edge)
+        stable|latest|dev|edge)
             channel="${channel:-$tag}"
             ;;
         sha-*|v[0-9]*)
@@ -2078,10 +2085,30 @@ resolve_lancache_image_channel() {
 
     # Normal installs default to the stable channel. Untagged development or
     # pre-stable testing must opt into edge explicitly so production users do
-    # not drift onto a moving integration channel by accident.
+    # not drift onto a moving integration channel by accident. "latest", not
+    # "stable", stays the hardcoded fallback here so an install with genuinely
+    # nothing configured lands on the name that has existed the whole time
+    # (both resolve identically either way -- see resolve_lancache_stack_channel_tag).
     channel="${channel:-latest}"
     validate_lancache_image_channel "$channel"
     printf '%s\n' "$channel"
+}
+
+# Pure name mapping, no I/O: which physical GHCR "stack:<tag>" pointer image
+# backs a given operator-facing LANCACHE_IMAGE_CHANNEL value. "stable" (#819)
+# is the operator-facing name for the exact same underlying stack:latest
+# pointer image -- there is no separate stack:stable GHCR tag, and none is
+# planned; both names are published identically by the release job. Every
+# other channel name passes through unchanged. Kept as its own tiny function
+# (rather than inlined where it's used) specifically so this one mapping can
+# be unit-tested with zero docker/tar involved.
+lancache_stack_pointer_channel_for() {
+    local channel="$1"
+    if [[ "$channel" = "stable" ]]; then
+        printf 'latest\n'
+    else
+        printf '%s\n' "$channel"
+    fi
 }
 
 # Turns a mutable channel name (latest/dev/edge) into one immutable sha-* tag.
@@ -2098,10 +2125,12 @@ resolve_lancache_image_channel() {
 resolve_lancache_stack_channel_tag() {
     local env_file="$1" channel="$2"
     local registry prefix stack_image container_id="" resolved_tag=""
+    local pointer_channel
+    pointer_channel=$(lancache_stack_pointer_channel_for "$channel")
 
     registry=$(resolve_lancache_image_registry "$env_file")
     prefix=$(resolve_lancache_image_prefix "$env_file")
-    stack_image="${registry}/${prefix}/stack:${channel}"
+    stack_image="${registry}/${prefix}/stack:${pointer_channel}"
 
     command -v docker >/dev/null 2>&1 \
         || die "Docker is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} through ${stack_image}."
@@ -2111,14 +2140,14 @@ resolve_lancache_stack_channel_tag() {
     printf "\n${BOLD}${CYAN}▶ Resolving image channel %s${RESET}\n" "$channel" >&2
     docker pull "$stack_image" >/dev/null \
         || {
-            if [[ "$channel" = "latest" ]]; then
+            if [[ "$pointer_channel" = "latest" ]]; then
                 cat >&2 <<EOF
 
-${RED}✗${RESET} Cannot resolve the 'latest' stable release channel.
+${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
 to the 'edge' testing channel daily from master, a formal stable release with a
-published 'latest' channel tag has not yet been created.
+published 'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
@@ -2174,7 +2203,7 @@ resolve_lancache_image_tag() {
 
     if [[ -n "$tag" ]]; then
         case "$tag" in
-            latest|dev|edge)
+            stable|latest|dev|edge)
                 resolve_lancache_stack_channel_tag "$env_file" "$tag"
                 return 0
                 ;;
@@ -2192,7 +2221,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$channel" in
-        latest|dev|edge)
+        stable|latest|dev|edge)
             resolve_lancache_stack_channel_tag "$env_file" "$channel"
             return 0
             ;;
@@ -2222,7 +2251,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$tag" in
-        latest|dev|edge)
+        stable|latest|dev|edge)
             resolve_lancache_stack_channel_tag "$env_file" "$tag"
             return 0
             ;;
@@ -4234,7 +4263,7 @@ EOF
     if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
         lancache_image_channel="$response_image_channel"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(latest|dev|edge)$ ]]; then
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|dev|edge)$ ]]; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -4247,7 +4276,7 @@ EOF
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
         LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(latest|dev|edge)$ ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|dev|edge)$ ]]; then
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -4590,7 +4619,63 @@ while true; do
     print_error "Please enter a positive integer (e.g. 512)."
 done
 
-# ── 5. Watchtower ─────────────────────────────────────────────────────────────
+# ── 5. Release channel ────────────────────────────────────────────────────────
+print_step "Release channel"
+
+# Unlike the other prompts in this flow (INSTALL_DIR, detected_ip, ...), an
+# already-set LANCACHE_IMAGE_CHANNEL is NOT just a default to confirm -- it is
+# respected outright and the prompt is skipped entirely. Two real callers rely
+# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install`
+# non-interactive invocation (see resolve_lancache_stack_channel_tag's own
+# die() message), and (2) scripts/setup-cli-simulation.sh, which exports
+# LANCACHE_IMAGE_CHANNEL=pinned (plus an explicit LANCACHE_IMAGE_TAG) so CI
+# installs THIS commit's own just-built images rather than any published
+# channel. "pinned" is not a stable/edge choice at all -- it is a request for
+# one specific immutable tag -- so re-prompting and overwriting it with
+# whatever the operator/simulation answers here would silently discard that
+# request (a real regression caught in CI, not a hypothetical). Respecting any
+# pre-set value, of any kind, keeps this idempotent with the rest of this
+# script's "existing non-empty local values must be preserved by default"
+# convention (AGENTS.md) instead of treating this one field as an exception.
+if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+else
+    printf "  stable — the channel promoted after the full release validation gate.\n"
+    printf "           Recommended for most installs. This is what './setup.sh update'\n"
+    printf "           tracks by default, and what most operators should stay on.\n"
+    printf "  edge   — the most recently built channel from active development.\n"
+    printf "           Refreshes more often, may be less tested than stable. Opt in\n"
+    printf "           only if you specifically want the newest changes and accept\n"
+    printf "           the extra risk.\n\n"
+
+    # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
+    # resolve_lancache_image_channel already checks first (see its precedence
+    # comment above); nothing downstream needs to change to pick this up.
+    # "stable" and "latest" resolve to the identical published stack pointer
+    # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
+    # friendlier, self-explanatory name this prompt writes for new installs.
+    while true; do
+        ask "Release channel [stable/edge]" "stable"
+        case "${REPLY,,}" in
+            stable)
+                LANCACHE_IMAGE_CHANNEL="stable"
+                print_ok "Using the stable channel (recommended)."
+                break
+                ;;
+            edge)
+                LANCACHE_IMAGE_CHANNEL="edge"
+                print_warn "Using the edge channel — more recent, less tested than stable."
+                break
+                ;;
+            *)
+                print_error "Please answer 'stable' or 'edge'."
+                ;;
+        esac
+    done
+fi
+
+# ── 6. Watchtower ─────────────────────────────────────────────────────────────
 print_step "Automatic helper updates (Watchtower)"
 
 printf "  LanCache-NG first-party images are pinned to one resolved stack tag.\n"
@@ -4608,7 +4693,7 @@ else
     print_warn "Watchtower disabled — manual updates with: ./setup.sh update"
 fi
 
-# ── 6. DHCP mode ─────────────────────────────────────────────────────────────
+# ── 7. DHCP mode ─────────────────────────────────────────────────────────────
 print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
@@ -4809,7 +4894,7 @@ fi
 
 COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE")"
 
-# ── 7. Admin-UI access control ────────────────────────────────────────────────
+# ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
 printf "  Admin-UI runs on http://%s:8080 — reachable from your LAN by default.\n" "$IP_STANDARD"
@@ -4849,7 +4934,7 @@ else
     fi
 fi
 
-# ── 8. Writing .env ───────────────────────────────────────────────────────────
+# ── 9. Writing .env ───────────────────────────────────────────────────────────
 print_step "Writing .env"
 
 env_file="$INSTALL_DIR/.env"
@@ -5069,7 +5154,7 @@ UI_BIND_IP=${IP_STANDARD}
 EOF
 print_ok ".env written: $INSTALL_DIR/.env"
 
-# ── 9. Creating directories ───────────────────────────────────────────────────
+# ── 10. Creating directories ───────────────────────────────────────────────────
 print_step "Creating directories"
 mkdir -p "$CACHE_DIR"
 print_ok "Cache:          $CACHE_DIR"
@@ -5078,7 +5163,7 @@ if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
     print_ok "Kea data:       $KEA_DATA_DIR"
 fi
 
-# ── 10. Installing systemd watchdog ───────────────────────────────────────────
+# ── 11. Installing systemd watchdog ───────────────────────────────────────────
 # The systemd service owns boot startup; the timer is a convergence guard that
 # re-applies compose state if containers drift. It is not an update mechanism.
 print_step "Installing systemd watchdog"
@@ -5136,7 +5221,7 @@ EOF
     print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
 
-# ── 11. Summary and confirmation ──────────────────────────────────────────────
+# ── 12. Summary and confirmation ──────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
 printf "${BOLD}│              Configuration                   │${RESET}\n"
@@ -5185,7 +5270,7 @@ ask "Start now? [Y/n]" "Y"
 [[ "${REPLY,,}" != "n" ]] \
     || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
-# ── 12. Starting stack ───────────────────────────────────────────────────────
+# ── 13. Starting stack ───────────────────────────────────────────────────────
 # Pull before starting so GHCR/auth/platform failures happen while systemd units
 # are installed but not yet enabled, keeping failed first installs reversible.
 print_step "Pulling images"
@@ -5209,7 +5294,7 @@ else
 fi
 print_ok "Stack started"
 
-# ── 13. Post-start info ──────────────────────────────────────────────────────
+# ── 14. Post-start info ──────────────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
 printf "${BOLD}${GREEN}  LanCache-NG is running!${RESET}\n"
