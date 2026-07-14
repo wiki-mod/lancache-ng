@@ -100,8 +100,13 @@ jobs:
           # amd64-only release tag cannot silently reset latest to an
           # amd64-only stack and break arm64 installs on the default channel (#665).
           REQUIRED_PLATFORMS: linux/amd64,linux/arm64
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           # Product stack latest backfill intentionally excludes build-tools:
           # that tooling image has its own build/publish workflow and mutable
@@ -117,11 +122,18 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
+          # Wrapped in ghcr_retry (#822): every caller of this helper in this
+          # workflow expects the image to actually exist (this is a manual,
+          # operator-confirmed recovery run against already-published
+          # releases, never a "might not be built yet" probe), so a transient
+          # 401 here is a pure retry candidate. The `|| true` callers below
+          # (previous_refs) tolerate genuine absence the same way
+          # promote/backfill's build-push.yml counterparts do.
           digest_for_image() {
             local image=$1 digest
 
             # shellcheck disable=SC2016 # Go template is evaluated by Docker.
-            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
               return 1
             fi
             digest="${digest%\"}"
@@ -144,7 +156,8 @@ jobs:
             for target_image in "${promoted_targets[@]}"; do
               previous_digest="${previous_refs[$target_image]:-}"
               if [[ -n "$previous_digest" ]]; then
-                docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                  docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
                   || echo "::error::Could not restore previous digest for $target_image."
               else
                 echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
@@ -154,8 +167,8 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          docker buildx imagetools inspect "$source_stack" >/dev/null
-          docker pull "$source_stack" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$source_stack" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$source_stack" >/dev/null
           container_id="$(docker create "$source_stack")"
           stack_env="$(docker cp "${container_id}:/stack.env" - | tar -xO)"
           docker rm "$container_id" >/dev/null
@@ -185,7 +198,8 @@ jobs:
           source_stack_immutable_digest="$(digest_for_image "$source_stack_immutable")"
           [[ "$source_stack_digest" = "$source_stack_immutable_digest" ]] \
             || { echo "::error::${source_stack} digest does not match ${source_stack_immutable}; refusing to promote drifted release sources."; exit 1; }
-          bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
+          GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
 
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
@@ -194,7 +208,8 @@ jobs:
             source_sha_digest="$(digest_for_image "$source_image")"
             [[ "$source_release_digest" = "$source_sha_digest" ]] \
               || { echo "::error::${source_release_image} digest does not match ${source_image}; refusing to promote drifted release sources."; exit 1; }
-            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
+            GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+              bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
           done
 
           bash scripts/check-stable-external-images.sh
@@ -204,13 +219,15 @@ jobs:
             source_release_digest="$(digest_for_image "$source_release_image")"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
             previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-            docker buildx imagetools create --prefer-index=false -t "$target_image" "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create --prefer-index=false -t "$target_image" "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}"
             promoted_targets+=("$target_image")
           done
 
           target_stack="ghcr.io/${REPOSITORY}/stack:latest"
           previous_refs["$target_stack"]="$(digest_for_image "$target_stack" || true)"
-          docker buildx imagetools create --prefer-index=false -t "$target_stack" "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create --prefer-index=false -t "$target_stack" "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}"
           promoted_targets+=("$target_stack")
 
           for service in "${services[@]}"; do

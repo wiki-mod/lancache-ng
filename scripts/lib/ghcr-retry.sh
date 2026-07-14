@@ -101,10 +101,25 @@ ghcr_retry() {
   local attempt=1
   local status=0
   while (( attempt <= GHCR_RETRY_MAX_ATTEMPTS )); do
+    # Deliberately `if "$@"; then status=0; else status=$?; fi`, not the more
+    # obvious `if "$@"; then return 0; fi` followed by `status=$?`: when an
+    # `if` with no `else` takes the false branch, bash defines the compound
+    # statement's OWN exit status as 0 -- a bare `status=$?` read right after
+    # such an `if` always sees 0, never the tested command's real failure
+    # code, so ghcr_retry would silently report success after every attempt
+    # was exhausted (caught live: a forced-failure smoke test returned 0
+    # even though the wrapped command failed every single attempt). Keeping
+    # "$@" in if-condition position (not a bare statement) also keeps this
+    # safe under a caller's `set -e` -- a command tested by if/while/until
+    # does not trigger -e even when it fails.
     if "$@"; then
+      status=0
+    else
+      status=$?
+    fi
+    if (( status == 0 )); then
       return 0
     fi
-    status=$?
     if (( attempt >= GHCR_RETRY_MAX_ATTEMPTS )); then
       echo "::error::GHCR operation failed after ${GHCR_RETRY_MAX_ATTEMPTS} attempts (exit ${status}): $*" >&2
       return "$status"

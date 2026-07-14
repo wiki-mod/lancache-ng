@@ -194,6 +194,11 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs.plan.outputs.watchdog }}
           UI_TOUCHED: ${{ needs.plan.outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          # #822: lets backfill_from_base's real imagetools create (the exact
+          # operation that failed live 3x on 2026-07-14) retry with a fresh
+          # login instead of the single bare attempt it had before.
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ensure-pr-staging-images.sh
 
   # Strict superset of build-push.yml's shallow "validate full-setup image"
