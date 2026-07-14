@@ -347,6 +347,16 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `scripts/dns-zone-rollback-simulation.sh` (#809) never pulling fresh
+  images before starting its stack, unlike its sibling
+  `ssl-mitm-cache-simulation.sh`: Compose's default `pull_policy: missing`
+  silently reuses whatever image a runner already has cached locally under
+  the target tag. Confirmed live: a runner with an 11-hour-stale local
+  `dns:dev` image (from before this script's own rollback listener existed)
+  silently ran that old binary, producing a permanent connection-refused
+  that looked exactly like a startup race rather than what it actually was.
+  Added the same explicit `pull --quiet` step the sibling script already
+  uses, for the identical reason.
 - Fixed `build-push.yml`'s `rust_coverage` job pinning `actions/upload-artifact`
   to `v4.3.6`, whose own action metadata still declares the deprecated Node 20
   runtime (#799). Bumped to `v7.0.1`; the `name`/`path`/`retention-days` inputs

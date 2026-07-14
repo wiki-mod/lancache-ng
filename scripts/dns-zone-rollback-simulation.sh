@@ -62,6 +62,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "== Pulling the published $image_tag images =="
+
+# Without an explicit pull, Compose's pull_policy: missing (see
+# deploy/full-setup/docker-compose.yml) would silently reuse whatever image
+# is already cached locally under this tag instead of the one actually
+# published for this run -- confirmed live (2026-07-14, issue #809): a
+# runner with an 11-hour-stale local `dns:dev` image (predating this script's
+# own rollback listener entirely) silently ran that old binary instead of
+# pulling the current one, producing a permanent "connection refused" that
+# looked exactly like a startup race. Mirrors ssl-mitm-cache-simulation.sh's
+# own pull step, added for the identical reason.
+LANCACHE_IMAGE_TAG="$image_tag" \
+    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+    pull --quiet proxy docker-socket-proxy dns-standard dns-ssl nats ui
+
 echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
 
 # ui's own healthcheck (depends_on: docker-socket-proxy, proxy, nats) needs
