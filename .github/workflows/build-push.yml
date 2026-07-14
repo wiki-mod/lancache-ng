@@ -4069,117 +4069,22 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
-        # First build attempt uses the configured acceleration path. It is
-        # allowed to fail so the retry path can prove the Dockerfile fallback
-        # instead of leaving a transient acceleration outage as the final state.
+        # #822 ("Pattern D"): ghcr.io push-token issuance intermittently
+        # fails with "403 Forbidden"/"denied: denied"/"401 Unauthorized" for
+        # the slowest (Rust) builds in this matrix; a manual `gh run rerun`
+        # (fresh login, some time elapsed) has fixed every occurrence so far.
+        # This composite action is the shared retry+re-login policy every
+        # GHCR-writing step in the project now uses (see
+        # .github/actions/ghcr-build-push-retry and scripts/lib/ghcr-retry.sh
+        # for why a `uses:` step like docker/build-push-action needs its own
+        # wrapper instead of sourcing the shared shell function directly).
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
-        continue-on-error: true
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: ${{ matrix.context }}
-          build-contexts: ${{ matrix.build_contexts }}
-          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
-          build-args: |
-            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          network: ${{ env.RUST_BUILDX_NETWORK }}
-          allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
-          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.description=${{ matrix.description }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # No `annotations:` input here (issue #620). A genuinely
-          # single-platform push with provenance disabled has no index for
-          # buildx to attach an index-level description annotation to --
-          # `docker buildx build --annotation index:...` on a real
-          # single-platform push errors outright ("index annotations not
-          # supported for single platform export"), confirmed live against
-          # this project's own images. Forcing OCI mediatypes here (instead
-          # of the legacy Docker manifest v2 schema) is still required
-          # groundwork: `docker buildx imagetools create` downstream (in
-          # merge-manifests) silently drops --annotation with no error at all
-          # when combining Docker-format sources, because Docker's manifest
-          # list schema has no annotations field -- also confirmed live.
-          # merge-manifests is the first point where a genuine multi-platform
-          # index exists, so that's where the description annotation is
-          # actually attached; channel/stack promotions downstream of it
-          # carbon-copy that annotation forward untouched.
-          outputs: type=image,oci-mediatypes=true
-          platforms: linux/amd64
-          provenance: false
-          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
-          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
-
-      - name: Wait before retrying the push
-        # The first attempt and the retry below share the same "Log in to
-        # GHCR" session from earlier in this job. Observed pattern: ghcr.io
-        # push-token issuance intermittently fails with "403 Forbidden" or
-        # "denied: denied" for the two slowest (Rust) builds in this matrix;
-        # a manual `gh run rerun` (a brand-new job, fresh login, some time
-        # elapsed) has fixed every occurrence so far. This sleep gives a
-        # transient condition the same chance to clear before the in-job
-        # retry, instead of retrying instantly against whatever just failed.
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        run: sleep 30
-
-      - name: Re-authenticate to GHCR before retry
-        # Get a fresh push token rather than reusing the session from the
-        # "Log in to GHCR" step above, in case that session (not just the
-        # image build) was what the first attempt's auth failure was tied to.
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Retry Build and push
-        # Retry once with the same declared image inputs. Dockerfile-level
-        # fallback disables broken acceleration while preserving the normal
-        # build and publish contract.
-        id: retry-build
-        if: >-
-          ${{
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        timeout-minutes: 60
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
@@ -4225,10 +4130,7 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             ) &&
             always() &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         env:
           BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
@@ -4255,10 +4157,7 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         run: |
           set -euo pipefail
@@ -4271,15 +4170,12 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -4291,20 +4187,11 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Log in to GHCR for provenance attestation
-        if: >-
-          ${{
-            github.event_name != 'pull_request' &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            )
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+      # No separate "Log in to GHCR for provenance attestation" step: the
+      # ghcr-attest-retry composite action re-authenticates itself before
+      # each retry (see that action), and its first attempt reuses the
+      # session docker/login-action already created earlier in this job for
+      # the "Build and push" step above.
       - name: Attest image build provenance
         if: >-
           ${{
@@ -4313,11 +4200,12 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             )
           }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
-          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
-          push-to-registry: true
+          subject-digest: ${{ steps.build.outputs.digest }}
 
   build-arm64:
     # Native linux/arm64 leg of the same publish contract as build above.
@@ -4572,86 +4460,16 @@ jobs:
         # Uses the GitHub Actions cache backend (type=gha) instead of the
         # self-hosted local Buildx cache, since this runner is ephemeral and
         # has no persistent /var/tmp to reuse across runs.
+        #
+        # #822: same shared GHCR retry+re-login policy as build's own
+        # equivalent step -- see .github/actions/ghcr-build-push-retry.
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 90
-        continue-on-error: true
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: ${{ matrix.context }}
-          build-contexts: ${{ matrix.build_contexts }}
-          build-args: |
-            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
-          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.description=${{ matrix.description }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # See build's equivalent step for why there is no `annotations:`
-          # input here and why `outputs: type=image,oci-mediatypes=true` is
-          # still required groundwork for issue #620.
-          outputs: type=image,oci-mediatypes=true
-          platforms: linux/arm64
-          provenance: false
-          cache-from: type=gha,scope=${{ matrix.service }}-arm64
-          cache-to: type=gha,scope=${{ matrix.service }}-arm64,mode=max
-
-      - name: Wait before retrying the push
-        # Same transient ghcr.io push-token pattern documented on build's
-        # equivalent step.
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        run: sleep 30
-
-      - name: Re-authenticate to GHCR before retry
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Retry Build and push
-        id: retry-build
-        if: >-
-          ${{
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        timeout-minutes: 90
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
@@ -4681,15 +4499,12 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -4700,20 +4515,10 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Log in to GHCR for provenance attestation
-        if: >-
-          ${{
-            github.event_name != 'pull_request' &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            )
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+      # No separate "Log in to GHCR for provenance attestation" step: same
+      # reasoning as build's equivalent step (ghcr-attest-retry re-logs-in
+      # itself on retry, and the first attempt reuses the session from this
+      # job's own earlier "Log in to GHCR" step before "Build and push").
       - name: Attest image build provenance
         if: >-
           ${{
@@ -4722,11 +4527,12 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             )
           }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
-          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
-          push-to-registry: true
+          subject-digest: ${{ steps.build.outputs.digest }}
 
   merge-manifests:
     # Combines build's linux/amd64 per-service tag with build-arm64's
