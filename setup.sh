@@ -4611,51 +4611,58 @@ done
 # ── 5. Release channel ────────────────────────────────────────────────────────
 print_step "Release channel"
 
-printf "  stable — the channel promoted after the full release validation gate.\n"
-printf "           Recommended for most installs. This is what './setup.sh update'\n"
-printf "           tracks by default, and what most operators should stay on.\n"
-printf "  edge   — the most recently built channel from active development.\n"
-printf "           Refreshes more often, may be less tested than stable. Opt in\n"
-printf "           only if you specifically want the newest changes and accept\n"
-printf "           the extra risk.\n\n"
+# Unlike the other prompts in this flow (INSTALL_DIR, detected_ip, ...), an
+# already-set LANCACHE_IMAGE_CHANNEL is NOT just a default to confirm -- it is
+# respected outright and the prompt is skipped entirely. Two real callers rely
+# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install`
+# non-interactive invocation (see resolve_lancache_stack_channel_tag's own
+# die() message), and (2) scripts/setup-cli-simulation.sh, which exports
+# LANCACHE_IMAGE_CHANNEL=pinned (plus an explicit LANCACHE_IMAGE_TAG) so CI
+# installs THIS commit's own just-built images rather than any published
+# channel. "pinned" is not a stable/edge choice at all -- it is a request for
+# one specific immutable tag -- so re-prompting and overwriting it with
+# whatever the operator/simulation answers here would silently discard that
+# request (a real regression caught in CI, not a hypothetical). Respecting any
+# pre-set value, of any kind, keeps this idempotent with the rest of this
+# script's "existing non-empty local values must be preserved by default"
+# convention (AGENTS.md) instead of treating this one field as an exception.
+if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+else
+    printf "  stable — the channel promoted after the full release validation gate.\n"
+    printf "           Recommended for most installs. This is what './setup.sh update'\n"
+    printf "           tracks by default, and what most operators should stay on.\n"
+    printf "  edge   — the most recently built channel from active development.\n"
+    printf "           Refreshes more often, may be less tested than stable. Opt in\n"
+    printf "           only if you specifically want the newest changes and accept\n"
+    printf "           the extra risk.\n\n"
 
-# The prompt writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
-# resolve_lancache_image_channel already checks first (see its precedence
-# comment above); nothing downstream needs to change to pick this up. "stable"
-# and "latest" resolve to the identical published stack pointer (see
-# resolve_lancache_stack_channel_tag) -- "stable" is only the friendlier,
-# self-explanatory name this prompt writes for new installs.
-#
-# Default the prompt to any channel already set via LANCACHE_IMAGE_CHANNEL
-# (e.g. `LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install`, a documented
-# invocation -- see resolve_lancache_stack_channel_tag's own die() message)
-# rather than unconditionally overwriting it -- same "explicit value pre-fills
-# the default, operator still confirms" pattern every other prompt in this
-# flow uses (e.g. INSTALL_DIR, detected_ip). "latest" defaults the prompt to
-# "stable" since they are the same channel under its friendlier name.
-default_channel="stable"
-case "${LANCACHE_IMAGE_CHANNEL:-}" in
-    edge) default_channel="edge" ;;
-esac
-
-while true; do
-    ask "Release channel [stable/edge]" "$default_channel"
-    case "${REPLY,,}" in
-        stable)
-            LANCACHE_IMAGE_CHANNEL="stable"
-            print_ok "Using the stable channel (recommended)."
-            break
-            ;;
-        edge)
-            LANCACHE_IMAGE_CHANNEL="edge"
-            print_warn "Using the edge channel — more recent, less tested than stable."
-            break
-            ;;
-        *)
-            print_error "Please answer 'stable' or 'edge'."
-            ;;
-    esac
-done
+    # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
+    # resolve_lancache_image_channel already checks first (see its precedence
+    # comment above); nothing downstream needs to change to pick this up.
+    # "stable" and "latest" resolve to the identical published stack pointer
+    # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
+    # friendlier, self-explanatory name this prompt writes for new installs.
+    while true; do
+        ask "Release channel [stable/edge]" "stable"
+        case "${REPLY,,}" in
+            stable)
+                LANCACHE_IMAGE_CHANNEL="stable"
+                print_ok "Using the stable channel (recommended)."
+                break
+                ;;
+            edge)
+                LANCACHE_IMAGE_CHANNEL="edge"
+                print_warn "Using the edge channel — more recent, less tested than stable."
+                break
+                ;;
+            *)
+                print_error "Please answer 'stable' or 'edge'."
+                ;;
+        esac
+    done
+fi
 
 # ── 6. Watchtower ─────────────────────────────────────────────────────────────
 print_step "Automatic helper updates (Watchtower)"
