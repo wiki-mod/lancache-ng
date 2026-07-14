@@ -416,6 +416,35 @@ is real, live, running code, not just work sitting in source control.
   `docker network`/`ip addr` state at claim-time and retried on collision,
   this also self-heals around a leftover bridge interface a crashed run
   left behind, independent of any host-side cleanup hook.
+- Fixed the NATS auth-callout mechanism being permanently broken on every real
+  `deploy/dev` and `deploy/prod` install (#811): the `nats` container's
+  entrypoint unconditionally regenerated the whole `/etc/nats/nats.conf` on
+  every start, so the Admin UI's own write-then-restart sequence (it writes the
+  full config with the `auth_callout {}` block, then restarts `nats` to apply
+  it) clobbered its own config -- the restart re-ran the entrypoint, which
+  overwrote the just-written file a fraction of a second before `nats-server`
+  re-exec'd against it. `lancache-nats-callout` never existed in the running
+  config and the UI's responder task looped forever on `authorization
+  violation`, from the very first boot, with zero secondaries needed to
+  reproduce. Fixed by splitting the config the way every other service in this
+  project already scopes its own regeneration: the entrypoint now owns only the
+  static `nats.conf` (jetstream, `log_file`, the four static roles -- UI,
+  DNS-writer, DNS-replica, and the callout responder user) and `include`s a
+  separate `auth_callout.conf` fragment that ONLY the Admin UI writes
+  (`services/ui/src/routes/secondaries.rs::update_nats_conf`, now emitting just
+  the `auth_callout {}` stanza to `NATS_AUTH_CALLOUT_PATH`). The entrypoint
+  regenerates its own file idempotently on every restart and only ever creates
+  an empty placeholder for the fragment when absent, never overwriting it, so
+  the UI's callout config survives restarts. The UI still restarts `nats` to
+  apply the fragment because a SIGHUP-style live reload cannot deliver it --
+  `nats-server` explicitly refuses (`config reload not supported for
+  AuthCallout`), verified empirically against `nats-server 2.14.3`, as was the
+  `include`-inside-`authorization {}` mechanism the fix relies on. Added
+  `NATS_CALLOUT_USER`/`NATS_CALLOUT_PASSWORD` to the `nats` service (fed by the
+  same compose vars as the `ui` service so the responder's static bypass user
+  always matches) across `deploy/dev`, `deploy/prod`, and `deploy/quickstart`;
+  `deploy/full-setup`'s CI harness now prebakes the same split so the
+  auth-callout simulation exercises the real `include` path.
 - Fixed `setup.sh` writing an unescaped backtick in a comment inside the
   main `.env`-writing heredoc (found during a real end-to-end install test,
   2026-07-14): since that heredoc is deliberately unquoted (`<<EOF`, not
