@@ -159,9 +159,21 @@ pub struct Config {
     pub lancache_image_channel: String,
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
+    // Path to the auth_callout fragment the Admin UI is the SOLE writer of
+    // (issue #811). It is `include`d by the nats container's own nats.conf and
+    // holds only the `auth_callout {}` stanza (issuer + auth_users). Splitting
+    // it out of nats.conf is what lets the nats entrypoint keep idempotently
+    // regenerating its static config on every restart without clobbering the
+    // callout -- see routes/secondaries.rs::update_nats_conf and the nats
+    // service's entrypoint comment in deploy/*/docker-compose.yml. Defaults to
+    // the include target that entrypoint resolves relative to /etc/nats.
+    pub nats_auth_callout_path: String,
     pub nats_service: String,
     // Central logging pipeline (#633): written into nats.conf's top-level
-    // `log_file:` directive by update_nats_conf() (routes/secondaries.rs) so
+    // `log_file:` directive by the nats service's own entrypoint (since #811
+    // the Admin UI no longer writes nats.conf, only the auth_callout fragment;
+    // this field is retained for the connection/preflight code paths that
+    // still surface the configured log path) so
     // fluent-bit can tail it. nats-server logs to exactly one destination at
     // a time -- setting `log_file` means `docker logs` on this container
     // stops showing nats-server's own output while the `logging` compose
@@ -278,6 +290,7 @@ impl fmt::Debug for Config {
             .field("lancache_image_channel", &self.lancache_image_channel)
             .field("lancache_image_tag", &self.lancache_image_tag)
             .field("nats_conf_path", &self.nats_conf_path)
+            .field("nats_auth_callout_path", &self.nats_auth_callout_path)
             .field("nats_service", &self.nats_service)
             .field("nats_log_file", &self.nats_log_file)
             .field("dev_mode", &self.dev_mode)
@@ -557,6 +570,12 @@ impl Config {
             lancache_image_channel,
             lancache_image_tag,
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
+            // Must match the `include "auth_callout.conf"` target the nats
+            // entrypoint writes into nats.conf (resolved relative to /etc/nats).
+            nats_auth_callout_path: env_str(
+                "NATS_AUTH_CALLOUT_PATH",
+                "/etc/nats/auth_callout.conf",
+            ),
             nats_service: env_str("NATS_SERVICE", "nats"),
             nats_log_file: env_str("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),

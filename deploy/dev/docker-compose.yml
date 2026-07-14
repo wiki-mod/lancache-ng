@@ -324,17 +324,31 @@ services:
   nats:
     container_name: lancache-nats
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
-    # On every start: generate a minimal nats.conf (the 4 static roles, no
-    # auth_callout stanza -- this container has no way to know the Admin
-    # UI's auth-callout issuer public key) into the shared volume, chown it
-    # to the Admin UI user, then exec nats-server. The Admin UI overwrites
-    # this with the real config (adding auth_callout once it has generated/
-    # loaded its issuer keypair) and restarts this service moments after its
-    # own startup -- see services/ui/src/routes/secondaries.rs::update_nats_conf
-    # and services/ui/src/nats_auth_callout.rs for the full auth-callout flow
-    # (issue #583). Regenerating the static subset here keeps full recreates
-    # with rotated .env credentials convergent even before the UI's first
-    # write lands.
+    # Boot-time job (idempotent, safely re-run on every start/restart):
+    # regenerate ONLY this container's own static half of the config --
+    # nats.conf with jetstream, log_file, and the four static roles (UI,
+    # DNS-writer, DNS-replica, and the Admin UI's auth-callout responder user)
+    # -- from the NATS_* env below, chown it to the Admin UI user, then exec
+    # nats-server. The auth_callout {} stanza is deliberately NOT written here:
+    # it needs the Admin UI's runtime-generated issuer public key this
+    # container cannot know. Instead nats.conf `include`s a separate
+    # auth_callout.conf fragment that ONLY the Admin UI writes
+    # (services/ui/src/routes/secondaries.rs::update_nats_conf; see
+    # services/ui/src/nats_auth_callout.rs for the full flow, issue #583).
+    #
+    # This split is the whole point of issue #811's fix: regenerating the
+    # static subset on every restart is now safe because it never touches the
+    # UI's fragment -- exactly the convergence discipline pdns/kea/nginx/
+    # dhcp-proxy already follow (each regenerates only its own file, never the
+    # separately-persisted operator/UI-written one; see
+    # docs/known-good-config-snapshots.md). Previously this entrypoint wrote
+    # the WHOLE config unconditionally, so the Admin UI's restart -- which is
+    # REQUIRED to apply auth_callout, since nats-server explicitly refuses to
+    # hot-reload it ("config reload not supported for AuthCallout", verified
+    # against nats-server 2.14.3) -- re-ran this script and clobbered the UI's
+    # auth_callout every single time, permanently breaking the callout on real
+    # installs. Keeping the static subset here also keeps full recreates with
+    # rotated .env credentials convergent even before the UI's first write.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -356,11 +370,11 @@ services:
         # lifetime (no dual-output mode exists, unlike Kea's
         # "output-options" array), so `docker logs` on this container goes
         # quiet while the `logging` compose profile is active; fluent-bit
-        # tails this file instead. Only the initial boot config below sets
-        # this literally -- the Admin UI's own nats.conf write
-        # (routes/secondaries.rs::update_nats_conf) is what actually governs
-        # it after the UI's first startup, using its own NATS_LOG_FILE-
-        # derived config.nats_log_file value, which defaults to this same path.
+        # tails this file instead. Since issue #811 this entrypoint's nats.conf
+        # is the SOLE governor of log_file: the Admin UI now writes only the
+        # auth_callout.conf fragment (which carries no log_file directive), so
+        # this literal value -- the same path config.rs's NATS_LOG_FILE
+        # defaults to -- is authoritative for the process lifetime.
         log_file: /var/log/lancache-nats/nats.log
         authorization {
           users = [
@@ -403,7 +417,34 @@ services:
                 subscribe = ["lancache.dns.>", "_INBOX.>"]
               }
             }
+            {
+              # The Admin UI's own auth-callout responder connection identity
+              # (services/ui/src/nats_auth_callout.rs). It carries no subject
+              # permissions -- it only answers auth-callout requests. It is a
+              # STATIC user (not routed through the callout) because the UI's
+              # fragment lists it in auth_users, so nats-server checks its
+              # password against this list. Must stay in lockstep with the ui
+              # service's NATS_CALLOUT_USER/PASSWORD (the same compose vars feed
+              # both services below) -- if they ever diverge the responder can't
+              # connect and the callout silently fails.
+              user: "__NATS_CALLOUT_USER__"
+              password: "__NATS_CALLOUT_PASSWORD__"
+            }
           ]
+          # The auth_callout {} stanza lives in a SEPARATE file that only the
+          # Admin UI writes (routes/secondaries.rs::update_nats_conf), because
+          # it needs the UI's runtime-generated issuer public key this container
+          # can't know. Including it -- rather than embedding it -- is what lets
+          # this entrypoint keep regenerating its own static subset above on
+          # every restart without ever clobbering the UI's fragment (issue
+          # #811). nats-server resolves this path relative to nats.conf's own
+          # directory (/etc/nats). The placeholder-creation step below
+          # guarantees the target always exists before nats-server starts: a
+          # missing include file is a FATAL boot error (verified against
+          # nats-server 2.14.3), while an empty one is valid (no callout active
+          # yet). `include` inside authorization {} is supported and the
+          # included auth_callout goes fully live -- also verified against 2.14.3.
+          include "auth_callout.conf"
         }
         EOF
         sed \
@@ -413,18 +454,33 @@ services:
           -e "s|__NATS_DNS_WRITER_PASSWORD__|$$(escape_sed "$$NATS_DNS_WRITER_PASSWORD")|g" \
           -e "s|__NATS_DNS_REPLICA_USER__|$$(escape_sed "$$NATS_DNS_REPLICA_USER")|g" \
           -e "s|__NATS_DNS_REPLICA_PASSWORD__|$$(escape_sed "$$NATS_DNS_REPLICA_PASSWORD")|g" \
+          -e "s|__NATS_CALLOUT_USER__|$$(escape_sed "$$NATS_CALLOUT_USER")|g" \
+          -e "s|__NATS_CALLOUT_PASSWORD__|$$(escape_sed "$$NATS_CALLOUT_PASSWORD")|g" \
           /tmp/nats.conf.template > "$$tmp_nats_conf"
         chown 10001:10001 "$$tmp_nats_conf"
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
         trap - EXIT
+        # Guarantee the UI-owned auth_callout fragment exists before starting
+        # nats-server: a missing `include` target is a FATAL boot error, and on
+        # a fresh volume the Admin UI has not written it yet. Create an EMPTY
+        # placeholder ONLY when absent (an empty include is valid = no callout
+        # yet) so nats-server can boot and the UI can connect as its static user
+        # to write the real fragment. NEVER overwrite an existing one: once the
+        # UI has written the real auth_callout {} block, every subsequent
+        # restart re-runs this script and must leave that fragment untouched, or
+        # we reintroduce issue #811's clobber.
+        if [ ! -e /etc/nats/auth_callout.conf ]; then
+          : > /etc/nats/auth_callout.conf
+          chown 10001:10001 /etc/nats/auth_callout.conf
+        fi
         exec nats-server -c /etc/nats/nats.conf
     volumes:
       - nats-data:/data
       - nats-conf:/etc/nats
       - ../../services/nats/nats.conf:/nats-default.conf:ro
-      # Central logging pipeline (#633): the Admin UI writes
-      # `log_file: /var/log/lancache-nats/nats.log` into nats.conf here
-      # (routes/secondaries.rs::update_nats_conf); fluent-bit tails it.
+      # Central logging pipeline (#633): this entrypoint's nats.conf sets
+      # `log_file: /var/log/lancache-nats/nats.log` (the UI's auth_callout.conf
+      # fragment carries no log_file since issue #811); fluent-bit tails it.
       - nats-logs:/var/log/lancache-nats
     environment:
       - NATS_UI_USER=${NATS_UI_USER:-lancache-ui}
@@ -433,6 +489,13 @@ services:
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-lancache-nats-writer-dev-secret}
       - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:-lancache-dns-replica}
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-lancache-nats-replica-dev-secret}
+      # The auth-callout responder's static bypass identity. MUST match the ui
+      # service's NATS_CALLOUT_USER/PASSWORD (same compose vars + defaults):
+      # the ui process connects the responder with these creds and nats-server
+      # authenticates it against the static user this entrypoint writes above
+      # (issue #811 / #583).
+      - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:-lancache-nats-callout}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-lancache-nats-callout-dev-secret}
     networks:
       lancache:
         ipv4_address: 172.28.0.8

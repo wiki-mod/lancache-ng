@@ -217,6 +217,16 @@ services:
   # NATS_ISSUER_SEED (see its comment there), and this config is baked with
   # that seed's matching public key ahead of time, so nats-server is
   # auth_callout-ready from its very first start, with no restart required.
+  #
+  # Since issue #811 this bootstrap mirrors dev/prod's config split so the
+  # auth-callout simulation actually exercises the real include mechanism: the
+  # static nats.conf `include`s a separate auth_callout.conf fragment (rather
+  # than embedding the auth_callout {} block inline). Both files are prebaked
+  # here in one entrypoint run -- because the UI's restart-to-apply no-ops in
+  # this harness (see above), the entrypoint must produce a fully callout-ready
+  # pair itself. The Admin UI still writes auth_callout.conf on startup with its
+  # fixed-seed issuer (matching the prebaked one), but since the restart
+  # no-ops, the already-loaded prebaked pair is what serves the simulation.
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     entrypoint: ["/bin/sh", "-c"]
@@ -256,18 +266,29 @@ services:
               password: validation-nats-callout-password
             }
           ]
-          auth_callout {
-            # Public half of the ui service's NATS_ISSUER_SEED (see its
-            # comment there). Fixed on purpose for this validation harness --
-            # see the service-level comment above for why the Admin UI can't
-            # establish this dynamically here the way it does in dev/prod.
-            issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
-            # Every static user above must be listed here (see
-            # nats_auth_callout.rs's module docs for why) -- only real
-            # secondaries, registered at runtime and absent from both lists,
-            # go through the callout.
-            auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout"]
-          }
+          # Load the auth_callout {} stanza from a separate fragment, exactly
+          # like dev/prod's entrypoint does (issue #811). Prebaked below so it
+          # exists before nats-server starts (a missing include is a fatal boot
+          # error).
+          include "auth_callout.conf"
+        }
+        EOF
+        cat > /etc/nats/auth_callout.conf <<'EOF'
+        auth_callout {
+          # Public half of the ui service's NATS_ISSUER_SEED (see its comment
+          # there). Fixed on purpose for this validation harness -- see the
+          # service-level comment above for why the Admin UI can't establish
+          # this dynamically here the way it does in dev/prod. The Admin UI's
+          # own auth_callout.conf write (routes/secondaries.rs) derives this
+          # same public key from that fixed seed, so its write is byte-compatible
+          # even though the no-op restart means this prebaked copy is the one
+          # actually loaded.
+          issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
+          # Every static user in nats.conf must be listed here (see
+          # nats_auth_callout.rs's module docs for why) -- only real
+          # secondaries, registered at runtime and absent from both lists,
+          # go through the callout.
+          auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout"]
         }
         EOF
         exec nats-server -c /etc/nats/nats.conf
