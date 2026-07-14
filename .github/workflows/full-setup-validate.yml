@@ -627,11 +627,55 @@ jobs:
         # makes any bind mount setup.sh itself declares (e.g.
         # ./scripts/dhcp-probe.sh) resolve correctly no matter which side
         # evaluates it.
+        #
+        # --network host (#819): setup.sh's update flow now runs a real
+        # functional health probe (verify_stack_functional_health) against
+        # the stack's own loopback-published addresses (IP_STANDARD/IP_SSL,
+        # e.g. 127.0.0.2 in this simulation). Loopback addresses are
+        # per-network-namespace -- without --network host, this container has
+        # its OWN isolated 127.0.0.0/8, completely separate from the runner
+        # host's, where the sibling `proxy` container actually publishes its
+        # port. Confirmed directly on a runner: the identical curl from a
+        # sibling container without --network host gets connection-refused
+        # (000) permanently, forever, regardless of how long the health-gate
+        # waits, while the exact same curl from the host (or a sibling
+        # container WITH --network host) succeeds immediately. This is what
+        # caused `setup.sh update`'s new post-update health gate to always
+        # roll back inside this specific simulation harness -- not a flaky
+        # timing issue, not a bug in the health-gate logic itself, and (per
+        # the same reasoning) not something a real operator would hit, since
+        # setup.sh always runs directly on the host in production, never
+        # inside a container without host networking.
+        # flock (#819 follow-up): scripts/setup-cli-simulation.sh installs a
+        # real quickstart stack, whose compose file pins FIXED container
+        # names (lancache-nats, lancache-ui, ...) for a real operator's
+        # single-host install -- deliberately, see #669 item 6. Those names
+        # are NOT project-name-prefixed the way volumes/networks are, so two
+        # concurrent runs of this job that land on the SAME physical runner
+        # host (this repo registers several runner instances per host, all
+        # sharing one Docker daemon; concurrency: above only serializes
+        # *this ref's own* runs, never across different PRs/branches) fight
+        # over the exact same container names. Confirmed as the real cause
+        # of a `nats has no running container` failure during a genuine
+        # rollback-safety test: at that exact failure's timestamp, several
+        # *other* branches' Full-Setup Deep Validate runs were independently
+        # in flight too. Not the #820/#821 class (that fix only covers the
+        # per-octet Docker *network* subnet full-setup-validate/deep-validate
+        # reserve for their own throwaway stacks) -- this job never goes
+        # through that reservation at all, since it installs the real
+        # quickstart flow with real fixed names instead. A host-local flock
+        # around the whole simulation is sufficient (not a distributed lock):
+        # the collision can only happen between two runs sharing the same
+        # Docker daemon, i.e. the same physical host, which is exactly what a
+        # per-host lock file serializes.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
+          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
+          flock "$lock_fd"
           docker run --rm \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
             -w "$PWD" \

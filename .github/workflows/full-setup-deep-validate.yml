@@ -703,6 +703,20 @@ jobs:
         # Mounted at the SAME absolute path inside the container as on the host
         # so docker compose bind-mount sources (resolved against the HOST
         # daemon) match; see full-setup-validate.yml's identical step comment.
+        # --network host: also required here for the same reason as that
+        # step -- setup.sh's update-flow health gate curls the stack's own
+        # loopback-published addresses (127.0.0.x), which are per-network-
+        # namespace and otherwise unreachable from this sibling container.
+        #
+        # flock: see full-setup-validate.yml's identical step comment for the
+        # full finding -- this job installs a real quickstart stack with
+        # FIXED container names (lancache-nats, lancache-ui, ...), which are
+        # not project-name-scoped, so two runs of this job landing on the
+        # same physical runner host (this repo's runners are registered
+        # several-per-host, sharing one Docker daemon) collide. The `needs:`
+        # chain onto ui-nats-dns-integration-simulation above only serializes
+        # jobs *within this one workflow run*; it does nothing for two
+        # different PRs' runs overlapping, which is what actually happened.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           # Which images setup.sh installs (see setup-cli-simulation.sh for the
@@ -716,7 +730,10 @@ jobs:
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
         run: |
           set -euo pipefail
+          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
+          flock "$lock_fd"
           docker run --rm \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
             -w "$PWD" \
