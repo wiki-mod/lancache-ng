@@ -69,8 +69,6 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
@@ -930,8 +928,6 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -978,8 +974,6 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -1001,8 +995,6 @@ services:
     networks:
       - docker-api
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -1064,8 +1056,6 @@ services:
       - default
       - docker-api
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -1112,8 +1102,6 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -1165,8 +1153,6 @@ services:
       # (Kea) service's cap_add, which needs it for the same reason.
       - NET_ADMIN
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -1187,8 +1173,6 @@ services:
     volumes:
       - ./scripts/dhcp-probe.sh:/usr/local/bin/dhcp-probe.sh:ro
     restart: "no"
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
   # ── Admin UI ───────────────────────────────────────────────────────────────
   # UI is LAN-reachable by default for the quickstart workflow. Password protection
@@ -1288,8 +1272,6 @@ services:
       - default
       - docker-api
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
@@ -1314,29 +1296,9 @@ services:
       - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
     restart: always
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
-
-  # ── Watchtower (optional helper updates) ──────────────────────────────────────
-  # Only active if COMPOSE_PROFILES contains watchtower (setup.sh prompts for this)
-  # Fork from nicholas-fedor: actively maintained, NegotiateAPIVersion=true (Docker 29+)
-  watchtower:
-    container_name: lancache-watchtower
-    profiles: [watchtower]
-    image: ghcr.io/nicholas-fedor/watchtower:latest@sha256:c1dfdf27fe805dcfefe1cf048cee6960a511c097a99aa355b0bc4be6e6bb3bdf
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_LABEL_ENABLE=true
-      - WATCHTOWER_SCHEDULE=0 0 4 * * *
-    restart: always
-    logging:
-      driver: json-file
-      options: {max-size: "5m", max-file: "2"}
 
 networks:
   docker-api:

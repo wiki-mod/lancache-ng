@@ -20,7 +20,7 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional Watchtower helper updates and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
@@ -39,7 +39,7 @@ LanCache NG combines several services into one Docker based stack:
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
-  - optional Watchtower helper updates
+  - optional scheduled automatic updates (ordered, health-gated, Admin UI last)
   - optional watchdog and convergence checks
   - optional secondary DNS nodes synced through NATS
 
@@ -71,7 +71,7 @@ It can:
 - ask for the cache server IP
 - optionally enable SSL caching with a second IP
 - ask for cache directory and cache size
-- optionally enable Watchtower helper updates
+- optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
 - create config-only or full backups
 - restore setup-script backups

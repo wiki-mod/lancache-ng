@@ -28,7 +28,6 @@ Mutable external tags are not authoritative release records.
 | `balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335` | Central log receiver (`syslog-ng` service, #453); maintained by the syslog-ng project (published under the `balabit/` Docker Hub namespace) | Digest-pinned |
 | `tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476` | Docker API guard for UI/watchdog | Digest-pinned |
 | `netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74` | Optional monitoring helper | Digest-pinned |
-| `ghcr.io/nicholas-fedor/watchtower:latest@sha256:c1dfdf27fe805dcfefe1cf048cee6960a511c097a99aa355b0bc4be6e6bb3bdf` | Optional automatic update helper | Digest-pinned even though it remains optional and not release-authoritative |
 | `busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213` | Minimal base for the stack channel pointer image | Digest-pinned |
 | `rust:latest` | Build-tools base image | Allowed for build-tools only when provenance records the resolved base digest |
 

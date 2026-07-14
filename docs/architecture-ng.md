@@ -188,7 +188,6 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet (follow-up #633); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build) |
 | syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
 | docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
-| watchtower | Not applicable | Third-party pinned image (`ghcr.io/nicholas-fedor/watchtower`), quickstart-only (`watchtower` profile); same reasoning as docker-socket-proxy |
 
 ## Cache Warming
 

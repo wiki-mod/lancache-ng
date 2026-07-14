@@ -38,11 +38,14 @@ setup() {
 # `docker pull` a channel pointer image. Includes DHCP_PROXY_INTERFACE/
 # DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
-# (#450), and NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
-# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583): migrate_env_for_update()
-# backfills all of these unconditionally when missing, so a fixture predating
-# either feature would no longer be "fully converged" and would make the
-# no-op test below fail on its first run, not just its second.
+# (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
+# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583), and AUTO_UPDATE_ENABLED
+# (#819): migrate_env_for_update() backfills all of these unconditionally when
+# missing, so a fixture predating any of these features would no longer be
+# "fully converged" and would make the no-op test below fail on its first
+# run, not just its second -- confirmed the hard way when #819's own PR
+# broke this exact test on first CI run, which is exactly the failure mode
+# this comment exists to warn the next feature about.
 write_converged_env_fixture() {
     printf '%s\n' \
         'IP_STANDARD=192.0.2.10' \
@@ -99,6 +102,7 @@ write_converged_env_fixture() {
         'UI_AUTH_USER=admin' \
         'UI_AUTH_PASSWORD=RealAdminPassword123' \
         'ALLOW_INSECURE_UI=false' \
+        'AUTO_UPDATE_ENABLED=0' \
         > "$env_file"
 }
 

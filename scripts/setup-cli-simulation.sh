@@ -122,7 +122,7 @@ trap cleanup EXIT
 
 # Mirrors the proven health-wait pattern from full-setup-validate.yml: only
 # proxy and dns-standard declare a real healthcheck in this minimal profile
-# (SSL/DHCP/Watchtower/logging all disabled), everything else is only
+# (SSL/DHCP/scheduled-updates/logging all disabled), everything else is only
 # checked for "running" plus a restart-count ceiling (catches a crash loop
 # without needing a healthcheck definition for every service).
 wait_for_stack_healthy() {
@@ -216,7 +216,7 @@ expect_prompt {Directory[^\n]*\[} $install_dir
 expect_prompt {Cache directory \(absolute path\)} ""
 expect_prompt {Cache size in GiB} ""
 expect_prompt {Cache RAM buffer in MB} ""
-expect_prompt {Enable optional Watchtower} ""
+expect_prompt {Enable scheduled automatic updates\?} ""
 expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy\)} ""
 expect_prompt {Protect Admin-UI with password\? \[Y/n\]} ""
 expect_prompt {Username[^\n]*\[admin\]} ""
