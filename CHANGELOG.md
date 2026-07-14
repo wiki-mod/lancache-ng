@@ -108,6 +108,43 @@ is real, live, running code, not just work sitting in source control.
   any workflow file, as an early warning only -- the
   `shellcheck`/`shellcheck-hosted` CI jobs remain the actual enforcement (see
   CONTRIBUTING.md).
+- Added a real end-to-end test for the Admin UI reachability claim #763's
+  crash-loop-recovery discussion depends on: `deploy/*/docker-compose.yml`'s
+  `ui` service `depends_on` list has never had a `condition: service_healthy`
+  gate, which was meant to guarantee the Admin UI starts independently of
+  whether `proxy`/`nats`/`docker-socket-proxy` are healthy -- but that claim
+  had only ever been read off the compose file, never actually exercised.
+  `scripts/ui-reachability-crash-loop-simulation.sh` (new, wired into both
+  `full-setup-deep-validate.yml` and `full-setup-validate.yml` as
+  `ui-reachability-crash-loop-simulation`) deliberately forces `proxy` into a
+  genuine, continuous crash loop and confirms the Admin UI still starts,
+  becomes healthy, never restarts itself, and answers a real HTTP request on
+  `/health` throughout.
+- Added `setup.sh reset-to-last-known-good-config <service> [install-dir]
+  [snapshot-id] [--yes]` (#763's CLI-fallback scope item): for when the Admin
+  UI itself is unreachable but a service's own control surface still is.
+  Automates docs/known-good-config-snapshots.md's existing Kea "Manual
+  recovery" by-hand sequence (inspect the snapshot JSON under
+  `kea-data/config-snapshots`, then `config-test` -> `config-set` ->
+  `config-write` against the real Kea Control Agent) into one invocation --
+  the same sequence `services/ui/src/routes/dhcp.rs`'s `rollback_kea_snapshot`
+  already runs when the Admin UI IS reachable. Verified end-to-end by the new
+  `scripts/setup-reset-kea-config-simulation.sh` (wired into both workflows as
+  `setup-reset-kea-config-simulation`): adds two real reservations through the
+  Admin UI (creating two known-good snapshots), rolls back to the first via
+  the new CLI command, and confirms via a fresh `config-get` against the real
+  Kea server that the second reservation is genuinely gone and the first is
+  intact -- not just that the command claimed success. The `dns`/`pdns`
+  service target is not yet implemented: it depends on #628/PR #788's
+  PowerDNS zone/record rollback listener, which was still open at the time of
+  this change; the command fails closed with a clear pointer instead of
+  guessing at an API surface still subject to change.
+  This PR does not add any new "reset to last-known-good config" UI page:
+  that already exists today for Kea (`services/ui/src/routes/dhcp.rs`'s
+  `rollback_kea_snapshot`, `/dhcp` page) and, once #628/PR #788 merges, for
+  PowerDNS zone/record data (`/domains` page's "Zone-Snapshots" tab) --
+  #763's own corrected scope treats building a new unified reset UI as out of
+  scope precisely because that mechanism already exists per-service.
 - Added the repeat-run/idempotence test that was still missing for NATS's
   static `nats.conf` writer (#640, follow-up to the #456 convergence audit):
   Kea (`services/ui/src/routes/dhcp.rs`), PowerDNS's static config

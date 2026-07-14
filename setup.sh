@@ -3260,6 +3260,9 @@ Commands:
   secondary [options]  Register and launch a secondary DNS node.
   backup [options]     Create a config-only or full rollback backup.
   restore <archive>    Restore a setup-script backup.
+  reset-to-last-known-good-config <service> [install-dir] [snapshot-id]
+                       CLI fallback for rolling a service back to a known-good
+                       config when the Admin UI itself is unreachable.
   help, --help         Show this compact command list.
 
 Compatibility aliases:
@@ -3388,6 +3391,33 @@ same named Docker volumes regardless of install-dir. Restoring into a
 different [install-dir] refuses to proceed if a running stack elsewhere on
 this host is still using that project name, to avoid overwriting its live
 volumes.
+EOF
+            ;;
+        reset-to-last-known-good-config)
+            cat <<EOF
+Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id] [--yes]
+
+CLI fallback for when the Admin UI itself is unreachable but a service's own
+control surface still is (issue #763). Automates the exact by-hand recovery
+sequence docs/known-good-config-snapshots.md's "Manual recovery" section
+documents: list this install's known-good config snapshots for <service> and
+apply one -- the given [snapshot-id], or the newest after an explicit
+confirmation if omitted -- via that service's own real validate/apply/persist
+API, the same sequence the Admin UI's own per-service rollback pages already
+run when they ARE reachable.
+
+Supported services:
+  kea, dhcp   Rolls back Kea's DHCP config via its Control Agent API
+              (config-test -> config-set -> config-write), reading snapshots
+              from the shared kea-data volume.
+
+Not yet supported: dns/pdns zone-record rollback (depends on issue #628's
+PowerDNS rollback listener).
+
+--yes, -y     Skip the interactive confirmation prompt (e.g. for scripted use).
+              Applying a snapshot always takes effect immediately either way.
+
+If [install-dir] is omitted, /opt/lancache-ng is used.
 EOF
             ;;
         *)
@@ -4284,6 +4314,211 @@ EOF
     printf "\n${BOLD}Attach this file to your GitHub issue:${RESET} %s\n\n" "$archive"
 }
 
+# ── reset-to-last-known-good-config subcommand ────────────────────────────────
+# CLI fallback for #763: when the Admin UI itself is unreachable, an operator
+# still needs a way to roll a service back to its last known-good persisted
+# config -- the Admin UI's own per-service rollback pages (/dhcp for Kea) are
+# not an option if the UI can't be reached. docs/known-good-config-snapshots.md's
+# "Manual recovery" section already documents doing this by hand for Kea:
+# inspect the snapshot JSON files under kea-data/config-snapshots, then apply
+# one via config-test -> config-set -> config-write against the real Kea
+# Control Agent (the same three-call sequence services/ui/src/routes/dhcp.rs's
+# rollback_kea_snapshot already runs when the UI IS reachable). This command
+# automates exactly that sequence into one invocation, rather than inventing a
+# new mechanism.
+cmd_reset_to_last_known_good_config() {
+    local service="" install_dir="/opt/lancache-ng" snapshot_id="" assume_yes=0
+    local -a positional=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) assume_yes=1; shift ;;
+            *) positional+=("$1"); shift ;;
+        esac
+    done
+    service="${positional[0]:-}"
+    [[ -n "${positional[1]:-}" ]] && install_dir="${positional[1]}"
+    snapshot_id="${positional[2]:-}"
+
+    case "$service" in
+        kea|dhcp)
+            reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
+            ;;
+        dns|pdns|dns-standard|dns-ssl)
+            # #628/PR #788 (PowerDNS zone/record snapshot + rollback listener)
+            # was still in review, not yet merged, when this command was
+            # added -- automating its manual-recovery sequence here would mean
+            # guessing at an API surface still subject to change. Fails
+            # closed with a clear pointer instead of silently no-op-ing or
+            # shipping against a moving target.
+            die "reset-to-last-known-good-config for '$service' is not implemented yet: it depends on the PowerDNS zone/record rollback listener tracked in issue #628. Once that lands, this command will call it the same way the 'kea' target already calls Kea's Control Agent API. Until then, see docs/known-good-config-snapshots.md's \"Manual recovery\" section."
+            ;;
+        "")
+            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            ;;
+        *)
+            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            ;;
+    esac
+}
+
+# Lists this install's known-good Kea config snapshot ids, oldest first.
+# Mirrors services/ui/src/kea_snapshots.rs::list_snapshot_ids exactly: a
+# snapshot only counts if its directory holds a finalized dhcp4.json payload,
+# not a leftover ".staging-<id>" directory from an interrupted write (that
+# staging naming, and the fact that a real id is a plain run of digits, is
+# also why the loop below skips any directory name that isn't all-digits
+# rather than special-casing the "staging-" prefix alone). Directory names
+# sort correctly as plain strings here because every real id is the same
+# fixed 20-digit zero-padded width (kea_snapshots.rs's `format!("{nanos:020}")`).
+list_kea_snapshot_ids() {
+    local snapshot_root="$1" entry id
+    local -a ids=()
+    for entry in "$snapshot_root"/*/; do
+        [[ -e "$entry" ]] || continue
+        id=$(basename "$entry")
+        [[ "$id" =~ ^[0-9]+$ ]] || continue
+        [[ -f "${entry}dhcp4.json" ]] || continue
+        ids+=("$id")
+    done
+    [[ ${#ids[@]} -eq 0 ]] && return 0
+    printf '%s\n' "${ids[@]}" | sort
+}
+
+# Issues one Kea Control Agent command (config-test/config-set/config-write)
+# over HTTP Basic auth, exactly matching services/ui/src/routes/dhcp.rs's
+# kea_post: same endpoint ("/"), same Content-Type, same "admin" username.
+# Kea always answers with a JSON array whose first element carries the
+# per-service result ("result": 0 means success); jq is deliberately not a
+# setup.sh dependency (see compose_project_name's comment), so both fields are
+# pulled out with the same grep -oP idiom cmd_secondary already uses to parse
+# the primary server's JSON response, rather than introducing a new parsing
+# style just for this command.
+kea_ctrl_post() {
+    local kea_ctrl_url="$1" kea_ctrl_token="$2" body="$3"
+    local response_file http_status response result_code result_text
+
+    response_file=$(mktemp)
+    if ! http_status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -u "admin:${kea_ctrl_token}" \
+        -d "$body" \
+        "$kea_ctrl_url"); then
+        rm -f -- "$response_file"
+        die "Failed to connect to Kea's Control Agent at ${kea_ctrl_url}. Is the dhcp container running?"
+    fi
+    response=$(cat "$response_file")
+    rm -f -- "$response_file"
+
+    if [[ ! "$http_status" =~ ^2 ]]; then
+        die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
+    fi
+    result_code=$(printf '%s' "$response" | grep -oP '"result"\s*:\s*\K-?[0-9]+' | head -1)
+    result_text=$(printf '%s' "$response" | grep -oP '"text"\s*:\s*"\K[^"]*' | head -1)
+    [[ -n "$result_code" ]] || die "Unrecognized response from Kea's Control Agent: ${response}"
+    if [[ "$result_code" != "0" ]]; then
+        die "Kea's Control Agent rejected the command (result=${result_code}): ${result_text:-<no message>}"
+    fi
+    printf '%s\n' "$response"
+}
+
+# Automates docs/known-good-config-snapshots.md's Kea manual-recovery
+# sequence (see that doc's "Manual recovery" section for the by-hand version
+# this replaces): list known-good dhcp4.json snapshots from the shared
+# kea-data volume (newest last), apply the requested one -- or, if none was
+# given, the newest after an explicit confirmation -- via the real
+# config-test -> config-set -> config-write chain against Kea's own Control
+# Agent, the exact sequence services/ui/src/routes/dhcp.rs's
+# rollback_kea_snapshot already runs for an operator who CAN reach the Admin
+# UI. This is the fallback for when they can't.
+reset_kea_to_last_known_good_config() {
+    local install_dir="$1" snapshot_id="$2" assume_yes="${3:-0}"
+    local env_file state_dir kea_dir snapshot_root snapshot_dir_override
+    local kea_ctrl_host kea_ctrl_token kea_ctrl_url
+    local -a snapshot_ids=()
+    local sid config_json
+
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
+
+    kea_ctrl_token=$(get_env_var KEA_CTRL_TOKEN "$env_file")
+    [[ -n "$kea_ctrl_token" ]] \
+        || die "KEA_CTRL_TOKEN is empty or missing in $env_file -- cannot authenticate to Kea's Control Agent."
+
+    kea_ctrl_host=$(get_env_var KEA_CTRL_HOST "$env_file")
+    kea_ctrl_host="${kea_ctrl_host:-127.0.0.1}"
+    # The dhcp service runs with network_mode: host (deploy/prod/docker-compose.yml),
+    # so its Control Agent is reachable directly from THIS host's own loopback
+    # -- 0.0.0.0 (the container's own bind-all default) is not a valid address
+    # to connect *to*, so it is remapped to 127.0.0.1 exactly like the dhcp
+    # service's own healthcheck already does in docker-compose.yml.
+    [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="127.0.0.1"
+    kea_ctrl_url="http://${kea_ctrl_host}:8000/"
+
+    state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
+    state_dir="${state_dir:-$(legacy_state_root_or_default "$(production_state_root_default "$install_dir")")}"
+    kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+    kea_dir="${kea_dir:-$state_dir/kea}"
+
+    # KEA_CONFIG_SNAPSHOT_DIR (services/ui/src/config.rs) is read by the Admin
+    # UI process, not this script -- if an operator overrode it away from the
+    # documented default, this command has no way to know what host path that
+    # maps to and must fail closed rather than guess.
+    snapshot_dir_override=$(get_env_var KEA_CONFIG_SNAPSHOT_DIR "$env_file")
+    if [[ -n "$snapshot_dir_override" && "$snapshot_dir_override" != "/var/lib/kea/config-snapshots" ]]; then
+        die "KEA_CONFIG_SNAPSHOT_DIR is overridden to a non-default value ($snapshot_dir_override) that this command does not know how to map to a host path. Apply the snapshot manually -- see docs/known-good-config-snapshots.md's \"Manual recovery\" section."
+    fi
+    snapshot_root="$kea_dir/config-snapshots"
+    [[ -d "$snapshot_root" ]] \
+        || die "No known-good Kea config snapshots found at $snapshot_root."
+
+    mapfile -t snapshot_ids < <(list_kea_snapshot_ids "$snapshot_root")
+    [[ ${#snapshot_ids[@]} -gt 0 ]] \
+        || die "No valid known-good Kea config snapshots found under $snapshot_root."
+
+    print_step "Known-good Kea config snapshots (oldest first)"
+    for sid in "${snapshot_ids[@]}"; do
+        # 10#$sid forces base-10: sid is a fixed-width, zero-padded digit
+        # string, which bash arithmetic would otherwise misparse as octal
+        # (a leading "0" with an 8 or 9 in it is a hard bash error, and any
+        # other leading-zero value is silently mis-evaluated).
+        printf '  %s  (%s UTC)\n' "$sid" "$(date -u -d "@$(( 10#$sid / 1000000000 ))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    done
+
+    if [[ -z "$snapshot_id" ]]; then
+        snapshot_id="${snapshot_ids[${#snapshot_ids[@]}-1]}"
+        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+    fi
+    [[ -f "$snapshot_root/$snapshot_id/dhcp4.json" ]] \
+        || die "Snapshot '$snapshot_id' not found under $snapshot_root."
+    if [[ "$assume_yes" != "1" ]]; then
+        confirm "Roll Kea back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
+            || die "Cancelled."
+    fi
+
+    config_json=$(cat "$snapshot_root/$snapshot_id/dhcp4.json")
+
+    print_step "Validating snapshot $snapshot_id (config-test)"
+    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_token" \
+        "{\"command\":\"config-test\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}" >/dev/null
+    print_ok "Snapshot validated."
+
+    print_step "Applying snapshot $snapshot_id (config-set)"
+    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_token" \
+        "{\"command\":\"config-set\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}" >/dev/null
+    print_ok "Snapshot applied to the running Kea server."
+
+    print_step "Persisting snapshot $snapshot_id (config-write)"
+    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_token" \
+        '{"command":"config-write","service":["dhcp4"]}' >/dev/null
+    print_ok "Snapshot persisted to kea-dhcp4.conf."
+
+    print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
+    print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/routes/dhcp.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
+}
+
 # ── update-ip subcommand ───────────────────────────────────────────────────────
 # update-ip is the reconfiguration path for an existing install. It changes
 # only listener/DNS IP references and restarts that install's compose stack.
@@ -4887,6 +5122,12 @@ case "${1:-install}" in
             exit 0
         fi
         cmd_update_ip "${2:-/opt/lancache-ng}"; exit 0 ;;
+    reset-to-last-known-good-config)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help reset-to-last-known-good-config
+            exit 0
+        fi
+        shift; cmd_reset_to_last_known_good_config "$@"; exit 0 ;;
     help|--help|-h) print_usage; exit 0 ;;
     *)           die "Unknown command: $1\nRun './setup.sh --help' for available commands." ;;
 esac
