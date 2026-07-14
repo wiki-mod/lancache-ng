@@ -66,37 +66,52 @@ setup() {
 
 # Mocks docker (pull/create/cp/rm) and tar so resolve_lancache_stack_channel_tag
 # can run end to end without a real registry, and records which stack image
-# reference it actually requested.
+# reference it actually requested. Uses real fake-executable files on a
+# prepended PATH rather than `export -f` shell-function shadowing: `run`
+# invokes the target command in a genuinely separate bash process, and
+# exported-function inheritance (the BASH_FUNC_*%% mechanism) is not reliably
+# available in every environment (some hardened/post-Shellshock bash builds
+# disable it outright) -- confirmed the hard way: export -f worked in a local
+# interactive shell but silently fell through to the real system docker/tar in
+# CI, since neither exists there this manifested as the pipeline reading real
+# empty/error output instead of the fake stack.env content. A PATH-based fake
+# executable has no such environment-inheritance dependency.
 stub_stack_pointer_docker() {
-    docker() {
-        case "$1" in
-            pull)
-                printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/requested_stack_image"
-                return 0
-                ;;
-            create)
-                printf 'fake-container-id\n'
-                return 0
-                ;;
-            cp)
-                printf 'fake-tar-stream'
-                return 0
-                ;;
-            rm)
-                return 0
-                ;;
-            *)
-                command docker "$@"
-                ;;
-        esac
-    }
-    tar() {
-        # The real pipeline is `docker cp ... - | tar -xO | awk ...`; this
-        # fake ignores its real stdin/args and emits the stack.env line the
-        # awk extraction in resolve_lancache_stack_channel_tag expects.
-        printf 'LANCACHE_IMAGE_TAG=sha-abc1234\n'
-    }
-    export -f docker tar
+    fake_bin_dir="$BATS_TEST_TMPDIR/fake-bin"
+    mkdir -p "$fake_bin_dir"
+
+    cat > "$fake_bin_dir/docker" <<'FAKE_DOCKER'
+#!/usr/bin/env bash
+case "$1" in
+    pull)
+        printf '%s\n' "$2" > "$FAKE_STACK_POINTER_LOG/requested_stack_image"
+        exit 0
+        ;;
+    create)
+        printf 'fake-container-id\n'
+        exit 0
+        ;;
+    cp)
+        printf 'fake-tar-stream'
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
+esac
+FAKE_DOCKER
+
+    cat > "$fake_bin_dir/tar" <<'FAKE_TAR'
+#!/usr/bin/env bash
+# The real pipeline is `docker cp ... - | tar -xO | awk ...`; this fake
+# ignores its real stdin/args and emits the stack.env line the awk
+# extraction in resolve_lancache_stack_channel_tag expects.
+printf 'LANCACHE_IMAGE_TAG=sha-abc1234\n'
+FAKE_TAR
+
+    chmod +x "$fake_bin_dir/docker" "$fake_bin_dir/tar"
+    export FAKE_STACK_POINTER_LOG="$BATS_TEST_TMPDIR"
+    export PATH="$fake_bin_dir:$PATH"
 }
 
 @test "resolve_lancache_stack_channel_tag maps channel=stable onto the stack:latest pointer image" {
