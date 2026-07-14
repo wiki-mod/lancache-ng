@@ -157,6 +157,14 @@ pub struct Config {
     pub lancache_image_registry: String,
     pub lancache_image_prefix: String,
     pub lancache_image_channel: String,
+    // Whether the host's scheduled-update timer (lancache-auto-update.timer,
+    // installed by setup.sh) is meant to be running. This mirrors .env's
+    // AUTO_UPDATE_ENABLED at container start; the Admin UI's own toggle
+    // (routes/setup.rs) never edits this field directly, only the
+    // ui_settings_file override effective_auto_update_enabled() reads on top
+    // of it -- see that function's comment for why a host systemd timer can't
+    // be flipped synchronously from inside this container (#819).
+    pub auto_update_enabled: bool,
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
     // Path to the auth_callout fragment the Admin UI is the SOLE writer of
@@ -288,6 +296,7 @@ impl fmt::Debug for Config {
             .field("lancache_image_registry", &self.lancache_image_registry)
             .field("lancache_image_prefix", &self.lancache_image_prefix)
             .field("lancache_image_channel", &self.lancache_image_channel)
+            .field("auto_update_enabled", &self.auto_update_enabled)
             .field("lancache_image_tag", &self.lancache_image_tag)
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_auth_callout_path", &self.nats_auth_callout_path)
@@ -389,6 +398,28 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_proxy_custom_options.clone())
     }
 
+    // Release channel / scheduled-update settings (#819). Unlike DHCP mode,
+    // neither of these two values takes effect inside this container at all
+    // -- both are consumed entirely on the host by setup.sh's
+    // lancache-converge.service, which polls the same ui_settings_file this
+    // container writes to (routes/setup.rs's update_stack_settings) via a
+    // throwaway `docker run --rm -v ui-data:/volume:ro alpine cat ...`
+    // (chosen over a bind-mount migration -- see the #819 issue thread for
+    // why). Effects therefore land on the NEXT convergence tick (currently
+    // every 5 minutes), never synchronously with the save -- the Admin UI's
+    // own copy for this control must say so plainly rather than implying an
+    // instant effect it cannot deliver.
+    pub fn effective_lancache_image_channel_override(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "LANCACHE_IMAGE_CHANNEL")
+            .unwrap_or_else(|| self.lancache_image_channel.clone())
+    }
+
+    pub fn effective_auto_update_enabled(&self) -> bool {
+        read_ui_override(&self.ui_settings_file, "AUTO_UPDATE_ENABLED")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(self.auto_update_enabled)
+    }
+
     // Renders the current effective DHCP settings back into the same
     // `KEY=value` line format `read_ui_override` parses, so this is what
     // gets written to `ui_settings_file` whenever the operator saves DHCP
@@ -487,6 +518,7 @@ impl Config {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| derive_lancache_image_channel(&lancache_image_tag));
+        let auto_update_enabled = env_bool("AUTO_UPDATE_ENABLED", false);
 
         Ok(Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
@@ -568,6 +600,7 @@ impl Config {
             lancache_image_registry: env_str("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
             lancache_image_prefix: env_str("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
             lancache_image_channel,
+            auto_update_enabled,
             lancache_image_tag,
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
             // Must match the `include "auth_callout.conf"` target the nats

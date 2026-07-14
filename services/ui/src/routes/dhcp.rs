@@ -630,6 +630,78 @@ fn persist_ui_settings(state: &AppState, values: &[(&str, String)]) -> Result<()
     write_ui_settings_file(Path::new(&state.config.ui_settings_file), values)
 }
 
+// Carries through every current DHCP_* value unchanged (same reasoning as
+// update_dhcp_proxy's own persist_ui_settings call) while writing the two
+// release-channel/scheduled-update keys routes/setup.rs's
+// update_stack_settings actually lets the operator change. `pub(crate)`
+// rather than a routes/setup.rs-local copy of write_ui_settings_file, so
+// there is exactly one place that owns this file's whole-write contract
+// instead of two whitelists that could silently drift apart.
+pub(crate) fn persist_stack_settings(
+    state: &AppState,
+    lancache_image_channel: &str,
+    auto_update_enabled: bool,
+) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            ("LANCACHE_IMAGE_CHANNEL", lancache_image_channel.to_string()),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if auto_update_enabled { "1" } else { "0" }.to_string(),
+            ),
+        ],
+    )
+}
+
 // Pure filesystem half of persist_ui_settings, split out so unit tests can
 // exercise the real write/rename behavior against a temp path without
 // needing a full AppState (which otherwise requires a live Docker
@@ -666,6 +738,13 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         "DHCP_PROXY_BOOT_FILENAME",
         "DHCP_PROXY_BOOT_SERVER",
         "DHCP_PROXY_CUSTOM_OPTIONS",
+        // #819: release channel / scheduled-update settings, written by
+        // routes/setup.rs's update_stack_settings (via persist_stack_settings
+        // above). Consumed entirely on the host by setup.sh's
+        // lancache-converge.service, never inside this container -- see that
+        // function's doc comment for the full read path.
+        "LANCACHE_IMAGE_CHANNEL",
+        "AUTO_UPDATE_ENABLED",
     ] {
         if let Some(value) = map.get(key) {
             content.push_str(key);
@@ -792,6 +871,25 @@ pub async fn update_dhcp_mode(
             (
                 "DHCP_PROXY_CUSTOM_OPTIONS",
                 state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            // #819: this route never edits these, but persist_ui_settings
+            // overwrites the whole file each call -- carried through
+            // unchanged so a DHCP mode switch never silently reverts an
+            // operator's release-channel/scheduled-update choice back to its
+            // env default (the exact failure class write_ui_settings_file's
+            // own comment already warns about for this file in general).
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
             ),
         ],
     );
@@ -959,6 +1057,21 @@ pub async fn update_dhcp_proxy(
                 form.dhcp_proxy_boot_server.trim().to_string(),
             ),
             ("DHCP_PROXY_CUSTOM_OPTIONS", custom_options_storage),
+            // #819: same carry-through reasoning as update_dhcp_mode above --
+            // this route never edits these either.
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -5417,6 +5530,37 @@ mod tests {
         assert!(
             !target.with_extension("tmp").exists(),
             "temp-file-then-rename must not leave the .tmp file behind"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // #819: confirms the two release-channel/scheduled-update keys are on
+    // the same whitelist as the DHCP keys above (added to
+    // write_ui_settings_file's fixed key list), so routes/setup.rs's
+    // update_stack_settings can actually persist them through this same
+    // function -- a key left off that list is silently dropped even if a
+    // caller passes it in `values`, which is exactly the bug class this test
+    // guards against.
+    #[test]
+    fn write_ui_settings_file_persists_release_channel_and_auto_update_keys() {
+        let dir = temp_snapshot_root("stack-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(
+            &target,
+            &[
+                ("LANCACHE_IMAGE_CHANNEL", "edge".to_string()),
+                ("AUTO_UPDATE_ENABLED", "1".to_string()),
+            ],
+        );
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content,
+            "LANCACHE_IMAGE_CHANNEL=edge\nAUTO_UPDATE_ENABLED=1\n"
         );
 
         fs::remove_dir_all(&dir).ok();

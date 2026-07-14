@@ -310,8 +310,11 @@ or install dependency.
 Instead of running `setup.sh update` manually, a host `systemd` timer
 (`lancache-auto-update.timer`) can run the same ordered, health-gated update
 on a schedule. Enable it at install time (the "Scheduled automatic updates"
-prompt, default: disabled) or later by setting `AUTO_UPDATE_ENABLED=1` in
-`.env` and re-running `setup.sh`. It only actually pulls and restarts when the
+prompt, default: disabled), later by setting `AUTO_UPDATE_ENABLED=1` in `.env`
+and re-running `setup.sh`, or from the Admin UI's Setup page (release channel
+and scheduled-update toggle). A change made from the Admin UI is picked up by
+the host's convergence timer (currently every 5 minutes), not instantly --
+that control's own copy says so. It only actually pulls and restarts when the
 selected release channel has moved to a new image set -- an unchanged channel
 is a silent no-op, not a full restart on every tick. Manually trigger the same
 check with:
