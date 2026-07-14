@@ -208,3 +208,87 @@ teardown() {
     run validation_subnet_output_is_collision "assertion failed: expected cache HIT but got MISS"
     [ "$status" -eq 1 ]
 }
+
+# fake_docker_and_ip <networks> <ip_addr_output>
+# Installs PATH-shimmed `docker`/`ip` executables (real ones are not assumed
+# present/safe to actually invoke in a unit test) that answer
+# validation_subnet_conflicts's own two subprocess calls from fixed,
+# test-supplied data instead of real daemon/host state: `docker network
+# ls -q` prints one ID per line parsed from <networks> (each line
+# "id|name|subnet"); `docker network inspect <id> --format ...` prints
+# "name|subnet " for that ID (matching the real go-template's shape:
+# name, a literal pipe, then space-separated subnets with a trailing
+# space); `ip -4 -o addr show` prints <ip_addr_output> verbatim. Prepends a
+# fresh $BATS_TEST_TMPDIR/bin to PATH so these shadow any real `docker`/`ip`
+# on the test runner without needing either to actually exist.
+fake_docker_and_ip() {
+    local networks="$1" ip_addr_output="$2" fake_bin="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin"
+
+    cat > "$fake_bin/docker" <<STUB
+#!/usr/bin/env bash
+networks='$networks'
+if [[ "\$1" == "network" && "\$2" == "ls" ]]; then
+    printf '%s\n' "\$networks" | cut -d'|' -f1
+elif [[ "\$1" == "network" && "\$2" == "inspect" ]]; then
+    printf '%s\n' "\$networks" | awk -F'|' -v id="\$3" '\$1==id {printf "%s|%s \n", \$2, \$3}'
+fi
+STUB
+    chmod +x "$fake_bin/docker"
+
+    cat > "$fake_bin/ip" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' '$ip_addr_output'
+STUB
+    chmod +x "$fake_bin/ip"
+
+    PATH="$fake_bin:$PATH"
+}
+
+@test "conflicts: empty docker/ip state reports no conflict" {
+    fake_docker_and_ip "" ""
+    run validation_subnet_conflicts "172.30.42.0/24"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "conflicts: a foreign docker network with an overlapping subnet is reported" {
+    fake_docker_and_ip "net1|other-project_validation|172.30.42.0/24" ""
+    run validation_subnet_conflicts "172.30.42.0/24"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"docker network other-project_validation (172.30.42.0/24)"* ]]
+}
+
+@test "conflicts: own_prefix exact match and delimited child are excluded, not just startswith" {
+    # Both "lancache-ng-validation-22" (exact) and
+    # "lancache-ng-validation-22_validation" (delimited child) are OUR
+    # project's own leftovers and must be excluded when own_prefix is given.
+    fake_docker_and_ip "net1|lancache-ng-validation-22|172.30.22.0/24
+net2|lancache-ng-validation-22_validation|172.30.22.0/24" ""
+    run validation_subnet_conflicts "172.30.22.0/24" "lancache-ng-validation-22"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "conflicts: a different numbered project is NOT excluded by a bare startswith footgun" {
+    # The exact regression this delimited-child match guards against:
+    # own_prefix "lancache-ng-validation-22" must NOT swallow
+    # "lancache-ng-validation-220..." (a different, unrelated octet's
+    # project) as if it were "ours" -- a bare startswith() would.
+    fake_docker_and_ip "net1|lancache-ng-validation-220-foo_validation|172.30.99.0/24" ""
+    run validation_subnet_conflicts "172.30.99.0/24" "lancache-ng-validation-22"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"docker network lancache-ng-validation-220-foo_validation (172.30.99.0/24)"* ]]
+}
+
+@test "conflicts: an overlapping host interface (not a docker network) is reported" {
+    # This is the exact real-world case a Docker-only check would miss: a
+    # bridge interface the kernel already owns, invisible to
+    # \`docker network ls\` (an orphan from a killed container, another NIC,
+    # a VPN) still makes a create fail -- confirmed for real in issue #820's
+    # own evidence (host interface br-55b74025b723 blocking octet 242).
+    fake_docker_and_ip "" "3: br-55b74025b723    inet 172.30.242.1/24 brd 172.30.242.255 scope global br-55b74025b723"
+    run validation_subnet_conflicts "172.30.242.0/24"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"host interface br-55b74025b723 (172.30.242.1/24)"* ]]
+}

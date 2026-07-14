@@ -120,6 +120,8 @@ cd "$repo_root"
 
 # shellcheck source=scripts/lib/dhcp-lease-parse.sh
 source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient, e.g. the build-tools image)}"
 
@@ -147,24 +149,6 @@ mkdir -p "$work_dir/client-state"
 # actually write the lease file the rest of this script depends on.
 chmod 0777 "$work_dir/client-state"
 
-# A fixed subnet would collide across concurrent runs sharing one of this
-# project's self-hosted runner hosts, exactly like the full-setup validation
-# network did before #623's per-run derivation. Mirror that fix here: derive
-# the third octet of a dedicated 172.31.0.0/16 range (unused by
-# deploy/dev's 172.28.0.0/16 and full-setup-validate's 172.30.0.0/16) from
-# this run's own identity, with a random fallback so an operator can still
-# run this script directly (not just via GitHub Actions).
-run_identity="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-$$}-${RANDOM:-0}"
-digest="$(printf '%s' "$run_identity" | sha256sum | cut -c1-8)"
-octet=$(( (16#$digest % 252) + 2 )) # 2..253
-subnet="172.31.${octet}.0/24"
-gateway="172.31.${octet}.1"
-kea_ip="172.31.${octet}.2"
-# pdns_ip (issue #706): the real PowerDNS container the DDNS verification
-# section further below stands up. Reserved here, alongside the other fixed
-# addresses in this /24, so it stays visibly outside both the DHCP pool
-# ($pool_start-$pool_end) and $kea_ip.
-pdns_ip="172.31.${octet}.3"
 # dhcp_test_domain: a distinctive, run-unique DHCP_DOMAIN value (not the
 # production default "lan") so the domain-name-option assertion further
 # below can tell a correctly-applied DHCP_DOMAIN config apart from Kea
@@ -172,30 +156,30 @@ pdns_ip="172.31.${octet}.3"
 # "lan" could pass that assertion even if Kea ignored the configured
 # option entirely. Named once here (both the Kea container's DHCP_DOMAIN
 # env var and the PowerDNS test zone created for it, further below, must
-# use exactly the same value).
+# use exactly the same value). Does not depend on the subnet octet, so it is
+# safe to fix here regardless of how the network-reservation retry below
+# resolves.
 dhcp_test_domain="lancache-dhcp448-test.lan"
-pool_start="172.31.${octet}.128"
-pool_end="172.31.${octet}.200"
 
 # $work_dir above needs no per-run uniqueness of its own: $repo_root is
 # already GitHub Actions' own per-run workspace checkout (or, run locally,
 # just this one operator's own checkout), so a fixed subdirectory name under
-# it can never collide with another run. Docker objects are different: the
-# daemon on a shared self-hosted runner host is one process serving every
-# concurrent workflow run and every operator's local invocation, so object
-# *names* need their own collision avoidance independent of the subnet. The
-# octet alone is not enough for that (only 252 buckets, so two concurrent
-# runs can still land on the same octet); appending this shell's own PID
-# ($$) is what actually guarantees the docker network/container/image names
-# themselves never collide, even when the subnet-derived octet does.
-network_name="lancache-ng-dhcp448-${octet}-$$"
-kea_container="lancache-ng-dhcp448-kea-${octet}-$$"
-image_tag="lancache-ng-dhcp448-kea:${octet}-$$"
+# it can never collide with another run. Docker OBJECT NAMES are different:
+# the daemon on a shared self-hosted runner host is one process serving
+# every concurrent workflow run and every operator's local invocation, so
+# names need their own collision avoidance, independent of the subnet octet
+# below -- this shell's own PID ($$) is what guarantees that (two
+# concurrently-running processes on the same host can never share a PID),
+# so these names are fixed up front and never need to change across a
+# subnet-reservation retry.
+network_name="lancache-ng-dhcp448-$$"
+kea_container="lancache-ng-dhcp448-kea-$$"
+image_tag="lancache-ng-dhcp448-kea:$$"
 # dns_container/dns_image_tag (issue #706): the real PowerDNS container the
 # DDNS verification section further below builds and queries. Named
 # alongside the Kea names above for the same collision-avoidance reason.
-dns_container="lancache-ng-dhcp448-dns-${octet}-$$"
-dns_image_tag="lancache-ng-dhcp448-dns:${octet}-$$"
+dns_container="lancache-ng-dhcp448-dns-$$"
+dns_image_tag="lancache-ng-dhcp448-dns:$$"
 
 # services/dhcp/entrypoint.sh refuses to start Kea at all if KEA_CTRL_TOKEN
 # or DDNS_TSIG_KEY is empty or one of its known placeholder defaults (it
@@ -243,6 +227,11 @@ cleanup() {
     docker rmi "$image_tag" >/dev/null 2>&1 || true
     docker rmi "${dns_image_tag:-}" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
+    # Release the host-local subnet-octet lock the reservation loop below
+    # acquired (issue #820), so a concurrent run can reuse the octet
+    # immediately. Safe no-op if the loop never got as far as locking one
+    # (e.g. a failure while building the Kea image, before the loop runs).
+    validation_subnet_release "${subnet_lock_holder_pid:-}"
     exit "$status"
 }
 trap cleanup EXIT
@@ -250,16 +239,97 @@ trap cleanup EXIT
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 docker build -q -t "$image_tag" services/dhcp >/dev/null
 
-echo "== Creating isolated bridge network $network_name ($subnet, no host interface involved) =="
-# --ip-range confines Docker's OWN container-address bookkeeping to the
-# first half of the subnet, so it can never overlap the Kea pool
-# ($pool_start-$pool_end) that this script is actually testing.
-docker network create \
-    --driver bridge \
-    --subnet "$subnet" \
-    --gateway "$gateway" \
-    --ip-range "172.31.${octet}.0/25" \
-    "$network_name" >/dev/null
+# A fixed subnet would collide across concurrent runs sharing one of this
+# project's self-hosted runner hosts, exactly like the full-setup validation
+# network did before #623's per-run derivation, and a bare per-run hash
+# derivation with no lock/retry still collides under real concurrency
+# exactly like full-setup-deep-validate.yml's own jobs did before #820 --
+# two concurrent runs of THIS script deriving the same octet (only 252
+# buckets) would both attempt `docker network create --subnet
+# 172.31.<octet>.0/24`, and only one can win; the loser previously died
+# outright with "Pool overlaps". This adopts the exact same host-local
+# flock-plus-retry primitives full-setup-deep-validate.yml's stack-starting
+# jobs use (scripts/lib/reserve-validation-subnet.sh), on a dedicated
+# 172.31.0.0/16 range (unused by deploy/dev's 172.28.0.0/16 and
+# full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
+# (/tmp/lancache-validation-locks-dhcp-kea) so this pool's octet contention
+# never unnecessarily serializes against the unrelated 172.30 pool.
+#
+# run_id/run_attempt fold in this shell's own PID and $RANDOM so a local,
+# non-CI invocation (no GITHUB_RUN_ID) still gets fresh entropy per run,
+# mirroring this script's pre-#820 fallback.
+subnet_lock_root="/tmp/lancache-validation-locks-dhcp-kea"
+subnet_max_attempts=10
+subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}"
+subnet_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+
+octet=""
+subnet_lock_holder_pid=""
+subnet_next_attempt=1
+while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
+    reservation="$(validation_subnet_reserve "$subnet_lock_root" "$subnet_run_id" "$subnet_run_attempt" "$subnet_next_attempt" "$subnet_max_attempts")" || {
+        echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
+        exit 1
+    }
+    attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
+    candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
+    candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+
+    candidate_subnet="172.31.${candidate_octet}.0/24"
+    conflict="$(validation_subnet_conflicts "$candidate_subnet")"
+    if [[ -n "$conflict" ]]; then
+        echo "Octet $candidate_octet's subnet $candidate_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+        validation_subnet_release "$candidate_pid"
+        subnet_next_attempt=$((attempt + 1))
+        continue
+    fi
+
+    echo "== Creating isolated bridge network $network_name ($candidate_subnet, no host interface involved) (attempt $attempt) =="
+    # --ip-range confines Docker's OWN container-address bookkeeping to the
+    # first half of the subnet, so it can never overlap the Kea pool
+    # (computed below from the winning octet) that this script is actually
+    # testing.
+    if create_output="$(docker network create \
+        --driver bridge \
+        --subnet "$candidate_subnet" \
+        --gateway "172.31.${candidate_octet}.1" \
+        --ip-range "172.31.${candidate_octet}.0/25" \
+        "$network_name" 2>&1)"; then
+        octet="$candidate_octet"
+        subnet_lock_holder_pid="$candidate_pid"
+        break
+    fi
+
+    echo "$create_output"
+    validation_subnet_release "$candidate_pid"
+    if ! validation_subnet_output_is_collision "$create_output"; then
+        echo "::error::docker network create failed for a reason unrelated to a subnet collision; not retrying." >&2
+        exit 1
+    fi
+    echo "docker network create failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
+    subnet_next_attempt=$((attempt + 1))
+done
+
+if [[ -z "$octet" ]]; then
+    echo "::error::Could not reserve a free validation subnet and create the network after $subnet_max_attempts attempts." >&2
+    exit 1
+fi
+
+# Every other address in this /24 is only knowable once the octet above is
+# actually locked in (a failed candidate is simply abandoned, never used) --
+# computed here, immediately after the winning `docker network create`,
+# rather than up front the way a single-shot derivation would.
+subnet="172.31.${octet}.0/24"
+gateway="172.31.${octet}.1"
+kea_ip="172.31.${octet}.2"
+# pdns_ip (issue #706): the real PowerDNS container the DDNS verification
+# section further below stands up. Reserved here, alongside the other fixed
+# addresses in this /24, so it stays visibly outside both the DHCP pool
+# ($pool_start-$pool_end) and $kea_ip.
+pdns_ip="172.31.${octet}.3"
+pool_start="172.31.${octet}.128"
+pool_end="172.31.${octet}.200"
+echo "Validation network is up on subnet $subnet (lock held by PID $subnet_lock_holder_pid)."
 
 echo "== Building the PowerDNS image from this checkout's services/dns (issue #706) =="
 # --build-arg BUILD_TOOLS_IMAGE=$client_tool_image (PR #769 review follow-up):

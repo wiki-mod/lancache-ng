@@ -68,75 +68,11 @@ source "$script_dir/reserve-validation-subnet.sh"
 lock_root="/tmp/lancache-validation-locks"
 max_attempts=10
 
-# subnet_conflicts <target_subnet>
-# Prints a human-readable description of every EXISTING Docker network or host
-# interface whose subnet overlaps <target_subnet>, ignoring networks that
-# belong to THIS run's own Compose project (docker compose reuses/recreates
-# those by name -- a leftover from an aborted earlier attempt is not a real
-# collision). Empty output means the candidate looks free. This is
-# defense-in-depth ahead of `docker compose up`: a leftover bridge interface
-# from something outside Docker's own bookkeeping (another NIC, a VPN, a
-# bridge orphaned by a killed container that `docker network ls` no longer
-# lists) still makes the kernel refuse an overlapping bridge, so checking the
-# live `ip addr` view here lets the retry skip that octet cleanly instead of
-# discovering it only via a `docker compose up` failure. This is exactly why
-# the wrapper self-heals around leaked bridge interfaces regardless of any
-# host-side cleanup hook's completeness.
-#
-# python3 is used purely as an inline, uncommitted-behaviour CIDR-overlap
-# calculator (stdlib `ipaddress`); nothing from it is imported into the
-# project runtime (Rust + shell), consistent with AG-REL-001's local-one-off
-# allowance and with the identical inline check the workflows already carry.
-subnet_conflicts() {
-    local target_subnet="$1"
-    python3 - "$target_subnet" <<'PYEOF'
-import ipaddress, os, subprocess, sys
-
-target = ipaddress.ip_network(sys.argv[1])
-own_prefix = os.environ.get("COMPOSE_PROJECT_NAME", "lancache-ng-validation")
-
-# Match our OWN networks exactly, or a well-delimited child of our project
-# name ("<prefix>_validation", "<prefix>-auth-callout_validation", ...) --
-# NOT a bare startswith, which would wrongly treat another run's octet-220
-# project ("lancache-ng-validation-220...") as "ours" when this run holds
-# octet 22. Those never share a subnet in practice (the flock stops two runs
-# holding the same octet at once), but the delimiter check keeps the "is this
-# network ours" test honest instead of relying on that backstop.
-def is_ours(name: str) -> bool:
-    return name == own_prefix or name.startswith(own_prefix + "-") or name.startswith(own_prefix + "_")
-
-ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
-for network_id in ids:
-    fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
-    line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
-    name, _, subnets_str = line.partition("|")
-    if is_ours(name):
-        continue
-    for subnet_str in subnets_str.split():
-        try:
-            existing = ipaddress.ip_network(subnet_str)
-        except ValueError:
-            continue
-        if target.overlaps(existing):
-            print(f"docker network {name} ({subnet_str})")
-
-route_output = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
-for line in route_output.splitlines():
-    parts = line.split()
-    try:
-        inet_index = parts.index("inet")
-        iface = parts[1]
-        cidr = parts[inet_index + 1]
-    except (ValueError, IndexError):
-        continue
-    try:
-        existing = ipaddress.ip_interface(cidr).network
-    except ValueError:
-        continue
-    if target.overlaps(existing):
-        print(f"host interface {iface} ({cidr})")
-PYEOF
-}
+# The collision-conflict check itself (validation_subnet_conflicts) is
+# sourced from reserve-validation-subnet.sh above -- issue #820 consolidated
+# what used to be a copy-pasted python block per caller (this wrapper, the
+# full-setup-deep-validate.yml reserve step, and now the DHCP simulation
+# scripts) into one shared definition in the lib.
 
 reserved=0
 next_attempt=1
@@ -152,13 +88,13 @@ while [[ "$next_attempt" -le "$max_attempts" ]]; do
     holder_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
 
     # Export the FULL VALIDATION_* set for THIS octet before the conflict
-    # check, so subnet_conflicts() reads the correct COMPOSE_PROJECT_NAME
-    # (which decides which existing networks count as "ours") and so the
-    # command below inherits a self-consistent address set.
+    # check, so validation_subnet_conflicts reads the correct
+    # COMPOSE_PROJECT_NAME (which decides which existing networks count as
+    # "ours") and so the command below inherits a self-consistent address set.
     validation_subnet_export_env "$octet"
     target_subnet="172.30.${octet}.0/24"
 
-    conflict="$(subnet_conflicts "$target_subnet")"
+    conflict="$(validation_subnet_conflicts "$target_subnet" "$COMPOSE_PROJECT_NAME")"
     if [[ -n "$conflict" ]]; then
         echo "Octet $octet's subnet $target_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
         validation_subnet_release "$holder_pid"

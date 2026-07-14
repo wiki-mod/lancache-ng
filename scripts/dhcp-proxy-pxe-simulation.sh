@@ -62,6 +62,8 @@ cd "$repo_root"
 
 # shellcheck source=scripts/lib/dhcp-lease-parse.sh
 source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing python3-scapy and tcpdump, e.g. the build-tools image)}"
 
@@ -76,23 +78,111 @@ mkdir -p "$work_dir"
 # produce into it.
 chmod 0777 "$work_dir"
 
+# Docker OBJECT NAMES need collision avoidance independent of the subnet
+# octet below: the daemon on a shared self-hosted runner host is one process
+# serving every concurrent workflow run, and this shell's own PID ($$) is
+# what guarantees that (two concurrently-running processes on the same host
+# can never share a PID) -- fixed up front, never needing to change across a
+# subnet-reservation retry. Mirrors
+# dhcp-kea-lease-flow-simulation.sh's own naming (issue #820).
+network_name="lancache-ng-dhcp705-$$"
+dhcp_container="lancache-ng-dhcp705-proxy-$$"
+client_container="lancache-ng-dhcp705-client-$$"
+image_tag="lancache-ng-dhcp705-proxy:$$"
+
+# See dhcp-kea-lease-flow-simulation.sh's own cleanup() comment for why
+# `local status=$?` is captured first and the docker teardown commands
+# are ordered deliberately (containers before the network they're
+# attached to, before the image they reference) -- identical reasoning
+# applies here.
+cleanup() {
+    local status=$?
+    docker rm -f "$dhcp_container" "$client_container" >/dev/null 2>&1 || true
+    docker network rm "$network_name" >/dev/null 2>&1 || true
+    docker rmi "$image_tag" >/dev/null 2>&1 || true
+    rm -rf "$work_dir"
+    # Release the host-local subnet-octet lock the reservation loop below
+    # acquired (issue #820); safe no-op if the loop never got as far as
+    # locking one.
+    validation_subnet_release "${subnet_lock_holder_pid:-}"
+    exit "$status"
+}
+trap cleanup EXIT
+
+echo "== Building the dhcp-proxy image from this checkout's services/dhcp-proxy =="
+docker build -q -t "$image_tag" services/dhcp-proxy >/dev/null
+
 # A fixed subnet would collide across concurrent runs sharing one of this
-# project's self-hosted runner hosts. Mirror
-# dhcp-kea-lease-flow-simulation.sh's own per-run derivation, on a
-# dedicated 172.29.0.0/16 range unused by deploy/dev's 172.28.0.0/16,
-# full-setup-validate's 172.30.0.0/16, and
-# dhcp-kea-lease-flow-simulation's own 172.31.0.0/16. Deliberately NOT
-# 172.32.0.0/16: RFC 1918's 172.16.0.0/12 private block ends at
-# 172.31.255.255, so 172.32.0.0/16 is public address space -- creating a
+# project's self-hosted runner hosts, and a bare per-run hash derivation
+# with no lock/retry still collides under real concurrency -- the exact bug
+# class full-setup-deep-validate.yml's stack-starting jobs had before #820.
+# Adopts the same host-local flock-plus-retry primitives
+# (scripts/lib/reserve-validation-subnet.sh) on a dedicated 172.29.0.0/16
+# range (unused by deploy/dev's 172.28.0.0/16, full-setup-validate's
+# 172.30.0.0/16, and dhcp-kea-lease-flow-simulation's own 172.31.0.0/16;
+# deliberately NOT 172.32.0.0/16 -- RFC 1918's 172.16.0.0/12 private block
+# ends at 172.31.255.255, so 172.32.0.0/16 is public address space and a
 # Docker bridge route there could hijack traffic to a real public
-# 172.32.*  destination on a self-hosted runner for the duration of the
-# job (and on a failed cleanup, until the route is removed). 172.29.0.0/16
-# stays inside 172.16.0.0/12 and is not claimed by any other script/compose
-# file in this repo (confirmed via a repo-wide grep for other 172.16-31.x.x
-# usages), found in PR #765 review.
-run_identity="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-$$}-${RANDOM:-0}-pxe"
-digest="$(printf '%s' "$run_identity" | sha256sum | cut -c1-8)"
-octet=$(( (16#$digest % 252) + 2 )) # 2..253
+# destination, found in PR #765 review), in its OWN lock namespace
+# (/tmp/lancache-validation-locks-dhcp-proxy-pxe) so this pool's octet
+# contention never unnecessarily serializes against the unrelated 172.30/
+# 172.31 pools.
+subnet_lock_root="/tmp/lancache-validation-locks-dhcp-proxy-pxe"
+subnet_max_attempts=10
+subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}-pxe"
+subnet_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+
+octet=""
+subnet_lock_holder_pid=""
+subnet_next_attempt=1
+while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
+    reservation="$(validation_subnet_reserve "$subnet_lock_root" "$subnet_run_id" "$subnet_run_attempt" "$subnet_next_attempt" "$subnet_max_attempts")" || {
+        echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
+        exit 1
+    }
+    attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
+    candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
+    candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+
+    candidate_subnet="172.29.${candidate_octet}.0/24"
+    conflict="$(validation_subnet_conflicts "$candidate_subnet")"
+    if [[ -n "$conflict" ]]; then
+        echo "Octet $candidate_octet's subnet $candidate_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+        validation_subnet_release "$candidate_pid"
+        subnet_next_attempt=$((attempt + 1))
+        continue
+    fi
+
+    echo "== Creating isolated bridge network $network_name ($candidate_subnet, no host interface involved) (attempt $attempt) =="
+    if create_output="$(docker network create \
+        --driver bridge \
+        --subnet "$candidate_subnet" \
+        --gateway "172.29.${candidate_octet}.1" \
+        "$network_name" 2>&1)"; then
+        octet="$candidate_octet"
+        subnet_lock_holder_pid="$candidate_pid"
+        break
+    fi
+
+    echo "$create_output"
+    validation_subnet_release "$candidate_pid"
+    if ! validation_subnet_output_is_collision "$create_output"; then
+        echo "::error::docker network create failed for a reason unrelated to a subnet collision; not retrying." >&2
+        exit 1
+    fi
+    echo "docker network create failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
+    subnet_next_attempt=$((attempt + 1))
+done
+
+if [[ -z "$octet" ]]; then
+    echo "::error::Could not reserve a free validation subnet and create the network after $subnet_max_attempts attempts." >&2
+    exit 1
+fi
+
+# Every other address in this /24 is only knowable once the octet above is
+# actually locked in -- computed here, immediately after the winning
+# `docker network create`, rather than up front the way a single-shot
+# derivation would.
 subnet="172.29.${octet}.0/24"
 gateway="172.29.${octet}.1"
 dhcp_proxy_ip="172.29.${octet}.2"
@@ -108,36 +198,7 @@ dns_secondary="172.29.${octet}.11"
 pxe_boot_server="172.29.${octet}.50"
 bios_boot_filename="lancache-pxe705-bios.0"
 uefi_boot_filename="lancache-pxe705-uefi.efi"
-
-network_name="lancache-ng-dhcp705-${octet}-$$"
-dhcp_container="lancache-ng-dhcp705-proxy-${octet}-$$"
-client_container="lancache-ng-dhcp705-client-${octet}-$$"
-image_tag="lancache-ng-dhcp705-proxy:${octet}-$$"
-
-# See dhcp-kea-lease-flow-simulation.sh's own cleanup() comment for why
-# `local status=$?` is captured first and the docker teardown commands
-# are ordered deliberately (containers before the network they're
-# attached to, before the image they reference) -- identical reasoning
-# applies here.
-cleanup() {
-    local status=$?
-    docker rm -f "$dhcp_container" "$client_container" >/dev/null 2>&1 || true
-    docker network rm "$network_name" >/dev/null 2>&1 || true
-    docker rmi "$image_tag" >/dev/null 2>&1 || true
-    rm -rf "$work_dir"
-    exit "$status"
-}
-trap cleanup EXIT
-
-echo "== Building the dhcp-proxy image from this checkout's services/dhcp-proxy =="
-docker build -q -t "$image_tag" services/dhcp-proxy >/dev/null
-
-echo "== Creating isolated bridge network $network_name ($subnet, no host interface involved) =="
-docker network create \
-    --driver bridge \
-    --subnet "$subnet" \
-    --gateway "$gateway" \
-    "$network_name" >/dev/null
+echo "Validation network is up on subnet $subnet (lock held by PID $subnet_lock_holder_pid)."
 
 echo "== Starting a real dhcp-proxy container on the isolated network, PXE boot-pointer configured for both BIOS and UEFI (issue #705) =="
 # --cap-add NET_ADMIN/NET_RAW: dnsmasq's ProxyDHCP mode binds a raw DHCP

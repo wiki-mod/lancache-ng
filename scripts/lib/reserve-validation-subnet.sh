@@ -193,6 +193,80 @@ validation_subnet_reserve() {
     return 1
 }
 
+# validation_subnet_conflicts <target_subnet> [own_prefix]
+# Prints a human-readable description of every EXISTING Docker network or
+# host interface whose subnet overlaps <target_subnet>; empty output means
+# the candidate looks free. This is defense-in-depth ahead of whatever
+# actually claims the subnet (`docker compose up`, `docker network create`,
+# ...): a leftover bridge interface Docker's own bookkeeping no longer
+# tracks (another NIC, a VPN, an orphan from a killed container) still makes
+# the kernel refuse an overlapping bridge, so checking the live `ip addr`
+# view here lets a caller's retry loop skip that octet cleanly instead of
+# discovering it only via a failed create.
+#
+# <own_prefix>, when given and non-empty, marks a network as this caller's
+# OWN reusable-by-name resource (e.g. a Compose project docker recreates by
+# name) rather than a real collision -- matched by exact name or a
+# well-delimited child ("<own_prefix>-"/"<own_prefix>_"), NOT a bare
+# `startswith`, so e.g. octet 22's project ("lancache-ng-validation-22...")
+# is never misread as octet 220's ("lancache-ng-validation-220..."). Callers
+# with no reusable-by-name resource at all (a script that always creates a
+# brand-new, PID-unique network with no intent to reuse it) should omit
+# <own_prefix> entirely, so every existing network is a real candidate
+# collision.
+#
+# Single, shared definition used by full-setup-deep-validate.yml's own
+# reserve-and-start step, scripts/lib/run-in-validation-subnet.sh, and the
+# DHCP simulation scripts (issue #820) -- previously copy-pasted per caller,
+# which is exactly the kind of divergence risk this consolidation removes.
+# python3 is an inline stdlib CIDR-overlap calculator only (AG-REL-001
+# local-one-off allowance); nothing from it enters the committed runtime.
+validation_subnet_conflicts() {
+    local target_subnet="$1" own_prefix="${2:-}"
+    OWN_PREFIX="$own_prefix" python3 - "$target_subnet" <<'PYEOF'
+import ipaddress, os, subprocess, sys
+
+target = ipaddress.ip_network(sys.argv[1])
+own_prefix = os.environ.get("OWN_PREFIX", "")
+
+def is_ours(name: str) -> bool:
+    if not own_prefix:
+        return False
+    return name == own_prefix or name.startswith(own_prefix + "-") or name.startswith(own_prefix + "_")
+
+ids = subprocess.run(["docker", "network", "ls", "-q"], capture_output=True, text=True, check=True).stdout.split()
+for network_id in ids:
+    fmt = "{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}"
+    line = subprocess.run(["docker", "network", "inspect", network_id, "--format", fmt], capture_output=True, text=True, check=True).stdout.strip()
+    name, _, subnets_str = line.partition("|")
+    if is_ours(name):
+        continue
+    for subnet_str in subnets_str.split():
+        try:
+            existing = ipaddress.ip_network(subnet_str)
+        except ValueError:
+            continue
+        if target.overlaps(existing):
+            print(f"docker network {name} ({subnet_str})")
+
+route_output = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
+for line in route_output.splitlines():
+    parts = line.split()
+    try:
+        inet_index = parts.index("inet")
+        iface = parts[1]
+        cidr = parts[inet_index + 1]
+    except (ValueError, IndexError):
+        continue
+    try:
+        existing = ipaddress.ip_interface(cidr).network
+    except ValueError:
+        continue
+    if target.overlaps(existing):
+        print(f"host interface {iface} ({cidr})")
+PYEOF
+}
+
 # validation_subnet_export_env <octet>
 # Exports the COMPLETE per-run validation environment for a reserved octet:
 # the 172.30.<octet>.0/24 subnet, its gateway, every fixed service IP, the
