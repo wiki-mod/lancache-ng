@@ -8,11 +8,19 @@
 # (a) decide whether to run at all and (b) drive the same fail-closed
 # staging-tag guard build-push.yml uses.
 #
-# SOURCE OF TRUTH NOTE: the path-to-service rules mirror
-# .github/workflows/build-push.yml's inline `detect-changes` job. That job is
-# deliberately left untouched (#715 clarification), so this is a hand-kept
-# mirror rather than a shared extraction -- if build-push.yml's path scoping
-# changes, change this too. Kept as a standalone script (not inline YAML) so
+# SOURCE OF TRUTH NOTE: the path-to-service rules mirror the classifier
+# build-push.yml's `detect-changes` job runs. As of #819 that job no longer
+# carries the rules inline -- it delegates to scripts/classify-image-impact.sh,
+# which is now the single authoritative copy of the shared per-path booleans.
+# This script is STILL a hand-kept mirror of those rules (it adds its own
+# should_run gate and omits classifier keys the deep gate does not need), a
+# deliberate carry-over of the #715 choice to keep the two decoupled. If
+# classify-image-impact.sh's path scoping changes, change this too.
+# STATUS: as of 2026-07-14 this remains a separate mirror; folding it onto
+# classify-image-impact.sh (source the shared booleans, keep should_run on top)
+# is a viable next step but revisits #715's deliberate decoupling, so it is
+# surfaced for maintainer review (#819) rather than done unilaterally here.
+# Kept as a standalone script (not inline YAML) so
 # tests/bats/detect_full_setup_changes.bats can exercise the rules against
 # canned file lists without a runner.
 #
