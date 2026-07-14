@@ -34,6 +34,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/validation-image-tag.sh
 source "$script_dir/lib/validation-image-tag.sh"
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$script_dir/lib/ghcr-retry.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
 : "${PR_TAG:?PR_TAG (pr-<N>-sha-<short>) is required}"
@@ -77,12 +79,21 @@ image_exists() {
     fi
 }
 
+# #822 ("Pattern D"): this real `imagetools create` write is the exact
+# operation observed failing live three times in one day with
+# "401 Unauthorized: unauthenticated" (PRs #804/#817/#824, "ensure PR staging
+# images" job) -- it previously ran once with no retry at all. GHCR_RETRY_
+# USERNAME/PASSWORD are optional (ghcr_retry backs off and retries even
+# without them, just without a fresh relogin -- see that function's own
+# comment), so this still works if a caller runs the script without setting
+# them, same as scripts/require-image-platforms.sh.
 backfill_from_base() {
     local pr_image="$1" base_image="$2"
     if [[ -n "${STAGING_BACKFILL_CMD:-}" ]]; then
         "$STAGING_BACKFILL_CMD" "$pr_image" "$base_image"
     else
-        docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
+        ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- \
+            docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
     fi
 }
 

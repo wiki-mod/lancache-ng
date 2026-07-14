@@ -1390,21 +1390,50 @@ jobs:
             && { echo "::error::The build-tools workflow must not reintroduce QEMU emulation for its arm64 leg."; exit 1; }
           awk '
             /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
-            in_publish && /name: / { exit found ? 0 : 1 }
+            # Anchored on an actual step declaration ("- name: ..."), not a
+            # bare /name: / substring match: a with: input ending in name
+            # (for example a username input on the ghcr-build-push-retry
+            # composite action) also contains the literal substring
+            # "name: " and would otherwise be misread as the next steps
+            # boundary, ending the scan before it ever reaches "pull: true"
+            # below. NOTE: no apostrophes in this comment -- this whole
+            # block is inside a bash single-quoted awk script, and a single
+            # quote here would close that string early and hand the rest of
+            # the line to bash as literal commands.
+            in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
           ' .github/workflows/build-tools.yml \
             || { echo "::error::The build-tools amd64 publish step must pull fresh mutable bases before publishing."; exit 1; }
           awk '
             /name: Build and push arm64 build-tools image/ { in_publish = 1; found = 0; next }
-            in_publish && /name: / { exit found ? 0 : 1 }
+            # Anchored on an actual step declaration ("- name: ..."), not a
+            # bare /name: / substring match: a with: input ending in name
+            # (for example a username input on the ghcr-build-push-retry
+            # composite action) also contains the literal substring
+            # "name: " and would otherwise be misread as the next steps
+            # boundary, ending the scan before it ever reaches "pull: true"
+            # below. NOTE: no apostrophes in this comment -- this whole
+            # block is inside a bash single-quoted awk script, and a single
+            # quote here would close that string early and hand the rest of
+            # the line to bash as literal commands.
+            in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
           ' .github/workflows/build-tools.yml \
             || { echo "::error::The build-tools arm64 publish step must pull fresh mutable bases before publishing."; exit 1; }
           grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
-            && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'retry-build.outputs.digest' | grep -F 'steps.build.outputs.digest' >/dev/null \
+            && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
+          # build/build-arm64's "Build and push" step (#822) now runs through
+          # .github/actions/ghcr-build-push-retry instead of a bare
+          # docker/build-push-action + inline "retry-build" sibling step, so
+          # steps.build.outputs.digest above already resolves to whichever
+          # internal attempt succeeded -- there is no separate retry-build
+          # step id left to reference. Guard that the retry wrapper itself
+          # stays wired in, instead of the now-removed digest-fallback text.
+          grep -F 'uses: ./.github/actions/ghcr-build-push-retry' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::build/build-arm64 must publish through the shared ghcr-build-push-retry composite action so GHCR pushes retry on transient 401s (#822)."; exit 1; }
           grep -F 'Note arm64 scan coverage deferral' .github/workflows/build-tools.yml >/dev/null \
             && { echo "::error::The build-tools workflow must not keep the stale arm64 scan deferral notice."; exit 1; }
           grep -F 'Build local arm64 scan image' .github/workflows/build-tools.yml >/dev/null \
@@ -2010,8 +2039,13 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
           UI_TOUCHED: ${{ needs['detect-changes'].outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs['detect-changes'].outputs.build_tools }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           # Mirrors build/build-arm64's "Determine whether this service
           # needs building" should-build override exactly: a workflow/CI-
@@ -2061,7 +2095,12 @@ jobs:
             should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
 
             if [[ "$should_exist" == "true" ]]; then
-              if docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
+              # Wrapped in ghcr_retry: unlike merge-manifests' per-arch
+              # probes, a missing tag here is always a real error (this job
+              # runs after merge-manifests, so a touched service's PR staging
+              # tag is expected to already exist) -- retrying protects
+              # against a transient 401 being misreported as "never pushed".
+              if ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
                 echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
                 continue
               fi
@@ -2071,7 +2110,8 @@ jobs:
 
             base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
             echo "::notice::$service is untouched by this PR; (re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
-            docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
 
       - name: Build full-setup validation image
@@ -2135,6 +2175,8 @@ jobs:
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
           LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -2148,6 +2190,8 @@ jobs:
 
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           lock_root="/tmp/lancache-validation-locks"
           max_attempts=10
@@ -2205,7 +2249,7 @@ jobs:
           PYEOF
           }
 
-          docker compose pull --quiet
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose pull --quiet
 
           reserved_octet=""
           holder_pid=""
@@ -4069,117 +4113,22 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
-        # First build attempt uses the configured acceleration path. It is
-        # allowed to fail so the retry path can prove the Dockerfile fallback
-        # instead of leaving a transient acceleration outage as the final state.
+        # #822 ("Pattern D"): ghcr.io push-token issuance intermittently
+        # fails with "403 Forbidden"/"denied: denied"/"401 Unauthorized" for
+        # the slowest (Rust) builds in this matrix; a manual `gh run rerun`
+        # (fresh login, some time elapsed) has fixed every occurrence so far.
+        # This composite action is the shared retry+re-login policy every
+        # GHCR-writing step in the project now uses (see
+        # .github/actions/ghcr-build-push-retry and scripts/lib/ghcr-retry.sh
+        # for why a `uses:` step like docker/build-push-action needs its own
+        # wrapper instead of sourcing the shared shell function directly).
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
-        continue-on-error: true
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: ${{ matrix.context }}
-          build-contexts: ${{ matrix.build_contexts }}
-          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
-          build-args: |
-            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          network: ${{ env.RUST_BUILDX_NETWORK }}
-          allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
-          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
-          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.description=${{ matrix.description }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # No `annotations:` input here (issue #620). A genuinely
-          # single-platform push with provenance disabled has no index for
-          # buildx to attach an index-level description annotation to --
-          # `docker buildx build --annotation index:...` on a real
-          # single-platform push errors outright ("index annotations not
-          # supported for single platform export"), confirmed live against
-          # this project's own images. Forcing OCI mediatypes here (instead
-          # of the legacy Docker manifest v2 schema) is still required
-          # groundwork: `docker buildx imagetools create` downstream (in
-          # merge-manifests) silently drops --annotation with no error at all
-          # when combining Docker-format sources, because Docker's manifest
-          # list schema has no annotations field -- also confirmed live.
-          # merge-manifests is the first point where a genuine multi-platform
-          # index exists, so that's where the description annotation is
-          # actually attached; channel/stack promotions downstream of it
-          # carbon-copy that annotation forward untouched.
-          outputs: type=image,oci-mediatypes=true
-          platforms: linux/amd64
-          provenance: false
-          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
-          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
-
-      - name: Wait before retrying the push
-        # The first attempt and the retry below share the same "Log in to
-        # GHCR" session from earlier in this job. Observed pattern: ghcr.io
-        # push-token issuance intermittently fails with "403 Forbidden" or
-        # "denied: denied" for the two slowest (Rust) builds in this matrix;
-        # a manual `gh run rerun` (a brand-new job, fresh login, some time
-        # elapsed) has fixed every occurrence so far. This sleep gives a
-        # transient condition the same chance to clear before the in-job
-        # retry, instead of retrying instantly against whatever just failed.
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        run: sleep 30
-
-      - name: Re-authenticate to GHCR before retry
-        # Get a fresh push token rather than reusing the session from the
-        # "Log in to GHCR" step above, in case that session (not just the
-        # image build) was what the first attempt's auth failure was tied to.
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Retry Build and push
-        # Retry once with the same declared image inputs. Dockerfile-level
-        # fallback disables broken acceleration while preserving the normal
-        # build and publish contract.
-        id: retry-build
-        if: >-
-          ${{
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        timeout-minutes: 60
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
@@ -4225,10 +4174,7 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             ) &&
             always() &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         env:
           BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
@@ -4255,10 +4201,7 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         run: |
           set -euo pipefail
@@ -4271,15 +4214,12 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -4291,20 +4231,11 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Log in to GHCR for provenance attestation
-        if: >-
-          ${{
-            github.event_name != 'pull_request' &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            )
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+      # No separate "Log in to GHCR for provenance attestation" step: the
+      # ghcr-attest-retry composite action re-authenticates itself before
+      # each retry (see that action), and its first attempt reuses the
+      # session docker/login-action already created earlier in this job for
+      # the "Build and push" step above.
       - name: Attest image build provenance
         if: >-
           ${{
@@ -4313,11 +4244,12 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             )
           }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
-          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
-          push-to-registry: true
+          subject-digest: ${{ steps.build.outputs.digest }}
 
   build-arm64:
     # Native linux/arm64 leg of the same publish contract as build above.
@@ -4572,86 +4504,16 @@ jobs:
         # Uses the GitHub Actions cache backend (type=gha) instead of the
         # self-hosted local Buildx cache, since this runner is ephemeral and
         # has no persistent /var/tmp to reuse across runs.
+        #
+        # #822: same shared GHCR retry+re-login policy as build's own
+        # equivalent step -- see .github/actions/ghcr-build-push-retry.
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 90
-        continue-on-error: true
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: ${{ matrix.context }}
-          build-contexts: ${{ matrix.build_contexts }}
-          build-args: |
-            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-          push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
-          tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.description=${{ matrix.description }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # See build's equivalent step for why there is no `annotations:`
-          # input here and why `outputs: type=image,oci-mediatypes=true` is
-          # still required groundwork for issue #620.
-          outputs: type=image,oci-mediatypes=true
-          platforms: linux/arm64
-          provenance: false
-          cache-from: type=gha,scope=${{ matrix.service }}-arm64
-          cache-to: type=gha,scope=${{ matrix.service }}-arm64,mode=max
-
-      - name: Wait before retrying the push
-        # Same transient ghcr.io push-token pattern documented on build's
-        # equivalent step.
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        run: sleep 30
-
-      - name: Re-authenticate to GHCR before retry
-        if: >-
-          ${{
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.full_name == github.repository
-              )
-            ) &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Retry Build and push
-        id: retry-build
-        if: >-
-          ${{
-            (
-              steps.should-build.outputs.should-build == 'true'
-            ) &&
-            steps.build.outcome == 'failure'
-          }}
-        timeout-minutes: 90
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
@@ -4681,15 +4543,12 @@ jobs:
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
-            (
-              steps.build.outcome == 'success' ||
-              steps.retry-build.outcome == 'success'
-            )
+            steps.build.outcome == 'success'
           }}
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -4700,20 +4559,10 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Log in to GHCR for provenance attestation
-        if: >-
-          ${{
-            github.event_name != 'pull_request' &&
-            (
-              steps.should-build.outputs.should-build == 'true'
-            )
-          }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+      # No separate "Log in to GHCR for provenance attestation" step: same
+      # reasoning as build's equivalent step (ghcr-attest-retry re-logs-in
+      # itself on retry, and the first attempt reuses the session from this
+      # job's own earlier "Log in to GHCR" step before "Build and push").
       - name: Attest image build provenance
         if: >-
           ${{
@@ -4722,11 +4571,12 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             )
           }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
-          subject-digest: ${{ steps.retry-build.outputs.digest || steps.build.outputs.digest }}
-          push-to-registry: true
+          subject-digest: ${{ steps.build.outputs.digest }}
 
   merge-manifests:
     # Combines build's linux/amd64 per-service tag with build-arm64's
@@ -4783,8 +4633,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
@@ -4817,11 +4672,18 @@ jobs:
           # build/build-tools-base-digests and promote's copies of this same
           # helper) is a local copy per job over introducing a new composite
           # action just for one function. Same quote-stripping as those.
+          #
+          # Wrapped in ghcr_retry (#822): this reads the digest of a manifest
+          # this same step just created a few lines below, so a transient
+          # GHCR 401/read failure here is a real retry candidate, not an
+          # "expected absent" probe -- unlike the amd64/arm64 existence
+          # checks further down, which intentionally stay unwrapped (see
+          # their own comment).
           digest_for_image() {
             local image=$1
             local digest
 
-            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
               return 1
             fi
             digest="${digest%\"}"
@@ -4835,6 +4697,16 @@ jobs:
             arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
             target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
 
+            # Deliberately NOT wrapped in ghcr_retry: an absent per-arch
+            # staging tag here almost always means "this service's build was
+            # legitimately skipped" (unchanged on a PR, or a fork/Dependabot
+            # PR with no push permission), not a transient registry error.
+            # Retrying 3x with a 30s backoff would turn every expected skip
+            # into a ~90s stall per service, and worse, could misclassify a
+            # genuine transient 401 as "not built" and silently skip merging
+            # a service that actually was pushed -- the retry policy exists
+            # to protect real registry-write operations below, not this
+            # expected-failure control flow.
             if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
               echo "::notice::Skipping $service: no linux/amd64 image was published for this commit (likely unchanged on a pull request)."
               continue
@@ -4844,9 +4716,11 @@ jobs:
               exit 1
             fi
 
-            docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image" \
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image" \
               --annotation "index:org.opencontainers.image.description=${service_descriptions[$service]}"
-            bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+            GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+              bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
 
             # Output key uses underscores (dhcp-proxy/build-tools contain
             # hyphens, which the expression syntax in the attest steps below
@@ -4875,8 +4749,13 @@ jobs:
           # actual built merge commit), not the PR head SHA.
           BUILD_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${BUILD_SHA::7}"
@@ -4884,12 +4763,14 @@ jobs:
 
           # Same helper as the trusted-ref step above (and promote's own
           # copy) -- kept duplicated per step/job rather than shared, which
-          # is the existing convention in this file.
+          # is the existing convention in this file. Same ghcr_retry
+          # reasoning as that step's copy: this reads a manifest just
+          # created below, not an expected-absence probe.
           digest_for_image() {
             local image=$1
             local digest
 
-            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
               return 1
             fi
             digest="${digest%\"}"
@@ -4903,6 +4784,8 @@ jobs:
             arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
             target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
 
+            # Same "do not retry an expected-absence probe" reasoning as the
+            # trusted-ref step above.
             if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
               echo "::notice::Skipping $service: no linux/amd64 PR staging image (not touched by this PR, or a fork PR)."
               continue
@@ -4912,8 +4795,10 @@ jobs:
               exit 1
             fi
 
-            docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
-            bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
+            GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+              bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
 
             # Same underscore-key reasoning as the trusted-ref step above.
             # This PR staging manifest is the exact tag full-setup-validate
@@ -4936,59 +4821,66 @@ jobs:
       # unchanged).
       - name: Attest proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.proxy_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/proxy
           subject-digest: ${{ steps.create-trusted-manifests.outputs.proxy_digest }}
-          push-to-registry: true
 
       - name: Attest dns merged manifest provenance
         if: steps.create-trusted-manifests.outputs.dns_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dns
           subject-digest: ${{ steps.create-trusted-manifests.outputs.dns_digest }}
-          push-to-registry: true
 
       - name: Attest watchdog merged manifest provenance
         if: steps.create-trusted-manifests.outputs.watchdog_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/watchdog
           subject-digest: ${{ steps.create-trusted-manifests.outputs.watchdog_digest }}
-          push-to-registry: true
 
       - name: Attest dhcp merged manifest provenance
         if: steps.create-trusted-manifests.outputs.dhcp_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dhcp
           subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_digest }}
-          push-to-registry: true
 
       - name: Attest dhcp-proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.dhcp_proxy_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest }}
-          push-to-registry: true
 
       - name: Attest ui merged manifest provenance
         if: steps.create-trusted-manifests.outputs.ui_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/ui
           subject-digest: ${{ steps.create-trusted-manifests.outputs.ui_digest }}
-          push-to-registry: true
 
       - name: Attest build-tools merged manifest provenance
         if: steps.create-trusted-manifests.outputs.build_tools_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/build-tools
           subject-digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest }}
-          push-to-registry: true
 
       # Fork PRs self-skip here without any extra guard needed: build/build-arm64
       # never push a fork PR's per-arch legs, so create-pr-staging-manifests'
@@ -4996,59 +4888,66 @@ jobs:
       # every one of these seven steps is gated off by its own `if:` as a result.
       - name: Attest proxy PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.proxy_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/proxy
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.proxy_digest }}
-          push-to-registry: true
 
       - name: Attest dns PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.dns_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dns
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dns_digest }}
-          push-to-registry: true
 
       - name: Attest watchdog PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.watchdog_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/watchdog
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.watchdog_digest }}
-          push-to-registry: true
 
       - name: Attest dhcp PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.dhcp_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dhcp
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_digest }}
-          push-to-registry: true
 
       - name: Attest dhcp-proxy PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
-          push-to-registry: true
 
       - name: Attest ui PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.ui_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/ui
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.ui_digest }}
-          push-to-registry: true
 
       - name: Attest build-tools PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.build_tools_digest != ''
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/build-tools
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.build_tools_digest }}
-          push-to-registry: true
 
   promote:
     # Promotion is intentionally separate from image build. It moves coherent
@@ -5131,8 +5030,13 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           REQUESTED_CHANNEL: ${{ inputs.channel }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
@@ -5143,11 +5047,19 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
+          # Wrapped in ghcr_retry (#822): unlike merge-manifests' amd64/arm64
+          # existence probes, absence is never the expected outcome for any
+          # caller of this helper in this job -- the "previous digest before
+          # overwrite" callers below already tolerate absence via `|| true`
+          # regardless of whether that absence is real (first-ever promotion
+          # of a channel tag) or a transient read failure, and a retry only
+          # improves the odds of capturing the real previous digest that
+          # rollback_promotions needs.
           digest_for_image() {
             local image=$1
             local digest
 
-            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
               return 1
             fi
             digest="${digest%\"}"
@@ -5172,7 +5084,8 @@ jobs:
             for target_image in "${promoted_targets[@]}"; do
               previous_digest="${previous_refs[$target_image]:-}"
               if [[ -n "$previous_digest" ]]; then
-                docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                  docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
                   || echo "::error::Could not restore previous digest for $target_image."
               else
                 echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
@@ -5248,10 +5161,14 @@ jobs:
             exit 0
           fi
 
+          # Wrapped in ghcr_retry: unlike merge-manifests' per-arch checks,
+          # a missing source image here is always treated as an error, never
+          # an expected skip -- retrying protects against a transient read
+          # failure being reported as a genuinely missing image.
           missing=0
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
-            if ! docker buildx imagetools inspect "$source_image" >/dev/null; then
+            if ! ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$source_image" >/dev/null; then
               echo "::error::Cannot promote because required source image is missing: $source_image"
               missing=1
             fi
@@ -5261,7 +5178,8 @@ jobs:
           fi
 
           for service in "${services[@]}"; do
-            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}:${source_tag}" "$REQUIRED_PLATFORMS"
+            GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+              bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}:${source_tag}" "$REQUIRED_PLATFORMS"
           done
 
           pointer_context="$(mktemp -d)"
@@ -5288,14 +5206,16 @@ jobs:
           # attach to -- confirmed live while fixing issue #620. This step
           # does not disable provenance, so it already defaults to OCI
           # mediatypes without needing an explicit `outputs:` override.
-          docker buildx build \
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx build \
             --platform "$RELEASE_PLATFORMS" \
             --push \
             -t "$stack_pointer_image" \
             --annotation "index:org.opencontainers.image.description=${stack_pointer_description}" \
             "$pointer_context"
-          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
-          bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+            bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
           stack_pointer_digest="$(digest_for_image "$stack_pointer_image")"
           {
             printf 'stack-pointer-subject=ghcr.io/%s/stack\n' "$REPOSITORY"
@@ -5318,7 +5238,8 @@ jobs:
             for channel_tag in "${channel_tags[@]}"; do
               target_image="ghcr.io/${REPOSITORY}/${service}:${channel_tag}"
               previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-              docker buildx imagetools create --prefer-index=false -t "$target_image" "$source_image"
+              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                docker buildx imagetools create --prefer-index=false -t "$target_image" "$source_image"
               promoted_targets+=("$target_image")
             done
           done
@@ -5326,18 +5247,21 @@ jobs:
           for channel_tag in "${channel_tags[@]}"; do
             target_image="ghcr.io/${REPOSITORY}/stack:${channel_tag}"
             previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-            docker buildx imagetools create --prefer-index=false -t "$target_image" "$stack_pointer_image"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create --prefer-index=false -t "$target_image" "$stack_pointer_image"
             promoted_targets+=("$target_image")
           done
 
           for service in "${services[@]}"; do
             for channel_tag in "${channel_tags[@]}"; do
-              docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/${service}:${channel_tag}" >/dev/null
+              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/${service}:${channel_tag}" >/dev/null
             done
           done
 
           for channel_tag in "${channel_tags[@]}"; do
-            docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
           done
 
       # Automated SemVer patch (Z) tagging (#819). Gated to the release-
@@ -5437,11 +5361,12 @@ jobs:
 
       - name: Attest stack pointer provenance
         if: ${{ steps.promote-stack.outputs.stack-pointer-digest != '' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ steps.promote-stack.outputs.stack-pointer-subject }}
           subject-digest: ${{ steps.promote-stack.outputs.stack-pointer-digest }}
-          push-to-registry: true
 
   release:
     # Release source archives must match the same commit that produced the
@@ -5482,6 +5407,8 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -5510,8 +5437,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
           short_sha="${COMMIT_SHA::7}"
@@ -5531,7 +5463,7 @@ jobs:
             local image=$1
             local digest
 
-            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
             digest="${digest%\"}"
             digest="${digest#\"}"
             if [[ -z "$digest" || "$digest" = "null" ]]; then
@@ -5543,9 +5475,9 @@ jobs:
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${TAG_NAME}"
-          docker buildx imagetools inspect "$build_tools_image" >/dev/null
-          docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
-          docker pull "$build_tools_image" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$build_tools_image" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$build_tools_image" >/dev/null
           rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
           golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
           if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then

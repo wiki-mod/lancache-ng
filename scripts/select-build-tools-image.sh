@@ -13,6 +13,10 @@
 # branch-local validation image.
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$script_dir/lib/ghcr-retry.sh"
+
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
 # Resolves to the mutable channel tag build-push.yml's own promote job would
@@ -170,7 +174,12 @@ fi
 # image or fail outright — no silent fallback to a branch-local build. This is the right
 # trade-off for jobs where an unvalidated fallback image would be worse than a hard failure.
 if [[ "$require_published" = "true" ]]; then
-  if docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
+  # #822: strict mode has no fallback below (a failed pull here hard-fails
+  # the whole caller job), so this pull is the highest-value retry candidate
+  # in this script. GHCR_RETRY_USERNAME/PASSWORD are optional -- most of this
+  # script's many callers don't set them, and ghcr_retry still backs off and
+  # retries without them, just without a fresh relogin between attempts.
+  if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
     exit 0
   fi
@@ -192,7 +201,7 @@ if [[ "$event_name" != "pull_request" ]]; then
   exit 0
 fi
 
-if docker pull "$published_image" >"$pull_log" 2>&1; then
+if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1; then
   if smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
     exit 0

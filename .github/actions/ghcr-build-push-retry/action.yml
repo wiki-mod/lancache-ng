@@ -1,0 +1,251 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Docker build and push to GHCR with retry
+description: >-
+  Wraps docker/build-push-action with the issue #822 GHCR retry policy:
+  build/push once, and on failure wait, re-authenticate with a fresh
+  `docker login`, and retry the identical build/push -- up to 4 total
+  attempts (1 initial + 3 retries).
+
+# GitHub Actions composite steps cannot loop, and `uses:` cannot be
+# parameterized by an input (the action reference must be static YAML), so
+# the "at least 3 retries" attempt count below is 4 explicit, chained
+# docker/build-push-action steps rather than a real loop calling
+# scripts/lib/ghcr-retry.sh (that file's shell loop only works for plain
+# shell commands -- see its own header comment for why a `uses:` step needs
+# its own wrapper like this one instead).
+#
+# Extracted from .github/workflows/build-push.yml's build/build-arm64 jobs
+# (#541's "Wait before retrying the push" / "Re-authenticate to GHCR before
+# retry" / "Retry Build and push" steps), which had exactly one retry (2
+# total attempts) and existed only in those two jobs. Issue #822 found
+# build-tools.yml's own build-tools/build-tools-arm64 jobs run the identical
+# docker/build-push-action push with ZERO retry at all. Both now use this one
+# action so the policy can't drift between copies again (see #820's
+# duplicated-overlap-check lesson).
+inputs:
+  registry:
+    description: Registry hostname to log in to on retry.
+    required: false
+    default: ghcr.io
+  username:
+    description: Registry username to re-authenticate with before a retry.
+    required: true
+  password:
+    description: Registry password/token to re-authenticate with before a retry.
+    required: true
+  backoff-seconds:
+    description: Seconds to wait before each retry, before re-authenticating.
+    required: false
+    default: "30"
+  builder:
+    required: false
+    default: ""
+  context:
+    required: false
+    default: "."
+  build-contexts:
+    required: false
+    default: ""
+  secret-files:
+    required: false
+    default: ""
+  build-args:
+    required: false
+    default: ""
+  network:
+    required: false
+    default: ""
+  allow:
+    required: false
+    default: ""
+  push:
+    required: false
+    default: "true"
+  tags:
+    required: false
+    default: ""
+  labels:
+    required: false
+    default: ""
+  outputs:
+    required: false
+    default: ""
+  platforms:
+    required: false
+    default: ""
+  provenance:
+    required: false
+    default: ""
+  load:
+    required: false
+    default: "false"
+  pull:
+    required: false
+    default: "false"
+  cache-from:
+    required: false
+    default: ""
+  cache-to:
+    required: false
+    default: ""
+outputs:
+  digest:
+    description: Digest of the pushed image from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      continue-on-error: true
+      with:
+        builder: ${{ inputs.builder }}
+        context: ${{ inputs.context }}
+        build-contexts: ${{ inputs.build-contexts }}
+        secret-files: ${{ inputs.secret-files }}
+        build-args: ${{ inputs.build-args }}
+        network: ${{ inputs.network }}
+        allow: ${{ inputs.allow }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        outputs: ${{ inputs.outputs }}
+        platforms: ${{ inputs.platforms }}
+        provenance: ${{ inputs.provenance }}
+        load: ${{ inputs.load }}
+        pull: ${{ inputs.pull }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Wait before retry 1
+      if: steps.attempt1.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 1
+      if: steps.attempt1.outcome == 'failure'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure'
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      continue-on-error: true
+      with:
+        builder: ${{ inputs.builder }}
+        context: ${{ inputs.context }}
+        build-contexts: ${{ inputs.build-contexts }}
+        secret-files: ${{ inputs.secret-files }}
+        build-args: ${{ inputs.build-args }}
+        network: ${{ inputs.network }}
+        allow: ${{ inputs.allow }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        outputs: ${{ inputs.outputs }}
+        platforms: ${{ inputs.platforms }}
+        provenance: ${{ inputs.provenance }}
+        load: ${{ inputs.load }}
+        pull: ${{ inputs.pull }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Wait before retry 2
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 2
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      continue-on-error: true
+      with:
+        builder: ${{ inputs.builder }}
+        context: ${{ inputs.context }}
+        build-contexts: ${{ inputs.build-contexts }}
+        secret-files: ${{ inputs.secret-files }}
+        build-args: ${{ inputs.build-args }}
+        network: ${{ inputs.network }}
+        allow: ${{ inputs.allow }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        outputs: ${{ inputs.outputs }}
+        platforms: ${{ inputs.platforms }}
+        provenance: ${{ inputs.provenance }}
+        load: ${{ inputs.load }}
+        pull: ${{ inputs.pull }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Wait before retry 3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt4
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      continue-on-error: true
+      with:
+        builder: ${{ inputs.builder }}
+        context: ${{ inputs.context }}
+        build-contexts: ${{ inputs.build-contexts }}
+        secret-files: ${{ inputs.secret-files }}
+        build-args: ${{ inputs.build-args }}
+        network: ${{ inputs.network }}
+        allow: ${{ inputs.allow }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        outputs: ${{ inputs.outputs }}
+        platforms: ${{ inputs.platforms }}
+        provenance: ${{ inputs.provenance }}
+        load: ${{ inputs.load }}
+        pull: ${{ inputs.pull }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    # continue-on-error on every attempt above means none of their failures
+    # fail this composite action by itself -- this step is what actually
+    # surfaces success/failure to the calling job, and is the only step that
+    # inspects all four outcomes to find whichever attempt (if any) produced
+    # a real digest.
+    - name: Resolve outcome across all attempts
+      id: resolve
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${{ steps.attempt1.outcome }}" == "success" ]]; then
+          digest="${{ steps.attempt1.outputs.digest }}"
+        elif [[ "${{ steps.attempt2.outcome }}" == "success" ]]; then
+          digest="${{ steps.attempt2.outputs.digest }}"
+        elif [[ "${{ steps.attempt3.outcome }}" == "success" ]]; then
+          digest="${{ steps.attempt3.outputs.digest }}"
+        elif [[ "${{ steps.attempt4.outcome }}" == "success" ]]; then
+          digest="${{ steps.attempt4.outputs.digest }}"
+        else
+          echo "::error::All build/push attempts against ${{ inputs.registry }} failed." >&2
+          exit 1
+        fi
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"

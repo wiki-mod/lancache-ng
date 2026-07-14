@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$script_dir/lib/ghcr-retry.sh"
+
 compose_file="${FULL_SETUP_COMPOSE_FILE:-deploy/full-setup/docker-compose.yml}"
 client_tools_image="${FULL_SETUP_CLIENT_TOOLS_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
 domain_file="${FULL_SETUP_DOMAIN_FILE:-services/dns/cdn-domains.txt}"
@@ -50,7 +54,8 @@ validation_network="${validation_network:-${validation_networks[0]:-}}"
 [[ -n "$validation_network" ]] \
     || { echo "::error::Could not determine the validation Docker network for dns-standard."; exit 1; }
 
-docker pull "$client_tools_image" >/dev/null
+# #822: optional GHCR_RETRY_USERNAME/PASSWORD -- see scripts/lib/ghcr-retry.sh.
+ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$client_tools_image" >/dev/null
 
 docker run --rm \
     --network "$validation_network" \
