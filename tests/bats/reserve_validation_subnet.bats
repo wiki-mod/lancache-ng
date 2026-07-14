@@ -292,3 +292,170 @@ net2|lancache-ng-validation-22_validation|172.30.22.0/24" ""
     [ "$status" -eq 0 ]
     [[ "$output" == *"host interface br-55b74025b723 (172.30.242.1/24)"* ]]
 }
+
+# fake_docker_network_ops
+# Installs a PATH-shimmed `docker` that simulates one or more named networks
+# for validation_network_await_detached/validation_network_teardown/
+# validation_project_networks_teardown, driven entirely by fixture files a
+# test writes under $FAKE_DOCKER_STATE before calling `run`:
+#   <name>.exists      -- present means the network "exists" (absent means
+#                          `docker network inspect <name>` fails, matching a
+#                          network that is already gone)
+#   <name>.removed      -- present means `docker network rm <name>` already
+#                          removed it (inspect fails afterward too)
+#   <name>.count        -- the container count `--format '{{len .Containers}}'`
+#                          returns (defaults to 0 if absent)
+#   <name>.containers   -- the container id/name list any other `--format`
+#                          query returns (the real code only ever asks for
+#                          IDs to disconnect or names for the timeout error,
+#                          never both in one call, so one fixture file covers
+#                          either)
+#   <name>.rm_fails     -- present means `docker network rm <name>` keeps
+#                          failing even after a force-disconnect, so a test
+#                          can prove the final "could not be removed" error
+# `docker network ls --filter ...` prints whatever $FAKE_DOCKER_STATE/ls_ids
+# contains (one network name per line -- this stub does not model Compose's
+# real opaque network IDs; validation_project_networks_teardown only cares
+# that whatever `ls` prints gets passed to `network inspect --format
+# '{{.Name}}'` next, and this stub's inspect keys off that same value
+# directly, so using real names in ls_ids exercises the same code path
+# without needing a separate id->name indirection layer). Every call is
+# also appended to $FAKE_DOCKER_LOG so a test can assert a specific
+# sub-command actually ran (e.g. that disconnect happened before rm).
+fake_docker_network_ops() {
+    local fake_bin="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin"
+    export FAKE_DOCKER_STATE="$BATS_TEST_TMPDIR/state"
+    mkdir -p "$FAKE_DOCKER_STATE"
+    export FAKE_DOCKER_LOG="$BATS_TEST_TMPDIR/docker-calls.log"
+    : > "$FAKE_DOCKER_LOG"
+
+    cat > "$fake_bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+state="$FAKE_DOCKER_STATE"
+
+if [[ "$1" == "network" && "$2" == "inspect" ]]; then
+    name="$3"
+    if [[ -f "$state/${name}.removed" || ! -f "$state/${name}.exists" ]]; then
+        exit 1
+    fi
+    if [[ "$*" == *"len .Containers"* ]]; then
+        cat "$state/${name}.count" 2>/dev/null || echo 0
+        exit 0
+    elif [[ "$*" == *"{{.Name}}"* ]]; then
+        echo "$name"
+        exit 0
+    elif [[ "$*" == *"--format"* ]]; then
+        cat "$state/${name}.containers" 2>/dev/null
+        exit 0
+    fi
+    exit 0
+elif [[ "$1" == "network" && "$2" == "rm" ]]; then
+    name="$3"
+    if [[ -f "$state/${name}.rm_fails" ]]; then
+        exit 1
+    fi
+    touch "$state/${name}.removed"
+    exit 0
+elif [[ "$1" == "network" && "$2" == "disconnect" ]]; then
+    name="$3"
+    : > "$state/${name}.containers"
+    echo 0 > "$state/${name}.count"
+    exit 0
+elif [[ "$1" == "network" && "$2" == "ls" ]]; then
+    cat "$state/ls_ids" 2>/dev/null
+    exit 0
+fi
+exit 1
+STUB
+    chmod +x "$fake_bin/docker"
+
+    PATH="$fake_bin:$PATH"
+}
+
+@test "network_await_detached returns immediately when the network does not exist" {
+    fake_docker_network_ops
+    run validation_network_await_detached "gone-net" 5
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "network_await_detached returns immediately once the container count is already 0" {
+    fake_docker_network_ops
+    touch "$FAKE_DOCKER_STATE/known-net.exists"
+    echo 0 > "$FAKE_DOCKER_STATE/known-net.count"
+    run validation_network_await_detached "known-net" 5
+    [ "$status" -eq 0 ]
+}
+
+@test "network_await_detached times out and reports the still-attached container names" {
+    # A container that never detaches within the timeout is the real CI
+    # signature this whole fix targets (see reserve-validation-subnet.sh's
+    # own comment on validation_network_await_detached) -- must fail loudly
+    # with a clear, actionable message, not a silent blind sleep.
+    fake_docker_network_ops
+    touch "$FAKE_DOCKER_STATE/known-net.exists"
+    echo 1 > "$FAKE_DOCKER_STATE/known-net.count"
+    echo "stuck-container" > "$FAKE_DOCKER_STATE/known-net.containers"
+    run validation_network_await_detached "known-net" 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"still reports attached containers after 1s"* ]]
+    [[ "$output" == *"stuck-container"* ]]
+}
+
+@test "network_teardown removes an already-clear network directly" {
+    fake_docker_network_ops
+    touch "$FAKE_DOCKER_STATE/known-net.exists"
+    echo 0 > "$FAKE_DOCKER_STATE/known-net.count"
+    run validation_network_teardown "known-net" 5
+    [ "$status" -eq 0 ]
+    [ -f "$FAKE_DOCKER_STATE/known-net.removed" ]
+}
+
+@test "network_teardown is a silent no-op when the network is already gone" {
+    fake_docker_network_ops
+    run validation_network_teardown "gone-net" 5
+    [ "$status" -eq 0 ]
+}
+
+@test "network_teardown force-disconnects stuck containers after the wait times out, then removes" {
+    fake_docker_network_ops
+    touch "$FAKE_DOCKER_STATE/known-net.exists"
+    echo 1 > "$FAKE_DOCKER_STATE/known-net.count"
+    echo "stuck-id" > "$FAKE_DOCKER_STATE/known-net.containers"
+    run validation_network_teardown "known-net" 1
+    [ "$status" -eq 0 ]
+    [ -f "$FAKE_DOCKER_STATE/known-net.removed" ]
+    grep -q "network disconnect -f known-net stuck-id" "$FAKE_DOCKER_LOG"
+}
+
+@test "network_teardown reports a clear, actionable error when the network still cannot be removed" {
+    fake_docker_network_ops
+    touch "$FAKE_DOCKER_STATE/known-net.exists"
+    echo 1 > "$FAKE_DOCKER_STATE/known-net.count"
+    echo "stuck-id" > "$FAKE_DOCKER_STATE/known-net.containers"
+    touch "$FAKE_DOCKER_STATE/known-net.rm_fails"
+    run validation_network_teardown "known-net" 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not be removed even after waiting"* ]]
+}
+
+@test "project_networks_teardown tears down every network belonging to a compose project" {
+    # The real bug this guards against: deploy/full-setup/docker-compose.yml
+    # declares TWO networks per project ("validation" and "validation-api"),
+    # so a fix that only knew about one hardcoded "<project>_validation" name
+    # would silently skip the other.
+    fake_docker_network_ops
+    touch "$FAKE_DOCKER_STATE/net-a.exists"
+    echo 0 > "$FAKE_DOCKER_STATE/net-a.count"
+    touch "$FAKE_DOCKER_STATE/net-b.exists"
+    echo 0 > "$FAKE_DOCKER_STATE/net-b.count"
+    printf 'net-a\nnet-b\n' > "$FAKE_DOCKER_STATE/ls_ids"
+
+    run validation_project_networks_teardown "some-project" 5
+    [ "$status" -eq 0 ]
+    [ -f "$FAKE_DOCKER_STATE/net-a.removed" ]
+    [ -f "$FAKE_DOCKER_STATE/net-b.removed" ]
+    grep -q "network ls --filter label=com.docker.compose.project=some-project" "$FAKE_DOCKER_LOG"
+}

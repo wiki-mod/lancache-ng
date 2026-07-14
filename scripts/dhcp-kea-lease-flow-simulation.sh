@@ -223,7 +223,15 @@ cleanup() {
     # harmlessly and get swallowed by `|| true`, same as every other
     # teardown command here.
     docker rm -f "${dns_container:-}" >/dev/null 2>&1 || true
-    docker network rm "$network_name" >/dev/null 2>&1 || true
+    # A blind `docker network rm` right after `docker rm -f` can still lose
+    # the "has active endpoints" race (see validation_network_teardown's own
+    # comment in reserve-validation-subnet.sh): the daemon can report a
+    # container removed before its network endpoint is actually unwired.
+    # This network's name is unique per run ($$-suffixed), so a lost race
+    # here only leaks one orphaned network on the runner host rather than
+    # poisoning a sibling job -- but it still needs a real wait+retry
+    # instead of silently swallowing the failure and leaking it forever.
+    validation_network_teardown "$network_name" || true
     docker rmi "$image_tag" >/dev/null 2>&1 || true
     docker rmi "${dns_image_tag:-}" >/dev/null 2>&1 || true
     rm -rf "$work_dir"

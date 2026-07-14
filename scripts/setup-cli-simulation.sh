@@ -16,6 +16,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+
 # Which images the fresh-install phase (and every follow-on `setup.sh update`,
 # via the .env it writes) brings the stack up on. The deep-validate workflow
 # resolves these from the triggering event and passes them in:
@@ -115,6 +118,13 @@ cleanup() {
     if [[ -f "$install_dir/docker-compose.yml" ]]; then
         docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env" down -v --remove-orphans >/dev/null 2>&1 || true
     fi
+    # `down` above can lose the "has active endpoints" race (see
+    # validation_project_networks_teardown's own comment in
+    # reserve-validation-subnet.sh) and silently leave a network non-empty.
+    # This project's name is unique per install_dir, so a lost race here
+    # only leaks one orphaned network rather than poisoning a sibling job --
+    # still needs a real wait+retry instead of leaking it forever.
+    validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
     rm -rf "$install_dir" "$repo_root/.setup-cli-simulation-tmp" "$backup_root"
     exit "$status"
 }
@@ -265,6 +275,10 @@ while true; do
     if grep -qF 'port is already allocated' "$fresh_install_log" && [[ "$attempt" -lt 5 ]]; then
         echo "::warning::Fresh install attempt $attempt hit a transient port-allocation race; retrying." >&2
         docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env" down -v --remove-orphans >/dev/null 2>&1 || true
+        # Still under the OLD COMPOSE_PROJECT_NAME here (see the comment
+        # below) -- must tear its network(s) down before it is reassigned,
+        # for the same "has active endpoints" reason cleanup() does.
+        validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
         rm -rf "$install_dir"
         install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
         export SETUP_SIM_INSTALL_DIR="$install_dir"

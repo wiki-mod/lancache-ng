@@ -22,6 +22,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+
 work_dir="$repo_root/.nats-auth-callout-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
@@ -44,6 +47,12 @@ cleanup() {
     local status=$?
     docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
         down -v --remove-orphans >/dev/null 2>&1 || true
+    # `down` above can lose the "has active endpoints" race (see
+    # validation_project_networks_teardown's own comment in reserve-validation-
+    # subnet.sh) and silently leave this network non-empty, poisoning it for
+    # whichever job/run reserves this octet next -- wait for and force a
+    # real removal instead of trusting `down`'s own exit code.
+    validation_project_networks_teardown "$compose_project" || true
     rm -rf "$work_dir"
     exit "$status"
 }

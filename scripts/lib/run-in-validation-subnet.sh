@@ -120,7 +120,15 @@ while [[ "$next_attempt" -le "$max_attempts" ]]; do
     # The command owns its own teardown (EXIT trap), so the network is already
     # gone by the time it returns -- release the octet lock unconditionally
     # now, whatever the outcome, so a concurrent run can claim it immediately
-    # instead of waiting for this job's whole process tree to exit.
+    # instead of waiting for this job's whole process tree to exit. This
+    # assumption only holds because each wrapped script's own cleanup trap
+    # calls validation_project_networks_teardown (reserve-validation-
+    # subnet.sh) after `docker compose down`, which waits for every
+    # container to actually detach before returning -- `down`'s own exit
+    # alone is not sufficient proof (confirmed in CI: a container-removal API
+    # call can report success before its network endpoint is actually
+    # unwired, leaving the network non-empty for whichever run reserves this
+    # same octet next).
     validation_subnet_release "$holder_pid"
 
     if [[ "$cmd_status" -eq 0 ]]; then
