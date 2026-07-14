@@ -728,6 +728,31 @@ is real, live, running code, not just work sitting in source control.
   in this same PR would fail the strict, no-fallback `validate-compose` and
   `shellcheck (GitHub-hosted fallback)` jobs against the still-stale
   currently-published image (#787).
+- Fixed `scripts/setup-cli-simulation.sh` (shared by the `setup.sh CLI
+  simulation` job in both `full-setup-deep-validate.yml` and
+  `full-setup-validate.yml`) colliding with itself across concurrent CI runs
+  on the shared self-hosted runner pool: `deploy/quickstart/docker-compose.yml`
+  pins a static top-level `name: lancache-ng`, which Compose prefers over the
+  `--project-directory` basename it would otherwise derive, so every run
+  resolved to the identical Compose project (and therefore identical
+  container/volume names) regardless of each run already using its own
+  unique `mktemp`-derived install directory. Confirmed live (run
+  `29322035897`): two concurrent runs both resolved to project `lancache-ng`,
+  and `setup.sh`'s own `guard_restore_shared_project_volumes` (#669) correctly
+  refused to proceed once it saw another active install under that name --
+  the guard was doing its job; this script simply never gave concurrent runs
+  the per-run isolation it assumes. Same failure family as #820 (shared-host,
+  concurrent-CI, no per-run isolation), a different specific resource (Compose
+  project name, not a subnet octet). The script now exports a
+  `COMPOSE_PROJECT_NAME` derived from its own already-unique install
+  directory's basename (sanitized to Compose's `^[a-z0-9][a-z0-9_-]*$`
+  requirement) before every `docker compose` call, in both places the script
+  can mint a fresh install directory (initial run and the port-collision
+  retry loop); a real end-user install is unaffected, since it never sets the
+  simulation-only env var this derivation depends on, and the compose yaml's
+  static `name: lancache-ng` is deliberately left unchanged for real installs
+  (see #669 item 6 for why per-install-dir project naming stays out of scope
+  for that case).
 
 ## [0.1.0] - 2026-07-06
 
