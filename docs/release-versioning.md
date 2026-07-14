@@ -106,8 +106,8 @@ Default behavior:
 - fresh stable installs use `LANCACHE_IMAGE_CHANNEL=stable` (written by
   `setup.sh`'s interactive picker); `LANCACHE_IMAGE_CHANNEL=latest` remains
   valid and resolves identically for existing installs and manual overrides
-- edge installs must explicitly choose `edge` at the interactive prompt, or
-  set `LANCACHE_IMAGE_CHANNEL=edge`
+- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`, or choose
+  `edge` at `setup.sh`'s interactive channel prompt
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`

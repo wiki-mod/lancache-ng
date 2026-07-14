@@ -328,8 +328,8 @@ Compose. The interactive installer asks which channel to use, defaulting to
 `stable`.
 
 - `stable` (default) is the channel promoted after the full release
-  validation gate. `latest` is the same channel under its original name —
-  both resolve to the identical published image.
+  validation gate. `LANCACHE_IMAGE_CHANNEL=latest` is the same channel under
+  its original name — both resolve to the identical published image.
 - `edge` is the most recently built, less tested pre-stable channel promoted
   from `master`. Opt in only if you want the newest changes.
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
