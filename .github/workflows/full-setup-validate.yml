@@ -445,7 +445,16 @@ jobs:
           # trusting `down`'s own exit code.
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
+          # This step runs unconditionally (`if: always()`), including when
+          # the "Reserve a validation subnet and start the stack" step above
+          # failed before ever setting COMPOSE_PROJECT_NAME -- under
+          # `set -u`, a bare "$COMPOSE_PROJECT_NAME" would abort this whole
+          # step with "unbound variable" in exactly that case (confirmed in
+          # CI). The safe-default form skips teardown when there is nothing
+          # to tear down instead.
+          if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+            validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
+          fi
 
           # Release the host-local subnet lock the "Reserve a validation
           # subnet and start the stack" step above acquired (see that
