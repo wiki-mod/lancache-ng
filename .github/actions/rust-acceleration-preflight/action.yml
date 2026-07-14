@@ -75,7 +75,15 @@ runs:
 
         # Pull and run the tools image outside BuildKit so cache layers cannot mask
         # acceleration-infrastructure failures.
-        docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
+        #
+        # #822: this preflight runs once per matrix leg with Rust acceleration
+        # secrets configured (up to 14 times per build-push.yml run), each a
+        # real ghcr.io pull of the same class of call that hit a transient 401
+        # live. GHCR_RETRY_USERNAME/PASSWORD are optional -- callers that
+        # don't set them still get backoff+retry, just without a relogin.
+        # shellcheck source=scripts/lib/ghcr-retry.sh
+        source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+        ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
