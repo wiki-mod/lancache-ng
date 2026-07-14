@@ -129,6 +129,21 @@ ${at_test} "retention keeps only KEEP_KNOWN_GOOD_CONFIGS snapshots across repeat
     true
 }
 EOF
+
+    # The NATS entrypoint's static nats.conf generator (since #811) lives inline
+    # in each deploy/*/docker-compose.yml `command:` block -- the guard tracks
+    # all three generating compose files against a single shared bats evidence
+    # file. The compose fixtures only need to EXIST (the guard's writer check is
+    # existence-only); the evidence bats file carries the repeat-run marker.
+    mkdir -p "$fixture_root/deploy/dev" "$fixture_root/deploy/prod" "$fixture_root/deploy/quickstart"
+    printf 'services:\n  nats:\n    command: ["true"]\n' > "$fixture_root/deploy/dev/docker-compose.yml"
+    printf 'services:\n  nats:\n    command: ["true"]\n' > "$fixture_root/deploy/prod/docker-compose.yml"
+    printf 'services:\n  nats:\n    command: ["true"]\n' > "$fixture_root/deploy/quickstart/docker-compose.yml"
+    cat > "$fixture_root/tests/bats/nats_conf_entrypoint_idempotence.bats" <<EOF
+${at_test} "nats entrypoint regenerates a byte-identical nats.conf across repeated restarts" {
+    true
+}
+EOF
 }
 
 @test "passes when every config-writer has a real repeat-run test" {
@@ -242,6 +257,22 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -ne 0 ]
     [[ "$output" == *"services/dhcp-proxy/entrypoint.sh"* ]]
+}
+
+@test "fails when the nats entrypoint static-nats.conf generator loses its repeat-run coverage" {
+    # Since #811 the nats entrypoint's inline static-nats.conf generator (in
+    # deploy/*/docker-compose.yml) is a config-writer distinct from
+    # secondaries.rs; removing its shared bats evidence must surface here for
+    # every generating compose file, or the #811-critical never-overwrite branch
+    # could regress uncovered.
+    seed_passing_fixture
+    rm "$fixture_root/tests/bats/nats_conf_entrypoint_idempotence.bats"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"deploy/dev/docker-compose.yml"* ]]
+    [[ "$output" == *"deploy/prod/docker-compose.yml"* ]]
+    [[ "$output" == *"deploy/quickstart/docker-compose.yml"* ]]
 }
 
 @test "does not count a commented-out bats @test line as evidence" {
