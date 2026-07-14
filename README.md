@@ -297,11 +297,28 @@ The update command can:
 - pull the current repository state
 - update the compose file
 - pull newer images
-- restart the stack
+- restart every service except the Admin UI first, verify the whole non-UI
+  set is actually healthy, then restart the Admin UI last
+- automatically roll back to the pre-update backup if that health check fails
 
 Setup and update always consume prebuilt runtime images. They do not build the
 production stack locally, so host-side build acceleration is never a runtime
 or install dependency.
+
+### Scheduled automatic updates
+
+Instead of running `setup.sh update` manually, a host `systemd` timer
+(`lancache-auto-update.timer`) can run the same ordered, health-gated update
+on a schedule. Enable it at install time (the "Scheduled automatic updates"
+prompt, default: disabled) or later by setting `AUTO_UPDATE_ENABLED=1` in
+`.env` and re-running `setup.sh`. It only actually pulls and restarts when the
+selected release channel has moved to a new image set -- an unchanged channel
+is a silent no-op, not a full restart on every tick. Manually trigger the same
+check with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh auto-update
+```
 
 **Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/backup-restore.md` for rollback options.
 
@@ -697,8 +714,8 @@ Release channels and package rules are documented in `docs/release-versioning.md
 
 Keep `deploy/prod/.env` as the checked-in template. Manual production changes
 belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
-`setup.sh update`, `setup.sh backup`, `setup.sh restore`, `setup.sh update-ip`,
-and `setup.sh create-logs-for-issue` when present.
+`setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,
+`setup.sh update-ip`, and `setup.sh create-logs-for-issue` when present.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 

@@ -3293,6 +3293,24 @@ Usage: ./setup.sh update [install-dir]
 
 Updates an existing LanCache-NG installation, pulls fresh container images, and
 restarts the stack. If [install-dir] is omitted, /opt/lancache-ng is used.
+
+Applies the same ordered, health-gated sequence as auto-update below: every
+service except the Admin UI is brought up and verified healthy first, the
+Admin UI is recreated last, and a failed health check rolls back to the
+pre-update backup this command takes automatically.
+EOF
+            ;;
+        auto-update)
+            cat <<EOF
+Usage: ./setup.sh auto-update [install-dir]
+
+Scheduled entry point (#819), normally invoked by the lancache-auto-update
+systemd timer, not run directly by an operator. Does nothing unless
+AUTO_UPDATE_ENABLED=1 in .env AND the resolved release channel has actually
+moved to a new image set since the last update -- an unchanged channel is a
+silent no-op, not a full pull-and-restart. When it does act, it runs the
+exact same ordered, health-gated update as ./setup.sh update. If
+[install-dir] is omitted, /opt/lancache-ng is used.
 EOF
             ;;
         update-ip|--reconfigure|reconfigure)
@@ -3378,27 +3396,233 @@ EOF
     esac
 }
 
-# ── update subcommand ─────────────────────────────────────────────────────────
-# Update order is deliberate: pause convergence, create a rollback backup,
-# migrate/validate config, pull images, validate again, restart, then resume
+# ── update / auto-update shared internals ─────────────────────────────────────
+# Internal shared state for the current stack-update flow (set once near the
+# top of perform_stack_update_flow, read by every helper below it). This is
+# deliberately plain globals rather than threading the env-file/compose-files
+# values through several layers of function parameters: bash nameref
+# parameters (`local -n`) become fragile once nested more than one call deep
+# (name collisions between an outer and inner nameref are a real footgun), and
+# this flow never runs two updates concurrently in the same process, so there
+# is no real downside to shared state scoped to "the update currently in
+# progress." Not meant to be read outside of the functions in this section.
+_UPDATE_ENV_FILE=""
+_UPDATE_COMPOSE_FILES=()
+
+# `docker compose` pre-loaded with the current update flow's env-file and
+# compose files, so every helper below calls the exact same stack the rest of
+# the flow is already operating on.
+dc_update() {
+    docker compose --env-file "$_UPDATE_ENV_FILE" "${_UPDATE_COMPOSE_FILES[@]}" "$@"
+}
+
+# Real per-container status probe, not just "the process started". If the
+# container declares a Docker HEALTHCHECK, this requires it to report
+# "healthy" -- Docker leaves `.State.Health` empty for a container with no
+# healthcheck defined, which is how this tells "no healthcheck declared" apart
+# from "starting"/"unhealthy" rather than guessing. For a container with no
+# healthcheck at all, the best available signal is that it is actually in the
+# "running" state (weaker, but honestly the most this project can assert for
+# those services today).
+service_container_is_healthy() {
+    local service="$1"
+    local container_id health status
+
+    container_id=$(dc_update ps -q "$service" 2>/dev/null)
+    [[ -n "$container_id" ]] || return 1
+
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id" 2>/dev/null)
+    if [[ -n "$health" ]]; then
+        [[ "$health" = "healthy" ]]
+        return $?
+    fi
+
+    status=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null)
+    [[ "$status" = "running" ]]
+}
+
+# Functional confirmation on top of per-container health: a container
+# reporting "healthy" only proves ITS OWN internal check passed, not that it
+# actually serves what a real client needs. Reuses this project's own
+# established real-probe idioms rather than inventing new ones: the proxy
+# /healthz check already used by cmd_debug's "Health checks" step, and a real
+# dig-based DNS query in the same style scripts/dns-zone-rollback-simulation.sh
+# already uses. `ping`/`ss` are deliberately not used here -- neither proves
+# the service actually answers a real request.
+verify_stack_functional_health() {
+    local ip_standard ip_ssl ssl_enabled test_fqdn resolved
+
+    ip_standard=$(get_env_var IP_STANDARD "$_UPDATE_ENV_FILE")
+    ip_ssl=$(get_env_var IP_SSL "$_UPDATE_ENV_FILE")
+    ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE")
+
+    if command -v curl >/dev/null 2>&1; then
+        if [[ -n "$ip_standard" ]] && ! curl -sf "http://$ip_standard/healthz" >/dev/null; then
+            print_error "Functional check failed: http://$ip_standard/healthz"
+            return 1
+        fi
+        if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]] && ! curl -sf "http://$ip_ssl/healthz" >/dev/null; then
+            print_error "Functional check failed: http://$ip_ssl/healthz"
+            return 1
+        fi
+    fi
+
+    # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
+    # container answers a real query at all (AGENTS.md requires a real
+    # query/response probe here, not ping/ss), not that every domain resolves.
+    test_fqdn="steamcontent.com"
+    if [[ -n "$ip_standard" ]] && command -v dig >/dev/null 2>&1; then
+        resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>/dev/null)
+        if [[ -z "$resolved" ]]; then
+            print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip_standard}"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# Polls every named service until each is container-healthy (see
+# service_container_is_healthy) AND the whole set passes the functional probe,
+# or the timeout elapses. This is the real decision point the removed
+# Watchtower helper never had: a real wait with a real pass/fail outcome, not
+# "log a warning and continue anyway" (its actual documented behavior even in
+# its one health-aware mode, confirmed on #819 -- see the mechanics research
+# there for the primary-source citations).
+wait_for_stack_health() {
+    local timeout_seconds="$1"
+    shift
+    local -a services=("$@")
+    local interval_seconds=3 elapsed=0 svc all_healthy
+
+    while (( elapsed < timeout_seconds )); do
+        all_healthy=1
+        for svc in "${services[@]}"; do
+            if ! service_container_is_healthy "$svc"; then
+                all_healthy=0
+                break
+            fi
+        done
+        if [[ "$all_healthy" = "1" ]] && verify_stack_functional_health; then
+            return 0
+        fi
+        sleep "$interval_seconds"
+        elapsed=$((elapsed + interval_seconds))
+    done
+    return 1
+}
+
+# Rolls the whole stack back to the pre-update backup perform_stack_update_flow
+# just took, found by its deterministic filename (the newest
+# lancache-ng-config-*.tar.gz under the default backup root is always that
+# exact archive: perform_stack_update_flow only reaches the point where this
+# can be called after successfully creating one moments earlier, and archive
+# timestamps are UTC and lexically sortable). Reuses the existing cmd_restore
+# path rather than reimplementing rollback -- restore already stops the stack,
+# replaces state, and re-converges .env correctly.
+rollback_stack_update() {
+    local install_dir="$1"
+    local backup_root="/var/backups/lancache-ng"
+    local latest_backup
+
+    latest_backup=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print 2>/dev/null | sort | tail -1)
+    if [[ -z "$latest_backup" ]]; then
+        print_error "No pre-update backup archive found under $backup_root; cannot roll back automatically. Manual recovery required."
+        return 1
+    fi
+
+    print_warn "Rolling back to pre-update backup: $latest_backup"
+    if cmd_restore "$latest_backup" "$install_dir"; then
+        print_ok "Rollback completed; stack restored to its pre-update state."
+        return 0
+    fi
+    print_error "Rollback itself failed. Manual recovery required: inspect $latest_backup and $install_dir directly."
+    return 1
+}
+
+# Applies an already-pulled image set in the order #819 requires: every
+# service except the Admin UI first, verified actually healthy (not merely
+# started), only then the Admin UI recreated last -- so an operator's one
+# visibility tool into the stack stays up throughout and only blips at the
+# very end, once nothing else could still fail. A failed health gate at
+# either stage rolls back to the pre-update backup rather than leaving a
+# half-updated, unverified stack running. This is the reversed
+# start-then-verify-then-retire-old order identified in the #819 Watchtower
+# mechanics research as the concrete fix for Watchtower's own no-rollback gap
+# -- built as real engineering here, not ported from it.
+apply_stack_update_ordered() {
+    local install_dir="$1"
+    local -a all_services non_ui_services
+    local svc
+
+    mapfile -t all_services < <(dc_update config --services)
+    non_ui_services=()
+    for svc in "${all_services[@]}"; do
+        [[ "$svc" = "ui" ]] && continue
+        non_ui_services+=("$svc")
+    done
+    # This project's compose files always define several non-ui services
+    # (proxy, dns, nats, ...), so non_ui_services is never actually empty --
+    # important because an empty array here would expand to zero arguments,
+    # and `docker compose up -d` with no explicit service names means "bring
+    # up everything", silently starting the Admin UI too and defeating the
+    # UI-last ordering this function exists to guarantee. Fail closed instead
+    # of silently falling into that behavior if this assumption is ever wrong.
+    (( ${#non_ui_services[@]} > 0 )) \
+        || die "No non-UI services found in this compose configuration; refusing to apply an update that cannot guarantee UI-last ordering."
+
+    print_step "Starting non-UI services"
+    if ! dc_update up -d --remove-orphans "${non_ui_services[@]}"; then
+        print_error "Failed to start non-UI services."
+        rollback_stack_update "$install_dir"
+        return 1
+    fi
+
+    print_step "Verifying non-UI services are healthy"
+    if ! wait_for_stack_health 180 "${non_ui_services[@]}"; then
+        print_error "Non-UI services did not become healthy in time."
+        rollback_stack_update "$install_dir"
+        return 1
+    fi
+
+    print_step "Starting Admin UI (last)"
+    if ! dc_update up -d --remove-orphans ui; then
+        print_error "Failed to start the Admin UI."
+        rollback_stack_update "$install_dir"
+        return 1
+    fi
+
+    print_step "Verifying the whole stack is healthy"
+    if ! wait_for_stack_health 120 ui; then
+        print_error "Admin UI did not become healthy in time."
+        rollback_stack_update "$install_dir"
+        return 1
+    fi
+
+    print_ok "Whole stack verified healthy"
+    return 0
+}
+
+# The shared flow both `setup.sh update` (manual) and `setup.sh auto-update`
+# (scheduled, #819) run once they've decided an update should happen. Order is
+# deliberate: pause convergence, create a rollback backup, migrate/validate
+# config, pull images, validate again, apply ordered+health-gated (rolling
+# back to the backup just taken on a failed health check), then resume
 # convergence. Reordering can leave a half-migrated stack running.
-cmd_update() {
-    local install_dir="${1:-/opt/lancache-ng}"
-    local env_file
-    local -a compose_files
-    install_dir=$(realpath -m "$install_dir")
+perform_stack_update_flow() {
+    local install_dir="$1"
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported
     cd "$install_dir"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
+    _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
+    mapfile -t _UPDATE_COMPOSE_FILES < <(compose_file_args_for_install_dir "$install_dir" "$_UPDATE_ENV_FILE")
     # Query the activation state directly rather than inferring it from
-    # ${#compose_files[@]}: that count now also grows when a
+    # ${#_UPDATE_COMPOSE_FILES[@]}: that count now also grows when a
     # docker-compose.override.yml/.yaml is auto-detected (see
     # compose_file_args_for_install_dir), so array length alone can no longer
     # distinguish "NATS override active" from "operator override present".
-    if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
+    if nats_secondary_override_active_for_install_dir "$install_dir" "$_UPDATE_ENV_FILE"; then
         print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
     fi
 
@@ -3431,17 +3655,96 @@ cmd_update() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling selected images"
-    docker compose --env-file "$env_file" "${compose_files[@]}" pull \
+    dc_update pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
     validate_compose_config "$install_dir"
 
-    print_step "Restarting containers"
-    docker compose --env-file "$env_file" "${compose_files[@]}" up -d --remove-orphans
+    if ! apply_stack_update_ordered "$install_dir"; then
+        trap - EXIT
+        resume_lancache_convergence_after_update
+        UPDATE_CONVERGENCE_COMPLETED=1
+        die "Update failed its post-update health gate and was rolled back to the pre-update backup. Investigate before retrying."
+    fi
+
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
     print_ok "Stack updated"
+}
+
+# ── update subcommand ─────────────────────────────────────────────────────────
+cmd_update() {
+    local install_dir="${1:-/opt/lancache-ng}"
+    install_dir=$(realpath -m "$install_dir")
+    perform_stack_update_flow "$install_dir"
+}
+
+# Pure decision, no docker/registry I/O: given the current state, should a
+# scheduled auto-update tick actually proceed? Isolated from
+# resolve_lancache_image_channel/resolve_lancache_stack_channel_tag (which do
+# the real, docker-dependent resolution) specifically so this decision can be
+# unit-tested directly -- see tests/bats/setup_auto_update_gate.bats. Prints
+# one human-readable reason line either way and returns 0 (proceed) or 1
+# (skip).
+lancache_auto_update_should_proceed() {
+    local auto_update_enabled="$1" channel="$2" current_tag="$3" deployed_tag="$4"
+
+    if [[ "$auto_update_enabled" != "1" ]]; then
+        printf 'skip: AUTO_UPDATE_ENABLED is not 1\n'
+        return 1
+    fi
+    if [[ "$channel" = "pinned" ]]; then
+        printf 'skip: LANCACHE_IMAGE_CHANNEL=pinned tracks one fixed tag, not a moving channel; nothing to detect\n'
+        return 1
+    fi
+    if [[ "$current_tag" = "$deployed_tag" ]]; then
+        printf 'skip: channel %s is already at %s\n' "$channel" "$current_tag"
+        return 1
+    fi
+    printf 'proceed: channel %s moved %s -> %s\n' "$channel" "$deployed_tag" "$current_tag"
+    return 0
+}
+
+# ── auto-update subcommand ────────────────────────────────────────────────────
+# Scheduled entry point (#819): invoked by lancache-auto-update.timer on the
+# host, not normally run directly. Detect-then-act, not unconditional
+# pull-and-restart -- a scheduled tick where the channel hasn't moved must be a
+# true no-op, or every tick would restart the whole stack for nothing.
+cmd_auto_update() {
+    local install_dir="${1:-/opt/lancache-ng}"
+    local env_file auto_update_enabled current_channel current_tag deployed_tag decision
+
+    install_dir=$(realpath -m "$install_dir")
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+
+    # Re-checked here, not just trusted from whatever gated the systemd timer
+    # itself: an operator can flip AUTO_UPDATE_ENABLED=0 in .env directly
+    # without re-running setup.sh, which would not by itself disable an
+    # already-enabled timer unit. This is the cheap, fail-closed belt-and-
+    # braces check that keeps a stale enabled timer from ever actually acting
+    # once the operator's intent in .env says otherwise.
+    auto_update_enabled=$(get_env_var AUTO_UPDATE_ENABLED "$env_file")
+    current_channel=$(resolve_lancache_image_channel "$env_file")
+    deployed_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file")
+    # Only actually resolve the channel through the registry once the cheap,
+    # local checks above haven't already ruled the tick out -- avoids a
+    # pointless registry round-trip on a disabled or pinned install.
+    if [[ "$auto_update_enabled" = "1" && "$current_channel" != "pinned" ]]; then
+        current_tag=$(resolve_lancache_stack_channel_tag "$env_file" "$current_channel")
+    else
+        current_tag=""
+    fi
+
+    if decision=$(lancache_auto_update_should_proceed "$auto_update_enabled" "$current_channel" "$current_tag" "$deployed_tag"); then
+        print_step "Scheduled automatic update: ${decision#proceed: }"
+        perform_stack_update_flow "$install_dir"
+    else
+        print_ok "${decision#skip: }"
+        return 0
+    fi
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
@@ -4418,6 +4721,12 @@ case "${1:-install}" in
             exit 0
         fi
         cmd_update "${2:-/opt/lancache-ng}"; exit 0 ;;
+    auto-update)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help auto-update
+            exit 0
+        fi
+        cmd_auto_update "${2:-/opt/lancache-ng}"; exit 0 ;;
     debug)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help debug
@@ -5245,6 +5554,53 @@ Unit=lancache-converge.service
 WantedBy=timers.target
 EOF
 
+    # Scheduled automatic updates (#819), replacing the removed Watchtower
+    # opt-in. Always written (harmless while disabled), only enabled/started
+    # later if AUTO_UPDATE_ENABLED=1 -- same "install now, activate after a
+    # successful first pull" pattern as lancache.service/lancache-converge.*
+    # above. Runs on the HOST via systemd, not as a container: no container
+    # gains expanded Docker-socket or filesystem access to perform an update,
+    # unlike the removed Watchtower helper (which needed read-write socket
+    # access in its own container -- see docs/threat-model.md).
+    #
+    # ExecStart runs whatever setup.sh is already on this install's disk at
+    # tick time -- it does NOT `git pull`/re-fetch itself first. Deliberate
+    # choice (#819, mirroring mailcow-dockerized's own update.sh, which
+    # self-updates but refuses to re-exec in the same process): rewriting a
+    # script file out from under the interpreter currently executing it risks
+    # corrupted/partial execution of the remaining lines. The accepted cost is
+    # that a bugfix to setup.sh's own update logic only takes effect on the
+    # NEXT scheduled tick, not immediately -- far safer than the alternative.
+    cat > /etc/systemd/system/lancache-auto-update.service <<EOF
+[Unit]
+Description=LanCache-NG Scheduled Automatic Update
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/setup.sh auto-update ${INSTALL_DIR}
+EOF
+
+    # RandomizedDelaySec spreads many installs' ticks across an hour instead
+    # of every one of them hitting GHCR at exactly 04:00; Persistent=true
+    # catches up a missed run (e.g. host was off) on next boot instead of
+    # silently skipping to the next scheduled day.
+    cat > /etc/systemd/system/lancache-auto-update.timer <<EOF
+[Unit]
+Description=LanCache-NG Scheduled Automatic Update Timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=lancache-auto-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
     systemctl daemon-reload
     SYSTEMD_AVAILABLE=1
     print_ok "systemd units installed; they will be enabled after image pull succeeds"
@@ -5318,6 +5674,11 @@ if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
     print_ok "lancache-converge.timer enabled for boot"
     systemctl start lancache.service
     systemctl start lancache-converge.timer
+    if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
+        systemctl enable lancache-auto-update.timer
+        systemctl start lancache-auto-update.timer
+        print_ok "lancache-auto-update.timer enabled (scheduled automatic updates)"
+    fi
 else
     docker compose --env-file "$INSTALL_DIR/.env" up -d
 fi
