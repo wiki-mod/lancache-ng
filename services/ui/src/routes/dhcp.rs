@@ -693,10 +693,7 @@ pub(crate) fn persist_stack_settings(
                 "DHCP_PROXY_CUSTOM_OPTIONS",
                 state.config.effective_dhcp_proxy_custom_options(),
             ),
-            (
-                "LANCACHE_IMAGE_CHANNEL",
-                lancache_image_channel.to_string(),
-            ),
+            ("LANCACHE_IMAGE_CHANNEL", lancache_image_channel.to_string()),
             (
                 "AUTO_UPDATE_ENABLED",
                 if auto_update_enabled { "1" } else { "0" }.to_string(),
@@ -5561,7 +5558,10 @@ mod tests {
         assert!(result.is_ok(), "expected a clean write: {result:?}");
 
         let content = fs::read_to_string(&target).expect("settings file must exist");
-        assert_eq!(content, "LANCACHE_IMAGE_CHANNEL=edge\nAUTO_UPDATE_ENABLED=1\n");
+        assert_eq!(
+            content,
+            "LANCACHE_IMAGE_CHANNEL=edge\nAUTO_UPDATE_ENABLED=1\n"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -3750,10 +3750,11 @@ cmd_auto_update() {
 # ── converge-reconcile subcommand (#819) ──────────────────────────────────────
 # Internal entry point, not meant for interactive use: invoked as the first
 # ExecStart of lancache-converge.service, immediately before its existing
-# `docker compose up -d --remove-orphans` convergence (see the "Installing
-# systemd watchdog" step). Bridges the Admin UI's release-channel/scheduled-
-# update control (services/ui/src/routes/setup.rs's update_stack_settings)
-# onto the host.
+# container-drift convergence step further below (see the "Installing
+# systemd watchdog" step -- that ExecStart line brings the whole compose
+# stack back up, unchanged by this commit). Bridges the Admin UI's release-
+# channel/scheduled-update control (services/ui/src/routes/setup.rs's
+# update_stack_settings) onto the host.
 #
 # That control can only write into the ui-data Docker-managed *named volume*
 # (routes/dhcp.rs's persist_ui_settings/write_ui_settings_file target) -- a
@@ -3826,9 +3827,9 @@ cmd_converge_reconcile() {
     # A converge tick can fire before the very first install completes (the
     # timer/service are both installed, then enabled, in that order -- see
     # "Installing systemd watchdog"/"Starting stack"); silently skip rather
-    # than die, exactly like the pre-existing `docker compose up -d
-    # --remove-orphans` ExecStart this runs alongside would also have nothing
-    # to converge yet.
+    # than die, exactly like the pre-existing container-drift convergence
+    # ExecStart line this runs alongside would also have nothing to converge
+    # yet.
     [[ -f "$install_dir/docker-compose.yml" ]] || return 0
     command -v docker >/dev/null 2>&1 || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
