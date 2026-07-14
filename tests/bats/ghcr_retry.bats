@@ -27,9 +27,17 @@ setup() {
     # Stub out sleep/docker so the suite runs fast and never touches the
     # network or a real registry session.
     sleep() { :; }
+    # relogin_calls is tracked via a file, not a plain shell variable: this
+    # stub is invoked as `printf ... | docker login ...` inside
+    # ghcr_relogin, and the right-hand side of a pipeline runs in its own
+    # subshell in bash by default (no `lastpipe`), so a variable increment
+    # here would be invisible to the test's own shell once the pipe exits --
+    # a real bug caught by CI (see "re-authenticates once per retry" below).
+    # Appends survive across subshells the same way $attempt_log already
+    # relies on for counting flaky_cmd invocations.
     docker() {
         if [[ "$1" = "login" ]]; then
-            relogin_calls=$((${relogin_calls:-0} + 1))
+            echo "relogin" >> "$relogin_log"
             return "${FAKE_RELOGIN_EXIT:-0}"
         fi
         return 0
@@ -38,9 +46,15 @@ setup() {
 
     GHCR_RETRY_BACKOFF_SECONDS=0
     GHCR_RETRY_MAX_ATTEMPTS=4
-    relogin_calls=0
+    relogin_log="$BATS_TEST_TMPDIR/relogins"
+    : > "$relogin_log"
     attempt_log="$BATS_TEST_TMPDIR/attempts"
     : > "$attempt_log"
+}
+
+# Number of times the docker() stub above observed a `docker login` call.
+relogin_calls() {
+    wc -l < "$relogin_log"
 }
 
 # Fails FAKE_FAIL_COUNT times (default from caller env), then succeeds.
@@ -111,21 +125,21 @@ always_fail_cmd() {
 @test "ghcr_retry does not re-authenticate before the first attempt" {
     FAKE_FAIL_COUNT=0
     ghcr_retry ghcr.io testuser testpass -- flaky_cmd
-    [ "$relogin_calls" -eq 0 ]
+    [ "$(relogin_calls)" -eq 0 ]
 }
 
 @test "ghcr_retry re-authenticates once per retry, not once total" {
     FAKE_FAIL_COUNT=3
     ghcr_retry ghcr.io testuser testpass -- flaky_cmd
     # 3 failed attempts -> 3 re-logins before the 4th (successful) attempt.
-    [ "$relogin_calls" -eq 3 ]
+    [ "$(relogin_calls)" -eq 3 ]
 }
 
 @test "ghcr_retry retries without a fresh login when no credentials are given" {
     FAKE_FAIL_COUNT=1
     run ghcr_retry ghcr.io "" "" -- flaky_cmd
     [ "$status" -eq 0 ]
-    [ "$relogin_calls" -eq 0 ]
+    [ "$(relogin_calls)" -eq 0 ]
     [[ "$output" == *"retrying without a fresh login"* ]]
 }
 
@@ -140,4 +154,36 @@ always_fail_cmd() {
     export -f docker
     run ghcr_relogin ghcr.io testuser testpass
     [ "$status" -ne 0 ]
+}
+
+@test "ghcr_retry's captured stdout stays clean when a mid-retry relogin writes to stdout" {
+    # Real `docker login` prints "Login Succeeded" to STDOUT, not stderr (only
+    # its credential-store warning goes to stderr). The earlier stub in
+    # setup() diverged from that reality by writing nothing to stdout, which
+    # let this bug hide: a caller that captures ghcr_retry's output via
+    # `$(...)` (e.g. `digest="$(ghcr_retry ... -- docker buildx imagetools
+    # inspect ...)"`) would get "Login Succeeded" spliced into the captured
+    # value on any retry firing mid-substitution -- corrupting the digest on
+    # exactly the transient-401-then-retry case this file exists to survive.
+    docker() {
+        if [[ "$1" = "login" ]]; then
+            echo "Login Succeeded"
+            return 0
+        fi
+        return 0
+    }
+    export -f docker
+    FAKE_FAIL_COUNT=1
+    real_cmd() {
+        echo "attempt" >> "$attempt_log"
+        local calls
+        calls=$(wc -l < "$attempt_log")
+        if (( calls <= "${FAKE_FAIL_COUNT:-0}" )); then
+            return 1
+        fi
+        echo "sha256:cleanvalue"
+    }
+    export -f real_cmd
+    captured="$(ghcr_retry ghcr.io testuser testpass -- real_cmd 2>/dev/null)"
+    [ "$captured" = "sha256:cleanvalue" ]
 }

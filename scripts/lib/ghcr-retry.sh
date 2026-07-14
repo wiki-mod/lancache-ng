@@ -58,7 +58,15 @@ ghcr_relogin() {
   local username="${2:?ghcr_relogin: username is required}"
   local password="${3:?ghcr_relogin: password is required}"
 
-  printf '%s' "$password" | docker login "$registry" --username "$username" --password-stdin
+  # `docker login` prints "Login Succeeded" to STDOUT (only the
+  # credential-store warning goes to stderr). ghcr_retry is routinely called
+  # from a caller's `$(...)` command substitution to capture a digest/output
+  # (e.g. `digest="$(ghcr_retry ... -- docker buildx imagetools inspect ...)"`),
+  # and a retry that fires *during* that same substitution would otherwise
+  # splice "Login Succeeded" into the captured value -- corrupting exactly the
+  # transient-401 retry case this file exists to survive. Redirect to stderr
+  # so relogin output never lands in a caller's stdout capture.
+  printf '%s' "$password" | docker login "$registry" --username "$username" --password-stdin >&2
 }
 
 # ghcr_retry <registry> <username> <password> -- <command> [args...]

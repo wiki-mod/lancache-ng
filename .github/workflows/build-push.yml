@@ -1391,11 +1391,15 @@ jobs:
           awk '
             /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
             # Anchored on an actual step declaration ("- name: ..."), not a
-            # bare /name: / substring match: a `with:` input ending in
-            # "name" (e.g. this PR's "username:"/`ghcr-build-push-retry`
-            # input) also contains the literal substring "name: " and would
-            # otherwise be misread as the next step's boundary, ending the
-            # scan before it ever reaches "pull: true" below.
+            # bare /name: / substring match: a with: input ending in name
+            # (for example a username input on the ghcr-build-push-retry
+            # composite action) also contains the literal substring
+            # "name: " and would otherwise be misread as the next steps
+            # boundary, ending the scan before it ever reaches "pull: true"
+            # below. NOTE: no apostrophes in this comment -- this whole
+            # block is inside a bash single-quoted awk script, and a single
+            # quote here would close that string early and hand the rest of
+            # the line to bash as literal commands.
             in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
@@ -1404,11 +1408,15 @@ jobs:
           awk '
             /name: Build and push arm64 build-tools image/ { in_publish = 1; found = 0; next }
             # Anchored on an actual step declaration ("- name: ..."), not a
-            # bare /name: / substring match: a `with:` input ending in
-            # "name" (e.g. this PR's "username:"/`ghcr-build-push-retry`
-            # input) also contains the literal substring "name: " and would
-            # otherwise be misread as the next step's boundary, ending the
-            # scan before it ever reaches "pull: true" below.
+            # bare /name: / substring match: a with: input ending in name
+            # (for example a username input on the ghcr-build-push-retry
+            # composite action) also contains the literal substring
+            # "name: " and would otherwise be misread as the next steps
+            # boundary, ending the scan before it ever reaches "pull: true"
+            # below. NOTE: no apostrophes in this comment -- this whole
+            # block is inside a bash single-quoted awk script, and a single
+            # quote here would close that string early and hand the rest of
+            # the line to bash as literal commands.
             in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
