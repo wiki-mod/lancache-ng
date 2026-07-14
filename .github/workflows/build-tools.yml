@@ -428,11 +428,12 @@ jobs:
 
       - name: Attest amd64 build-tools image provenance
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
 
       # `always()` so a later, unrelated step failing (e.g. a Trivy finding)
       # doesn't throw away cache from a build that itself succeeded --
@@ -646,11 +647,12 @@ jobs:
 
       - name: Attest arm64 build-tools image provenance
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
 
       - name: Remove local scan image
         if: always()
@@ -758,11 +760,12 @@ jobs:
       # other mutable/branch tag actually points at, so it needs its own
       # attestation before anything is promoted to it.
       - name: Attest merged build-tools manifest provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: ./.github/actions/ghcr-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
           subject-digest: ${{ steps.merged-digest.outputs.digest }}
-          push-to-registry: true
 
       - name: Promote mutable tags
         # Promotes from the digest resolved and attested by the two steps
