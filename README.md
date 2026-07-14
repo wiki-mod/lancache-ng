@@ -324,10 +324,14 @@ See `docs/backup-restore.md` for backup scope, restore testing, secret handling,
 
 `LANCACHE_IMAGE_CHANNEL` selects the first-party image channel. `setup.sh`
 resolves mutable channels to the immutable `LANCACHE_IMAGE_TAG` used by Docker
-Compose.
+Compose. The interactive installer asks which channel to use, defaulting to
+`stable`.
 
-- `latest` is the default stable release channel.
-- `edge` is the tested pre-stable channel promoted from `master`.
+- `stable` (default) is the channel promoted after the full release
+  validation gate. `latest` is the same channel under its original name —
+  both resolve to the identical published image.
+- `edge` is the most recently built, less tested pre-stable channel promoted
+  from `master`. Opt in only if you want the newest changes.
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
@@ -649,13 +653,15 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 CACHE_MAX_GB=50
 
 # First-party service image selector.
-# latest is the latest stable release channel.
-# Use edge only when you explicitly want the tested pre-stable channel.
+# stable is the channel promoted after the full release validation gate
+# (latest is the same channel under its original name -- both resolve
+# identically). Use edge only when you explicitly want the most recently
+# built, less tested pre-stable channel.
 # setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
 # Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
-LANCACHE_IMAGE_CHANNEL=latest
+LANCACHE_IMAGE_CHANNEL=stable
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
@@ -670,14 +676,16 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 
 `KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq/PowerDNS configurations are kept for automatic rollback if a newly generated config fails validation at container startup. It also controls how many known-good Kea DHCP config snapshots the Admin UI keeps for operator-selected rollback (see the DHCP settings page). See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
 
-`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the
-latest stable release. Use `edge` only when you explicitly want the tested
-pre-stable channel. `setup.sh` resolves mutable channels through the `stack`
-pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose
-pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` /
-`vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and
-`LANCACHE_IMAGE_TAG` to that same release tag so the running containers match
-the source tree.
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `stable` (default)
+and `latest` both mean the same released channel — `stable` is the friendlier
+name `setup.sh`'s interactive picker offers, `latest` is the original name and
+remains valid. Use `edge` only when you explicitly want the most recently
+built, less tested pre-stable channel. `setup.sh` resolves mutable channels
+through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG`
+that Docker Compose pulls. If you install from a tagged release archive or a
+checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned`
+and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers
+match the source tree.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
 The resulting install/update path still stays pull-only and does not depend on
