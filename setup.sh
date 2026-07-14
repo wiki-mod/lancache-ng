@@ -2094,6 +2094,23 @@ resolve_lancache_image_channel() {
     printf '%s\n' "$channel"
 }
 
+# Pure name mapping, no I/O: which physical GHCR "stack:<tag>" pointer image
+# backs a given operator-facing LANCACHE_IMAGE_CHANNEL value. "stable" (#819)
+# is the operator-facing name for the exact same underlying stack:latest
+# pointer image -- there is no separate stack:stable GHCR tag, and none is
+# planned; both names are published identically by the release job. Every
+# other channel name passes through unchanged. Kept as its own tiny function
+# (rather than inlined where it's used) specifically so this one mapping can
+# be unit-tested with zero docker/tar involved.
+lancache_stack_pointer_channel_for() {
+    local channel="$1"
+    if [[ "$channel" = "stable" ]]; then
+        printf 'latest\n'
+    else
+        printf '%s\n' "$channel"
+    fi
+}
+
 # Turns a mutable channel name (latest/dev/edge) into one immutable sha-* tag.
 # Channels are published as a tiny "stack:<channel>" pointer image whose only
 # content is a stack.env file naming the current immutable LANCACHE_IMAGE_TAG
@@ -2108,14 +2125,8 @@ resolve_lancache_image_channel() {
 resolve_lancache_stack_channel_tag() {
     local env_file="$1" channel="$2"
     local registry prefix stack_image container_id="" resolved_tag=""
-    # "stable" (#819) is the operator-facing name for the exact same
-    # underlying stack:latest pointer image -- there is no separate
-    # stack:stable GHCR tag, and none is planned; both names are published
-    # identically by the release job. Map it once, here, before building the
-    # pointer image reference, so every caller resolves the same real image
-    # regardless of which of the two names an install's channel is set to.
-    local pointer_channel="$channel"
-    [[ "$pointer_channel" = "stable" ]] && pointer_channel="latest"
+    local pointer_channel
+    pointer_channel=$(lancache_stack_pointer_channel_for "$channel")
 
     registry=$(resolve_lancache_image_registry "$env_file")
     prefix=$(resolve_lancache_image_prefix "$env_file")

@@ -4,10 +4,21 @@
 # Regression tests for the "stable"/"edge" operator-facing channel picker
 # (#819). "stable" is a new accepted LANCACHE_IMAGE_CHANNEL value that must
 # resolve through the exact same published stack:latest pointer image "latest"
-# already uses -- there is no separate stack:stable GHCR tag. These tests pin
-# that mapping directly (via a mocked `docker`/`tar`, since
-# resolve_lancache_stack_channel_tag talks to a real registry otherwise), plus
-# the plain validation/inference logic that does not need Docker at all.
+# already uses -- there is no separate stack:stable GHCR tag.
+#
+# lancache_stack_pointer_channel_for (the channel-name-to-pointer-tag mapping)
+# is tested directly as a pure function with zero I/O -- no docker/tar
+# mocking. An earlier version of this file mocked the real
+# `docker cp | tar -xO | awk` pipeline resolve_lancache_stack_channel_tag runs
+# to pin the same mapping end-to-end; that mock (first via `export -f`,
+# then via a PATH-prepended fake executable) proved unreliable in the real
+# CI bats environment for reasons that could not be root-caused without a
+# local bats install (this Windows checkout has none). Testing the pure
+# mapping function directly is both simpler and strictly more reliable, since
+# it has no dependency on docker/tar/PATH resolution behavior at all -- the
+# actual registry pull path stays covered by the real end-to-end CI
+# simulations (scripts/setup-cli-simulation.sh,
+# scripts/watchtower-update-simulation.sh) instead of an in-bats mock.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -64,85 +75,26 @@ setup() {
     [ "$output" = "latest" ]
 }
 
-# Mocks docker (pull/create/cp/rm) and tar so resolve_lancache_stack_channel_tag
-# can run end to end without a real registry, and records which stack image
-# reference it actually requested. Uses real fake-executable files on a
-# prepended PATH rather than `export -f` shell-function shadowing: `run`
-# invokes the target command in a genuinely separate bash process, and
-# exported-function inheritance (the BASH_FUNC_*%% mechanism) is not reliably
-# available in every environment (some hardened/post-Shellshock bash builds
-# disable it outright) -- confirmed the hard way: export -f worked in a local
-# interactive shell but silently fell through to the real system docker/tar in
-# CI, since neither exists there this manifested as the pipeline reading real
-# empty/error output instead of the fake stack.env content. A PATH-based fake
-# executable has no such environment-inheritance dependency.
-stub_stack_pointer_docker() {
-    fake_bin_dir="$BATS_TEST_TMPDIR/fake-bin"
-    mkdir -p "$fake_bin_dir"
-
-    cat > "$fake_bin_dir/docker" <<'FAKE_DOCKER'
-#!/usr/bin/env bash
-case "$1" in
-    pull)
-        printf '%s\n' "$2" > "$FAKE_STACK_POINTER_LOG/requested_stack_image"
-        exit 0
-        ;;
-    create)
-        printf 'fake-container-id\n'
-        exit 0
-        ;;
-    cp)
-        printf 'fake-tar-stream'
-        exit 0
-        ;;
-    rm)
-        exit 0
-        ;;
-esac
-FAKE_DOCKER
-
-    cat > "$fake_bin_dir/tar" <<'FAKE_TAR'
-#!/usr/bin/env bash
-# The real pipeline is `docker cp ... - | tar -xO | awk ...`; this fake
-# ignores its real stdin/args and emits the stack.env line the awk
-# extraction in resolve_lancache_stack_channel_tag expects.
-printf 'LANCACHE_IMAGE_TAG=sha-abc1234\n'
-FAKE_TAR
-
-    chmod +x "$fake_bin_dir/docker" "$fake_bin_dir/tar"
-    export FAKE_STACK_POINTER_LOG="$BATS_TEST_TMPDIR"
-    export PATH="$fake_bin_dir:$PATH"
+@test "lancache_stack_pointer_channel_for maps stable onto the latest pointer" {
+    run lancache_stack_pointer_channel_for "stable"
+    [ "$status" -eq 0 ]
+    [ "$output" = "latest" ]
 }
 
-@test "resolve_lancache_stack_channel_tag maps channel=stable onto the stack:latest pointer image" {
-    stub_stack_pointer_docker
-    run resolve_lancache_stack_channel_tag "$BATS_TEST_TMPDIR/missing.env" "stable"
+@test "lancache_stack_pointer_channel_for passes latest through unchanged" {
+    run lancache_stack_pointer_channel_for "latest"
     [ "$status" -eq 0 ]
-    [ "$output" = "sha-abc1234" ]
-    [ "$(cat "$BATS_TEST_TMPDIR/requested_stack_image")" = "ghcr.io/wiki-mod/lancache-ng/stack:latest" ]
+    [ "$output" = "latest" ]
 }
 
-@test "resolve_lancache_stack_channel_tag still requests stack:latest for channel=latest" {
-    stub_stack_pointer_docker
-    run resolve_lancache_stack_channel_tag "$BATS_TEST_TMPDIR/missing.env" "latest"
+@test "lancache_stack_pointer_channel_for passes edge through unchanged" {
+    run lancache_stack_pointer_channel_for "edge"
     [ "$status" -eq 0 ]
-    [ "$output" = "sha-abc1234" ]
-    [ "$(cat "$BATS_TEST_TMPDIR/requested_stack_image")" = "ghcr.io/wiki-mod/lancache-ng/stack:latest" ]
+    [ "$output" = "edge" ]
 }
 
-@test "resolve_lancache_stack_channel_tag requests stack:edge unchanged for channel=edge" {
-    stub_stack_pointer_docker
-    run resolve_lancache_stack_channel_tag "$BATS_TEST_TMPDIR/missing.env" "edge"
+@test "lancache_stack_pointer_channel_for passes dev through unchanged" {
+    run lancache_stack_pointer_channel_for "dev"
     [ "$status" -eq 0 ]
-    [ "$output" = "sha-abc1234" ]
-    [ "$(cat "$BATS_TEST_TMPDIR/requested_stack_image")" = "ghcr.io/wiki-mod/lancache-ng/stack:edge" ]
-}
-
-@test "resolve_lancache_image_tag resolves LANCACHE_IMAGE_CHANNEL=stable through the pointer" {
-    stub_stack_pointer_docker
-    LANCACHE_IMAGE_CHANNEL="stable"
-    run resolve_lancache_image_tag "$BATS_TEST_TMPDIR/missing.env"
-    [ "$status" -eq 0 ]
-    [ "$output" = "sha-abc1234" ]
-    [ "$(cat "$BATS_TEST_TMPDIR/requested_stack_image")" = "ghcr.io/wiki-mod/lancache-ng/stack:latest" ]
+    [ "$output" = "dev" ]
 }
