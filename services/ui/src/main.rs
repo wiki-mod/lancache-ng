@@ -69,6 +69,7 @@ const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
+const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-registration.token";
 
 // Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
 // not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
@@ -128,6 +129,69 @@ fn load_or_create_session_secret() -> Result<[u8; 32]> {
             Ok(secret)
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+// Resolves the effective SECONDARY_REGISTRATION_TOKEN, generating and persisting
+// a strong random one when the configured value is missing or a checked-in
+// placeholder. setup.sh always generates a real hex32 token
+// (`get_or_generate_secret ... hex32`), but the compose header's documented
+// manual path ("Or manually: Edit .env ... docker compose up -d") ships either
+// an empty default (deploy/quickstart compose's `${SECONDARY_REGISTRATION_TOKEN:-}`)
+// or a public placeholder (deploy/quickstart/.env's YOUR_..._HERE,
+// deploy/prod/.env's CHANGE_ME_*, deploy/dev compose's lancache-reg-dev-secret).
+// Those all previously boot-looped the UI. Generating the same kind of secret
+// setup.sh would -- persisted next to the other /data secrets so it never
+// rotates across restarts (a rotating token would break an already-registered
+// secondary) -- keeps the security invariant intact (registration still needs
+// an unguessable secret) while removing both the crash and the guessable public
+// default. An operator-supplied real value always wins and is preserved. `path`
+// is a parameter so the create branch is unit-testable.
+fn load_or_create_secondary_registration_token(
+    configured: &str,
+    path: &str,
+) -> Result<String, String> {
+    if !secondary_registration_token_is_placeholder(configured) {
+        return Ok(configured.to_string());
+    }
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let existing = contents.trim();
+            if secondary_registration_token_is_placeholder(existing) {
+                return Err(format!(
+                    "persisted secondary registration token at {path} is empty or a \
+                     placeholder — refusing to start. Delete the file to regenerate it, \
+                     or set SECONDARY_REGISTRATION_TOKEN to a real secret"
+                ));
+            }
+            Ok(existing.to_string())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let token = hex::encode(rand::random::<[u8; 32]>());
+            let mut open_options = OpenOptions::new();
+            open_options.create_new(true).write(true);
+            #[cfg(unix)]
+            open_options.mode(0o600);
+            let mut file = open_options.open(path).map_err(|e| {
+                format!("failed to create secondary registration token file at {path}: {e}")
+            })?;
+            file.write_all(token.as_bytes()).map_err(|e| {
+                format!("failed to write secondary registration token file at {path}: {e}")
+            })?;
+            file.sync_all().map_err(|e| {
+                format!("failed to sync secondary registration token file at {path}: {e}")
+            })?;
+            tracing::warn!(
+                "SECONDARY_REGISTRATION_TOKEN was unset or a placeholder; generated a \
+                 persistent random registration token at {path}. To register a secondary \
+                 DNS node, read the value from that file or set SECONDARY_REGISTRATION_TOKEN \
+                 explicitly."
+            );
+            Ok(token)
+        }
+        Err(err) => Err(format!(
+            "failed to read secondary registration token file at {path}: {err}"
+        )),
     }
 }
 
@@ -593,9 +657,7 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
 // (`POST /api/secondary/register`) that lets a new secondary DNS node join
 // this primary -- see routes/secondaries.rs's own empty-token and
 // constant-time comparison checks, which enforce the same invariant again on
-// every request as defense in depth. This boot-time check exists so a
-// misconfigured token fails loud at startup instead of silently accepting
-// registrations against a guessable value:
+// every request as defense in depth. The invariant this guards:
 // - an empty token was the original vulnerability (flagged on PR #195):
 //   an unset configured token compared equal to an unset/empty request
 //   token, so any client could register.
@@ -603,18 +665,17 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
 //   readable straight out of this repository's checked-in deploy/prod/.env
 //   and deploy/quickstart/.env defaults.
 //
-// Registering a secondary DNS node is an opt-in feature -- most single-node
-// installs never use it -- but the token itself is not opt-in: setup.sh
-// already generates a real SECONDARY_REGISTRATION_TOKEN unconditionally for
-// every install, in the same ensure_secret_env_key pipeline as
-// PDNS_API_KEY and DDNS_TSIG_KEY, regardless of whether the operator ever
-// registers a secondary (see setup.sh's `ensure_secret_env_key
-// SECONDARY_REGISTRATION_TOKEN`). Manual installs that copy
-// deploy/prod/.env by hand get the same requirement via that file's
-// CHANGE_ME_* default rather than an empty value, so this check -- like
-// UI_AUTH_USER/UI_AUTH_PASSWORD's resolve_admin_ui_auth_mode above -- fails
-// closed with a clear message rather than starting in a silently insecure
-// state (issue #659).
+// setup.sh already generates a real SECONDARY_REGISTRATION_TOKEN
+// unconditionally for every install (`get_or_generate_secret ... hex32`, same
+// ensure_secret_env_key pipeline as PDNS_API_KEY/DDNS_TSIG_KEY). The documented
+// manual compose path does not run setup.sh, so main() resolves the token
+// through load_or_create_secondary_registration_token first: an operator's real
+// value is kept, otherwise a persistent random one is generated -- meaning the
+// token reaching this function is already guaranteed real on every path. This
+// check therefore stays as a defense-in-depth assertion on the *resolved* value
+// (a resolution bug that ever yielded an empty/placeholder token must still fail
+// closed rather than start in a silently insecure state, issue #659), not as
+// the primary boot gate it once was.
 fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
     if token.is_empty() {
         return Err(
@@ -635,7 +696,6 @@ fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
 
 fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
     validate_ui_session_ttl_seconds(cfg.ui_session_ttl_seconds)?;
-    validate_secondary_registration_token(&cfg.secondary_registration_token)?;
     nats_config::validate_runtime_nats_credentials(cfg)?;
     Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
 }
@@ -679,7 +739,7 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
 
-    let cfg = match config::Config::from_env() {
+    let mut cfg = match config::Config::from_env() {
         Ok(cfg) => cfg,
         Err(message) => {
             tracing::error!("{message}");
@@ -722,6 +782,28 @@ async fn main() -> Result<()> {
 
     let nats = connect_nats_with_retry(&cfg).await;
     let ui_session_secret = load_or_create_session_secret()?;
+
+    // Resolve the effective secondary-registration token alongside the other
+    // durable /data secrets: a real operator value is preserved, otherwise a
+    // persistent random one is generated so the documented manual compose path
+    // starts securely instead of crash-looping (see
+    // load_or_create_secondary_registration_token). validate_* then asserts the
+    // resolved value is real as defense in depth.
+    let secondary_registration_token = match load_or_create_secondary_registration_token(
+        &cfg.secondary_registration_token,
+        SECONDARY_REGISTRATION_TOKEN_FILE,
+    ) {
+        Ok(token) => token,
+        Err(message) => {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(message) = validate_secondary_registration_token(&secondary_registration_token) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
+    cfg.secondary_registration_token = secondary_registration_token;
 
     // Loaded before the DB/state so its public key can be baked into the
     // initial nats.conf write below, and its private seed handed to the
@@ -1074,6 +1156,49 @@ mod tests {
             "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn load_or_create_secondary_registration_token_generates_persists_and_preserves() {
+        // A real operator-supplied value is returned unchanged and no file is
+        // read or written (path deliberately does not exist).
+        let real = "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d";
+        assert_eq!(
+            load_or_create_secondary_registration_token(
+                real,
+                "/nonexistent/lancache-ng-must-not-be-read.token"
+            )
+            .unwrap(),
+            real
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-ng-secreg-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secondary-registration.token");
+        let path_str = path.to_str().unwrap();
+
+        // An empty configured value generates a real hex32 token and persists it.
+        let generated = load_or_create_secondary_registration_token("", path_str).unwrap();
+        assert_eq!(generated.len(), 64, "expected a 32-byte hex token");
+        assert!(!secondary_registration_token_is_placeholder(&generated));
+
+        // Idempotent: a later start with a placeholder value reuses the persisted
+        // token (must never rotate), whichever placeholder form triggered it.
+        let reused = load_or_create_secondary_registration_token(
+            "YOUR_SECONDARY_REGISTRATION_TOKEN_HERE",
+            path_str,
+        )
+        .unwrap();
+        assert_eq!(generated, reused);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
