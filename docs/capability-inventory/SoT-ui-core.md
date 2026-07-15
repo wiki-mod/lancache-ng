@@ -693,57 +693,55 @@ multi-container integration tests (not mocks):
   while *it* crash-loops) — the actual "rescue mode" gap #763 still tracks
   as deferred.
 
-**The actual CI gap — verified directly, not inferred, and re-verified after
-an advisor review flagged the first pass as incomplete**:
+**CORRECTED after maintainer review — `cargo test` DOES run in CI.** An
+earlier version of this section claimed no workflow invokes `cargo` at all.
+That claim was wrong, caught directly by the maintainer against the actual
+workflow file, and is retracted here rather than left standing (see revision
+history at the bottom of this document for the full account).
 
-- None of the workflow files on `origin/v0.2.0` (`.github/workflows/*.yml` —
-  checked every file, `grep -i cargo` across all of them) invoke `cargo` at
-  all.
-- The `services/ui/Dockerfile` build stage runs `cargo build --release
-  --locked` only (checked directly against both the sccache-enabled and
-  non-sccache-fallback build paths) — **never `cargo test`**.
-- There IS a real, well-built script that runs `cargo test`:
-  **`scripts/ui-rust-checks.sh`** (fmt-check → check → clippy → **test** →
-  build, in that order, each individually toggleable via `--no-*` flags,
-  running inside the project's `build-tools` Docker image so contributors
-  don't need a host Rust toolchain). Documented in
-  `docs/ui-rust-dev-checks.md` as "Local Admin UI Rust Checks... so
-  contributors do not need `rustc` on the host machine." **Confirmed by
-  grepping every file in the repository for `ui-rust-checks`: it is
-  referenced by exactly one file, its own documentation page — no workflow
-  invokes it.** It is a real, usable, correctly-implemented local
-  convenience script, not a CI gate.
-- Net effect: every one of the **~91 `#[test]` functions** across `main.rs`
-  (12), `config.rs` (24), `nats_auth_callout.rs` (15), `nats_config.rs`
-  (27), `session.rs` (3), `docker_client.rs` (0), `nginx_client.rs` (8),
-  `syslog_client.rs` (12), `routes/mod.rs` (4) — plus `kea_snapshots.rs`'s
-  own 8, scoped to the other agent but compiled from the same crate — is
-  only ever compiled and run if a human or agent manually invokes either
-  `cargo test --locked --manifest-path services/ui/Cargo.toml` (the exact
-  command CONTRIBUTING.md tells contributors to run themselves) or
-  `./scripts/ui-rust-checks.sh` (with `--no-test` not passed, the default).
-  **There is no automated gate in any GitHub Actions workflow enforcing that
-  either actually happens before merge.**
-- This is a real, concrete gap: a genuinely well-designed unit test suite
-  (careful env-var test isolation via `env_test_lock()`, real crypto
-  round-trip tests, real revocation-property tests, real chunk-boundary
+**What actually runs, verified directly against `origin/v0.2.0`'s
+`.github/workflows/build-push.yml`**:
+
+- **`ui_test`** (job `test (ui)`) runs `cargo test --locked --manifest-path
+  services/ui/Cargo.toml` via `./.github/actions/cargo-with-sccache-fallback`,
+  on `[self-hosted, linux, lancache, lancache-heavy]`. This is exactly the
+  ~91 `#[test]` functions across `main.rs` (12), `config.rs` (24),
+  `nats_auth_callout.rs` (15), `nats_config.rs` (27), `session.rs` (3),
+  `docker_client.rs` (0), `nginx_client.rs` (8), `syslog_client.rs` (12),
+  `routes/mod.rs` (4), plus `kea_snapshots.rs`'s own 8 (compiled from the
+  same crate, scoped to the other agent).
+- **`dns_test`** (job `test (dns/nats-subscriber)`) runs the identical
+  pattern for `services/dns/nats-subscriber/Cargo.toml`.
+- Both are gated by `detect-changes` outputs (`ui`/`dns_rust`/`workflow` ==
+  `true`) — deliberate, correctly-scoped path filtering ("UI tests run only
+  when the UI or workflow contract changes... keeps docs/setup-only PRs from
+  paying for unrelated Rust test work", per the job's own comment), **not** a
+  coverage gap. `ui_rust_quality`/`dns_rust_quality` jobs (fmt/clippy) run
+  upstream of the two test jobs with the same scoping, and a `rust_coverage`
+  job depends on both `dns_test` and `ui_test`.
+- So: the well-designed unit test suite this document catalogs (careful
+  env-var test isolation via `env_test_lock()`, real crypto round-trip
+  tests, real revocation-property tests, real chunk-boundary
   file-reconstruction tests, real multi-host log-merge starvation-guard
-  regression tests) exists entirely outside CI's enforcement. A regression
-  in any of these functions would only be caught if `full-setup-deep-
-  validate`'s two simulation scripts above happen to exercise the exact
-  broken path (they cover auth-callout's revocation property and the
-  health-route's reachability well, but do **not** cover, e.g.,
-  `session.rs`'s HMAC correctness, `nats_config.rs`'s validator edge cases,
-  `nginx_client.rs`/`syslog_client.rs`'s log-parsing edge cases, or most of
-  `config.rs`'s env-parsing logic) — or a human/agent runs
-  `cargo test`/`ui-rust-checks.sh` locally first.
-- Recommend this becomes its own tracked issue (wire `ui-rust-checks.sh` —
-  or at minimum `cargo test --locked --manifest-path services/ui/Cargo.toml`
-  — into a real CI workflow job for `services/ui`, and, per this project's
-  Rust-only language rule, likely for the other Rust crates too, e.g.
-  `services/dns/nats-subscriber`) rather than silently noting it and moving
-  on, per this issue's own "gaps that need a decision get their own issue"
-  scoping rule.
+  regression tests) **is** enforced automatically on every PR that touches
+  UI code or the workflow contract itself, exactly as `CONTRIBUTING.md`
+  implies it should be.
+
+**What is still a genuine, standalone finding (not retracted)**: the
+`services/ui/Dockerfile` build stage itself runs `cargo build --release
+--locked` only, never `cargo test` — but that's expected and correct, since
+the Dockerfile builds the release binary for the running image; test
+enforcement living in the CI workflow rather than the Dockerfile is the
+normal, sound split. Separately, **`scripts/ui-rust-checks.sh`** (a real,
+well-built local Docker-based fmt/check/clippy/test/build script, documented
+in `docs/ui-rust-dev-checks.md` as letting contributors skip installing a
+host Rust toolchain) is referenced by nothing in the repository except its
+own doc page — confirmed by grepping the whole repo for `ui-rust-checks`,
+one hit outside its own file. Since `build-push.yml` already runs the
+equivalent checks natively in CI, this script is likely redundant/dead for
+CI purposes specifically (it may still be a useful pre-push local dev
+convenience) — a smaller, still-valid finding on its own, distinct from the
+retracted "no CI test coverage" claim above.
 
 ---
 
@@ -751,7 +749,8 @@ an advisor review flagged the first pass as incomplete**:
 
 | Finding | File | Status |
 |---|---|---|
-| `cargo test` never runs in any GitHub Actions workflow for `services/ui`; the one script that does run it (`ui-rust-checks.sh`) is a local-only convenience tool referenced by nothing but its own doc page — ~91 unit tests are compile-only in every automated pipeline | crate-wide | **New finding this pass** — recommend a follow-up issue |
+| ~~`cargo test` never runs in any GitHub Actions workflow for `services/ui`~~ — **RETRACTED**: `build-push.yml`'s `ui_test`/`dns_test` jobs do run `cargo test` for `services/ui` and `services/dns/nats-subscriber` respectively, correctly path-scoped via `detect-changes`. See section 11. | crate-wide | **Corrected finding — was wrong, fixed after maintainer review** |
+| `scripts/ui-rust-checks.sh` (a real local fmt/check/clippy/test/build script) is referenced by nothing in the repo except its own doc page — likely redundant given `build-push.yml` already runs the equivalent checks in CI | crate-wide | Still valid, smaller finding (unaffected by the retraction above) |
 | `impl fmt::Display for Config` is a stub (hardcoded `"..."` ellipsis, only 2 of ~55 fields shown) — present but not meaningfully usable, and nothing appears to call it over `Debug` | `config.rs` | Defined but decorative; not a bug, just dead-ish |
 | `docker_client.rs` has zero `#[cfg(test)]` coverage, despite `container_name_for_service`'s match arms being pure and trivially testable | `docker_client.rs` | Gap, low severity |
 | `routes/mod.rs` has two near-duplicate CSRF-verification helpers (`verify_csrf_token` vs `verify_csrf_header`) with slightly different call conventions | `routes/mod.rs` | Minor duplication, not a bug |
@@ -799,3 +798,21 @@ an advisor review flagged the first pass as incomplete**:
   number, and adds the `scripts/ui-rust-checks.sh` finding to the CI-gap
   analysis (a real cargo-test-capable script exists but is wired to nothing
   in CI).
+- **Retraction**: the headline CI-gap claim in the previous revision ("no
+  GitHub Actions workflow runs `cargo test` for `services/ui`") was wrong.
+  The maintainer caught it directly against `build-push.yml`'s `ui_test`/
+  `dns_test` jobs (both run `cargo test`, correctly path-scoped via
+  `detect-changes`). Root cause: an earlier check looped `git show
+  origin/v0.2.0:<workflow-file>` over every workflow file and grepped for
+  `cargo`; on this Windows/MSYS environment, `git show <ref>:<path>` silently
+  fails with `fatal: ambiguous argument` due to MSYS's automatic path
+  conversion mangling the `ref:path` argument (colon-then-slash gets read as
+  a Windows path and rewritten, e.g. `origin/v0.2.0:.github/workflows/
+  build-push.yml` becomes `origin\v0.2.0;.github\workflows\build-push.yml`),
+  and the failure was swallowed rather than surfaced — so the loop produced
+  an empty, falsely-reassuring "no cargo anywhere" result for every single
+  workflow file, not just this one. Re-run with `MSYS_NO_PATHCONV=1` (or by
+  extracting the blob to a file first) finds the jobs immediately. Section
+  11 and the summary table above are corrected; this is recorded here as a
+  durable methodology note for any future `git show <ref>:<path>` loop run
+  on this host.
