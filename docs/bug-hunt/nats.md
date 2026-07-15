@@ -227,9 +227,21 @@ there is **no** full-setup crash-loop. This downgrades Finding C to a
 least-privilege / consistency note: full-setup relies on the allow-all
 footgun and diverges from the other three stacks' explicit grants; adding any
 `publish` entry to that block later would instantly break it. **This settles
-the open question in issue #845** — recommend closing #845 with this evidence
-(optionally add explicit grants to full-setup to match dev/prod/quickstart and
-make intent legible). Runner resources were fully cleaned up after the test.
+the open question in issue #845** — recommend closing #845 with this evidence.
+
+**Fix caveat (dependency impact — read before "just add explicit grants"):**
+the obvious tidy-up (give full-setup's writer/replica the same explicit
+publish lists dev/prod/quickstart use, for consistency/least-privilege) is
+**not free**: those explicit lists deliberately omit
+`$JS.API.STREAM.CREATE.LANCACHE_DNS` from the *replica*, which is exactly what
+imports **Finding D's startup race** — a race full-setup is immune to *today*
+precisely because its allow-all lets the replica create the stream. So any
+"make full-setup match the others" change must also address Finding D (e.g.
+grant the replica `STREAM.CREATE` too, or gate dns-ssl on the stream
+existing), or it trades a cosmetic inconsistency for a real cold-start
+crash-loop window. Findings C-fix and D are coupled.
+
+Runner resources were fully cleaned up after the test.
 
 Cross-cutting: this same test is the empirical backbone for Findings B and D.
 It proves that an **explicit** publish allow-list denies any unlisted subject
