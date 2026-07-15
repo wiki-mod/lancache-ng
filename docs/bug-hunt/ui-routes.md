@@ -292,5 +292,115 @@ findings that overlap with it are still listed (for completeness) with a note.
 
 ---
 
-*(Continues in a follow-up commit: `dhcp.rs`, the largest and most complex route file, 5568
-lines, is being worked through separately.)*
+---
+
+## dhcp.rs -- by far the largest and most complex route file (5568 lines; full non-test code,
+lines 1-3317, read in full; test module, lines 3318-5568, scanned by test-name coverage)
+
+20. **`add_reservation`'s `hostname` field is submitted to Kea with zero format validation,
+    unlike every other identity-bearing field in this file.** (`routes/dhcp.rs:1436-1494`)
+    `add_reservation` validates `form.mac` (`is_valid_mac`) and `form.ip` (`is_valid_ip`) before
+    use, but `form.hostname` is inserted straight into the reservation JSON
+    (`"hostname": form.hostname`, line ~1484) with no length cap, no character-set check, and no
+    DNS-label validity check -- a sharp contrast with `routes/domains.rs`'s LAN-record routes,
+    which validate every name field against `is_valid_dns_fqdn`/`is_valid_dns_fqdn_allow_
+    underscore` before it can reach NATS/PowerDNS. Since Kea's DDNS integration turns a
+    reservation's hostname into an actual DNS record (per this project's own architecture, a
+    lease/reservation hostname eventually becomes a `dns-standard`-side A/PTR record), an
+    unvalidated hostname here could produce a malformed DDNS update that Kea/PowerDNS then has
+    to reject or mishandle downstream, with the rejection surfacing far from where the bad input
+    was actually accepted. Whether Kea's own config-test/config-set validates hostname shape
+    server-side (which would fail this request loudly rather than silently) was not traced
+    further outside this file.
+
+21. **`GET /dhcp` silently triggers a real, disruptive Docker container restart plus a broadcast
+    DHCP-conflict scan on the LAN on every single page load, with no caching, cooldown, or
+    opt-out.** (`templates/dhcp.html:656-657`, calling `check_dhcp_conflict` /
+    `routes/dhcp.rs:1604-1611, 2100-2185`) `document.addEventListener('DOMContentLoaded',
+    checkDhcpConflict)` means every browser load (or reload) of `/dhcp` fires `GET /api/dhcp/
+    check`, which (`check_dhcp_probe` -> `run_dhcp_probe`) stops and restarts the predeclared
+    `dhcp-probe` container and runs a real `nmap broadcast-dhcp-discover` scan plus a `dhclient`
+    dry-run on the LAN. `state.dhcp_probe_lock` serializes concurrent runs so they queue rather
+    than corrupt each other's output, but nothing throttles or caches the result across page
+    loads -- an operator who refreshes the page repeatedly (or has a browser
+    extension/monitoring tool auto-refreshing an open `/dhcp` tab) queues a fresh
+    stop/start/scan cycle every single time, each one taking real wall-clock time (a full nmap
+    broadcast scan plus a dhclient dry-run) and each one emitting a real DHCPDISCOVER onto the
+    LAN. This is a meaningful operational side-effect for what looks, from the URL, like a plain
+    read-only settings page. Not present in the SoT inventory (which covers `/api/dhcp/check`'s
+    own coverage but not this auto-trigger-on-page-load behavior).
+
+22. **`remove_subnet_option`'s "nothing matched" case surfaces as a 500 Internal Server Error,
+    not a 404, unlike `release_lease`'s explicit not-found handling in the very same file.**
+    (`routes/dhcp.rs:1404-1434`, `remove_custom_subnet_option` at line ~2944) When no option
+    matches the given code+data, `remove_custom_subnet_option` returns
+    `Err("custom option not found")`, which `remove_subnet_option` maps through the generic
+    `.map_err(|e| DhcpError::config_error(e.to_string()))?` pipeline -- `config_error` always
+    constructs `StatusCode::INTERNAL_SERVER_ERROR`. Compare this to `release_lease`
+    (`routes/dhcp.rs:1528-1570`), which explicitly special-cases Kea's own "no matching lease"
+    result as `StatusCode::NOT_FOUND`, precisely because "the thing you tried to remove/release
+    was already gone" is an ordinary race, not a server failure. A double-submitted "remove
+    option" form (e.g. a double click, or a stale page reloaded after someone else already
+    removed it) renders as a 500 in this file's own error page and would show up as a real
+    backend failure in any monitoring that treats a 500 status as an incident, when the intended
+    end state (the option is gone) is already true.
+
+23. **CSRF verification happens after the (side-effect-free) `require_kea_mode` state check in
+    every Kea mutation handler, rather than first.** (`routes/dhcp.rs:1196-1198` and every
+    following mutation handler in this file follow the identical
+    `require_kea_mode(&state)?;` then `crate::routes::verify_csrf_token(...)` order) Not
+    exploitable today since `require_kea_mode` only reads already-authenticated-session-visible
+    config state and has no side effect, but it is a minor inversion of the usual "verify the
+    request is legitimate before doing anything else with it" ordering used elsewhere in this
+    project (e.g. `routes/domains.rs`'s handlers all call `verify_csrf_token` as their very
+    first statement). Flagging as an info-level consistency note, not a vulnerability.
+
+24. **The Admin UI's own user-facing template text is inconsistently in German across at least
+    seven template files rendered by these very routes, contradicting `AGENTS.md`'s explicit
+    "Project-facing text must be in English" rule.** Confirmed German strings (JS `alert()`/
+    `confirm()` dialogs and status text, not just incidental content) in:
+    `templates/dhcp.html` (`checkDhcpConflict()`'s entire status-line vocabulary -- "Prüfe...",
+    "Konfliktprobe läuft...", "Fremder DHCP-Server gefunden", "DHCP-Client-Dry-Run
+    fehlgeschlagen", "Fehler beim Prüfen: ", etc., lines ~575-635),
+    `templates/secondaries.html` (`alert()`/`confirm()` dialogs: "Token erfolgreich rotiert für
+    ${name}", "${name} wirklich entfernen?", "Fehler beim Rotieren des Tokens: ...", lines
+    ~167-196), `templates/setup.html`, `templates/logs.html`, `templates/domains.html`
+    ("Speichern" button label, line 193), `templates/base.html` ("Netdata läuft intern und
+    speist die Graphen.", line 118), and `templates/stats.html` ("Netdata-Verbindung nicht
+    verfügbar. Starte den Stack mit Netdata:", line 41). This is rendered directly by the routes
+    in this component (`dhcp_page` renders `dhcp.html`, `secondaries_page` renders
+    `secondaries.html`, `setup_page` renders `setup.html`, `domains_page` renders
+    `domains.html`, `logs_page` renders `logs.html`), so it is squarely in scope here even
+    though the actual strings live in `templates/`, not the `.rs` files themselves. This reads
+    as a systemic language-consistency defect (most of the surrounding UI text is English, with
+    German sentences mixed in at specific call sites -- looking like `CLAUDE.md`'s "Chat
+    language: German" convention leaking into shipped, English-required "Code language"
+    surfaces) rather than an isolated typo, and is not mentioned anywhere in the existing SoT
+    inventory.
+
+25. `axum::extract::Json`/`Form` in this axum 0.8 project (`services/ui/Cargo.toml:14`) apply a
+    2 MB default body-size limit automatically per-extractor unless explicitly overridden --
+    this resolves the concern initially raised in this same pass about `routes/secondaries.rs`'s
+    public `register_secondary`/`rotate_token` JSON bodies (see finding #19 above); noting this
+    here so the finding isn't miscounted as still-open. No corresponding issue found for this
+    file's own `Form` extractors either.
+
+---
+
+## Coverage note
+
+`stats.rs` (14 lines) was read in full in the first commit -- no findings beyond what the SoT
+inventory already documents (it is a pure render-only page shell).
+
+All 9 route files plus `mod.rs` (10 files, matching the SoT inventory's own file count) have now
+been read in full for their non-test code. `dhcp.rs`'s ~2250-line test module was scanned by
+test-name/coverage rather than read line-by-line, given its size; no additional findings were
+derived from the test code itself beyond the coverage-gap observations already folded into the
+numbered findings above (e.g. finding #20's note that no test exercises `add_reservation`'s
+hostname field, since none of the existing tests target it).
+
+This document is the raw, unfiltered output of the collection phase for issue #849 (vacuum-first,
+no self-verification during collection, per the maintainer-agreed methodology for this sweep).
+Severity judgments in the accompanying tool-call findings are the collecting agent's own
+first-pass estimate, not a verified ranking -- verification is a separate, later phase.
+
