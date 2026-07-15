@@ -299,6 +299,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/nginx/access.log
       - -p
       - tag=nginx.file
@@ -308,6 +310,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/nginx/access.log
       - -p
@@ -362,6 +366,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/nginx/error.log
       - -p
       - tag=nginx-error.file
@@ -371,6 +377,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/nginx/error.log
       - -p
@@ -382,6 +390,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/nginx/stream.log
       - -p
       - tag=nginx-stream.file
@@ -391,6 +401,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/nginx/stream.log
       - -p
@@ -485,6 +497,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/lancache-dns-standard/*.log
       - -p
       - tag=dns-standard.syslog
@@ -494,6 +508,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-dns-ssl/*.log
       - -p
@@ -505,6 +521,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/kea/*.log
       - -p
       - tag=dhcp.syslog
@@ -514,6 +532,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-dhcp-proxy/*.log
       - -p
@@ -525,6 +545,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/lancache-ui/*.log
       - -p
       - tag=ui.syslog
@@ -534,6 +556,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-watchdog/*.log
       - -p
@@ -545,6 +569,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/lancache-nats/*.log
       - -p
       - tag=nats.syslog
@@ -554,6 +580,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-netdata/*.log
       - -p
