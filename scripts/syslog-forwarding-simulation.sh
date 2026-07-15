@@ -304,13 +304,56 @@ for service in $all_services; do
         failed=1
     fi
     if [[ " $services_with_healthcheck " == *" $service "* ]]; then
-        health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+        # Loop 1 above and this per-service check are NOT one atomic
+        # operation: it breaks the instant it observes every tracked
+        # service healthy in a single pass, then this loop re-reads each
+        # service's status again, moments later, one at a time. Any real
+        # event that flips a service's health back to "starting" (Docker
+        # only ever does this on an actual container restart) in that gap
+        # would otherwise be reported as a fresh, unexplained failure here
+        # instead of what it actually is: a health check that already
+        # passed once, then got knocked over again by something between the
+        # two loops. This short re-poll closes that gap without weakening
+        # the check itself -- a service that is genuinely still unhealthy
+        # after this additional wait still fails loudly below, exactly as
+        # before.
+        health_deadline=$((SECONDS + 15))
+        health="unknown"
+        while (( SECONDS < health_deadline )); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+            [[ "$health" = "healthy" ]] && break
+            sleep 2
+        done
         [[ "$health" = "healthy" ]] \
-            || { echo "::error::$service did not become healthy (status: $health)" >&2; failed=1; }
+            || { echo "::error::$service did not become healthy (status: $health, restarts: $restart_count)" >&2; failed=1; }
     fi
 done
 
 if [[ "$failed" -eq 1 ]]; then
+    echo "::group::Failure diagnostics: per-service restart counts"
+    # RestartCount alone can't distinguish "restarted once, by the known
+    # ui-triggered reload_nats_conf() at boot" from "restarted again for an
+    # unrelated, unexplained reason" -- but printing it for every service
+    # here means a future occurrence of this failure has that number
+    # attached, instead of needing to be reconstructed after the fact from
+    # a job whose containers are long gone by the time anyone looks.
+    for service in $all_services; do
+        cid="$("${compose[@]}" ps -q "$service")"
+        [[ -n "$cid" ]] || continue
+        echo "$service: RestartCount=$(docker inspect --format '{{.RestartCount}}' "$cid" 2>/dev/null || echo '?')"
+    done
+    echo "::endgroup::"
+
+    echo "::group::Failure diagnostics: nats-server's own log"
+    # nats-server's log_file directive (services/nats entrypoint in
+    # deploy/quickstart/docker-compose.yml) sends its ENTIRE log to
+    # /var/log/lancache-nats/nats.log, not stdout -- "compose logs" below
+    # captures stdout/stderr only, so a nats-specific crash or an
+    # unexpected second restart would otherwise be completely invisible in
+    # this diagnostics dump.
+    "${compose[@]}" exec -T nats sh -c 'cat /var/log/lancache-nats/nats.log 2>/dev/null | tail -n 200' || true
+    echo "::endgroup::"
+
     echo "::group::Logs from all services (failure diagnostics)"
     "${compose[@]}" logs --no-color
     echo "::endgroup::"
