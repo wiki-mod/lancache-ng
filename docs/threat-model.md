@@ -251,7 +251,14 @@ record changes, or subscribes to read cache/DNS metadata.
 
 **Mitigations** (verified in `deploy/quickstart/docker-compose.yml`):
 - NATS is **not published on the host** in the default deployment — it is only
-  reachable on the internal Docker network.
+  reachable on the internal Docker network. This also covers nats-server's own
+  HTTP monitor endpoint (`http_port: 8222`, added for the Docker healthcheck
+  and Netdata's NATS collector): it carries no credentials of its own
+  (nats-server's monitor has no built-in auth), so any container reachable on
+  the same internal Docker network can read `/varz`/`/healthz` without a NATS
+  role credential — but it is read-only server metadata (version, connection
+  counts), not the DNS-record data path itself, and stays unreachable from
+  outside the Docker network exactly like the client port.
 - Access is **credentialled and role-scoped**, not a single shared account.
   Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.

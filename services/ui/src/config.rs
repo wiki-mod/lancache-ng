@@ -105,6 +105,7 @@ pub struct Config {
     pub ui_session_ttl_seconds: u64,
     pub security_headers_enabled: bool,
     pub hsts_mode: HstsMode,
+    pub ui_logs_max_entries: usize,
     pub pdns_auth_url: String,
     pub pdns_rec_url: String,
     // Zone/record known-good snapshot rollback listener (#628), a new
@@ -253,6 +254,7 @@ impl fmt::Debug for Config {
             )
             .field("allow_insecure_ui", &self.allow_insecure_ui)
             .field("ui_session_ttl_seconds", &self.ui_session_ttl_seconds)
+            .field("ui_logs_max_entries", &self.ui_logs_max_entries)
             .field("pdns_auth_url", &self.pdns_auth_url)
             .field("pdns_rec_url", &self.pdns_rec_url)
             .field("dns_rollback_url", &self.dns_rollback_url)
@@ -567,6 +569,7 @@ impl Config {
             )?,
             security_headers_enabled: env_bool("UI_SECURITY_HEADERS", true),
             hsts_mode: env_hsts_mode("UI_HSTS_MODE", HstsMode::Auto),
+            ui_logs_max_entries: env_usize_clamped("UI_LOGS_MAX_ENTRIES", 200),
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             dns_rollback_url: env_str("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
@@ -734,6 +737,19 @@ fn env_u32_clamped(key: &str, default: u32) -> u32 {
     env::var(key)
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(default)
+}
+
+// The Admin UI /logs view is a bounded tail. A missing, non-numeric, or zero
+// value falls back to `default` rather than failing UI startup: this is a
+// display convenience knob, not a fail-closed security value, and zero would
+// silently blank the page. Kept as usize so parse_log_tail/parse_syslog_tail
+// limits and the final Vec::truncate need no casts.
+fn env_usize_clamped(key: &str, default: usize) -> usize {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(default)
 }
@@ -1234,6 +1250,29 @@ mod tests {
 
         env::set_var(key, "7");
         assert_eq!(env_u32_clamped(key, 3), 7);
+
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn env_usize_clamped_falls_back_to_default_for_invalid_or_non_positive_values() {
+        let _guard = env_test_lock().lock().unwrap();
+        let key = "LANCACHE_TEST_UI_LOGS_MAX_ENTRIES_CLAMP";
+
+        env::remove_var(key);
+        assert_eq!(env_usize_clamped(key, 200), 200);
+
+        for invalid in ["0", "", "abc", "-1"] {
+            env::set_var(key, invalid);
+            assert_eq!(
+                env_usize_clamped(key, 200),
+                200,
+                "expected default for invalid value {invalid:?}"
+            );
+        }
+
+        env::set_var(key, "500");
+        assert_eq!(env_usize_clamped(key, 200), 500);
 
         env::remove_var(key);
     }

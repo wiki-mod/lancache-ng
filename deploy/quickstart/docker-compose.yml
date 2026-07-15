@@ -115,6 +115,17 @@ services:
         jetstream {
           store_dir: /data
         }
+        # Monitor endpoint: nats-server shipped with no HTTP monitor
+        # listening (no http_port set), so the Docker healthcheck below and
+        # Netdata's go.d NATS collector both saw a hard connection refused
+        # against :8222 on every attempt -- not a timing issue, the port
+        # simply never opened. Verified live against this pinned image
+        # (nats-server 2.14.3): once set, /healthz and /varz answer
+        # immediately after "Server is ready". Only reachable from other
+        # containers on this compose network -- not published to the host --
+        # and carries no secrets of its own (nats-server's monitor endpoint
+        # has no built-in auth).
+        http_port: 8222
         # Central logging pipeline (#633): nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
         # lifetime (no dual-output mode exists, unlike Kea's
@@ -244,6 +255,17 @@ services:
       # `log_file: /var/log/lancache-nats/nats.log` (the UI's auth_callout.conf
       # fragment carries no log_file since issue #811); fluent-bit tails it.
       - nats-logs:/var/log/lancache-nats
+    healthcheck:
+      # Real HTTP probe against the monitor endpoint (http_port: 8222 in the
+      # entrypoint above), not just a bare TCP connect -- proves nats-server's
+      # HTTP monitor is actually answering, not merely that something is
+      # listening on the port. Uses wget (BusyBox), not curl: verified
+      # empirically that nats:2-alpine ships BusyBox's wget/nc but no curl.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -277,6 +299,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/nginx/access.log
       - -p
       - tag=nginx.file
@@ -286,6 +310,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/nginx/access.log
       - -p
@@ -340,6 +366,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/nginx/error.log
       - -p
       - tag=nginx-error.file
@@ -349,6 +377,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/nginx/error.log
       - -p
@@ -360,6 +390,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/nginx/stream.log
       - -p
       - tag=nginx-stream.file
@@ -369,6 +401,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/nginx/stream.log
       - -p
@@ -463,6 +497,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/lancache-dns-standard/*.log
       - -p
       - tag=dns-standard.syslog
@@ -472,6 +508,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-dns-ssl/*.log
       - -p
@@ -483,6 +521,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/kea/*.log
       - -p
       - tag=dhcp.syslog
@@ -492,6 +532,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-dhcp-proxy/*.log
       - -p
@@ -503,6 +545,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/lancache-ui/*.log
       - -p
       - tag=ui.syslog
@@ -512,6 +556,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-watchdog/*.log
       - -p
@@ -523,6 +569,8 @@ services:
       - -i
       - tail
       - -p
+      - read_from_head=on
+      - -p
       - path=/var/log/lancache-nats/*.log
       - -p
       - tag=nats.syslog
@@ -532,6 +580,8 @@ services:
       - skip_long_lines=on
       - -i
       - tail
+      - -p
+      - read_from_head=on
       - -p
       - path=/var/log/lancache-netdata/*.log
       - -p
@@ -1263,6 +1313,17 @@ services:
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      # Shallow liveness probe against services/ui/src/main.rs's own /health
+      # route (its comment there documents it as existing specifically for
+      # container healthchecks) -- proves the HTTP server is accepting
+      # connections, not that NATS/Docker/DNS are reachable. curl is present
+      # in this image's apt-get install list (services/ui/Dockerfile).
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - docker-socket-proxy
       - proxy
@@ -1283,6 +1344,33 @@ services:
     hostname: lancache-netdata
     cap_add: [SYS_PTRACE]
     security_opt: [apparmor:unconfined]
+    # Central logging pipeline (#633, #847): this netdata build's own log
+    # paths under /var/log/netdata (access/collector/daemon/health/...) are
+    # symlinks to /dev/stdout|stderr, not real files -- nothing for
+    # fluent-bit to tail. Same "no local repo checkout to bind-mount a
+    # config file from" constraint the syslog/syslog-ng services already
+    # solve by generating their config inline (quickstart's install_dir has
+    # no services/ directory -- see setup.sh's install_quickstart_compose_
+    # assets()), so this entrypoint override writes a netdata.conf that
+    # redirects daemon/health to real files under
+    # /var/log/netdata/*.file.log, then execs the image's own entrypoint.
+    # netdata-logs shares that path with fluent-bit, which tails those real
+    # files read-only. collector/access/debug stay on their stdout defaults
+    # and are NOT collected: collector is extremely high-rate internal
+    # diagnostics (temperature-sensor flapping, apps.plugin permission-denied
+    # spam per host process) that would flood the shared bounded /logs view
+    # and hide every other source; access is high-rate API chatter; debug is
+    # empty unless enabled.
+    entrypoint: ["/usr/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        cat > /etc/netdata/netdata.conf <<'CONF'
+        [logs]
+        daemon = /var/log/netdata/daemon.file.log
+        health = /var/log/netdata/health.file.log
+        CONF
+        exec /usr/sbin/run.sh
     volumes:
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata
@@ -1290,9 +1378,6 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Central logging pipeline (#633): netdata writes health/collector/
-      # error logs under /var/log/netdata by default; mount that onto a
-      # shared volume so fluent-bit can tail it.
       - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
     restart: always

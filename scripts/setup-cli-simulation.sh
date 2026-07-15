@@ -130,14 +130,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Mirrors the proven health-wait pattern from full-setup-validate.yml: only
-# proxy and dns-standard declare a real healthcheck in this minimal profile
-# (SSL/DHCP/scheduled-updates/logging all disabled), everything else is only
-# checked for "running" plus a restart-count ceiling (catches a crash loop
-# without needing a healthcheck definition for every service).
+# Mirrors the proven health-wait pattern from full-setup-validate.yml: proxy,
+# dns-standard, nats, and ui declare a real healthcheck in this minimal
+# profile (SSL/DHCP/scheduled-updates/logging all disabled) --
+# deploy/quickstart/docker-compose.yml previously left nats/ui without one
+# (no http_port set for nats, no HEALTHCHECK in the ui image), which is why
+# they were absent from this list; both now have one, matching
+# full-setup-validate.yml's own list. Everything else here (docker-socket-
+# proxy, watchdog, netdata) is only checked for "running" plus a
+# restart-count ceiling (catches a crash loop without needing a healthcheck
+# definition for every service).
 wait_for_stack_healthy() {
     local compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env")
-    local services_with_healthcheck="proxy dns-standard"
+    local services_with_healthcheck="proxy dns-standard nats ui"
     local all_services="proxy dns-standard nats docker-socket-proxy watchdog ui netdata"
     local deadline=$((SECONDS + 90)) service cid status all_ready
 

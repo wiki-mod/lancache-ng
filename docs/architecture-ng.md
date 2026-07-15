@@ -132,13 +132,27 @@ Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse p
 
 Lightweight container with Docker socket access (restart permission).
 
-**Health checks:**
+**Health checks:** every service below has a Docker Compose `healthcheck:`
+block, but `watchdog.sh` itself only *acts* on a subset of them -- see the
+"Auto-restart" scope note directly below this list before assuming every
+entry here is watched and restarted by the watchdog daemon.
 - nginx: HTTP request on `/health`
 - PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
+- nats: HTTP probe against nats-server's own monitor endpoint (`http_port: 8222` set in the compose-generated boot config, checked via `wget` against `/healthz` -- nats:2-alpine ships BusyBox's wget/nc but no curl, verified empirically)
+- ui: HTTP request on `/health` (`services/ui/src/main.rs`'s shallow liveness route, checked via `curl`, present in the image)
 - syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit: `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build)
 
-**Auto-restart:** X failed checks → `docker restart <container>`
+**Auto-restart:** X failed checks → `docker restart <container>`. Scope,
+verified against `services/watchdog/watchdog.sh`: the daemon's own
+`check_and_maybe_restart` loop only polls and auto-restarts `proxy`,
+`dns-standard`, and (when `SSL_ENABLED=1`) `dns-ssl` -- the three container
+names it takes via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+`CONTAINER_DNS_SSL`, feeding the Admin UI's dashboard traffic-light status.
+Kea, syslog-ng, fluent-bit, `nats`, and `ui` all have a real Docker
+healthcheck too (so `docker inspect`/`docker compose ps` and CI's own
+wait-for-healthy scripts can see it), but the watchdog daemon does not poll
+or restart any of those five itself.
 
 **Scheduled purge (cron, daily):**
 - Remove cache entries older than `CACHE_VALID_HIT` (`find -mtime`)
@@ -183,7 +197,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | ui | Via fluent-bit → syslog-ng | `main.rs`'s `init_tracing()` adds a second `tracing-subscriber` layer that appends to `UI_LOG_FILE` (default `/var/log/lancache-ui/ui.log`) alongside the existing stdout layer; best-effort — a missing/unwritable log path never blocks startup |
 | watchdog | Via fluent-bit → syslog-ng | `watchdog.sh` itself is unchanged; the compose `entrypoint`/`command` override `tee`s its stdout into `/var/log/lancache-watchdog/watchdog.log` via `exec /watchdog.sh > >(tee -a ...) 2>&1`, so it stays PID 1 (signal handling unaffected) |
 | nats | Via fluent-bit → syslog-ng | Like dnsmasq, nats-server logs to exactly one destination — no dual-output mode exists — so `log_file: /var/log/lancache-nats/nats.log` (set both in the compose-generated boot config and, authoritatively, by the Admin UI's `update_nats_conf`) means `docker logs` goes quiet on this container while the `logging` profile is active; same accepted trade-off as dhcp-proxy |
-| netdata | Via fluent-bit → syslog-ng | netdata writes `health.log`/`collector.log`/`error.log` etc. under `/var/log/netdata` by default; that path is now mounted onto the `netdata-logs` volume, which fluent-bit tails read-only |
+| netdata | Via fluent-bit → syslog-ng | The pinned netdata image ships its default `/var/log/netdata/*.log` paths as symlinks to `/dev/stdout`/`/dev/stderr` (nothing for fluent-bit to tail), so — same "no local repo checkout to bind-mount a config file from" constraint as `syslog`/`syslog-ng` below — an inline `entrypoint` override writes a `netdata.conf` that redirects the `[logs]` `collector`/`daemon`/`health` sources to real files at `/var/log/netdata/*.file.log`, then `exec`s the image's own `/usr/sbin/run.sh`; that path is mounted onto the `netdata-logs` volume, which fluent-bit tails read-only. `access`/`debug` stay on their stdout defaults (high-rate/empty). netdata v2 has no separate `error` log key — error-level events land in `daemon`/`collector` |
 | dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
 | fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet (follow-up #633); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build) |
 | syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
