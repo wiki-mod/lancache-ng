@@ -278,6 +278,157 @@ calls out that this field is being skipped rather than genuinely unset).
 **Evidence:** `config/dev/dhcp.env` (no `DHCP_DNS_SERVER_IP_SSL` line);
 `services/dhcp/entrypoint.sh` line 63 (`: "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"`).
 
+## Verification pass (self-verified against origin/v0.2.0)
+
+Second, independent pass: every finding above re-checked directly against the
+real code in its own context (not delegated), each with its own reasoning, plus
+independent follow-through for anything not yet traced to its end. Verdicts:
+
+- **#1 (blind `wait` hides a dead D2) — CONFIRMED, moderate.** `entrypoint.sh`
+  starts three daemons (lines 501/505/510) and calls bare `wait` (line 534);
+  bash's argument-less `wait` blocks until *all* jobs exit, so one dead daemon
+  never makes PID 1 exit and Docker's restart policy never fires. Confirmed the
+  healthcheck (dev compose lines 257-270, prod 293+) only runs
+  `config-get service:["dhcp4"]` through the Control Agent: a dead `kea-dhcp4`
+  *is* caught (config-get errors → `jq .result==0` fails → unhealthy), a dead
+  `kea-ctrl-agent` *is* caught (curl fails → unhealthy), but a dead
+  `kea-dhcp-ddns` is caught by nothing → forward/reverse DDNS silently stops
+  while the container stays "healthy". Same single-blind-`wait` shape in
+  `services/dns/entrypoint.sh`, so it is a project-wide class.
+
+- **#2 (`DHCP_DDNS_PORT` unvalidated, unquoted) — CONFIRMED, minor.** Only
+  handling is the default at line 70 (`: "${DHCP_DDNS_PORT:=5300}"`); no
+  `is_ipv4`/numeric gate. It is spliced *unquoted* into `kea-dhcp-ddns.conf`
+  (`"port": ${DHCP_DDNS_PORT}`, 36 occurrences), so a non-numeric value yields
+  syntactically invalid JSON and — per #1 — a *silent* D2 startup failure.
+  Reachability proven by the mirror image of #2's own refutation: a repo-wide
+  grep shows `DHCP_DDNS_PORT` is set in **no** compose `environment:` block and
+  **no** env-file — it flows purely from the entrypoint default, so the value an
+  operator can typo (e.g. via a future env addition) reaches JSON with nothing
+  in between. Refinement to the original rationale: the claim that
+  `DHCP_LEASE_TIME` is fully gated by `$((DHCP_LEASE_TIME * 2))` is only
+  partly true — bash evaluates a pure-identifier value (`abc`) as a nested
+  variable to `0` with no error, so `valid-lifetime`/`max-valid-lifetime` (also
+  unquoted, `kea-dhcp4.conf` lines 66-67) are an equally unvalidated splice;
+  the difference is that a broken `kea-dhcp4.conf` *is* caught by the
+  healthcheck, so its failure is not silent the way D2's is.
+
+- **#3 (`migrate_dhcp4_config` has zero direct test coverage) — CONFIRMED,
+  moderate.** The bats extractor (`tests/bats/helpers/dhcp-kea-helpers.sh` line
+  15) whitelists only `is_ipv4|is_ipv4_csv|resolve_ntp_server|resolve_ntp_csv|build_ntp_option|render_kea_config|render_kea_dhcp4_config`;
+  `migrate_dhcp4_config`/`build_ntp_migration_map` are never sourced. Grep across
+  `tests/` finds `migrate_dhcp4_config` only in one explanatory comment
+  (`dhcp_kea_config_generation.bats` line 58), never a call. Both E2E sims boot a
+  fresh container so migration runs once against its own just-rendered template
+  (`cmp -s` → no-op) — the actual "upgrade an existing install" jq branches run
+  only on a live operator's real upgrade. This is the most-complex,
+  most-regression-prone function in the entrypoint (CHANGELOG: #773 log-path
+  outage, #694/#749 hook-path/comment bugs) and nothing exercises its migration
+  path.
+
+- **#4 (duplicate reserved IP across MACs) — CONFIRMED as a UI-side validation
+  gap, moderate.** `add_reservation` (dhcp.rs 1436) validates only
+  `is_valid_mac` + `is_valid_ip` (syntactic); `upsert_reservation` (3261) matches
+  existing entries by `hw-address` only, so two different MACs with the same
+  `ip-address` both persist. No `ip-address`-uniqueness check anywhere in this
+  path. Scope-limited claim per the evidence I actually hold: whether Kea itself
+  then rejects the duplicate is **version-dependent and unverified from here**
+  (Kea's `ip-reservations-unique` global defaults to `true` in recent releases
+  and *would* reject it at config-set time, turning this into a hard 500 the
+  operator sees; older/relaxed configs would silently accept two devices
+  fighting for one IP). Either way the UI does no pre-check of its own, unlike
+  every subnet-geometry check in the same file — that gap is the confirmed part.
+
+- **#5 (reservation IP not checked against subnet CIDR) — CONFIRMED, minor.**
+  `add_reservation` calls `is_valid_ip` (bare IPv4 syntax) and never
+  `ipv4_in_cidr` against the target subnet, unlike `validate_dhcp_form` (2533-2535)
+  for pools/gateway and `compatible_reservations_for_subnet` (3189) for existing
+  reservations. An operator can attach an out-of-subnet address to any
+  `subnet_id` with no 400 from this project's own validation.
+
+- **#6 (no cross-subnet CIDR/pool overlap check) — CONFIRMED as a UI-side gap,
+  info.** `add_subnet`/`update_subnet` (1192/1268) only run `validate_dhcp_form`,
+  which checks geometry *within one* subnet's own CIDR; nothing compares against
+  the other `subnet4` entries. Same hedge as #4: the downstream "Kea does not
+  reject overlapping subnet4" claim is **version-dependent and not verified from
+  here**; the confirmed part is that this project performs no overlap check of
+  its own.
+
+- **#7 (nmap failure misreported as `not_found`) — CONFIRMED, downgraded to
+  minor.** The logic is real: on nmap failure the `2>&1` banner/error text makes
+  `$nmap_out` non-empty, so `elif [ -s "$nmap_out" ]` reports `not_found`
+  (`dhcp-probe.sh` 40-46), and that flows straight through
+  `parse_conflict_probe_result` (dhcp.rs 2199) → `NotFound` → UI shows "no
+  conflict". Traced to the end. **But** the original trigger example ("missing
+  CAP_NET_RAW / root privilege") does not apply in the default deployment: the
+  `ui` image sets no `USER` (Dockerfile ends at root) and the `dhcp-probe`
+  compose service sets no `user:`, so the probe runs as root, and Docker's
+  default capability set grants root `CAP_NET_RAW` — nmap's raw broadcast works
+  without any `cap_add`. So the misclassification is real but its trigger is a
+  genuine nmap runtime error, not a structural every-run failure; minor.
+
+- **#8 (quickstart `dhcp-probe` bind-mount source absent) — CONFIRMED, info
+  (mitigated).** `deploy/quickstart/docker-compose.yml` line 1174 bind-mounts
+  `./scripts/dhcp-probe.sh`, which exists nowhere in the repo (real file is
+  `services/ui/dhcp-probe.sh`); `deploy/dev` and `deploy/prod` have no such mount
+  (they use the baked-in image copy, ui Dockerfile line 472). `setup.sh`
+  `install_quickstart_compose_assets()` copies the file into
+  `<install_dir>/scripts/dhcp-probe.sh` (and force-removes an auto-vivified dir
+  per #538), guarded by `tests/bats/setup_quickstart_assets.bats`. Trap only
+  bites someone running the quickstart compose file straight from a repo checkout
+  (Docker auto-vivifies an empty dir over the container's real script). All CI
+  hits the file via the real setup flow, so it is masked everywhere exercised.
+
+- **#9 (run_dhcp_probe non-zero-exit branch unreachable) — PARTIALLY REFUTED,
+  info.** `dhcp-probe.sh` runs `set -eu` (line 7), so it is *not* true that the
+  script can only exit 0: any unguarded command failure (`mktemp -d`, `date`,
+  an unbound var from a future edit) exits non-zero, and a container OOM/abort
+  also yields a non-zero wait status. So the Rust branch (dhcp.rs 2176-2182) is
+  legitimately-reachable defensive code for infra/early-exit failures, not dead
+  code — and it never masks a real conflict result (a found conflict still exits
+  0). Reframe: correctly defensive, just untested.
+
+- **#10 (DDNS `dns-servers` is failover, not fan-out) — CONFIRMED, already
+  tracked (#770), info.** Re-verified: every `dns-servers` array in
+  `kea-dhcp-ddns.conf` lists `${DHCP_DNS_SERVER_IP}` then
+  `${DHCP_DNS_SERVER_IP_SSL}`; Kea D2 treats this first-to-last, so `dns-ssl`
+  never gets a record while `dns-standard` answers. Unchanged.
+
+- **#11 (dev `dhcp.env` missing `DHCP_DNS_SERVER_IP_SSL`) — REFUTED for the real
+  deployment path, info.** The env-file omission is inert: `deploy/dev` (line
+  240) and `deploy/prod` (line 278) set `DHCP_DNS_SERVER_IP_SSL=${IP_SSL}` in the
+  compose `environment:` block, which by Compose precedence overrides `env_file:`.
+  So the value comes from `IP_SSL` (from `deploy/*/.env`), never from the
+  entrypoint's `127.0.0.1` fallback, in any normal `docker compose` run. The
+  127.0.0.1 fallback would only ever appear if someone ran the container with the
+  env-file alone and no compose environment — not a deployment path. See new
+  finding N1 for the residual real inconsistency this uncovered.
+
+## New findings from this pass
+
+- **N1. dev/prod compose use bare `${IP_SSL}` where quickstart uses
+  `${IP_SSL:-${IP_STANDARD}}` (info/minor).** `deploy/quickstart` line 1073 sets
+  `DHCP_DNS_SERVER_IP_SSL=${IP_SSL:-${IP_STANDARD}}`, but `deploy/dev` (240) and
+  `deploy/prod` (278) use bare `${IP_SSL}` (same for `DHCP_DNS_SECONDARY`). In a
+  standard-only deployment where `IP_SSL` is unset in `deploy/*/.env`, dev/prod
+  resolve the SSL DDNS target (and the secondary DNS option) to empty →
+  entrypoint's `127.0.0.1` fallback, i.e. a dead second failover target inside
+  the dhcp container itself, whereas quickstart degrades to `IP_STANDARD`. This
+  is the actual residue of the (refuted) #11: not the env-file, but the missing
+  `:-${IP_STANDARD}` default in the two non-quickstart compose files. Low impact
+  because it is only the failover entry (#770), but it is a silent
+  standard-only-mode inconsistency between the three compose variants.
+
+- **N2. `kea-dhcp4.conf` `valid-lifetime`/`max-valid-lifetime` are unquoted,
+  incompletely-gated env splices (info).** Same unquoted-JSON-interpolation class
+  as #2 (`kea-dhcp4.conf` lines 66-67). `DHCP_LEASE_TIME`'s only gate is
+  `$((DHCP_LEASE_TIME * 2))` at entrypoint line 189, which bash evaluates to `0`
+  (no error) for a pure-identifier value like `abc`, letting the raw token reach
+  JSON. A trailing-garbage value (`86400x`) *does* abort via arithmetic under
+  `set -e`, so the gate is partial, not absent. Distinct from #2 in that the
+  resulting broken `kea-dhcp4.conf` is caught by the healthcheck (not silent),
+  so lower severity — noted for completeness of the interpolation-safety class.
+
 ## Out of scope / explicitly not re-litigated here
 
 - `services/dhcp-proxy` (dnsmasq ProxyDHCP/PXE mode) — different code path,
