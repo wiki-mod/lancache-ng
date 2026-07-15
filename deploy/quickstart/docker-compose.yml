@@ -1344,6 +1344,30 @@ services:
     hostname: lancache-netdata
     cap_add: [SYS_PTRACE]
     security_opt: [apparmor:unconfined]
+    # Central logging pipeline (#633, #847): this netdata build's own log
+    # paths under /var/log/netdata (access/collector/daemon/health/...) are
+    # symlinks to /dev/stdout|stderr, not real files -- nothing for
+    # fluent-bit to tail. Same "no local repo checkout to bind-mount a
+    # config file from" constraint the syslog/syslog-ng services already
+    # solve by generating their config inline (quickstart's install_dir has
+    # no services/ directory -- see setup.sh's install_quickstart_compose_
+    # assets()), so this entrypoint override writes a netdata.conf that
+    # redirects collector/daemon/health to real files under
+    # /var/log/netdata/*.file.log, then execs the image's own entrypoint.
+    # netdata-logs shares that path with fluent-bit, which tails those real
+    # files read-only. access/debug stay on their stdout defaults (high-rate
+    # API chatter / empty unless debug is enabled).
+    entrypoint: ["/usr/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        cat > /etc/netdata/netdata.conf <<'CONF'
+        [logs]
+        collector = /var/log/netdata/collector.file.log
+        daemon = /var/log/netdata/daemon.file.log
+        health = /var/log/netdata/health.file.log
+        CONF
+        exec /usr/sbin/run.sh
     volumes:
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata
@@ -1351,9 +1375,6 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Central logging pipeline (#633): netdata writes health/collector/
-      # error logs under /var/log/netdata by default; mount that onto a
-      # shared volume so fluent-bit can tail it.
       - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
     restart: always
