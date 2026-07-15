@@ -2445,6 +2445,27 @@ jobs:
           set -euo pipefail
           docker compose down --volumes --remove-orphans || true
 
+          # `down` above can lose Docker's own "has active endpoints" race
+          # (a container-removal API call can return before its network
+          # endpoint is actually unwired -- confirmed for real in CI, see
+          # validation_project_networks_teardown's own comment in
+          # reserve-validation-subnet.sh) and silently leave this project's
+          # network(s) non-empty, poisoning them for whichever run reserves
+          # this octet next. Wait for and force a real removal instead of
+          # trusting `down`'s own exit code.
+          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+          # This step runs unconditionally (`if: always()`), including when
+          # the "Reserve a validation subnet and start the stack" step above
+          # failed before ever setting COMPOSE_PROJECT_NAME -- under
+          # `set -u`, a bare "$COMPOSE_PROJECT_NAME" would abort this whole
+          # step with "unbound variable" in exactly that case (confirmed in
+          # CI). The safe-default form skips teardown when there is nothing
+          # to tear down instead.
+          if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+            validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
+          fi
+
           # Release the host-local subnet lock the "Reserve a validation
           # subnet and start the stack" step above acquired (see that step's
           # own comment), so the octet becomes available to the next run

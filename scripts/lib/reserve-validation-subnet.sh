@@ -326,3 +326,127 @@ validation_subnet_output_is_collision() {
         || "$output" == *"already in use"* \
         || "$output" == *"Address already in use"* ]]
 }
+
+# validation_network_await_detached <network_name> [timeout_seconds]
+# Polls `docker network inspect <network_name>` until Docker itself reports
+# zero attached containers (or the network is already gone), instead of a
+# blind fixed sleep. Prints nothing; returns 0 once confirmed clear/gone, 1
+# (with an ::error:: naming the still-attached containers) if
+# <timeout_seconds> (default 30) elapses first.
+#
+# WHY THIS EXISTS: every one of this project's compose-stack simulation
+# scripts tears its stack down with `docker compose down ... || true`, on
+# the assumption that once that command returns, every container AND its
+# network endpoint are fully gone. Confirmed false in real CI (run
+# 29346408005's attempt 1, jobs "Watchtower update simulation" and "DNS
+# zone/record rollback simulation", both landing on octet 69): the Docker
+# daemon's own container-removal API call can report success before the
+# matching network endpoint is actually unwired internally -- worse under
+# host load with many concurrent validation networks (18 other stale octets
+# were live on the runner at that exact moment, per the post-job cleanup
+# hook's own log). Since every job in one full-setup-deep-validate.yml run
+# derives and reuses the SAME octet/project name (compute-validation-network
+# runs once per run, not once per job), a job whose own `down` lost this
+# race silently leaves one container attached (its swallowed `|| true`
+# never surfaces this), and the NEXT job to reserve that same octet inherits
+# a network Docker still considers non-empty. That job's own `docker compose
+# up` then hits Compose's recreate-stale-network path, which fails with
+# "has active endpoints" -- a real, uncontrolled command failure (not
+# wrapped in `|| true`), which is what actually surfaced in CI. Confirmed
+# directly on a real self-hosted runner host: a two-container/stop-one/
+# rm-immediately repro reproduces "has active endpoints" once enough
+# concurrent networks are active on the host to slow the daemon's own
+# endpoint-detach queue, and waiting for `docker network inspect`'s
+# container count to reach 0 before removing eliminates it.
+validation_network_await_detached() {
+    local network_name="$1" timeout="${2:-30}"
+    local deadline=$((SECONDS + timeout))
+    local remaining
+
+    while (( SECONDS < deadline )); do
+        remaining="$(docker network inspect "$network_name" --format '{{len .Containers}}' 2>/dev/null)" || return 0
+        [[ "$remaining" == "0" ]] && return 0
+        sleep 1
+    done
+
+    echo "::error::Docker network $network_name still reports attached containers after ${timeout}s -- a container's endpoint never fully detached (teardown race)." >&2
+    # Redirect order matters (see watchtower-update-simulation.sh's own
+    # identical-reasoning comment): `>&2` first duplicates the CURRENT
+    # stdout target onto fd2, then `2>/dev/null` replaces fd2 with
+    # /dev/null for THIS command's own stderr only -- doing it in the
+    # reverse order would send the container names themselves to
+    # /dev/null too, since fd1 would then be duplicated from an
+    # already-redirected fd2.
+    docker network inspect "$network_name" --format '{{range $id, $c := .Containers}}{{$c.Name}} {{end}}' >&2 2>/dev/null || true
+    return 1
+}
+
+# validation_network_teardown <network_name> [timeout_seconds]
+# Removes <network_name>, waiting for every attached container to actually
+# detach first (validation_network_await_detached) rather than racing
+# Docker's own async endpoint-detach against an immediate `docker network
+# rm` -- the exact race described above. If the wait times out, force-
+# disconnects every still-attached container's endpoint (a container stuck
+# past the timeout did not shut down cleanly on its own; waiting longer
+# would not help) before retrying the removal, and reports a clear,
+# actionable error if the network still cannot be removed afterward --
+# instead of silently leaving a poisoned network behind for whichever job
+# or run reuses this project name next (the actual failure mode this
+# function replaces). Safe to call when the network is already gone.
+#
+# Callers use this instead of trusting `docker compose down`'s own network
+# removal to have actually finished: it is meant to run right after `down`
+# in every script's cleanup trap, so the octet/project-name lock this
+# project's callers hold (scripts/lib/run-in-validation-subnet.sh,
+# full-setup-validate.yml's own teardown step) can truthfully be released
+# once this returns, instead of merely once `down`'s own CLI call returned.
+validation_network_teardown() {
+    local network_name="$1" timeout="${2:-30}"
+
+    if ! docker network inspect "$network_name" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! validation_network_await_detached "$network_name" "$timeout"; then
+        echo "::warning::Force-disconnecting remaining containers from $network_name after the ${timeout}s wait; they did not shut down cleanly on their own." >&2
+        local containers cid
+        containers="$(docker network inspect "$network_name" --format '{{range $id, $c := .Containers}}{{$id}} {{end}}' 2>/dev/null)"
+        for cid in $containers; do
+            docker network disconnect -f "$network_name" "$cid" >/dev/null 2>&1 || true
+        done
+    fi
+
+    if docker network rm "$network_name" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if docker network inspect "$network_name" >/dev/null 2>&1; then
+        echo "::error::Docker network $network_name could not be removed even after waiting ${timeout}s and force-disconnecting its containers -- a later job/run reusing this project name will hit the same 'has active endpoints' race." >&2
+        return 1
+    fi
+    return 0
+}
+
+# validation_project_networks_teardown <compose_project_name> [timeout_seconds]
+# Tears down EVERY Docker network Compose created for <compose_project_name>
+# (discovered via the `com.docker.compose.project` label Compose itself
+# attaches, e.g. deploy/full-setup/docker-compose.yml declares both
+# "validation" and "validation-api" -- a single hardcoded "_validation"
+# suffix would silently skip the second one), via validation_network_teardown
+# for each. Callers should prefer this over calling
+# validation_network_teardown on one guessed network name directly: it stays
+# correct if a compose file's network list changes, with no per-caller
+# hardcoded suffix to fall out of sync.
+validation_project_networks_teardown() {
+    local compose_project="$1" timeout="${2:-30}"
+    local network_id failed=0
+
+    while IFS= read -r network_id; do
+        [[ -n "$network_id" ]] || continue
+        local network_name
+        network_name="$(docker network inspect "$network_id" --format '{{.Name}}' 2>/dev/null)" || continue
+        validation_network_teardown "$network_name" "$timeout" || failed=1
+    done < <(docker network ls --filter "label=com.docker.compose.project=$compose_project" -q 2>/dev/null)
+
+    return "$failed"
+}

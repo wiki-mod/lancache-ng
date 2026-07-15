@@ -98,7 +98,13 @@ image_tag="lancache-ng-dhcp705-proxy:$$"
 cleanup() {
     local status=$?
     docker rm -f "$dhcp_container" "$client_container" >/dev/null 2>&1 || true
-    docker network rm "$network_name" >/dev/null 2>&1 || true
+    # A blind `docker network rm` right after `docker rm -f` can still lose
+    # the "has active endpoints" race (see validation_project_networks_
+    # teardown's own comment in reserve-validation-subnet.sh); this
+    # network's name is unique per run ($$-suffixed), so a lost race here
+    # only leaks one orphaned network on the runner host, but it still
+    # needs a real wait+retry instead of silently leaking it forever.
+    validation_network_teardown "$network_name" || true
     docker rmi "$image_tag" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
     # Release the host-local subnet-octet lock the reservation loop below
