@@ -132,13 +132,27 @@ Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse p
 
 Lightweight container with Docker socket access (restart permission).
 
-**Health checks:**
+**Health checks:** every service below has a Docker Compose `healthcheck:`
+block, but `watchdog.sh` itself only *acts* on a subset of them -- see the
+"Auto-restart" scope note directly below this list before assuming every
+entry here is watched and restarted by the watchdog daemon.
 - nginx: HTTP request on `/health`
 - PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
+- nats: HTTP probe against nats-server's own monitor endpoint (`http_port: 8222` set in the compose-generated boot config, checked via `wget` against `/healthz` -- nats:2-alpine ships BusyBox's wget/nc but no curl, verified empirically)
+- ui: HTTP request on `/health` (`services/ui/src/main.rs`'s shallow liveness route, checked via `curl`, present in the image)
 - syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit: `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build)
 
-**Auto-restart:** X failed checks → `docker restart <container>`
+**Auto-restart:** X failed checks → `docker restart <container>`. Scope,
+verified against `services/watchdog/watchdog.sh`: the daemon's own
+`check_and_maybe_restart` loop only polls and auto-restarts `proxy`,
+`dns-standard`, and (when `SSL_ENABLED=1`) `dns-ssl` -- the three container
+names it takes via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+`CONTAINER_DNS_SSL`, feeding the Admin UI's dashboard traffic-light status.
+Kea, syslog-ng, fluent-bit, `nats`, and `ui` all have a real Docker
+healthcheck too (so `docker inspect`/`docker compose ps` and CI's own
+wait-for-healthy scripts can see it), but the watchdog daemon does not poll
+or restart any of those five itself.
 
 **Scheduled purge (cron, daily):**
 - Remove cache entries older than `CACHE_VALID_HIT` (`find -mtime`)

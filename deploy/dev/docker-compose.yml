@@ -365,6 +365,17 @@ services:
         jetstream {
           store_dir: /data
         }
+        # Monitor endpoint: nats-server shipped with no HTTP monitor
+        # listening (no http_port set), so the Docker healthcheck below and
+        # Netdata's go.d NATS collector both saw a hard connection refused
+        # against :8222 on every attempt -- not a timing issue, the port
+        # simply never opened. Verified live against this pinned image
+        # (nats-server 2.14.3): once set, /healthz and /varz answer
+        # immediately after "Server is ready". Only reachable from other
+        # containers on this compose network -- not published to the host --
+        # and carries no secrets of its own (nats-server's monitor endpoint
+        # has no built-in auth).
+        http_port: 8222
         # Central logging pipeline (#633): nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
         # lifetime (no dual-output mode exists, unlike Kea's
@@ -496,6 +507,17 @@ services:
       # (issue #811 / #583).
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:-lancache-nats-callout}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-lancache-nats-callout-dev-secret}
+    healthcheck:
+      # Real HTTP probe against the monitor endpoint (http_port: 8222 in the
+      # entrypoint above), not just a bare TCP connect -- proves nats-server's
+      # HTTP monitor is actually answering, not merely that something is
+      # listening on the port. Uses wget (BusyBox), not curl: verified
+      # empirically that nats:2-alpine ships BusyBox's wget/nc but no curl.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       lancache:
         ipv4_address: 172.28.0.8
@@ -1220,6 +1242,17 @@ services:
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+    healthcheck:
+      # Shallow liveness probe against services/ui/src/main.rs's own /health
+      # route (its comment there documents it as existing specifically for
+      # container healthchecks) -- proves the HTTP server is accepting
+      # connections, not that NATS/Docker/DNS are reachable. curl is present
+      # in this image's apt-get install list (services/ui/Dockerfile).
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - lancache
       - docker-api

@@ -253,19 +253,22 @@ echo "== Phase 3: bringing the stack up (ssl + logging profiles; dhcp disabled t
 "${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng
 "${compose[@]}" --profile ssl --profile logging up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng
 
-# nats and ui are deliberately excluded here: neither has a Docker
-# HEALTHCHECK defined (deploy/quickstart/docker-compose.yml, the ui
-# Dockerfile) -- `docker inspect --format '{{.State.Health.Status}}'` on a
-# container with no healthcheck errors (empty `.State.Health`), so the
-# fallback below always reports "unknown" and this wait loop could NEVER
-# succeed for them, 100% deterministically, regardless of any real timing.
-# Confirmed as the actual cause of this job's own `nats`/`ui did not become
-# healthy` failures -- unrelated to the `ui`-triggered nats restart (see
-# reload_nats_conf()/restart_service() in services/ui) that coincidentally
-# also shows up in the same run's logs. setup-cli-simulation.sh already gets
-# this right, listing only the services that actually have a healthcheck.
-services_with_healthcheck="proxy dns-standard dns-ssl netdata"
-all_services="docker-socket-proxy watchdog syslog syslog-ng nats ui $services_with_healthcheck"
+# nats and ui are back in this list: deploy/quickstart/docker-compose.yml now
+# defines a real Docker HEALTHCHECK for both (nats: http_port 8222 + a wget
+# probe against /healthz; ui: curl against services/ui/src/main.rs's /health
+# route). Previously neither had one, so `docker inspect --format
+# '{{.State.Health.Status}}'` always fell through to "unknown" and this wait
+# loop could NEVER succeed for them, 100% deterministically, regardless of
+# any real timing -- that was the actual cause of this job's own `nats`/`ui
+# did not become healthy` failures, unrelated to the `ui`-triggered nats
+# restart (see reload_nats_conf()/restart_service() in services/ui) that
+# coincidentally also showed up in the same run's logs. Removing them from
+# this list was only ever the correct fix for the no-healthcheck state, not
+# a permanent exclusion -- see setup-cli-simulation.sh's matching list, which
+# needed the same update once its own compose target (quickstart) gained
+# real healthchecks.
+services_with_healthcheck="proxy dns-standard dns-ssl nats ui netdata"
+all_services="docker-socket-proxy watchdog syslog syslog-ng $services_with_healthcheck"
 
 deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do

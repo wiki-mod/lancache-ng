@@ -228,6 +228,13 @@ services:
         jetstream {
           store_dir: /data
         }
+        # Monitor endpoint: mirrors dev/prod/quickstart's entrypoint (see
+        # those files' matching comment) -- without this, nats-server has no
+        # HTTP monitor listening at all, so /healthz below would never
+        # answer. Verified live against this pinned image (nats-server
+        # 2.14.3): once set, /healthz and /varz answer immediately after
+        # "Server is ready".
+        http_port: 8222
         authorization {
           users = [
             {
@@ -290,7 +297,12 @@ services:
         ipv4_address: ${VALIDATION_NATS_IP:-172.30.99.8}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 4222 || exit 1"]
+      # Real HTTP probe against the monitor endpoint (http_port: 8222 above),
+      # not just a bare TCP connect on the client port -- proves nats-server's
+      # HTTP monitor is actually answering, matching dev/prod/quickstart's
+      # equivalent check. Uses wget (BusyBox), not curl: verified empirically
+      # that nats:2-alpine ships BusyBox's wget/nc but no curl.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 2
