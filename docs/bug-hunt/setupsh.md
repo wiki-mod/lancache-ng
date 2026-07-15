@@ -308,6 +308,77 @@ while v0.2.0 is pre-stable) rather than asserting it is unintentional.
 
 ---
 
+## 9. Vacuous assertion in `setup_update_idempotence.bats` — `run !` result is never checked
+
+**File/line**: `tests/bats/setup_update_idempotence.bats:158-159`.
+
+```bash
+run ! grep -q '^CACHE_DIR_STANDARD=' "$env_file"
+run ! grep -q '^CACHE_DIR_SSL=' "$env_file"
+grep -qx 'CACHE_DIR=/srv/lancache/cache' "$env_file"
+grep -qx 'PROXY_SECURITY_MODE=lazy' "$env_file"
+```
+
+Bats' `run` helper captures a command's exit status/output into `$status`/
+`$output` and always itself returns 0, specifically so a failing command
+under test doesn't abort the whole test via bats' own errexit-like behavior
+— the caller is expected to assert on `$status` afterward. Lines 158-159
+never do that (no `[ "$status" -eq 0 ]`/`-eq 1` follows either `run` call,
+and no other line reads `$status` before it gets overwritten by whatever
+`run` call comes next). This means the two lines intended to prove
+"`migrate_env_for_update` actually removed the legacy `CACHE_DIR_STANDARD`/
+`CACHE_DIR_SSL` keys" (visible from the surrounding code and the file's own
+header-comment framing: "split cache keys collapse") execute but assert
+**nothing** — a regression that stopped removing those legacy keys after
+migration would not be caught by this test. This is independent of whatever
+bats' `run ! <cmd>` idiom is specifically documented to mean; the defect is
+simply that no assertion follows the `run` call at all, which is true
+regardless of that idiom's semantics. Lines 160-161 (bare `grep -qx`, not
+wrapped in `run`) are correctly enforcing in the normal bats sense (an
+unguarded failing command does fail the test) — only the two `run !` lines
+are affected.
+
+Severity assessment: minor/moderate (test-quality defect: the two assertions
+are silently inert, weakening this test's proof of one part of the #456
+legacy-cache-key-collapse migration, though the same collapse is still
+proven at the real-CLI level by `scripts/setup-cli-simulation.sh` Phase 4b's
+`grep -q '^CACHE_DIR_STANDARD=' "$install_dir/.env" && { echo error; exit 1;
+}` check, which correctly uses the bare/unwrapped form).
+
+---
+
+## 10. Stale doc-comment references a deleted script as existing test coverage
+
+**File/line**: `tests/bats/setup_channel_stable_edge.bats:18-21` (header comment).
+
+```
+Testing the pure mapping function directly is both simpler and strictly
+more reliable ... the actual registry pull path stays covered by the real
+end-to-end CI simulations (scripts/setup-cli-simulation.sh,
+scripts/watchtower-update-simulation.sh) instead of an in-bats mock.
+```
+
+`scripts/watchtower-update-simulation.sh` no longer exists — confirmed via
+`git log --all --oneline -- scripts/watchtower-update-simulation.sh`, whose
+most recent entry is commit `dd0fd66`, "feat(setup): remove Watchtower, add
+scheduled-update opt-in in its place (#829)": Watchtower (and its dedicated
+simulation script) was deleted as part of the #819 rework this same
+`setup.sh` region documents extensively (`cmd_auto_update`/
+`perform_stack_update_flow` replacing it). The comment still claims this
+deleted script as one of the two things providing real end-to-end coverage
+of the channel-resolution registry pull path. This is exactly the kind of
+stale claim AGENTS.md's Comment Style section warns about ("a stale
+[claim]... sitting next to code that no longer does it... actively misleads
+the next reader"), and it directly reinforces the SoT's own already-flagged
+issue #785 gap (scheduled channel-install smoke check for the published
+channels) by making a reader believe there is more real coverage of that
+path than currently exists.
+
+Severity assessment: minor (documentation-only, but actively misleading
+about test-coverage scope in exactly the area #785 already tracks as a gap).
+
+---
+
 ## Scope note on what this pass did and did not (yet) do
 
 - Read `setup.sh` in full, sequentially, top to bottom (all ~6085 lines),
@@ -321,11 +392,13 @@ while v0.2.0 is pre-stable) rather than asserting it is unintentional.
   test-coverage gaps are not re-listed here; see that document directly).
 - Verified the CI branch-protection finding (#8) live via `gh api`, since
   that is directly checkable without needing a runner.
-- Did **not** yet do a line-by-line read of the 15 `tests/bats/setup_*.bats`
-  files or the `scripts/*-simulation.sh` files' own internal logic for
-  test-quality bugs (vacuous assertions, wrong fixtures, etc.) — that is a
-  second pass, tracked as follow-up within this same sweep, not blocking
-  this raw-findings commit per the "commit incrementally, session can end
-  any time" instruction.
+- Also did a full read of all 14 `tests/bats/setup_*.bats` files (the 15th,
+  `detect_full_setup_changes.bats`, is not `setup.sh`-specific) plus both
+  `scripts/setup-cli-simulation.sh` and
+  `scripts/setup-reset-kea-config-simulation.sh` in full for test-quality
+  bugs (vacuous assertions, wrong fixtures, stale doc claims). That pass
+  found findings #9 and #10 above; every other file/script read clean (every
+  `run` call is followed by a real `$status`/`$output` assertion, fixtures
+  match the behavior under test).
 - Did not use a live runner (.228/.229/.240) for this pass — no runner
   resources were created or need cleanup for this component's bug hunt.
