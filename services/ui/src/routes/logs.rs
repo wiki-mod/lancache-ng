@@ -27,10 +27,12 @@ pub async fn logs_page(
     let mut ctx = Context::new();
     ctx.insert("active_page", "logs");
 
+    let max_entries = state.config.ui_logs_max_entries;
+
     if state.config.syslog_enabled {
         let log_root = state.config.syslog_log_root.clone();
         let mut syslog_logs = tokio::task::spawn_blocking(move || {
-            syslog_client::parse_syslog_tail(&log_root, None, 200)
+            syslog_client::parse_syslog_tail(&log_root, None, max_entries)
         })
         .await
         .unwrap_or_default();
@@ -51,7 +53,7 @@ pub async fn logs_page(
     let mut all_logs = if state.config.standard_log == state.config.ssl_log {
         let mut shared_logs = tokio::task::spawn_blocking({
             let path = state.config.standard_log.clone();
-            move || nginx_client::parse_log_tail(&path, 200)
+            move || nginx_client::parse_log_tail(&path, max_entries)
         })
         .await
         .unwrap_or_default();
@@ -62,14 +64,17 @@ pub async fn logs_page(
 
         shared_logs
     } else {
+        // Split the budget across both sources so the combined, reversed,
+        // truncated result below still tops out at max_entries overall.
+        let per_source = max_entries / 2;
         let (standard_logs, ssl_logs) = tokio::join!(
             tokio::task::spawn_blocking({
                 let p = state.config.standard_log.clone();
-                move || nginx_client::parse_log_tail(&p, 100)
+                move || nginx_client::parse_log_tail(&p, per_source)
             }),
             tokio::task::spawn_blocking({
                 let p = state.config.ssl_log.clone();
-                move || nginx_client::parse_log_tail(&p, 100)
+                move || nginx_client::parse_log_tail(&p, per_source)
             }),
         );
 
@@ -88,7 +93,7 @@ pub async fn logs_page(
 
     // Show most recent first
     all_logs.reverse();
-    all_logs.truncate(200);
+    all_logs.truncate(max_entries);
 
     // Apply cache status filter if provided
     if let Some(filter) = &params.filter {
