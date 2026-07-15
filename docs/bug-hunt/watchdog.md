@@ -579,8 +579,107 @@ that prior documentation is a starting point, not a boundary:
 
 ---
 
+## 16. Additional findings from a second, independent re-verification pass
+
+A later independent pass re-verified all 15 findings above against the same
+`origin/v0.2.0` code (each re-confirmed) and surfaced four items the first
+pass did not. Numbered N1-N4 to keep them distinct from the findings above.
+
+### N1. `resolve_cache_dir()`'s fail-closed error message is invisible to the operator (new)
+
+**Severity: moderate.**
+
+Finding 15 above (and the SoT) already established that the `exit 1` inside
+`resolve_cache_dir()` *does* correctly propagate through
+`CACHE_DIR="$(resolve_cache_dir)"` (line 70) under `set -euo pipefail` and
+halts the daemon -- and concluded "this is not a bug." That conclusion is
+correct about the *exit propagation* but misses a separate defect on the same
+lines: the diagnostic that is supposed to tell the operator what went wrong
+never reaches any log.
+
+```sh
+log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }          # line 36 -> stdout
+...
+log "ERROR: CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths
+     without CACHE_DIR. Set CACHE_DIR to one shared cache directory."         # line 53
+exit 1                                                                        # line 54
+```
+
+`log()` writes to **stdout**, and `resolve_cache_dir()` is invoked inside a
+command substitution (`CACHE_DIR="$(resolve_cache_dir)"`), which **captures
+stdout**. So the ERROR line is captured into the about-to-be-discarded
+`CACHE_DIR` value, not printed to the container log. The subshell's `exit 1`
+still propagates (finding 15), so the container exits 1 into its
+`restart: always` loop -- but with **no visible reason**. The one message
+that would tell a non-expert operator "set CACHE_DIR to one shared directory"
+is swallowed by the very call site that triggers the exit.
+
+Trigger is narrow (a legacy pre-#445 install with divergent
+`CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` and unset `CACHE_DIR`), hence moderate --
+but the silent-exit behavior directly violates CONTRIBUTING.md's "errors
+should fail closed and be understandable to non-expert operators." Fix
+direction: route `log()` (or at least error logs) to stderr, or `>&2` this
+specific error before `exit 1`.
+
+### N2. Even the `full-setup` watchdog healthcheck cannot detect a stalled loop (new refinement of finding 10)
+
+**Severity: minor.**
+
+Finding 10 above notes no real deployment defines a watchdog `healthcheck:`,
+while `deploy/full-setup` does: `test -f /var/run/watchdog/status.json`
+(`deploy/full-setup/docker-compose.yml:187-192`). That existing probe is
+**existence-only**. `status.json` is (re)written every loop via `.tmp`+`mv`
+and, once created, never disappears -- so a loop that stalls *after* its first
+successful write (the finding-4 no-timeout-curl hang scenario) keeps the probe
+green forever. Any healthcheck propagated into dev/prod/quickstart (the
+finding-10 fix, which is a Bringschuld since the probe already exists and is
+CI-validated in full-setup) should therefore be **freshness-based** (assert
+`status.json`'s mtime is within a few `CHECK_INTERVAL`s), not existence-based,
+to actually cover the failure mode finding 4 describes.
+
+### N3. `CHECK_INTERVAL` is unvalidated -- a bad value is a crash loop, unlike every other numeric knob (new)
+
+**Severity: minor.**
+
+The script validates `CACHE_VALID_DAYS` (lines 204-209),
+`SYSLOG_RETENTION_DAYS`, `SYSLOG_MAX_GB`, and both stamp files with the
+`case ''|*[!0-9]*)` digit-only idiom. But the loop-critical `CHECK_INTERVAL`
+is passed straight to `sleep "$CHECK_INTERVAL"` (line 449) with no validation.
+A non-numeric or empty value (`CHECK_INTERVAL=30s`, `CHECK_INTERVAL=`) makes
+`sleep` exit non-zero -> `set -e` kills the daemon -> `restart: always` ->
+crash loop. The valuable point is the **inconsistency**: the least-critical
+knobs are validated, the one whose failure takes the whole daemon down is not.
+(`RESTART_AFTER`, `DISK_WARN_PCT`, `DISK_ALARM_PCT` are also unvalidated but
+only appear inside `[ ... ]` test conditions, where a bad value degrades to a
+no-op rather than crashing, so `CHECK_INTERVAL` is the sharp edge.) Fix
+direction: validate `CHECK_INTERVAL` with the same digit-only idiom.
+
+### N4. `SSL_ENABLED` truthiness diverges from the Admin UI's parser -- watchdog can silently stop monitoring `dns-ssl` (new)
+
+**Severity: minor.**
+
+`watchdog.sh` gates SSL monitoring on `[ "$SSL_ENABLED" = "1" ]` (lines 27,
+443) -- exact string `"1"` only. The Admin UI parses the *same* variable with
+`env_bool()` (`services/ui/src/config.rs:741-750`), which accepts
+`1|true|yes|on` (case-insensitive) as true. So `SSL_ENABLED=true` makes the UI
+treat SSL mode as **on** while watchdog treats it as **off** -> `C_DNS_SSL=""`
+-> the `lancache-dns-ssl` container is silently unmonitored and never
+restarted even though the stack is running SSL mode. Every compose file uses
+the canonical `1`, so this only bites on a plausible-looking manual
+misconfiguration (`true` is the natural boolean spelling), hence minor -- but
+it is a real cross-component inconsistency inside watchdog's own SSL branch.
+The proxy entrypoint also uses `= "1"`, so watchdog is consistent with the
+proxy and only the UI is lenient; aligning watchdog to accept `1|true|yes|on`
+(or documenting `"1"`-only) removes the divergence.
+
+---
+
 ## Posting status
 
 Findings from this file were also posted as a single English GitHub comment
 (prefixed `CLD-<unix-timestamp>`) on the umbrella sweep issue #849, per
 `AGENTS.md`'s active-comment-maintenance convention.
+
+A second re-verification pass appended section 16 (findings N1-N4) and posted
+a follow-up `CLD-`-prefixed comment on #849 summarizing the re-confirmation of
+all prior findings plus the four new ones.
