@@ -738,3 +738,196 @@ its coverage claim is narrower than the file's actual test suite.
 No open issue currently tracks the `cmd_secondary`/`cmd_debug`/
 `converge-reconcile` real-CLI test-coverage gaps identified in this
 inventory — these are new observations from this audit, not yet filed.
+
+---
+
+## Shared helper-function inventory (env/secret/systemd/backup helpers, lines ~869-2914)
+
+Every `cmd_*` function above is built on a large shared layer of helpers.
+Full pass over every function between `get_env_var` (869) and
+`record_image_revisions` (2903, the line before `cmd_backup` starts) —
+condensed here; every function was individually checked for purpose,
+reads/writes, idempotence, and test coverage.
+
+**`.env` read primitives** (`get_env_var`, `get_env_var_nonempty`,
+`get_env_assignment_value_raw[_nonempty]`, `env_key_exists`,
+`env_key_has_value`) — pure readers, no isolated `@test` for any of them;
+correctness is proven only transitively through every
+`migrate_env_for_update` test. A refactor of these primitives alone would
+have no dedicated regression coverage.
+
+**Secret classification/generation** (`secret_value_is_placeholder`,
+`env_key_has_usable_secret`, `generate_secret_value`, `get_or_generate_secret`)
+— `env_key_has_usable_secret` is the idempotence gate every secret-writing
+caller relies on (proven via `setup_update_idempotence.bats`).
+**`generate_secret_value` itself is NOT idempotent** (each call is a fresh
+`openssl rand` draw) — the whole system's secret stability (AG-OP-006)
+depends entirely on every caller gating it behind `env_key_has_usable_secret`
+first. That is correctly done everywhere today, but it is a single
+architectural control point: a future call site that skips the gate would
+immediately rotate a secret on every run. `get_or_generate_secret` itself has
+no direct test and appears unused in the current `migrate_env_for_update`
+call graph (which uses `ensure_secret_env_key` instead) — possibly dead code,
+not fully verified since call sites outside this line range weren't checked
+by this pass.
+
+**`.env` value validation** (`validate_env_value`, `validate_env_values_for_initial_write`)
+— no direct test found for either; exercised only transitively (no isolated
+negative test for a rejected character was found in this line range).
+
+**`.env` write primitives** (`set_env_key`, `set_env_assignment`,
+`append_env_key_if_missing`, `set_env_key_if_empty_or_missing`,
+`append_env_assignment_if_missing`, `append_env_migrated_assignment_if_missing`,
+`append_required_env_migrated_assignment_if_empty_or_missing`,
+`migrate_proxy_security_mode_for_update`) — all individually idempotent by
+design (preserve-existing-or-fill-default pattern); `set_env_key` also
+cleans up any pre-existing duplicate key lines on write (self-healing).
+`append_env_migrated_assignment_if_missing` and
+`migrate_proxy_security_mode_for_update` have DIRECT bats coverage
+(`setup_env_migration.bats`); the others are proven only transitively via
+`setup_update_idempotence.bats`.
+**Gap**: `append_required_env_migrated_assignment_if_empty_or_missing` (the
+"never allowed to stay empty" variant) has no isolated test, unlike its
+"optional" sibling.
+
+**Legacy path resolution** (`legacy_state_path`, `legacy_state_root_has_known_children`,
+`legacy_state_root_or_default`, `legacy_dir_or_default`) — pure readers, no
+direct tests, exercised transitively.
+
+**Path-override/removal helpers** (`set_optional_env_path_override_if_needed`,
+`remove_env_key`) — idempotent by design (removes an override once it matches
+the derived default, converging the "one state root" contract); no direct
+test, proven transitively via `migrate_env_for_update` fixtures.
+
+**Install-dir/compose-file resolution** (`production_state_root_default`,
+`is_deploy_prod_install_dir`, `runtime_env_file_for_install_dir`,
+`nats_secondary_override_active_for_install_dir`,
+`compose_file_args_for_install_dir`, `install_quickstart_compose_assets`) —
+this group has GOOD direct coverage: `runtime_env_file_for_install_dir` is
+tested in 3 separate bats files; `nats_secondary_override_active_for_install_dir`
+and `compose_file_args_for_install_dir` have 10 combined tests in
+`setup_nats_secondary_override.bats`; `install_quickstart_compose_assets` has
+its own dedicated `setup_quickstart_assets.bats` including an explicit
+"running install twice on an already-correct install stays idempotent" test.
+
+**Git repo sync** (`git_default_branch_name`, `git_repo_is_clean`,
+`sync_repo_to_default_branch`, `deploy_prod_repo_root`,
+`deploy_prod_repo_input_paths`, `resolve_update_ip_config_paths`) —
+`resolve_update_ip_config_paths` is well tested (4 tests,
+`setup_update_ip_install_dir.bats`, the #666 fix). **Gap**:
+`sync_repo_to_default_branch` — a destructive `git checkout -B` hard-reset
+onto `origin/<default>`, refuses on a dirty tree — has no isolated repeat-run
+test anywhere found.
+
+**Atomic file writers** (`write_env_file`, `write_generated_runtime_file`) —
+idempotent as a mechanism (temp file + `mv`, preserves owner/mode for
+`.env`); no direct test, but exercised by every caller's test.
+
+**Update guards/secret wrapper** (`require_env_value_for_update`,
+`ensure_secret_env_key`, `cache_size_gb_from_env`) — `ensure_secret_env_key`
+is the AG-OP-006 linchpin, proven via every secret-stability assertion in
+`setup_update_idempotence.bats`.
+
+**Platform guards** (`assert_prebuilt_image_platform_supported`,
+`host_image_platform`, `assert_resolved_image_tag_platform_supported`) —
+well tested: `setup_image_platform_guard.bats` has 2+2+7 tests covering
+architecture detection and the #665 resolved-tag-platform check (single-
+platform success, multi-platform index fallback, missing buildx, unreachable
+registry, missing docker).
+
+**systemd convergence-timer interaction (NOT unit installation)**
+(`systemd_unit_exists`, `pause_lancache_convergence_for_update`,
+`resume_lancache_convergence_after_update`,
+`resume_lancache_convergence_after_failed_update`) — **no test coverage found
+for any of these four** (distinct from `watchdog_idempotence.bats`, which
+tests a different component, the watchdog service itself, not this
+convergence-timer pause/resume logic). **`pause_lancache_convergence_for_update`
+is not demonstrably reentrant-safe**: it captures the pre-pause systemd state
+into globals on every call; calling it twice without an intervening resume
+would read the timer as already-stopped on the second call and overwrite the
+"was originally active" flag, so a later resume would incorrectly leave the
+timer disabled. Not currently a real bug in the traced call graph (called
+once per update from `cmd_update`), but the function itself has no reentrancy
+guard and no test proves the single-call assumption holds everywhere it's
+used.
+
+**Image tag/channel validation & resolution** (`validate_lancache_image_tag`,
+`validate_lancache_image_channel`, `derive_release_archive_image_tag`,
+`validate_lancache_image_registry`, `validate_lancache_image_prefix`,
+`resolve_lancache_image_registry`, `resolve_lancache_image_prefix`,
+`resolve_lancache_image_channel`, `lancache_stack_pointer_channel_for`,
+`resolve_lancache_stack_channel_tag`, `resolve_lancache_image_tag`) — mixed:
+`validate_lancache_image_channel`/`resolve_lancache_image_channel`/
+`lancache_stack_pointer_channel_for`/`derive_release_archive_image_tag`/
+`resolve_lancache_image_tag` all have solid direct bats coverage.
+**Gaps**: `validate_lancache_image_tag` (accepts only `sha-*`/`pr-<N>-sha-*`/
+`vX.Y.Z[-rc.N]`, rejects mutable channel names — a real security-relevant
+guard) has NO isolated test found, nor do `validate_lancache_image_registry`,
+`validate_lancache_image_prefix`, `resolve_lancache_image_registry`, or
+`resolve_lancache_image_prefix`. `resolve_lancache_stack_channel_tag` (the
+one function that does a real `docker pull`/`cp`/`tar` against a live
+registry to resolve a channel pointer to an immutable `sha-*`) has no bats
+test — by design, it needs a real registry, so it's covered instead only by
+`scripts/setup-cli-simulation.sh`'s real end-to-end run (subject to the #785
+gap noted above: only exercised on non-PR CI events since the per-PR gate
+switched to pinned images).
+
+**`migrate_env_for_update` itself (2287-~2604, ~320 lines)** — see the
+`update` subcommand section above; this is the single most thoroughly
+tested function in the whole file (dedicated bats file + CLI-simulation
+phases + explicitly named in the AGENTS.md enforcement matrix as the
+concrete evidence for AG-OP-006/007/011).
+
+**Backup/restore support helpers** (`install_missing_tools`,
+`backup_manifest`, `path_is_inside`, `compose_stack_available`,
+`compose_stack_running`, `compose_stack_stop`, `compose_stack_start`,
+`validate_compose_config`, `compose_project_name`,
+`compose_cache_volume_name`, `compose_volume_names`,
+`backup_compose_volumes`, `restore_compose_volumes`,
+`guard_restore_shared_project_volumes`, `record_image_revisions`) — mixed:
+`compose_stack_running`, `compose_project_name`, `compose_cache_volume_name`,
+`compose_volume_names`, `backup_compose_volumes`, and
+`guard_restore_shared_project_volumes` all have direct tests in
+`setup_backup_restore_safety.bats`. **Gaps, several notable given how
+security/safety-critical this group is**: `backup_manifest` (defines backup
+SCOPE — what gets included) has no isolated test; `path_is_inside` (prevents
+a backup destination recursively archiving itself) has no test;
+`compose_stack_stop` has no direct test; **`compose_stack_start` has no test
+of any kind found anywhere** (not even mentioned in a helper file);
+**`validate_compose_config`** (the `docker compose config` dry-run that
+AG-OP-010 requires to run before any restart/pull) **has no test found** —
+notable since this is exactly the kind of "validate before mutate" gate
+AGENTS.md calls out as safety-critical; **`restore_compose_volumes`** (the
+destructive clean-replace of a named volume's entire contents from an
+archive) **has no isolated test** despite being one of the more dangerous
+operations in the file; `record_image_revisions` has no test (low risk —
+purely informational, never auto-restored).
+
+### Top findings from the helper-layer pass
+
+1. `migrate_env_for_update` is the only area with complete, explicit
+   AG-OP-006/007/011 test coverage (repeat-run fixtures, secret-stability
+   assertions, hash comparison) — consistent with the AGENTS.md enforcement
+   matrix.
+2. The foundational `.env` read/write primitives have no isolated unit tests
+   of their own; correctness is proven only transitively through
+   `migrate_env_for_update`'s tests.
+3. Clear test gaps on security-relevant validators:
+   `validate_lancache_image_tag`, `validate_lancache_image_registry`,
+   `validate_lancache_image_prefix`.
+4. Convergence-timer pause/resume (`systemd_unit_exists` through
+   `resume_lancache_convergence_after_failed_update`) has zero test coverage,
+   and `pause_lancache_convergence_for_update` is not demonstrably safe
+   against being called twice without an intervening resume.
+5. Several backup/restore core functions have no direct test:
+   `backup_manifest`, `path_is_inside`, `compose_stack_stop`,
+   `compose_stack_start` (no test anywhere), `validate_compose_config`,
+   `restore_compose_volumes`, `record_image_revisions`. Given AG-OP-010
+   ("validate before restart/pull") and the destructive nature of volume
+   restore, `validate_compose_config` and `restore_compose_volumes` lacking
+   direct coverage stand out.
+6. `generate_secret_value` is not idempotent by itself (fresh random value on
+   every call); the whole system's secret stability depends entirely on
+   every call site gating it behind `env_key_has_usable_secret` first. That
+   holds correctly everywhere today, but it is a single architectural
+   control point rather than a property of the generator itself.
