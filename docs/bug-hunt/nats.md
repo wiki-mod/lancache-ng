@@ -201,6 +201,46 @@ this test in this pass (would require a runner and was not in scope for
 this static-analysis-first sweep) — flagging as the single highest-value
 follow-up verification for the next phase.
 
+### Finding C — RESOLVED by live test (CLD-1784147204 pass, runner .240)
+
+The exact live test proposed above was run against the **pinned image**
+`nats:2-alpine@sha256:c11af97…` = **nats-server v2.14.3** (the same server
+version this repo runs), with `auth_callout` deliberately excluded from the
+isolation config so the omitted-direction rule is tested in isolation:
+
+- User `w`, `permissions = { subscribe = ["lancache.dns.>","_INBOX.>"] }`,
+  **no `publish` block** — the exact shape of full-setup's writer/replica.
+  Core-published to `test.subject` **and** to
+  `$JS.API.STREAM.CREATE.LANCACHE_DNS` → **both "Published", zero
+  permission-violation logs on the server.**
+- Control user `e`, explicit `publish = ["allowed.only"]`: publish to
+  `allowed.only` succeeded; publish to `other.subject` →
+  `-ERR Permissions Violation for Publish to "other.subject"` (server TRC
+  log). Confirms the harness detects denials and that an explicit list denies
+  unlisted subjects.
+
+**Verdict: omitted `publish` block = allow-all. Finding C's crash-loop /
+"silently denied" reading is REFUTED.** full-setup's `validation-dns-writer`/
+`validation-dns-replica` actually get *unrestricted* publish, so their
+`get_stream`/`create_stream`/consumer/ack JetStream calls all **succeed** —
+there is **no** full-setup crash-loop. This downgrades Finding C to a
+least-privilege / consistency note: full-setup relies on the allow-all
+footgun and diverges from the other three stacks' explicit grants; adding any
+`publish` entry to that block later would instantly break it. **This settles
+the open question in issue #845** — recommend closing #845 with this evidence
+(optionally add explicit grants to full-setup to match dev/prod/quickstart and
+make intent legible). Runner resources were fully cleaned up after the test.
+
+Cross-cutting: this same test is the empirical backbone for Findings B and D.
+It proves that an **explicit** publish allow-list denies any unlisted subject
+(control `e`), so the writer's missing `lancache.dns.flush` (Finding B) and
+the replica's missing `$JS.API.STREAM.CREATE.LANCACHE_DNS` (Finding D) are
+**real denials**, not speculation. And because omitted-publish = allow-all,
+the crash-loop mechanism (`services/dns/entrypoint.sh:780`
+`run_nats_subscriber`'s `while true; … sleep 3` wrapper, which restarts the
+binary on every `exit(1)` while the container stays "up") is triggered by
+Finding D's replica race in dev/prod/quickstart — but never by full-setup.
+
 ---
 
 ## Finding D — dns-ssl (replica) can lose a startup race against
@@ -391,7 +431,7 @@ everything noticed" rule, since it read as suspicious before verification.
 
 1. **Finding A** (unreachable/unconfigurable secondary NATS URL) — CRITICAL, confirmed, novel.
 2. **Finding B** (rollback flush permission gap) — HIGH, confirmed, novel.
-3. **Finding C** (full-setup publish-omitted semantics) — potentially CRITICAL but CONTESTED; needs the live nats-server test described above before any fix is written.
+3. **Finding C** (full-setup publish-omitted semantics) — **RESOLVED by live nats-server v2.14.3 test (runner .240): omitted `publish` = allow-all, so the "silently denied/crash-loop" reading is REFUTED.** Downgraded to a least-privilege / stack-consistency note; settles issue #845. See the "Finding C — RESOLVED by live test" subsection above.
 4. **Finding D** (dns-replica stream-create startup race) — MODERATE, confirmed, self-healing.
 5. **Finding E** (reload_nats_conf silent best-effort) — MODERATE, confirmed.
 6. **Finding F** (full-setup restart-by-name 404) — LOW, already documented/mitigated; broader pattern (six hardcoded names) worth a cross-component note.
