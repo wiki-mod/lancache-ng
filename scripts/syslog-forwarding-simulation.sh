@@ -503,15 +503,18 @@ assert_marker_reaches_ui "$marker_watchdog" "watchdog (startup banner's CHECK_IN
 echo "== netdata: documented weaker check (no operator-triggerable marker mechanism found) =="
 # netdata is a third-party image (docs/architecture-ng.md's logging matrix);
 # no repo-managed config or route was found that lets an operator inject a
-# distinguishing string into health.log/collector.log/error.log (the files
-# fluent-bit forwards for this host, confirmed by reading the fluent-bit
-# service definition). Unlike watchdog/nats/ui/proxy/dns-standard/dns-ssl,
-# this is a structural gap, not a convenience shortcut -- mirrors
-# dhcp-probe's existing documented "Not applicable" treatment in the
-# logging matrix. What IS verified: netdata's own collector/health engine
-# reliably produces at least one real forwarded line within its first
-# minute of normal operation, so this still proves netdata's logging path
-# is wired end-to-end -- just without per-run marker discrimination.
+# distinguishing string into its forwarded logs. Unlike
+# watchdog/nats/ui/proxy/dns-standard/dns-ssl, this is a structural gap, not
+# a convenience shortcut -- mirrors dhcp-probe's existing documented "Not
+# applicable" treatment in the logging matrix. What IS verified: netdata's
+# daemon/health logs -- the only netdata streams deploy/*/docker-compose.yml
+# deliberately redirect to real, fluent-bit-tailable files; the far
+# higher-rate collector stream is intentionally left on its stdout default
+# and NOT forwarded, so it cannot flood the bounded /logs view and bury
+# every other service's marker -- reliably produce at least one real
+# forwarded line within the first minute of normal operation, so this still
+# proves netdata's logging path is wired end-to-end, just without per-run
+# marker discrimination.
 netdata_deadline=$((SECONDS + 90))
 netdata_seen=0
 while (( SECONDS < netdata_deadline )); do
