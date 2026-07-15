@@ -7,7 +7,10 @@ on branch `docs/inventory-observability` so no research is lost if the
 session is interrupted. The authoritative, English public log entry for this
 component is posted as a comment on issue #843.
 
-Status: **research in progress**.
+Status: **research complete, comment posted**. This file mirrors that
+comment's content (plus fuller source citations) so it survives
+independently of GitHub availability. Public comment:
+https://github.com/wiki-mod/lancache-ng/issues/843#issuecomment-4977058482
 
 Scope: `netdata` service, `syslog`/`fluent-bit` + `syslog-ng` logging profile
 as wired in `deploy/{dev,prod,quickstart,full-setup}/docker-compose.yml`,
