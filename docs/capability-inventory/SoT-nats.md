@@ -11,23 +11,51 @@ language rule). This file is the working copy / durable backup of that
 research, kept in its own branch (`docs/inventory-nats`) per the umbrella
 issue's parallel-audit workflow.
 
-## Correction to this issue's own body
+## Correction to this issue's own body (superseded — see UPDATE below)
 
 Issue #843's body says the "nats/ui missing-healthcheck finding" is
 "#842, and the fix in PR #828", and separately calls out "tonight's
 monitor-port gap" as an example of configured-but-dormant capability. Checked
-directly against real diffs before writing this up:
+directly against real diffs before writing this up (as of PR #828's head at
+the time, before commit `83567a8`):
 
 - **PR #828** (`test(ci): real syslog-ng -> Admin UI visibility E2E
-  simulation`) only touches `.github/workflows/full-setup-deep-validate.yml`
-  and `scripts/syslog-forwarding-simulation.sh`. It does **not** touch any
-  `docker-compose.yml`, does **not** add a healthcheck to `nats`, and does
-  **not** configure `http_port`/`8222` anywhere. It hardcodes
+  simulation`), at that point, only touched
+  `.github/workflows/full-setup-deep-validate.yml` and
+  `scripts/syslog-forwarding-simulation.sh`. It did **not** touch any
+  `docker-compose.yml`, did **not** add a healthcheck to `nats`, and did
+  **not** configure `http_port`/`8222` anywhere. It hardcoded
   `services_with_healthcheck="proxy dns-standard dns-ssl netdata"` —
   explicitly *not* including `nats` or `ui`.
 - **Issue #842** is actually about `watchdog.sh` only monitoring
   `proxy`/`dns-standard`/`dns-ssl` and not `nats`/`ui`/`dhcp`/etc. It does not
   mention `http_port`/`8222` either.
+
+**UPDATE (same day, after the above was written):** a different, parallel
+agent pushed commit `83567a8` ("fix(nats,ui): add real Docker HEALTHCHECK for
+nats and ui services") onto PR #828 at `2026-07-15T05:10:48Z`, shortly after
+the check above was made. Re-verified directly against the live diff and the
+commit message:
+
+- `http_port: 8222` is now set in the generated `nats.conf` template across
+  all 4 compose files (dev/prod/quickstart/full-setup) — 15 matches for
+  `http_port` in the current `gh pr diff 828`.
+- `nats`'s Docker healthcheck (all 4 stacks, replacing full-setup's old bare
+  `nc -z 127.0.0.1 4222`) is now `wget -q -O /dev/null http://127.0.0.1:8222/healthz`.
+- `ui` also gets a real healthcheck (`curl -sf http://127.0.0.1:8080/health`)
+  in the same commit — closing the companion "no healthcheck on ui" gap noted
+  in the full-setup JetStream-permission finding below.
+- The commit message states this was verified live against the pinned
+  `nats:2-alpine` image (nats-server 2.14.3): `/healthz` and `/varz` respond
+  once the server logs "Server is ready".
+
+**Net effect: the monitor-port (`8222`) gap and the "no real healthcheck
+anywhere in the 3 real stacks" finding below are now closed by PR #828**,
+pending that PR's merge — they were accurate findings at the time of the
+original pass, not stale claims invented after the fact. The plaintext
+`nats://` (no TLS) finding, the clustering/leafnodes/gateways/accounts/
+websocket/mqtt findings, and the full-setup JetStream-permission question
+are all unaffected by this commit and remain valid as written below.
 - Repo-wide `git grep` for `8222|http_port|monitor_port` across
   `*.conf`/`*.yml`/`*.rs`/`*.sh`/`*.md` on `origin/v0.2.0`: **zero matches**.
 
@@ -45,7 +73,7 @@ believing it's already resolved.
 | Static IP | `172.28.0.8` on `lancache` network | none (default network) | none | `172.30.99.8` on `validation` network |
 | `expose:` | not set | `["4222"]` | not set | not set |
 | `ports:` (host publish) | not set | not set directly (only via optional `docker-compose.nats-secondary.yml` overlay) | not set | not set |
-| `healthcheck:` | **none** | **none** | **none** | `nc -z 127.0.0.1 4222` (bare TCP check, not a real NATS/JetStream protocol probe) |
+| `healthcheck:` (as originally checked) | **none** | **none** | **none** | `nc -z 127.0.0.1 4222` (bare TCP check) — **all 4 now fixed by PR #828 commit `83567a8`**: `http_port: 8222` + `wget .../healthz` real HTTP monitor probe everywhere, see UPDATE note above |
 | `logging:` driver | not set (default) | `json-file`, 5m/2 files | `json-file`, 5m/2 files (inline map YAML style, cosmetically different from prod) | not set |
 | `log_file` in generated nats.conf | `/var/log/lancache-nats/nats.log` | same | same | **not set at all** — stdout only, breaks the "central logging pipeline (#633)" pattern the other three follow |
 | `/data`, `/etc/nats` volumes | named Docker volumes (`nats-data`, `nats-conf`) | **host bind-mounts** under `${LANCACHE_STATE_DIR:-/opt/lancache-ng}` | named Docker volumes | named Docker volumes |
@@ -67,13 +95,17 @@ believing it's already resolved.
 - **`expose: ["4222"]` only in prod.** Documentation-only Compose field (does
   not itself publish anything), but inconsistently present — dev/quickstart/
   full-setup omit it even though the port is equally relevant there.
-- **No real healthcheck anywhere in the three production-shaped stacks.**
-  Only full-setup has any `healthcheck:`, and even that is a bare `nc -z` TCP
-  check — proves the port accepts a TCP connection, not that `nats-server` is
-  ready for the NATS protocol handshake or that JetStream is initialized.
-  Same class of weak-check gap AG-VAL-019/AG-VAL-020 call out for DNS
-  (`ping`/`ss` alone insufficient) — dev/prod/quickstart have *none* at all,
-  not even the weak one.
+- **No real healthcheck anywhere in the three production-shaped stacks —
+  ~~true when checked~~, now fixed by PR #828 commit `83567a8`.** At the time
+  of this pass, only full-setup had any `healthcheck:`, and even that was a
+  bare `nc -z` TCP check — proving the port accepts a TCP connection, not
+  that `nats-server` is ready for the NATS protocol handshake or that
+  JetStream is initialized (the same class of weak-check gap
+  AG-VAL-019/AG-VAL-020 call out for DNS — `ping`/`ss` alone insufficient).
+  Commit `83567a8` (same day, pushed shortly after this check) adds
+  `http_port: 8222` to all 4 stacks and switches every `nats` healthcheck to
+  `wget -q -O /dev/null http://127.0.0.1:8222/healthz` — a real HTTP monitor
+  probe, not a bare TCP connect. See the UPDATE note above.
 - **full-setup's authorization block appears incompatible with the exact
   JetStream code path its own dns-standard/dns-ssl containers run.** Traced
   end to end, not just asserted:
@@ -139,13 +171,17 @@ template; only credential-injection style differs:
 Confirmed via repo-wide `git grep` (zero matches for all of the below across
 `*.conf`/`*.yml`/`*.rs`/`*.sh`/`*.md` on `origin/v0.2.0`, except where noted):
 
-- **Monitoring/`http_port` (8222)** — not configured in any of the 4 stacks
-  (see correction above). No `/varz`, `/connz`, `/subsz`, `/jsz` endpoint is
-  ever exposed — no introspection into connection count, subject-level
-  stats, or JetStream account/stream stats short of parsing the log file or
-  asking the client to self-report. Would also be the natural basis for a
-  real healthcheck (`GET /healthz` on the monitor port) instead of the bare
-  TCP check full-setup uses today.
+- **Monitoring/`http_port` (8222) — CLOSED by PR #828 commit `83567a8`,
+  see UPDATE note above.** Was not configured in any of the 4 stacks when
+  this pass originally checked (repo-wide `git grep` for
+  `8222|http_port|monitor_port` returned zero matches on that check). As of
+  `83567a8`, `http_port: 8222` is set in all 4 stacks' generated `nats.conf`,
+  `/healthz` and `/varz` are live-verified responding (per that commit's
+  message, against the pinned `nats:2-alpine`/nats-server 2.14.3), and it's
+  now the basis for a real healthcheck (`wget .../healthz`) instead of the
+  old bare TCP check. `/connz`, `/subsz`, `/jsz` are not specifically
+  exercised by that commit's healthcheck but are now reachable on the same
+  monitor port for ad-hoc introspection.
 - **Clustering (`cluster {}` / route URLs)** — entirely absent. Every
   deployment is a single `nats-server` process; no HA, no route protocol
   between peers. Consistent with the rest of the stack's single-primary
@@ -208,26 +244,29 @@ Confirmed via repo-wide `git grep` (zero matches for all of the below across
 
 ## Summary
 
-The three real deployment stacks (dev/prod/quickstart) are functionally
-consistent in what `nats.conf` itself configures (same JetStream/auth setup,
-byte-identical generated templates), but diverge in operational plumbing
-around the service block: healthchecks (none anywhere in the 3 real stacks),
+**Updated after initial posting**: the three real deployment stacks
+(dev/prod/quickstart) were functionally consistent in what `nats.conf` itself
+configured (same JetStream/auth setup, byte-identical generated templates),
+but diverged in operational plumbing around the service block: healthchecks
+(none anywhere in the 3 real stacks, at the time of the original check),
 logging driver config, volume backing (named volume vs. host bind-mount),
-credential-injection style, and one dead bind-mount unique to dev. The
-full-setup validation harness diverges further and non-trivially: it has the
-*only* healthcheck of the four, but its authorization permissions for the
-DNS-writer/replica roles are missing the JetStream `publish` grants the real
-roles have, and it doesn't wire `log_file` at all.
+credential-injection style, and one dead bind-mount unique to dev. **The
+healthcheck gap is now closed** by PR #828 commit `83567a8` (`http_port: 8222`
++ a real `wget .../healthz` probe in all 4 stacks) — see the UPDATE note near
+the top of this file. The full-setup validation harness still diverges in
+one respect that `83567a8` does not touch: its authorization permissions for
+the DNS-writer/replica roles are missing the JetStream `publish` grants the
+real roles have, and it still doesn't wire `log_file` at all.
 
 Beyond compose-level plumbing, this project uses a narrow, deliberate slice
 of nats-server's real feature surface: single-node JetStream with
-`auth_callout`-based dynamic authorization, and nothing else. Clustering,
-leafnodes, gateways, TLS, WebSocket/MQTT gateways, and full account/JWT
-multi-tenancy are all upstream capabilities that exist in the
-`nats:2-alpine` image but are never activated anywhere in this repository.
-Most of that is a reasonable match for the project's current single-primary,
-LAN-scale architecture — the two items that look like real gaps rather than
-deliberate scope choices are the missing monitor/`http_port` (no real
-health/stats endpoint, and no better-than-bare-TCP healthcheck as a result)
-and the plaintext `nats://` channel to remote secondaries over
-`docker-compose.nats-secondary.yml`.
+`auth_callout`-based dynamic authorization, plus (as of `83567a8`) the HTTP
+monitor endpoint for healthchecks/introspection. Clustering, leafnodes,
+gateways, TLS, WebSocket/MQTT gateways, and full account/JWT multi-tenancy
+are all upstream capabilities that exist in the `nats:2-alpine` image but are
+never activated anywhere in this repository. Most of that is a reasonable
+match for the project's current single-primary, LAN-scale architecture — with
+the monitor-port gap now closed, the one item that still looks like a real
+gap rather than a deliberate scope choice is the plaintext `nats://` channel
+to remote secondaries over `docker-compose.nats-secondary.yml` (no TLS
+between the primary and any remote secondary connecting over LAN/VPN).
