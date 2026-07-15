@@ -253,8 +253,19 @@ echo "== Phase 3: bringing the stack up (ssl + logging profiles; dhcp disabled t
 "${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng
 "${compose[@]}" --profile ssl --profile logging up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng
 
-services_with_healthcheck="proxy dns-standard dns-ssl nats ui netdata"
-all_services="docker-socket-proxy watchdog syslog syslog-ng $services_with_healthcheck"
+# nats and ui are deliberately excluded here: neither has a Docker
+# HEALTHCHECK defined (deploy/quickstart/docker-compose.yml, the ui
+# Dockerfile) -- `docker inspect --format '{{.State.Health.Status}}'` on a
+# container with no healthcheck errors (empty `.State.Health`), so the
+# fallback below always reports "unknown" and this wait loop could NEVER
+# succeed for them, 100% deterministically, regardless of any real timing.
+# Confirmed as the actual cause of this job's own `nats`/`ui did not become
+# healthy` failures -- unrelated to the `ui`-triggered nats restart (see
+# reload_nats_conf()/restart_service() in services/ui) that coincidentally
+# also shows up in the same run's logs. setup-cli-simulation.sh already gets
+# this right, listing only the services that actually have a healthcheck.
+services_with_healthcheck="proxy dns-standard dns-ssl netdata"
+all_services="docker-socket-proxy watchdog syslog syslog-ng nats ui $services_with_healthcheck"
 
 deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do
