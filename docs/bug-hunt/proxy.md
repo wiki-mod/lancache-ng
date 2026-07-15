@@ -634,24 +634,48 @@ not the standard-mode 443 passthrough. nginx's stream module supports
 `ngx_stream_geo`/allow-deny, so enforcement is achievable; the gap is
 structural (the geo var isn't even in scope for `stream{}`).
 
-### N2. [moderate] Proxy bats unit tests never run as a gate on `services/proxy/**` changes
+### N2. [minor] Proxy bats UNIT tests aren't unit-gated per-PR on `services/proxy/**` (only the E2E is)
 
 `bats tests/bats` runs in exactly one workflow — `build-tools.yml`
 (line 345, whose own comment at line 327 states it "is the only place
 bats/shellspec ever run"). That workflow's push/PR triggers
 (`build-tools.yml` lines 29-44) are limited to `tools/build-tools/**`,
 `.github/workflows/build-tools.yml`, `tests/bats/**`, `tests/shellspec/**`,
-`setup.sh`, and `scripts/check-idempotence-test-coverage.sh`. `build-push.yml`
-builds the proxy image on `services/proxy/**` changes but has **no**
-proxy test job (its `*_test` jobs are `dns_test`/`ui_test`/`watchdog_test`,
-all Rust; there is no `proxy_test`) and runs no bats at all. Consequently a
-PR that modifies only `services/proxy/entrypoint.sh` (cert generation,
-domain validation, PSL root derivation, the known-good-snapshot adapter) does
-**not** run `proxy_cert_generation.bats` or `proxy_known_good_snapshot.bats`
-as a merge gate — those execute only on the weekly `build-tools` schedule or
-when a PR happens to also touch one of the trigger paths above. Real
-regressions in proxy shell logic can merge green and only surface at the next
-weekly run.
+`setup.sh`, and `scripts/check-idempotence-test-coverage.sh` — **not**
+`services/proxy/**`. `build-push.yml` builds the proxy image on
+`services/proxy/**` changes but has no `proxy_test` job (its `*_test` jobs are
+`dns_test`/`ui_test`/`watchdog_test`, all Rust) and runs no bats.
+
+**Scope correction after checking the E2E gate (advisor prompt):**
+`full-setup-deep-validate.yml` triggers on every `pull_request`
+(`branches: [master, "v[0-9]*"]`, no `paths:` filter) and its `plan` job sets
+`should_run`/`proxy=true` via `detect-full-setup-changes.sh` whenever
+`services/proxy/` is touched (lines 116-118 of that script), then runs
+`scripts/ssl-mitm-cache-simulation.sh` — a real cert-generation + MITM-cache +
+SNI-passthrough E2E against `deb.debian.org`. So a **broad class** of
+proxy-shell regressions (cert gen failing, config failing `nginx -t`,
+MITM/passthrough breaking) **is** gated per-PR by that E2E. What is *not*
+unit-gated per-PR is the fine-grained logic the bats units cover and the E2E
+happy-path does not exercise: `_default_cert_needs_regen`'s IP-prefix
+anchoring (#655), `_registrable_domain` PSL edge cases, `_is_valid_domain`
+boundary rules, and the 4-file "incomplete snapshot" rejection branch. A
+regression confined to those paths that still passes `nginx -t` and the
+`deb.debian.org` happy path would merge green and only be caught by the weekly
+`build-tools` bats run. Downgraded from moderate to minor accordingly.
+
+### N5. [info] CLAUDE.md "Serial file in `/tmp`" design decision is reversed in code
+
+`CLAUDE.md:98-99` (v0.2.0 worktree) states as a Key Design Decision:
+"Serial file in `/tmp`: … OpenSSL's serial file is always written to
+`/tmp/lancache-ca.srl` rather than the certs directory, and passed with
+`-CAserial`." The code does the opposite: `entrypoint.sh:596`
+`SERIAL_FILE="$CA_DIR/ca.srl"`, deliberately persisted in the CA volume so the
+serial counter survives container restarts (#71; see the comment at
+entrypoint 593-599). Only the transient CSR still lives in `/tmp`
+(`/tmp/lancache-cert.csr`). Same stale-documentation class as finding #5 and
+N3, squarely in this component's own governance doc. This CLAUDE.md
+"Key Design Decisions" section is the right place to reconcile the rest of the
+proxy design claims against the current code during any follow-up.
 
 ### N3. [info] Stale `services/proxy-standard` references
 
