@@ -318,8 +318,25 @@ if [[ "$failed" -eq 1 ]]; then
 fi
 echo "All 8 stack services (7 wired + docker-socket-proxy) are running and healthy."
 
+# --network host (same reasoning as full-setup-validate.yml's identical
+# fix for setup-cli-simulation.sh, issue #819): every call site below
+# targets $ip_standard/$ip_ssl, the SAME loopback-published addresses
+# (127.0.<octet>.2/3) a real operator's browser would use, deliberately --
+# proving that exact address is reachable is the point (this script's own
+# header: "the exact HTTP surface an operator uses"), not just that the
+# service is reachable somehow. Loopback addresses are per-network-
+# namespace: without --network host, this container gets its OWN isolated
+# 127.0.0.0/8, completely separate from the runner host's, where the
+# sibling `ui`/`proxy` containers actually publish their ports. Confirmed
+# directly on a runner: the identical curl from a sibling container without
+# --network host gets connection-refused (000) after 0ms, permanently,
+# regardless of how long a caller waits, while the exact same curl WITH
+# --network host succeeds immediately. Resolving by container/service name
+# instead (e.g. http://ui:8080) would also be network-reachable, but would
+# silently stop proving the loopback-published address itself works --
+# exactly the address a real operator's LAN client depends on.
 run_client() {
-    docker run --rm --network "$network_name" \
+    docker run --rm --network host \
         -v "$work_dir/shared:/shared" \
         "$BUILD_TOOLS_IMAGE" bash -c "$1"
 }
