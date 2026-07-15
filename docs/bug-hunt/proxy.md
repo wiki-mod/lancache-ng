@@ -491,3 +491,200 @@ sweep and found accurate/still current as described; not repeated verbatim
 above to avoid pure duplication, but they are part of this bug-hunt's
 collected scope and should be considered "re-confirmed, not newly found" if
 this file is used as an input to the later verification phase.
+
+---
+
+# Verification pass (2026-07-15, second sweep)
+
+Each of the 15 raw findings above was re-verified directly against the
+`origin/v0.2.0` source in this sweep (own reasoning, not trusted from the
+raw dump). New findings discovered while following every branch to its end
+are appended after the verdicts.
+
+## Verdicts on the 15 known findings
+
+1. **CA `ca.key` no permission hardening** — CONFIRMED (serious).
+   `entrypoint.sh` lines 559-565 generate `ca.key` with no `chmod`/`chgrp`;
+   `certs/generate-ca.sh:26` explicitly does `chmod 600 "$CA_KEY"`, and the
+   same entrypoint hardens the *less* sensitive `CERT_DIR` (2750) and its
+   keys (0640) a few lines later (589-692). The codebase demonstrably knows
+   the pattern and omits it for its single most sensitive secret. OpenSSL's
+   `-keyout` uses the process umask (022 in the Debian container → 644), the
+   very reason the standalone script adds an explicit `chmod`. Mitigating
+   context: the file lands on the host `certs/` bind-mount, so real exposure
+   is bounded by host FS access on a typically single-admin appliance — but
+   the hardening gap is real, trivially fixable, and directly undercuts
+   threat-model T7's stated "CA key staying secret" residual-risk basis.
+
+2. **Dev `PROXY_ALLOWED_CLIENT_CIDRS` IPv4-only → 403s IPv6 LAN clients** —
+   CONFIRMED (moderate). `config/dev/proxy.env:31` ships
+   `"192.168.0.0/16 10.0.0.0/8 172.16.0.0/12"` (no IPv6 range); the generated
+   `geo` block defaults to deny for anything unlisted, and `http.conf:30` /
+   `https.conf:32` gate `location /` on it. Prod ships it empty (permissive),
+   so dev-only. Dual-stack is a headline feature (both configs listen on
+   `[::]`), so a real IPv6 client is silently 403'd against shipped dev
+   defaults.
+
+3. **Per-domain certs (`CERT_DIR`) have no named volume** — CONFIRMED with
+   correction (minor, was moderate). Fact confirmed: `Dockerfile:56`
+   `VOLUME ["/etc/nginx/ssl", ...]`, compose only bind-mounts the
+   `/etc/nginx/ssl/ca` sub-path, so `/etc/nginx/ssl/certs` lives in an
+   anonymous volume while the sibling `proxy-config-snapshots` is a named
+   volume. Correction to the raw claim "every recreate forces regeneration":
+   `docker compose up --force-recreate` reuses anonymous volumes by default;
+   the loss happens specifically on `docker compose down && up` (and any flow
+   that removes the container), where a fresh anon volume is created. Impact
+   is self-healing and CA-preserving (CA persists via the real bind-mount;
+   per-domain certs are just re-signed) — efficiency only, no correctness or
+   security impact.
+
+4. **#841 silent-`set -e` pattern in `ssl-mitm-cache-simulation.sh`** —
+   CONFIRMED (minor, already tracked by #841). Line 151
+   `proxy_cid="$(... ps -q proxy)"` → line 152 `docker cp` with no guard;
+   the four cache-behavior `curl` calls (lines 315/321/339/345) use
+   `-sS` (no `-f`) inside top-level `var="$(...)"` assignments under
+   `set -euo pipefail`, so a hard connection/TLS failure aborts with a bare
+   exit code and none of the `::error::` context every other assertion here
+   has. Re-confirmed still present on v0.2.0.
+
+5. **threat-model T2 names retired `cdn-ssl-domains.txt`** — CONFIRMED
+   (info). `docs/threat-model.md:183` still says strict mode limits hosts to
+   `cdn-ssl-domains.txt`; the file no longer exists in v0.2.0 (repo-wide
+   `git grep` finds it only in that stale doc line and the historical
+   comment at `entrypoint.sh:357` explaining its retirement). Strict mode now
+   derives roots from `services/dns/cdn-domains.txt` via the vendored PSL.
+
+6. **nginx installed unpinned from mainline apt repo** — CONFIRMED (info).
+   `Dockerfile:21` installs bare `nginx` (no `=version` pin) while the base
+   image one line above is digest-pinned. Supply-chain/reproducibility gap
+   for a TLS-interception-sensitive component.
+
+7. **`EXPOSE 80 443` omits 8443** — CONFIRMED (info). `Dockerfile:58` vs
+   `nginx.conf:89-90` (`listen 8443; listen [::]:8443;`). Metadata-only, but
+   `docker run -P` against the image alone would never publish the
+   standard-mode SNI listener.
+
+8. **`mkdir -p /var/cache/nginx/tmp` is dead** — CONFIRMED (info).
+   Repo-wide grep of `cache/nginx/tmp|proxy_temp_path|client_body_temp_path`
+   returns only `Dockerfile:35`; `proxy_cache_path ... use_temp_path=off`
+   keeps temp files in the cache tree, so nothing writes there.
+
+9. **Test-coverage gaps** — CONFIRMED (info). `proxy_known_good_snapshot.bats`
+   only ever drives `_proxy_validate_snapshot_or_rollback` with a SINGLE
+   candidate file; the real call site passes four
+   (`nginx.conf proxy-params.conf $SSL_MAP_FILE $STREAM_TARGET_FILE`), so the
+   multi-file "incomplete snapshot" rejection branch (entrypoint 203-214) is
+   untested for the proxy adapter. No test asserts `CA_DIR`/`ca.key` or
+   `CERT_DIR` permissions. `_registrable_domain` has no `co.uk`/exception-rule
+   test — I hand-traced the algorithm for `foo.example.co.uk` (→ example.co.uk),
+   `city.kawasaki.jp` (exception → registrable), and plain `steamcontent.com`
+   and it is logically CORRECT; the gap is purely test coverage, not a bug.
+   `strict` mode and `PROXY_ALLOWED_CLIENT_CIDRS` 403 paths remain untested.
+
+10. **`/nginx_status` ACL IPv4-only** — CONFIRMED (info, latent). `http.conf:25`
+    `allow 172.16.0.0/12`. No `enable_ipv6` on any deploy network (grep
+    confirms), so container networking is IPv4-only today — not live. Also
+    note `/nginx_status` exists only in `http.conf`, not `https.conf`.
+
+11. **`/healthz` has no access control** — CONFIRMED (info). Both
+    `http.conf:16` and `https.conf:25`; it's a `location =` block outside the
+    `$lancache_client_allowed` gate, reachable by anyone who can route to the
+    proxy. Static "ok", low sensitivity, undocumented as an intentional
+    decision (unlike the `/ca.crt` proposal).
+
+12. **install-ca-cert.md distribution is unimplemented** — CONFIRMED (info).
+    `docs/install-ca-cert.md:110` "Status: proposal pending maintainer
+    decision ... not all implemented yet". No shipped low-friction CA
+    distribution path today.
+
+13. **`resolver ipv6=on` in `http{}` but default in `stream{}`** — CONFIRMED
+    (info, latent). `nginx.conf:57` sets `ipv6=on`; the stream resolver
+    (line 75) omits it, relying on nginx's version-dependent default (flipped
+    to `on` in 1.23.1). Inconsistent; not observably broken on the current
+    unpinned-mainline nginx.
+
+14. **`slice` + cached 301/302 unverified** — CONFIRMED (info). `proxy-params.conf`
+    lines 4-11 enable slicing and `proxy_cache_valid 200 206 301 302`; no bats
+    or E2E test drives a redirecting response through the slice-enabled path.
+    Asserted by config, exercised nowhere.
+
+15. **Upstream `Cache-Control`/`Expires` ignored but not hidden** — CONFIRMED
+    (info). `proxy-params.conf:16-18` ignores Cache-Control/Expires/Vary/
+    Set-Cookie for nginx's own cache decision and hides only Set-Cookie/Vary;
+    the origin's Cache-Control/Expires still reach the client verbatim. Design
+    asymmetry, no confirmed concrete failure.
+
+## New findings (this sweep)
+
+### N1. [moderate, security] Client allowlist (`PROXY_ALLOWED_CLIENT_CIDRS`) is NOT enforced on the standard-mode SNI-passthrough listener (port 8443)
+
+`$lancache_client_allowed` is referenced only in `conf.d/http.conf:30` and
+`conf.d/https.conf:32` (confirmed by repo grep). The `geo` block is generated
+into `/etc/nginx/conf.d/00-ssl-map.conf`, which is `include`d only in the
+`http{}` context; the `stream{}` block (nginx.conf 72-96) includes
+`/etc/nginx/stream.d/*.conf` and has no access gate at all. So standard-mode
+HTTPS — `IP_STANDARD:443 → container:8443`, `proxy_pass $stream_backend`,
+which in the default **lazy** mode is `$ssl_preread_server_name:443` — is an
+unrestricted SNI-driven TLS relay to any host:443 for any client that can
+reach the port, **regardless of `PROXY_ALLOWED_CLIENT_CIDRS`**. This directly
+contradicts `docs/threat-model.md` T2 ("restricts which client networks the
+proxy will answer **at all**") and T9 ("can restrict which clients may drive
+the proxy"): both overstate a mitigation that covers only ports 80 and 443,
+not the standard-mode 443 passthrough. nginx's stream module supports
+`ngx_stream_geo`/allow-deny, so enforcement is achievable; the gap is
+structural (the geo var isn't even in scope for `stream{}`).
+
+### N2. [moderate] Proxy bats unit tests never run as a gate on `services/proxy/**` changes
+
+`bats tests/bats` runs in exactly one workflow — `build-tools.yml`
+(line 345, whose own comment at line 327 states it "is the only place
+bats/shellspec ever run"). That workflow's push/PR triggers
+(`build-tools.yml` lines 29-44) are limited to `tools/build-tools/**`,
+`.github/workflows/build-tools.yml`, `tests/bats/**`, `tests/shellspec/**`,
+`setup.sh`, and `scripts/check-idempotence-test-coverage.sh`. `build-push.yml`
+builds the proxy image on `services/proxy/**` changes but has **no**
+proxy test job (its `*_test` jobs are `dns_test`/`ui_test`/`watchdog_test`,
+all Rust; there is no `proxy_test`) and runs no bats at all. Consequently a
+PR that modifies only `services/proxy/entrypoint.sh` (cert generation,
+domain validation, PSL root derivation, the known-good-snapshot adapter) does
+**not** run `proxy_cert_generation.bats` or `proxy_known_good_snapshot.bats`
+as a merge gate — those execute only on the weekly `build-tools` schedule or
+when a PR happens to also touch one of the trigger paths above. Real
+regressions in proxy shell logic can merge green and only surface at the next
+weekly run.
+
+### N3. [info] Stale `services/proxy-standard` references
+
+`services/proxy-standard` was unified into `services/proxy` in v0.2.0 (only
+`services/proxy` and `services/dhcp-proxy` exist under `services/`), but two
+references remain: `docs/threat-model.md:412` ("`services/proxy-standard`'s
+`ssl_preread`-based SNI passthrough...") and
+`services/ui/src/templates/dashboard.html:53` (comment). Purely stale
+pointers; no functional impact. (The threat-model one is in this component's
+doc scope; the dashboard one belongs to the UI component but is noted here
+since it names this component.)
+
+### N4. [info] Lazy-mode stream passthrough with an empty SNI proxies to a malformed `:443` upstream
+
+In lazy mode the generated stream map is
+`default $ssl_preread_server_name:443;` (entrypoint 748-749). A TLS
+ClientHello with no SNI (or one `ssl_preread` cannot parse) leaves
+`$ssl_preread_server_name` empty, so `$stream_backend` becomes the literal
+`:443` and `proxy_pass` fails. Not a security issue (the connection simply
+breaks) and no-SNI clients are rare for game CDNs, but it's an unhandled
+edge with no explicit reject/log path (strict mode, by contrast, sends
+unknown SNI to the `127.0.0.1:9` discard sink). Info-level.
+
+### Re-confirmed adjacent facts (not new)
+
+- The proxy image retains build-only `gnupg`/`curl`/`ca-certificates` from the
+  nginx-repo bootstrap (`Dockerfile:14-27`); `curl` is legitimately reused by
+  the compose healthcheck, so this is not dead — noted only to rule it out.
+- `proxy_ssl_verify_depth 2` was checked as a possible over-strict/over-lax
+  setting; depth 2 (≤2 intermediates) covers all common public CDN chains —
+  not a finding.
+- The Docker-NAT source-IP nuance (userland-proxy rewriting `$remote_addr`
+  to the bridge gateway) would make the `geo` allowlist all-or-nothing on
+  Docker Desktop, but the dev gateway (172.28.x.x) falls inside the dev
+  allowlist's `172.16.0.0/12`, so it does not currently misfire — noted, not
+  filed.
