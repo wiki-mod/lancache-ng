@@ -440,31 +440,42 @@ run_client "curl -sS -o /dev/null -b /shared/cookiejar \
     'http://$ip_standard:8080/domains/dns/add'" || true
 assert_marker_reaches_ui "$marker_ui" "ui (Rejected invalid dns domain warning)"
 
-echo "== Trigger 3/6: nats -- a real client connection with a unique consumer name =="
-# Reuses the real nats-subscriber binary already shipped in the dns image
-# (the same one scripts/nats-secondary-auth-callout-simulation.sh drives),
-# rather than reimplementing a NATS client -- a genuine connection attempt,
-# not a fabricated log line.
-# On a same-repo PR, SETUP_SIM_IMAGE_TAG is the pinned pr-<N>-sha tag Phase 1
-# just installed with (the common, tested case). On workflow_dispatch/fork/
-# Dependabot it is deliberately empty (see this script's own CI job comment)
-# and SETUP_SIM_IMAGE_CHANNEL instead carries the resolved channel word
-# (e.g. "edge"/"dev") -- falling through to LANCACHE_IMAGE_TAG here would be
-# wrong, since that var is never set as a job-level env for this script.
-dns_image_tag="${SETUP_SIM_IMAGE_TAG:-${SETUP_SIM_IMAGE_CHANNEL:-edge}}"
-dns_image="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${dns_image_tag}"
-nats_user="$(grep '^NATS_DNS_WRITER_USER=' "$install_dir/.env" | cut -d= -f2-)"
-nats_pass="$(grep '^NATS_DNS_WRITER_PASSWORD=' "$install_dir/.env" | cut -d= -f2-)"
+echo "== Trigger 3/6: nats -- a real authentication failure carrying a unique username =="
+# An earlier version of this trigger created a durable JetStream consumer
+# named after the marker (via the real nats-subscriber binary) and expected
+# nats-server's own log to mention that name -- confirmed directly (live,
+# against the real nats:2-alpine image) that it never does, at any log
+# level short of full protocol trace (`trace: true`, which logs every
+# message's raw payload). That was a 100%-reproducible design gap, not a
+# timing race: the consumer name is only ever printed by the short-lived
+# CLIENT process, whose stdout this script already discards, never by
+# nats-server itself at a verbosity this project's real quickstart
+# nats.conf would ever enable in production (trace-level payload logging
+# would flood the forwarded logging pipeline with every real DNS record
+# synced over NATS).
+#
+# nats-server DOES log a real, default-verbosity [ERR] line for a failed
+# authentication attempt, including the attempted username verbatim --
+# confirmed directly: `authentication error - User "<value>"`. Authenticating
+# with the marker AS the username (and a wrong password) is a genuine,
+# unmodified-nats.conf, production-observable event nats-server already logs
+# on its own, not a fabricated line. Implemented as a raw NATS protocol
+# CONNECT over bash's own /dev/tcp (no new client tool or image, matching
+# this project's own no-new-runtime-language stance): read the server's INFO
+# banner, send a CONNECT carrying the marker as the username, then give the
+# server a moment to log the resulting authentication error before the
+# container exits.
 docker run --rm --network "$network_name" \
-    --entrypoint sh \
-    -e "NATS_URL=nats://nats:4222" \
-    -e "NATS_USER=$nats_user" \
-    -e "NATS_PASSWORD=$nats_pass" \
-    -e "NATS_CONSUMER=$marker_nats" \
-    -e "PDNS_API_KEY=e2e-validation-pdns-key" \
-    "$dns_image" \
-    -c 'timeout 5 nats-subscriber || true' >/dev/null 2>&1 || true
-assert_marker_reaches_ui "$marker_nats" "nats (durable consumer name in nats-server's own log)"
+    -e "NATS_AUTH_MARKER=$marker_nats" \
+    "$BUILD_TOOLS_IMAGE" bash -c '
+        set +e
+        exec 3<>/dev/tcp/nats/4222
+        read -r -t 5 _ <&3
+        printf "CONNECT {\"user\":\"%s\",\"pass\":\"wrong\",\"verbose\":false,\"pedantic\":false}\r\n" "$NATS_AUTH_MARKER" >&3
+        read -r -t 3 _ <&3
+        sleep 1
+    ' >/dev/null 2>&1 || true
+assert_marker_reaches_ui "$marker_nats" "nats (authentication-error log line carrying the attempted username)"
 
 echo "== Trigger 4/6 and 5/6: dns-standard + dns-ssl -- one real DNS record add via the Admin UI =="
 # Both dns-standard's and dns-ssl's own nats-subscriber processes durably
