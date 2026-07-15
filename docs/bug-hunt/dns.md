@@ -491,3 +491,92 @@ drift guard (#8). Findings #3, #4, #9, #13 re-verify and extend doc-drift/gaps t
 capability-inventory SoT pass already flagged, confirming they are still true against
 current code as of this sweep. Findings #10-#12, #14-#17 are lower-severity/info-level
 observations collected per this sweep's vacuum-first, no-prefiltering mandate.
+
+---
+
+# Re-verification pass (run 2) — self-verified against `3f53ac3`
+
+CLD-1784147487
+
+Second independent pass over the same component, this time with in-context
+self-verification of every finding above (no separate verifier agent). Base
+re-confirmed as the current `origin/v0.2.0` tip: `gh api
+repos/wiki-mod/lancache-ng/branches/v0.2.0 --jq .commit.sha` →
+`3f53ac3b55e4975cdf8155a91fb80dd2cfdd3363`, so none of the findings below are
+upstream-fixed since the run-1 write-up.
+
+## Verdicts on findings 1–17
+
+All 17 re-verified directly against the code at `3f53ac3` and **CONFIRMED**. The
+run-1 evidence above holds line-for-line; spot notes where re-verification added
+detail:
+
+- **#1 Healthcheck (serious):** confirmed. The `secondary` profile
+  (`deploy/secondary/docker-compose.yml:34`, not in the run-1 table) uses bare
+  `rec_control ping` — also non-compliant (no query/response). So it is 5
+  profiles / 4 distinct styles, only `quickstart` compliant. `dnsutils` (dig)
+  is present in the image, so the compliant probe is available everywhere.
+- **#2 Recursor no IPv6 listener (serious):** confirmed; known/deferred as
+  #851. Run-1 already noted the authoritative bind is IPv4-only too — see N2.
+- **#3 / #4 doc-drift (moderate):** confirmed by tree-wide grep. #3: of the 7
+  rows in `architecture-ng.md`'s optional-features table, `ENABLE_ROOT_MIRROR`,
+  `FILTER_AAAA_V4/V6`, `SECONDARY_MASTERS`, `SECONDARY_ZONES` = 0 code refs;
+  `ENABLE_SECONDARY` appears only in a compose comment. #4: confirmed stale
+  (setup.sh:4347 shows the real merge was #628/PR #788).
+- **#5 TOCTOU (moderate):** confirmed and worth emphasizing — `snapshot_lock`
+  guards only snapshot bookkeeping (`maybe_snapshot_zone`, main.rs:153); the
+  consumer's live PATCH (main.rs:698) is never under it, and the rollback
+  handler's current-state GET (rollback_listener.rs:316-353) runs *before* the
+  lock, so the two PowerDNS writers are never mutually excluded.
+- **#6–#8 (minor):** confirmed (zone-create `|| true` at entrypoint.sh:677-684;
+  `replace`+`ttl:None` dropped as 4xx-ack at main.rs:730-741; RPZ helper is a
+  hand-copy with no sync guard, and `dns_zone_generation.bats:139` exercises the
+  copy not the entrypoint).
+- **#9–#17 (info):** all confirmed (TSIG no-revoke; root uid; IPv4-only root
+  AXFR; wildcard-only syntax unit-tested but 0 leading-dot lines in the shipped
+  `cdn-domains.txt`; stale setup.sh #628 message; AAAA-filter no observability;
+  `tail -c 11` no-op; `run_check_zone` no timeout; 22 sequential GETs on one
+  10s client).
+
+## New findings this pass
+
+### N1 [info/minor] — consumer PATCH path does not canonicalize `record.zone`, unlike the snapshot and rollback paths
+`main.rs::handle_dns_record` builds the PATCH URL from `record.zone` verbatim
+(main.rs:692-695), while its own post-PATCH snapshot uses
+`canonical_zone(&record.zone)` (main.rs:722-728) and the rollback listener uses
+`canonical_zone` + `zone_api_id`. A `lancache.dns.record` message whose `zone`
+carries a trailing dot (`"lan."`) would PATCH `.../zones/lan.` — PowerDNS's API
+id is `lan` — and get a 4xx that `handle_dns_record` acks and silently drops
+(main.rs:730-741), while the snapshot trigger (canonicalized) still fires against
+the correct zone. All in-tree publishers send the bare form (UI
+`domains.rs:182,231` `"zone": "lan"`; reconciler main.rs:884; rollback republish
+rollback_listener.rs:467), so live impact is nil today — but the consumer has no
+defensive normalization; the contract rests entirely on every publisher agreeing
+on the bare form. Fix: `zone_api_id(&canonical_zone(&record.zone))` on the PATCH
+URL, matching the other two paths.
+
+### N2 [info] — authoritative DDNS bind is IPv4-only (already noted within finding #2, restated for the #851 scope)
+`detect_pdns_local_address` (entrypoint.sh:121-143) only detects IPv4
+(`ip -4 route get` / `ip -4 addr show`), and `pdns.conf.template:15` binds
+`127.0.0.1,${PDNS_LOCAL_ADDRESS}` — IPv4 only. So #851's dual-stack gap is
+broader than the recursor's missing `::` listener: the authoritative
+DDNS-update path is IPv4-only too, and a purely-IPv6 DDNS host could never reach
+it. Fold into #851 scope.
+
+### N3 [info] — both PowerDNS REST-API allowlists are IPv4-only
+Distinct from the recursor's *incoming DNS* `allow_from` (which does list
+`fc00::/7`): the REST/webserver allowlists list only IPv4 loopback + RFC1918 —
+`pdns.conf.template:31` `webserver-allow-from=127.0.0.1,10.0.0.0/8,
+172.16.0.0/12,192.168.0.0/16` and `recursor.conf.template:114-118`
+`webservice.allow_from` (no `::1` / `fc00::/7`). A caller reaching these APIs
+over IPv6 would be rejected. No live breakage (nats-subscriber uses
+`127.0.0.1`), another facet of the #851 dual-stack gap.
+
+## Overall (run 2)
+
+Nothing in run-1 was overturned; every finding stands against the current
+`3f53ac3` tip. The actionable, currently-untracked items remain the healthcheck
+governance violation (#1, serious) and the two doc-drifts (#3/#4, moderate); the
+TOCTOU (#5) is real but inherent to the current locking design; the dual-stack
+gap is tracked (#851) but broader than the recursor alone (N2/N3). Everything
+else is minor/info hardening and observability debt.
