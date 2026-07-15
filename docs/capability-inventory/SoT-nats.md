@@ -74,16 +74,42 @@ believing it's already resolved.
   Same class of weak-check gap AG-VAL-019/AG-VAL-020 call out for DNS
   (`ping`/`ss` alone insufficient) — dev/prod/quickstart have *none* at all,
   not even the weak one.
-- **full-setup's authorization block is not equivalent to the real one.**
-  `validation-dns-writer`/`validation-dns-replica` only get `subscribe`
-  permissions — no `publish` list, so none of the
-  `$JS.API.STREAM.*`/`$JS.API.CONSUMER.*`/`$JS.ACK.*` subjects the real
-  `nats-subscriber` binary needs (stream/consumer creation, message ack) are
-  authorized there. If the full-setup validation stack ever exercises the
-  real DNS-sync JetStream flow end-to-end, it would hit permission-denied
-  errors dev/prod/quickstart never would. Worth confirming with whoever owns
-  the full-setup validation flow whether this is intentional (harness never
-  exercises real JetStream writes) or an unnoticed gap.
+- **full-setup's authorization block appears incompatible with the exact
+  JetStream code path its own dns-standard/dns-ssl containers run.** Traced
+  end to end, not just asserted:
+  - `deploy/full-setup/docker-compose.yml` sets `NATS_USER=validation-dns-writer`
+    for `dns-standard` and `NATS_USER=validation-dns-replica` for `dns-ssl`.
+  - Both of those users, in full-setup's nats.conf template only, carry
+    `subscribe` permissions and **no `publish` list at all**.
+  - `services/dns/nats-subscriber/src/main.rs` (`main()`, ~line 240 on)
+    unconditionally calls `js.get_stream("LANCACHE_DNS")` and, on failure,
+    `js.create_stream(...)`, exiting the process (`std::process::exit(1)`) if
+    that create also fails. Both of those JetStream API calls are NATS
+    request-reply operations over `$JS.API.STREAM.INFO.LANCACHE_DNS` /
+    `$JS.API.STREAM.CREATE.LANCACHE_DNS` — subjects neither validation user is
+    authorized to publish to in full-setup's authorization block.
+  - This is in tension with PR #828's own description, which says its new
+    simulation does "one real DNS record add through the Admin UI
+    (dns-standard + dns-ssl, since both independently consume the same NATS
+    write)" — i.e. it assumes this exact path already works in full-setup.
+  - I checked whether current CI already proves this one way or the other:
+    PR #828's own new "Syslog forwarding + Admin UI visibility simulation"
+    job is failing right now
+    (https://github.com/wiki-mod/lancache-ng/actions/runs/29389730152/job/87270364373),
+    but on a *different, earlier* symptom — `curl: (7) Failed to connect to
+    127.0.72.2 port 8080` while establishing a CSRF session against the
+    Admin UI, before the run ever reaches the DNS-record-add step that would
+    exercise dns-writer/replica's JetStream calls. `lancache-ui` in that run's
+    "Final container status" also has no `(healthy)` marker next to it, unlike
+    dns-standard/dns-ssl/proxy/netdata/syslog-ng — consistent with the
+    "no healthcheck on ui/nats" gap already tracked in #842, and plausibly why
+    curl raced ahead of a still-initializing UI. That failure neither confirms
+    nor refutes the JetStream-permission concern above; it just means CI
+    hasn't actually exercised that code path yet in this PR. **This needs a
+    real run that gets past the UI curl step to settle whether full-setup's
+    dns-writer/replica JetStream calls succeed or fail against these
+    permissions** — flagging as an open, evidence-backed question for the
+    dns-side/full-setup-owning pass, not a confirmed runtime bug.
 - **Credential-injection style differs by design across the four** (dev soft
   defaults, prod/quickstart hard-fail, full-setup hardcoded validation
   strings) — looks deliberate given each stack's differing purpose
