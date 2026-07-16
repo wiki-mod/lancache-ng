@@ -617,13 +617,16 @@ impl Config {
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
             // Mirrors watchdog.sh's maybe_prune_syslog() contract (PR3/#757)
             // exactly: same 4 env var names, same defaults (10 GB / 30
-            // days). env_u32_clamped's `n >= 1` floor is a deliberate, minor
-            // divergence from watchdog.sh's bash clamp (which lets a
-            // literal "0" through unchanged, since it is all-digits) --
-            // these two fields are display/reporting-only on the UI side
-            // (the UI never enforces the budget itself, watchdog does), so
-            // a clamped-to-default "0" here has no behavioral effect beyond
-            // what number is shown to the operator.
+            // days). env_u32_clamped's `n >= 1` floor used to be a documented
+            // divergence from watchdog.sh's bash clamp, which let a literal
+            // "0" through unchanged (it is all-digits) -- that was worse than
+            // a harmless display-only mismatch: a real SYSLOG_MAX_GB=0 made
+            // watchdog's size pass treat every file as over budget and delete
+            // everything it could. #874 added the same `n >= 1` floor to
+            // watchdog.sh (falling back to the default of 10 GB, exactly like
+            // this field does), so the two are now aligned again. SYSLOG_ENABLED
+            // parsing is likewise now shared in spirit with watchdog.sh's
+            // is_truthy() helper -- see env_bool()'s doc comment below.
             syslog_enabled: env_bool("SYSLOG_ENABLED", false),
             syslog_log_root: env_str("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
             syslog_max_gb: env_u32_clamped("SYSLOG_MAX_GB", 10),
@@ -754,6 +757,16 @@ fn env_usize_clamped(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+// Canonical truthy-parsing contract for boolean-style env vars in this
+// project. `SYSLOG_ENABLED` is also read by services/watchdog/watchdog.sh's
+// maybe_prune_syslog(), which implements the identical 1/true/yes/on
+// (case-insensitive, trimmed) rule via its own `is_truthy()` shell function
+// -- the two cannot literally share one function body across the Rust/Bash
+// boundary, but must not drift again the way they did before #874 (watchdog
+// used to only accept the literal string "true"). See
+// `syslog_enabled_truthy_parsing_matches_watchdog_contract` below and
+// tests/bats/watchdog_truthy_parsing.bats for parity tests run against the
+// exact same input tables on both sides.
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
@@ -1229,6 +1242,44 @@ mod tests {
         ] {
             env::remove_var(key);
         }
+    }
+
+    // #874: proves env_bool()'s SYSLOG_ENABLED parsing agrees with
+    // watchdog.sh's is_truthy() (services/watchdog/watchdog.sh) on the exact
+    // same input tables that tests/bats/watchdog_truthy_parsing.bats and
+    // tests/bats/watchdog_syslog_prune.bats exercise against the shell side.
+    // Before #874, watchdog.sh only accepted the literal string "true" here,
+    // so "1"/"yes"/"on" showed as enabled in the Admin UI while watchdog's
+    // maybe_prune_syslog() silently never ran. If either side's accepted-value
+    // set is ever edited without updating the other, this test and its bats
+    // counterparts stop agreeing on at least one of these inputs.
+    #[test]
+    fn syslog_enabled_truthy_parsing_matches_watchdog_contract() {
+        let _guard = env_test_lock().lock().unwrap();
+        let key = "LANCACHE_TEST_UI_SYSLOG_ENABLED_WATCHDOG_PARITY";
+
+        for value in [
+            "1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On", " true ", "\ton\t",
+        ] {
+            env::set_var(key, value);
+            assert!(
+                env_bool(key, false),
+                "expected SYSLOG_ENABLED={value:?} to be truthy"
+            );
+        }
+
+        for value in [
+            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "   ", "garbage", "1x", "truex",
+            "yesplease",
+        ] {
+            env::set_var(key, value);
+            assert!(
+                !env_bool(key, false),
+                "expected SYSLOG_ENABLED={value:?} to be falsy"
+            );
+        }
+
+        env::remove_var(key);
     }
 
     #[test]

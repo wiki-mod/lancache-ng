@@ -414,6 +414,33 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `SYSLOG_ENABLED` and `SYSLOG_MAX_GB` parsing diverging between the
+  Admin UI and `watchdog.sh` (#874, found via the #849 vacuum-first bug
+  hunt): the UI's `env_bool()` (`services/ui/src/config.rs`) accepted
+  `1`/`yes`/`on`/`true` (case-insensitive) as truthy for `SYSLOG_ENABLED`,
+  but `watchdog.sh`'s `maybe_prune_syslog()` gate only accepted the exact
+  literal string `true` -- any other spelling made the Admin UI display
+  syslog retention as enabled while watchdog's storage-budget/retention
+  engine silently never ran, with no error or operator-visible signal, and
+  the syslog store could grow unbounded. Fixed by adding a new
+  `is_truthy()` helper to `watchdog.sh` that mirrors `env_bool()`'s exact
+  truthy set (1/true/yes/on, case-insensitive, trimmed) and switching
+  `maybe_prune_syslog()`'s gate to use it -- a literal shared function
+  across the Rust/Bash boundary isn't possible, so both sides now carry a
+  documented contract and parity tests exercising the identical set of
+  truthy/falsy input values (`tests/bats/watchdog_truthy_parsing.bats`,
+  `tests/bats/watchdog_syslog_prune.bats`'s new end-to-end cases, and
+  `services/ui/src/config.rs`'s new
+  `syslog_enabled_truthy_parsing_matches_watchdog_contract` test) so the
+  two cannot silently drift apart again. Also fixed the related
+  `SYSLOG_MAX_GB` clamp divergence the issue named: the UI's
+  `env_u32_clamped` already rejected a literal `0` in favor of the default
+  (10 GB), but `watchdog.sh`'s clamp only guarded against oversized values
+  (`> 1048576` GiB, an arithmetic-overflow guard) and let `SYSLOG_MAX_GB=0`
+  through unchanged -- a real 0 GB budget made the size-based prune pass
+  treat every file as over budget and delete everything it could except
+  today's still-open active log. `watchdog.sh` now clamps any value below
+  1 to the same default of 10 GB, matching the UI's floor.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated

@@ -59,7 +59,7 @@ make_log_file() {
     touch -d "-${age_days} days" "$path"
 }
 
-@test "maybe_prune_syslog is a fail-closed no-op when SYSLOG_ENABLED is not true" {
+@test "maybe_prune_syslog is a fail-closed no-op when SYSLOG_ENABLED is not truthy" {
     make_log_file old.log 1 999
     SYSLOG_ENABLED=false maybe_prune_syslog
     [ -f "$log_root/hostA/old.log" ]
@@ -67,6 +67,42 @@ make_log_file() {
     unset SYSLOG_ENABLED
     maybe_prune_syslog
     [ -f "$log_root/hostA/old.log" ]
+}
+
+# #874 end-to-end proof: before is_truthy() existed, this gate only accepted
+# the literal string "true", so an operator-set "1"/"yes"/"on" showed as
+# enabled in the Admin UI (env_bool()'s more permissive parsing) while
+# watchdog silently never pruned anything. Runs the real gate (not just
+# is_truthy() in isolation -- see watchdog_truthy_parsing.bats for that)
+# against every value the Admin UI's env_bool() treats as truthy, resetting
+# the rate-limit stamp and recreating the fixture file each iteration since
+# maybe_prune_syslog() is normally rate-limited to once per day.
+@test "maybe_prune_syslog treats every Admin-UI-truthy SYSLOG_ENABLED value as enabled" {
+    for value in "1" "true" "TRUE" "True" "yes" "YES" "on" "ON" " on "; do
+        rm -f "$SYSLOG_PRUNE_STAMP"
+        make_log_file old.log 1 999
+        SYSLOG_ENABLED="$value" maybe_prune_syslog
+        [ ! -f "$log_root/hostA/old.log" ] || {
+            echo "expected SYSLOG_ENABLED=[$value] to enable pruning" >&2
+            return 1
+        }
+    done
+}
+
+# Complements the test above: every value the Admin UI's env_bool() treats
+# as explicitly falsy (plus unrecognized garbage, which env_bool() also
+# falls back to non-truthy for) must still leave the gate a no-op. No stamp
+# reset needed between iterations -- a no-op never advances the rate-limit
+# stamp, so every iteration observes the same untouched fixture file.
+@test "maybe_prune_syslog treats every Admin-UI-falsy SYSLOG_ENABLED value as disabled" {
+    make_log_file old.log 1 999
+    for value in "0" "false" "FALSE" "off" "OFF" "no" "NO" "" "garbage" "1x"; do
+        SYSLOG_ENABLED="$value" maybe_prune_syslog
+        [ -f "$log_root/hostA/old.log" ] || {
+            echo "expected SYSLOG_ENABLED=[$value] to leave pruning disabled" >&2
+            return 1
+        }
+    done
 }
 
 @test "maybe_prune_syslog age pass deletes files older than SYSLOG_RETENTION_DAYS and spares newer ones" {
@@ -205,6 +241,21 @@ make_log_file() {
     make_log_file a.log 1 1
 
     SYSLOG_MAX_GB=9999999999 run maybe_prune_syslog
+    [ "$status" -eq 0 ]
+    [ -f "$log_root/hostA/a.log" ]
+}
+
+# #874: SYSLOG_MAX_GB=0 passes the digit-only check unchanged (it is
+# all-digits), which -- before this minimum-value floor was added -- set
+# budget_bytes to 0 and made the size pass treat every file as over budget,
+# deleting everything it could. This mirrors the Admin UI's
+# env_u32_clamped()'s `n >= 1` floor (services/ui/src/config.rs): a literal
+# 0 is clamped to the same default (10 GB) as an invalid/non-numeric value,
+# so a small file well under the real 10 GB default must survive.
+@test "maybe_prune_syslog clamps SYSLOG_MAX_GB=0 to the default instead of using a zero budget" {
+    make_log_file a.log 1 1
+
+    SYSLOG_MAX_GB=0 run maybe_prune_syslog
     [ "$status" -eq 0 ]
     [ -f "$log_root/hostA/a.log" ]
 }

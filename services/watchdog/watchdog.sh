@@ -13,10 +13,16 @@ CACHE_VALID_DAYS="${CACHE_VALID_DAYS:-365}"
 STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"
 PURGE_STAMP="/var/run/watchdog/purge.stamp"
 
-# Central syslog-ng retention engine (#633). Fail-closed: unset/anything but
-# "true" leaves maybe_prune_syslog() a no-op, matching the project's
-# opt-in-only `logging` profile (installs that never enable it must never
-# have watchdog touch a path that doesn't exist for them).
+# Central syslog-ng retention engine (#633). Fail-closed: unset or any value
+# is_truthy() (defined below) does not recognize as truthy leaves
+# maybe_prune_syslog() a no-op, matching the project's opt-in-only `logging`
+# profile (installs that never enable it must never have watchdog touch a
+# path that doesn't exist for them). Truthy parsing mirrors the Admin UI's
+# env_bool() (services/ui/src/config.rs) exactly -- 1/true/yes/on,
+# case-insensitive, trimmed -- so an operator-set value is interpreted
+# identically by both components; before #874 this file only accepted the
+# literal string "true", so a value like "1" or "yes" showed as enabled in
+# the Admin UI while watchdog silently never pruned anything.
 SYSLOG_ENABLED="${SYSLOG_ENABLED:-false}"
 SYSLOG_PRUNE_STAMP="/var/run/watchdog/syslog-prune.stamp"
 
@@ -34,6 +40,29 @@ F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0
 H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
+
+# Canonical truthy-parsing contract shared with the Admin UI's env_bool()
+# (services/ui/src/config.rs) -- see #874. Recognizes 1/true/yes/on as
+# truthy, case-insensitively and after trimming surrounding whitespace,
+# exactly like env_bool()'s `value.trim().to_ascii_lowercase()` match.
+# Anything else (including 0/false/no/off, empty, or unrecognized garbage)
+# is treated as not-truthy; callers combine this with their own
+# `${VAR:-default}` fallback for the "unset" case, same as env_bool()'s
+# `unwrap_or(default)`. Only used for boolean-style env vars (currently
+# SYSLOG_ENABLED); introduced as a single shared function specifically so a
+# second flag can reuse it instead of re-implementing its own truthy check
+# that could drift from this one the way SYSLOG_ENABLED's did.
+is_truthy() {
+    local v="$1"
+    # Trim leading/trailing whitespace (mirrors Rust's `.trim()`).
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v,,}" # lowercase (mirrors Rust's `.to_ascii_lowercase()`)
+    case "$v" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # Keep the watchdog on one cache path only. If an old install still carries
 # split cache vars, they must agree or the helper refuses to guess.
@@ -247,7 +276,7 @@ maybe_purge() {
 # still be open for writing by syslog-ng (see the comment at that skip for
 # why deleting it would be unsafe).
 maybe_prune_syslog() {
-    if [ "$SYSLOG_ENABLED" != "true" ]; then
+    if ! is_truthy "$SYSLOG_ENABLED"; then
         return
     fi
 
@@ -293,6 +322,18 @@ maybe_prune_syslog() {
             max_gb=10
             ;;
     esac
+    # Minimum-value floor, matching the Admin UI's env_u32_clamped()
+    # (services/ui/src/config.rs, `n >= 1`) -- #874. The digit-only check
+    # above lets a literal "0" through unchanged (it is all-digits), which
+    # would set budget_bytes to 0 a few lines below and make the size pass
+    # treat every file in the tree as over budget, deleting everything it
+    # can (except today's still-open active file). A 0 GB budget is never a
+    # sane operator intent, so it is clamped to the same default as an
+    # invalid value rather than honored literally.
+    if [ "$max_gb" -lt 1 ]; then
+        log "SYSLOG_MAX_GB=${max_gb} is below the supported minimum (1 GiB); using default 10"
+        max_gb=10
+    fi
     # Magnitude guard, separate from the digit-only check above: an
     # all-digits-but-huge value (an accidental extra zero, e.g.
     # "9999999999") still passes that check, then overflows Bash's signed
