@@ -652,6 +652,24 @@ things follow from that:
   of this, not a replacement for it: even without the explicit republish,
   it would eventually converge secondaries on its own, just with up to a
   60-second delay.
+  - **NATS permission dependency (#906, follow-up to #867's flush-permission
+    fix above).** Like the flush, this republish is a `lancache.dns.record`
+    JetStream publish sent under whichever container's own identity runs
+    `rollback_handler` (`NATS_DNS_WRITER_USER` on `dns-standard`,
+    `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only works if that
+    identity's `publish` allow-list actually includes that subject. The
+    writer identity already held it (it needs it for the reconciler too);
+    the replica identity did not, and was silently denied when publishing
+    would have been attempted. Not reachable on the default
+    `DNS_ROLLBACK_URL` (`dns-standard:8083` everywhere), but the identity's
+    permissions must be correct independent of which URL an operator
+    configures. Fixed by granting `NATS_DNS_REPLICA_USER` `publish` on
+    `lancache.dns.record` too, accepting a real security-surface tradeoff:
+    a compromised dns-ssl NATS credential can now forge or replicate `lan.`
+    DNS records, not just signal a cache-flush. The alternative considered
+    was making the rollback listener itself detect and reject a
+    permission-denied record republish for `lan.` (fail loud instead of
+    silently no-op'ing); the maintainer chose the permission grant instead.
 - For `local.lan.` and the private reverse zones, there is no existing NATS
   replication to preserve or break in the first place — a rollback on the
   primary for these zones only ever affects that one node, exactly like

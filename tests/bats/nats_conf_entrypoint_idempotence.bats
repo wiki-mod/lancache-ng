@@ -23,12 +23,14 @@
 # the final `exec nats-server` and the ownership handoff to UID 10001); the
 # config-generation logic runs unmodified.
 #
-# Also covers a real-content regression, not just repeat-run convergence: the
+# Also covers real-content regressions, not just repeat-run convergence: the
 # `generate`/`nats_conf_content` helpers below make asserting on specific
 # rendered nats.conf permissions cheap, so the fix requiring dns-writer/
-# dns-replica to hold `publish` on `lancache.dns.flush` gets its own direct
-# assertion against the real generated config, alongside the idempotence
-# properties this suite was originally written for.
+# dns-replica to hold `publish` on `lancache.dns.flush` (#867/#882), and the
+# follow-up fix requiring dns-replica to also hold `publish` on
+# `lancache.dns.record`, each get their own direct assertion against the
+# real generated config, alongside the idempotence properties this suite was
+# originally written for.
 
 bats_require_minimum_version 1.5.0
 
@@ -228,6 +230,62 @@ nats_conf_content() {
         }
         echo "$replica_block" | grep -qF '"lancache.dns.flush"' || {
             echo "dns-replica identity is missing publish on lancache.dns.flush in $compose:" >&2
+            echo "$replica_block" >&2
+            return 1
+        }
+    done
+}
+
+# ── regression: dns-replica must also hold publish on the record subject ──────
+
+# `rollback_listener.rs::publish_rollback_records` (called for `zone == "lan."`)
+# republishes restored records on `lancache.dns.record` under whichever
+# identity is running the rollback listener. `NATS_DNS_WRITER_USER`
+# (dns-standard) already held this subject; `NATS_DNS_REPLICA_USER` (dns-ssl)
+# did not, following the same #867/#882 flush-permission fix above -- this
+# was a genuine gap since the identity's permissions must be correct
+# regardless of which URL `DNS_ROLLBACK_URL` is configured to (it always
+# defaults to `dns-standard:8083` today, but if it were ever pointed at
+# `dns-ssl`, the record republish would be silently denied and secondaries
+# would not converge after a `lan.` rollback). The maintainer accepted the
+# resulting security-surface tradeoff (a compromised dns-ssl credential can
+# now forge/replicate DNS records via this subject, not just signal a
+# cache-flush) rather than adding a fail-closed guard in the listener. This
+# test closes the same kind of coverage gap the flush test above closes:
+# `full-setup`'s equivalent identities carry no `publish` block at all
+# (unrestricted, see the flush test's comment), so only this direct
+# assertion against the real generated config proves the grant.
+@test "dev/prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.record" {
+    for compose in \
+        "$repo_root/deploy/dev/docker-compose.yml" \
+        "$repo_root/deploy/prod/docker-compose.yml" \
+        "$repo_root/deploy/quickstart/docker-compose.yml"
+    do
+        local root
+        root="$(make_sandbox "record-perm-$(basename "$(dirname "$compose")")")"
+        generate "$compose" "$root"
+        local conf="$root/etc/nats/nats.conf"
+
+        local writer_block replica_block
+        writer_block="$(awk '/user: "lancache-dns-writer"/,/^    \}$/' "$conf")"
+        replica_block="$(awk '/user: "lancache-dns-replica"/,/^    \}$/' "$conf")"
+
+        [[ -n "$writer_block" ]] || {
+            echo "could not locate the dns-writer user block in $conf" >&2
+            return 1
+        }
+        [[ -n "$replica_block" ]] || {
+            echo "could not locate the dns-replica user block in $conf" >&2
+            return 1
+        }
+
+        echo "$writer_block" | grep -qF '"lancache.dns.record"' || {
+            echo "dns-writer identity is missing publish on lancache.dns.record in $compose:" >&2
+            echo "$writer_block" >&2
+            return 1
+        }
+        echo "$replica_block" | grep -qF '"lancache.dns.record"' || {
+            echo "dns-replica identity is missing publish on lancache.dns.record in $compose:" >&2
             echo "$replica_block" >&2
             return 1
         }
