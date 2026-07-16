@@ -1,63 +1,112 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Host-local, per-octet locking for the full-setup-validate validation
-# Docker subnet (issue #703). Pure functions plus small side-effecting
-# helpers, no top-level executable code, so this can be sourced directly
-# both by .github/workflows/full-setup-validate.yml's own "Reserve a
-# validation subnet and start the stack" step and by
+# Host-local, per-slot locking for the full-setup-validate validation
+# Docker subnet (issue #703; slot/`/27` redesign issue #832). Pure functions
+# plus small side-effecting helpers, no top-level executable code, so this
+# can be sourced directly both by .github/workflows/full-setup-validate.yml's
+# own "Reserve a validation subnet and start the stack" step and by
 # tests/bats/reserve_validation_subnet.bats (fast, Docker-free unit coverage
 # of the derivation and lock-contention logic).
 #
 # Background: .github/actions/derive-validation-network (#623) derives a
-# 172.30.<n>.0/24 subnet from a hash of the run id/attempt, which makes
-# same-subnet collisions between two different, genuinely concurrent
-# workflow runs on the same self-hosted host RARE but not impossible -- pure
-# hashing has no coordination between runs at all. #703's own linked run
-# confirmed this for real: two concurrent runs derived the same octet, both
-# passed the old `docker network ls`-based pre-flight check (which only
-# catches a leftover Docker network from a previous run, not another run
-# mid-way through its own check-then-create window), and only one of them
-# won the kernel race to actually create the bridge.
+# subnet from a hash of the run id/attempt, which makes same-subnet
+# collisions between two different, genuinely concurrent workflow runs on
+# the same self-hosted host RARE but not impossible -- pure hashing has no
+# coordination between runs at all. #703's own linked run confirmed this for
+# real: two concurrent runs derived the same octet, both passed the old
+# `docker network ls`-based pre-flight check (which only catches a leftover
+# Docker network from a previous run, not another run mid-way through its
+# own check-then-create window), and only one of them won the kernel race to
+# actually create the bridge.
 #
 # This closes that gap with the same host-local `flock` idiom already used
 # elsewhere in this project for a shared-per-host resource
 # (build-tools.yml/build-push.yml's own Buildx cache lock): before a run is
 # allowed to touch Docker at all, it must hold an exclusive, non-blocking
-# flock on a well-known per-octet path. flock's lock is tied to an open file
+# flock on a well-known per-slot path. flock's lock is tied to an open file
 # descriptor, not to a marker file's mere existence, so a crashed or
 # cancelled run can never leave a stale lock behind -- the kernel releases
 # it the instant the holding process dies, whatever kills it (an explicit
 # release, or the runner tearing down the whole job's process tree on
 # cancellation).
+#
+# #832 REDESIGN (2026-07-16): the pool used to be exactly one `/24` per
+# third octet of 172.30.0.0/16 (252 usable slots, ~9 addresses of each `/24`
+# of 256 actually used) -- a small pool that was the direct, root cause of
+# the birthday-paradox collision frequency issue #820/#821's flock+retry
+# mechanism exists to route around. Each reservation now claims a `/27`
+# (30 usable hosts, comfortably more than the ~9-10 the validation stack
+# actually assigns, with headroom for the stack growing a few more services)
+# and the pool is widened from "one `/24` slot per octet" to "eight `/27`
+# slots per octet" within the SAME already-owned 172.30.0.0/16 -- ~2,000
+# slots instead of 252, an ~8x increase, with NO change to the /16 this
+# project draws from. Deliberately NOT widened to the full private
+# 172.16.0.0/12 block (the issue's own "Option B"): that whole range,
+# 172.17.0.0/16-172.31.0.0/16, is ALSO exactly Docker's own default
+# address-pool range for any OTHER, unrelated bridge network created on the
+# same runner host without an explicit subnet -- this project already hit a
+# real bug from relying on that exact range once (CHANGELOG's #654 entry,
+# PowerDNS's `webserver-allow-from` only covering Docker's default pools).
+# Widening into it would trade a self-inflicted small pool for a new,
+# harder-to-diagnose collision surface shared with tooling this project
+# does not control. Staying inside 172.30.0.0/16 avoids that risk entirely
+# while still solving the actual root cause (pool size), since 2,000 slots
+# already leaves enormous headroom over any realistic number of concurrent
+# runs on one host.
+#
+# The externally-visible reservation unit is now called a "slot" rather
+# than an "octet": it is `real_octet * 8 + subblock` (0..7 selecting which
+# of the 8 possible `/27` blocks within that octet's `/24`), so it is no
+# longer a valid single IP octet by itself (values run up to ~2031) --
+# validation_subnet_export_env is the one place that decomposes it back
+# into real IP octets.
 
-# validation_subnet_derive_octet <raw_seed>
-# Prints the third octet (2..253, excluding 28 and 99) of a
-# 172.30.<octet>.0/24 candidate subnet, deterministically derived from
-# <raw_seed>. Hashing rather than using the seed mod N directly: nothing
-# guarantees the seed's low-order digits are evenly distributed, and
-# back-to-back runs (the common case: consecutive pushes/PRs) hashing on raw
-# low bits could cluster near each other instead of spreading across the
-# available range.
-validation_subnet_derive_octet() {
+# validation_subnet_derive_slot <raw_seed>
+# Prints a combined slot index, deterministically derived from <raw_seed>,
+# that identifies one `/27` candidate subnet within 172.30.0.0/16:
+# `slot = real_octet * 8 + subblock`, where real_octet (2..253, excluding 28
+# and 99) is the third octet of a 172.30.<real_octet>.0/24 and subblock
+# (0..7) selects which of that /24's eight /27 blocks this run gets
+# (172.30.<real_octet>.<subblock*32>/27). Hashing rather than using the seed
+# mod N directly: nothing guarantees the seed's low-order digits are evenly
+# distributed, and back-to-back runs (the common case: consecutive
+# pushes/PRs) hashing on raw low bits could cluster near each other instead
+# of spreading across the available range. The octet and subblock are
+# deliberately derived from two DIFFERENT slices of the same digest (not the
+# same bits reused, and not two independent hashes) so the two dimensions
+# don't correlate with each other while staying reproducible from one seed.
+validation_subnet_derive_slot() {
     local raw_seed="$1"
-    local digest decimal octet
+    local digest decimal octet digest2 decimal2 subblock
 
     digest="$(printf '%s' "$raw_seed" | sha256sum | cut -c1-8)"
     decimal=$((16#$digest))
 
     # Reserve the third octet of 172.30.0.0/16 as the per-run pool. 0 and 1
     # are excluded outright; 28 is deploy/dev's docker-compose subnet
-    # (172.28.0.0/16, see deploy/dev/docker-compose.yml) so a derived run
-    # can never reproduce that unrelated network's third octet; 99 was the
-    # old fixed value, kept excluded so a derived pool stays visibly
-    # distinct from the previous hardcoded default.
+    # (172.28.0.0/16, see deploy/dev/docker-compose.yml) -- technically this
+    # octet's own /24 (172.30.28.0/24) can never actually overlap that
+    # unrelated /16 at all (different second octet entirely), but the
+    # exclusion is kept for continuity/visible-intent with the pre-#832
+    # scheme, at a negligible cost (8 of ~2000 slots); 99 was the old fixed
+    # default value (still used as deploy/full-setup/docker-compose.yml's
+    # literal fallback, see validation_subnet_export_env's own comment) --
+    # excluding it outright means a REAL per-run reservation can never be
+    # confused with an unset-env-var fallback landing on the same address.
     octet=$(( (decimal % 252) + 2 )) # 2..253
     case "$octet" in
         28|99) octet=$(( octet + 100 )) ;;
     esac
 
-    printf '%s\n' "$octet"
+    # A second, independent slice of the same digest picks the /27 block
+    # within that octet's /24 (see the file header's #832 note for why this
+    # is a slot within the SAME /16 rather than a wider search range).
+    digest2="$(printf '%s' "$raw_seed" | sha256sum | cut -c9-16)"
+    decimal2=$((16#$digest2))
+    subblock=$(( decimal2 % 8 )) # 0..7
+
+    printf '%s\n' "$(( octet * 8 + subblock ))"
 }
 
 # validation_subnet_seed_for_attempt <run_id> <run_attempt> <attempt_number>
@@ -65,8 +114,8 @@ validation_subnet_derive_octet() {
 # the exact same seed .github/actions/derive-validation-network's own
 # formula does (<run_id>-<run_attempt>, no extra suffix), so the common,
 # uncontested case -- the overwhelming majority of runs, which never hit a
-# lock or a real Docker collision -- derives the IDENTICAL octet that
-# action already independently computes for the compose-project-name/UI-port
+# lock or a real Docker collision -- derives the IDENTICAL slot that action
+# already independently computes for the compose-project-name/UI-port
 # outputs it exposes to this workflow's other jobs. Only a genuine retry
 # (attempt_number > 1) salts the seed, so it can never re-derive the very
 # candidate that was just found to be locked or in use.
@@ -80,11 +129,11 @@ validation_subnet_seed_for_attempt() {
     fi
 }
 
-# validation_subnet_try_lock <lock_root> <octet>
-# Attempts to atomically claim <octet> by holding a non-blocking exclusive
-# flock on "<lock_root>/<octet>.lock" for as long as the returned holder
+# validation_subnet_try_lock <lock_root> <slot>
+# Attempts to atomically claim <slot> by holding a non-blocking exclusive
+# flock on "<lock_root>/<slot>.lock" for as long as the returned holder
 # process stays alive. On success, prints the holder PID on stdout and
-# returns 0; on failure (another process already holds this octet's lock),
+# returns 0; on failure (another process already holds this slot's lock),
 # prints nothing and returns 1.
 #
 # The lock is acquired directly on an fd owned by the very process that
@@ -98,8 +147,8 @@ validation_subnet_seed_for_attempt() {
 # process holding the lock: killing exactly that PID always releases it
 # immediately, with no orphaned child left holding it behind.
 validation_subnet_try_lock() {
-    local lock_root="$1" octet="$2"
-    local lock_file="$lock_root/${octet}.lock"
+    local lock_root="$1" slot="$2"
+    local lock_file="$lock_root/${slot}.lock"
     local holder_pid
 
     mkdir -p "$lock_root"
@@ -160,10 +209,10 @@ validation_subnet_release() {
 
 # validation_subnet_reserve <lock_root> <run_id> <run_attempt> <start_attempt> <max_attempts>
 # Tries attempt numbers from <start_attempt> up to <max_attempts> (inclusive),
-# deriving each one's candidate octet via validation_subnet_seed_for_attempt
-# + validation_subnet_derive_octet and attempting to lock it via
-# validation_subnet_try_lock. On the first attempt number whose octet locks
-# successfully, prints three lines -- "attempt=<n>", "octet=<n>",
+# deriving each one's candidate slot via validation_subnet_seed_for_attempt
+# + validation_subnet_derive_slot and attempting to lock it via
+# validation_subnet_try_lock. On the first attempt number whose slot locks
+# successfully, prints three lines -- "attempt=<n>", "slot=<n>",
 # "holder_pid=<n>" -- and returns 0. If every attempt number in the range is
 # already locked by another concurrent run, prints nothing and returns 1.
 #
@@ -178,14 +227,14 @@ validation_subnet_release() {
 # already-rejected candidate.
 validation_subnet_reserve() {
     local lock_root="$1" run_id="$2" run_attempt="$3" start_attempt="$4" max_attempts="$5"
-    local attempt seed octet holder_pid
+    local attempt seed slot holder_pid
 
     for (( attempt = start_attempt; attempt <= max_attempts; attempt++ )); do
         seed="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" "$attempt")"
-        octet="$(validation_subnet_derive_octet "$seed")"
+        slot="$(validation_subnet_derive_slot "$seed")"
 
-        if holder_pid="$(validation_subnet_try_lock "$lock_root" "$octet")"; then
-            printf 'attempt=%s\noctet=%s\nholder_pid=%s\n' "$attempt" "$octet" "$holder_pid"
+        if holder_pid="$(validation_subnet_try_lock "$lock_root" "$slot")"; then
+            printf 'attempt=%s\nslot=%s\nholder_pid=%s\n' "$attempt" "$slot" "$holder_pid"
             return 0
         fi
     done
@@ -201,15 +250,15 @@ validation_subnet_reserve() {
 # ...): a leftover bridge interface Docker's own bookkeeping no longer
 # tracks (another NIC, a VPN, an orphan from a killed container) still makes
 # the kernel refuse an overlapping bridge, so checking the live `ip addr`
-# view here lets a caller's retry loop skip that octet cleanly instead of
+# view here lets a caller's retry loop skip that slot cleanly instead of
 # discovering it only via a failed create.
 #
 # <own_prefix>, when given and non-empty, marks a network as this caller's
 # OWN reusable-by-name resource (e.g. a Compose project docker recreates by
 # name) rather than a real collision -- matched by exact name or a
 # well-delimited child ("<own_prefix>-"/"<own_prefix>_"), NOT a bare
-# `startswith`, so e.g. octet 22's project ("lancache-ng-validation-22...")
-# is never misread as octet 220's ("lancache-ng-validation-220..."). Callers
+# `startswith`, so e.g. slot 22's project ("lancache-ng-validation-22...")
+# is never misread as slot 220's ("lancache-ng-validation-220..."). Callers
 # with no reusable-by-name resource at all (a script that always creates a
 # brand-new, PID-unique network with no intent to reuse it) should omit
 # <own_prefix> entirely, so every existing network is a real candidate
@@ -267,52 +316,68 @@ for line in route_output.splitlines():
 PYEOF
 }
 
-# validation_subnet_export_env <octet>
-# Exports the COMPLETE per-run validation environment for a reserved octet:
-# the 172.30.<octet>.0/24 subnet, its gateway, every fixed service IP, the
-# per-run Compose project name, and the per-run Admin UI host port. The
-# address layout deliberately mirrors .github/actions/derive-validation-
-# network's own output block byte-for-byte (same octet -> same subnet,
-# gateway, and .2..10 service IPs, same lancache-ng-validation-<octet>
-# project name, same 9000+octet UI port), so a driver that reserves a
-# freshly-locked octet at claim-time produces the identical wiring that
-# action would have produced up front -- just with an octet proven free on
-# THIS host right now instead of a statically-derived guess.
+# validation_subnet_export_env <slot>
+# Exports the COMPLETE per-run validation environment for a reserved slot:
+# the 172.30.<real_octet>.<base>/27 subnet (base = subblock*32), its
+# gateway, every fixed service IP, the per-run Compose project name, and the
+# per-run Admin UI host port. This is the ONE place a <slot> integer (as
+# produced by validation_subnet_derive_slot/validation_subnet_reserve) is
+# decomposed back into real IP octets -- every other function and every
+# caller treats <slot> as an opaque reservation unit. The address layout
+# deliberately mirrors .github/actions/derive-validation-network's own
+# output block byte-for-byte (same slot -> same subnet, gateway, and
+# base+2..base+10 service IPs, same lancache-ng-validation-<slot> project
+# name, same 9000+slot UI port), so a driver that reserves a freshly-locked
+# slot at claim-time produces the identical wiring that action would have
+# produced up front -- just with a slot proven free on THIS host right now
+# instead of a statically-derived guess.
 #
-# VALIDATION_STANDARD_SHIM_IP (.10, issue #668) is exported even though most
-# callers never read it directly: deploy/full-setup/docker-compose.yml
+# VALIDATION_STANDARD_SHIM_IP (base+10, issue #668) is exported even though
+# most callers never read it directly: deploy/full-setup/docker-compose.yml
 # consumes it as the standard-passthrough-shim service's Compose IP, so
 # omitting it would leave that container pinned to the fixed .99.10 default
-# and therefore OUTSIDE a reserved .<octet>.0/24 subnet -- the exact
-# cross-subnet placement bug the per-run derivation exists to avoid. Every
-# other VALIDATION_* value that any full-setup service or simulation script
-# reads is exported here for the same reason: the reserved octet must own
-# the whole address set, not just the subnet CIDR.
+# and therefore OUTSIDE a reserved /27 -- the exact cross-subnet placement
+# bug the per-run derivation exists to avoid. Every other VALIDATION_* value
+# that any full-setup service or simulation script reads is exported here
+# for the same reason: the reserved slot must own the whole address set,
+# not just the subnet CIDR.
+#
+# #832: only 10 of the /27's 30 usable host addresses (base+1..base+10) are
+# claimed here; base+11..base+30 stay free for a couple of consumer scripts
+# that need a few MORE addresses within the SAME reserved subnet
+# (scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh,
+# scripts/setup-reset-kea-config-simulation.sh -- each derives its own
+# extra addresses directly from $VALIDATION_SUBNET's actual base, see those
+# scripts' own comments) and for genuine future growth of the validation
+# stack itself.
 validation_subnet_export_env() {
-    local octet="$1"
+    local slot="$1"
+    local octet=$(( slot / 8 ))
+    local subblock=$(( slot % 8 ))
+    local base=$(( subblock * 32 ))
 
-    export VALIDATION_SUBNET="172.30.${octet}.0/24"
-    export VALIDATION_GATEWAY="172.30.${octet}.1"
-    export VALIDATION_PROXY_IP="172.30.${octet}.2"
-    export VALIDATION_DNS_STANDARD_IP="172.30.${octet}.3"
-    export VALIDATION_PROXY_SSL_IP="172.30.${octet}.4"
-    export VALIDATION_DNS_SSL_IP="172.30.${octet}.5"
-    export VALIDATION_WATCHDOG_IP="172.30.${octet}.6"
-    export VALIDATION_NETDATA_IP="172.30.${octet}.7"
-    export VALIDATION_NATS_IP="172.30.${octet}.8"
-    export VALIDATION_UI_IP="172.30.${octet}.9"
-    export VALIDATION_STANDARD_SHIM_IP="172.30.${octet}.10"
-    export COMPOSE_PROJECT_NAME="lancache-ng-validation-${octet}"
-    export VALIDATION_UI_PORT=$((9000 + octet))
+    export VALIDATION_SUBNET="172.30.${octet}.${base}/27"
+    export VALIDATION_GATEWAY="172.30.${octet}.$((base + 1))"
+    export VALIDATION_PROXY_IP="172.30.${octet}.$((base + 2))"
+    export VALIDATION_DNS_STANDARD_IP="172.30.${octet}.$((base + 3))"
+    export VALIDATION_PROXY_SSL_IP="172.30.${octet}.$((base + 4))"
+    export VALIDATION_DNS_SSL_IP="172.30.${octet}.$((base + 5))"
+    export VALIDATION_WATCHDOG_IP="172.30.${octet}.$((base + 6))"
+    export VALIDATION_NETDATA_IP="172.30.${octet}.$((base + 7))"
+    export VALIDATION_NATS_IP="172.30.${octet}.$((base + 8))"
+    export VALIDATION_UI_IP="172.30.${octet}.$((base + 9))"
+    export VALIDATION_STANDARD_SHIM_IP="172.30.${octet}.$((base + 10))"
+    export COMPOSE_PROJECT_NAME="lancache-ng-validation-${slot}"
+    export VALIDATION_UI_PORT=$((9000 + slot))
 }
 
 # validation_subnet_output_is_collision <output>
 # Returns 0 (true) when <output> carries one of Docker's own subnet/address
 # contention signatures, 1 otherwise. This is the single, shared definition
 # of "this failure is a subnet collision worth retrying on a different
-# octet" -- as opposed to a real, deterministic failure (a bad image, a
+# slot" -- as opposed to a real, deterministic failure (a bad image, a
 # missing env var, a genuine test assertion) that would fail identically on
-# every octet and so must be surfaced immediately instead of burning through
+# every slot and so must be surfaced immediately instead of burning through
 # the whole retry budget. "Pool overlaps" is the daemon's error when a new
 # bridge's subnet overlaps an existing one; the "already in use" / "Address
 # already in use" variants cover a host port or address a concurrent run
@@ -396,7 +461,7 @@ validation_network_await_detached() {
 #
 # Callers use this instead of trusting `docker compose down`'s own network
 # removal to have actually finished: it is meant to run right after `down`
-# in every script's cleanup trap, so the octet/project-name lock this
+# in every script's cleanup trap, so the slot/project-name lock this
 # project's callers hold (scripts/lib/run-in-validation-subnet.sh,
 # full-setup-validate.yml's own teardown step) can truthfully be released
 # once this returns, instead of merely once `down`'s own CLI call returned.

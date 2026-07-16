@@ -411,6 +411,48 @@ is real, live, running code, not just work sitting in source control.
   (a synthetic PXE client, via `scapy`) that proves it against a real
   `dnsmasq` container for both architectures and confirms an ordinary,
   non-PXE-tagged client still receives no reply.
+- CI: redesigned the `full-setup-validate`/`full-setup-deep-validate`/
+  `build-push` validation-subnet reservation pool from one `/24` per octet
+  of `172.30.0.0/16` (252 usable slots, of which the validation stack only
+  ever actually used ~10 of each `/24`'s 256 addresses) to one `/27` per
+  slot -- 30 usable hosts, comfortably more than the stack needs today with
+  headroom for it to grow -- drawn from a pool of 8 `/27` blocks per octet
+  within the SAME already-owned `172.30.0.0/16` (~2,000 slots, an ~8x
+  increase), rather than widening the search into the wider private
+  `172.16.0.0/12` block (#832). The small pool was the direct root cause of
+  the birthday-paradox collision frequency issue #820/#821's flock+retry
+  mechanism exists to route around; that retry mechanism is unchanged and
+  still the safety net for a genuine collision, it should now just fire far
+  less often. Deliberately did NOT widen into the full `172.16.0.0/12`
+  range: that range is ALSO Docker's own default address-pool range for
+  other, unrelated bridge networks on the same self-hosted runner host, and
+  this project already hit a real bug from relying on that exact range once
+  (PowerDNS's `webserver-allow-from` only covering it, above). A full
+  inventory of every fixed-subnet reservation in the project (`172.28.0.0/16`
+  dev compose, `172.31.0.0/16` DHCP Kea lease-flow simulation,
+  `172.29.0.0/16` DHCP proxy PXE simulation -- all untouched, all in
+  different, unrelated `/16`s) and every consumer that assumed the
+  reservation's old `/24` shape was done as part of this change; besides the
+  three workflows and `scripts/lib/reserve-validation-subnet.sh`/
+  `.github/actions/derive-validation-network` themselves, this found and
+  fixed two consumer scripts that computed their OWN additional addresses
+  (beyond the ~10 the core services claim) directly from the reserved
+  subnet's assumed `/24` shape --
+  `scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh` (a Kea test server,
+  DHCP pool, and static reservation address) and
+  `scripts/setup-reset-kea-config-simulation.sh` (the same, for its own
+  separate Kea instance) -- both renumbered to fit within a `/27` and
+  rewritten to parse the reserved subnet's actual base offset instead of
+  assuming it is always `.0`. Also consolidated three call sites
+  (`build-push.yml`, `full-setup-validate.yml`, and a separate,
+  never-actually-shared inline copy of the Docker-network conflict check in
+  `build-push.yml` that still had the exact bare-`startswith` footgun the
+  shared `validation_subnet_conflicts` helper (#820) was supposed to have
+  already fixed everywhere) onto the single shared
+  `validation_subnet_export_env`/`validation_subnet_conflicts` functions
+  instead of each keeping its own hand-written copy of the address-export
+  formula, closing off the exact kind of silent divergence a partial `/24`
+  to `/27` migration could otherwise have left behind.
 
 ### Fixed
 
