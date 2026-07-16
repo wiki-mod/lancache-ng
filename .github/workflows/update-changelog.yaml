@@ -11,7 +11,12 @@ on:
     types: [released]
 
 permissions:
-  contents: read
+  # Workflow-level floor: a job's own `permissions:` block can only NARROW
+  # this, never widen it -- contents:write is needed here because the job
+  # actually pushes a commit. Found live (2026-07-16) while root-causing the
+  # same mistake in build-push.yml's pr-template-check job and this repo's
+  # own release-drafter.yml.
+  contents: write
 
 jobs:
   update:

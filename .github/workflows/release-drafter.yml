@@ -13,7 +13,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # Workflow-level floor: a job's own `permissions:` block can only NARROW
+  # this, never widen it -- both scopes below are needed here because the
+  # job actually needs them (see the job's own permissions comment), not
+  # just cosmetic. Found live (2026-07-16) while root-causing a related
+  # instance of this same mistake in build-push.yml's pr-template-check job.
+  contents: write
+  pull-requests: read
 
 jobs:
   update_release_draft:
@@ -28,7 +34,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Run release-drafter
-        uses: release-drafter/release-drafter@b1476f6e6eb133afa41ed8589daba6dc69b4d3f5 # v6.1.0
+        uses: release-drafter/release-drafter@4d75298e00d9e34c483e5ff8c68d0ea1c1940c1e # v7.5.1
         with:
           # Lets an on-demand run (workflow_dispatch, e.g. "I need a fresh
           # CHANGELOG.md update now") immediately publish instead of just
