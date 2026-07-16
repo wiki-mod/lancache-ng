@@ -40,6 +40,14 @@ on:
 
 permissions:
   contents: read
+  # Workflow-level floor for pull-requests: a job's own `permissions:` block
+  # can only NARROW this, never widen it (#903 follow-up -- pr-template-check
+  # and pr-template-check-hosted added `pull-requests: read` at the job level
+  # to fetch the PR body live via `gh pr view`, but without it granted here
+  # too, that job-level grant was silently capped back down to nothing,
+  # exactly the same class of permissions-widening mistake already documented
+  # for id-token/attestations/artifact-metadata in build-tools.yml).
+  pull-requests: read
 
 concurrency:
   # Push/tag events use a run_id-suffixed key instead of the old
@@ -248,14 +256,37 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: read
+      pull-requests: read
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Fetch current labels/milestone live
+        # Same class of bug found and fixed in pr-template-check (2026-07-16):
+        # github.event.pull_request.labels/.milestone is a snapshot taken when
+        # THIS event fired, and can go stale (confirmed live: a PR that
+        # genuinely had labels and a milestone set was reported as having
+        # neither). Fetched live via `gh pr view` on the runner instead, then
+        # threaded into the container the same way the event-derived values
+        # used to be.
+        id: live-metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
+          milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
+          {
+            echo "labels_file=/tmp/pr-labels-live.json"
+            echo "milestone_title=$milestone_title"
+          } >> "$GITHUB_OUTPUT"
       - name: Validate labels, milestone, and project-board placement
         env:
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
-          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+          PR_LABELS_JSON: ${{ steps.live-metadata.outputs.labels_file }}
+          PR_MILESTONE_TITLE: ${{ steps.live-metadata.outputs.milestone_title }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
@@ -270,11 +301,16 @@ jobs:
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -euo pipefail
+          # PR_LABELS_JSON now names a live-fetched file (mounted below),
+          # not an inline JSON string -- read its content before handing it
+          # to the container as an env var, same shape the script always
+          # expected.
+          labels_json="$(cat "$PR_LABELS_JSON")"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            -e PR_LABELS_JSON \
+            -e PR_LABELS_JSON="$labels_json" \
             -e PR_MILESTONE_TITLE \
             -e PR_DRAFT \
             -e PR_NUMBER \
@@ -288,6 +324,9 @@ jobs:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select build-tools image
@@ -305,10 +344,26 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Fetch current labels/milestone live
+        # See the primary pr-tracking-metadata-check job's identical step for
+        # why this fetches live via `gh pr view` instead of trusting
+        # github.event.pull_request.labels/.milestone.
+        id: live-metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
+          milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
+          {
+            echo "labels_file=/tmp/pr-labels-live.json"
+            echo "milestone_title=$milestone_title"
+          } >> "$GITHUB_OUTPUT"
       - name: Validate labels, milestone, and project-board placement
         env:
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
-          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+          PR_LABELS_JSON: ${{ steps.live-metadata.outputs.labels_file }}
+          PR_MILESTONE_TITLE: ${{ steps.live-metadata.outputs.milestone_title }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
@@ -323,11 +378,12 @@ jobs:
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -euo pipefail
+          labels_json="$(cat "$PR_LABELS_JSON")"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            -e PR_LABELS_JSON \
+            -e PR_LABELS_JSON="$labels_json" \
             -e PR_MILESTONE_TITLE \
             -e PR_DRAFT \
             -e PR_NUMBER \
