@@ -31,7 +31,21 @@ services:
       - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
       - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
     healthcheck:
-      test: ["CMD", "rec_control", "ping"]
+      # Real query/response probe (AG-VAL-018), not bare `rec_control ping`
+      # (liveness only -- proves the control socket answers, not that DNS
+      # itself resolves, AG-VAL-019). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check (#869):
+      # dnsutils/dig is already installed in this image
+      # (services/dns/Dockerfile). cdn-domains.txt is baked into the image
+      # itself (`COPY cdn-domains.txt /etc/pdns/cdn-domains.txt` in
+      # services/dns/Dockerfile, no bind mount needed here), and the RPZ
+      # zone is generated from that file during entrypoint.sh's startup
+      # sequence, before the NATS subscriber even starts -- verified live
+      # against ghcr.io/wiki-mod/lancache-ng/dns:latest. NATS here only
+      # syncs the dynamic `lan.` zone from the primary, not the CDN list,
+      # so this check does not depend on NATS reconciliation and has the
+      # same timing profile as every other profile's DNS containers.
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
