@@ -20,7 +20,7 @@ PURGE_STAMP="/var/run/watchdog/purge.stamp"
 # path that doesn't exist for them). Truthy parsing mirrors the Admin UI's
 # env_bool() (services/ui/src/config.rs) exactly -- 1/true/yes/on,
 # case-insensitive, trimmed -- so an operator-set value is interpreted
-# identically by both components; before #874 this file only accepted the
+# identically by both components; this file previously only accepted the
 # literal string "true", so a value like "1" or "yes" showed as enabled in
 # the Admin UI while watchdog silently never pruned anything.
 SYSLOG_ENABLED="${SYSLOG_ENABLED:-false}"
@@ -115,8 +115,8 @@ if [ "$SSL_ENABLED" = "1" ] && [ "$C_DNS_SSL" != "lancache-dns-ssl" ]; then
 fi
 
 # Canonical truthy-parsing contract shared with the Admin UI's env_bool()
-# (services/ui/src/config.rs) -- see #874. Recognizes 1/true/yes/on as
-# truthy, case-insensitively and after trimming surrounding whitespace,
+# (services/ui/src/config.rs). Recognizes 1/true/yes/on as truthy,
+# case-insensitively and after trimming surrounding whitespace,
 # exactly like env_bool()'s `value.trim().to_ascii_lowercase()` match.
 # Anything else (including 0/false/no/off, empty, or unrecognized garbage)
 # is treated as not-truthy; callers combine this with their own
@@ -456,8 +456,8 @@ maybe_prune_syslog() {
             ;;
     esac
     # Minimum-value floor, matching the Admin UI's env_u32_clamped()
-    # (services/ui/src/config.rs, `n >= 1`) -- #874. The digit-only check
-    # above lets a literal "0" through unchanged (it is all-digits), which
+    # (services/ui/src/config.rs, `n >= 1`). The digit-only check above
+    # lets a literal "0" through unchanged (it is all-digits), which
     # would set budget_bytes to 0 a few lines below and make the size pass
     # treat every file in the tree as over budget, deleting everything it
     # can (except today's still-open active file). A 0 GB budget is never a

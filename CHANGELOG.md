@@ -498,7 +498,22 @@ is real, live, running code, not just work sitting in source control.
   through unchanged -- a real 0 GB budget made the size-based prune pass
   treat every file as over budget and delete everything it could except
   today's still-open active log. `watchdog.sh` now clamps any value below
-  1 to the same default of 10 GB, matching the UI's floor.
+  1 to the same default of 10 GB, matching the UI's floor. A second,
+  previously unaddressed divergence in the same clamp was found during PR
+  review: `env_u32_clamped` (the UI side) had no ceiling at all, while
+  `watchdog.sh`'s own guard already capped its enforced budget at 1048576
+  GiB -- an operator-set value above that ceiling (or one large enough to
+  overflow a `u32`, e.g. `9999999999`) displayed as its literal,
+  unclamped size in the Admin UI while watchdog silently enforced a much
+  smaller budget. Fixed by adding `env_u32_clamped_with_max` (parses as
+  `u64` so an overflowing value converges on the same result as an
+  in-range-but-over-ceiling one, instead of falling back to `default`) and
+  using it for `SYSLOG_MAX_GB` with the same `1048576` ceiling
+  (`SYSLOG_MAX_GB_CEILING`) `watchdog.sh` already enforces, plus parity
+  tests on both sides (`services/ui/src/config.rs`'s
+  `syslog_max_gb_oversized_value_clamps_to_watchdog_ceiling` and
+  `tests/bats/watchdog_syslog_prune.bats`'s new ceiling-parity case) that
+  assert the identical clamped value, not just that neither side crashes.
 - Generalized the single-consumer secret auto-generation from PR #855 into a
   reusable **shared-secret bootstrap** for handshake secrets that multiple
   independent containers must agree on (#858). All seven such secrets --

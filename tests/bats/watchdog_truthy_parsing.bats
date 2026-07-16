@@ -1,13 +1,13 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Unit coverage for services/watchdog/watchdog.sh's is_truthy() helper
-# (#874): the canonical truthy-parsing contract shared with the Admin UI's
-# env_bool() (services/ui/src/config.rs). Before this function existed,
-# watchdog.sh's SYSLOG_ENABLED gate only accepted the literal string "true",
-# while the Admin UI's env_bool() already accepted 1/true/yes/on
-# case-insensitively -- an operator typing "yes" or "1" saw the feature as
-# enabled in the Admin UI while watchdog silently never enforced retention.
+# Unit coverage for services/watchdog/watchdog.sh's is_truthy() helper: the
+# canonical truthy-parsing contract shared with the Admin UI's env_bool()
+# (services/ui/src/config.rs). Before this function existed, watchdog.sh's
+# SYSLOG_ENABLED gate only accepted the literal string "true", while the
+# Admin UI's env_bool() already accepted 1/true/yes/on case-insensitively --
+# an operator typing "yes" or "1" saw the feature as enabled in the Admin UI
+# while watchdog silently never enforced retention.
 #
 # This file tests is_truthy() directly, in isolation from
 # maybe_prune_syslog()'s rate-limiting/filesystem behavior (covered
@@ -15,7 +15,7 @@
 # deliberately the same values services/ui/src/config.rs's
 # `syslog_enabled_truthy_parsing_matches_watchdog_contract` test exercises
 # against env_bool() -- proving both components agree on the same set of
-# inputs is the whole point of #874.
+# inputs is the whole point of this test suite.
 
 bats_require_minimum_version 1.5.0
 

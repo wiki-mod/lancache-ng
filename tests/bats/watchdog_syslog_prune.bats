@@ -69,7 +69,7 @@ make_log_file() {
     [ -f "$log_root/hostA/old.log" ]
 }
 
-# #874 end-to-end proof: before is_truthy() existed, this gate only accepted
+# End-to-end proof: before is_truthy() existed, this gate only accepted
 # the literal string "true", so an operator-set "1"/"yes"/"on" showed as
 # enabled in the Admin UI (env_bool()'s more permissive parsing) while
 # watchdog silently never pruned anything. Runs the real gate (not just
@@ -245,7 +245,7 @@ make_log_file() {
     [ -f "$log_root/hostA/a.log" ]
 }
 
-# #874: SYSLOG_MAX_GB=0 passes the digit-only check unchanged (it is
+# SYSLOG_MAX_GB=0 passes the digit-only check unchanged (it is
 # all-digits), which -- before this minimum-value floor was added -- set
 # budget_bytes to 0 and made the size pass treat every file as over budget,
 # deleting everything it could. This mirrors the Admin UI's
@@ -258,4 +258,38 @@ make_log_file() {
     SYSLOG_MAX_GB=0 run maybe_prune_syslog
     [ "$status" -eq 0 ]
     [ -f "$log_root/hostA/a.log" ]
+}
+
+# Parity test for the watchdog side of services/ui/src/config.rs's
+# `syslog_max_gb_oversized_value_clamps_to_watchdog_ceiling` test: both sides
+# must agree on the exact clamped budget for the same oversized inputs, not
+# just "does not crash" (already covered by the overflow test above) or
+# "shows some value" -- an operator setting either input must see the same
+# 1048576 GiB budget enforced here that the Admin UI's env_u32_clamped_with_max
+# displays via SYSLOG_MAX_GB_CEILING. Checks the "budget=...GB" segment of
+# maybe_prune_syslog()'s own log line rather than file survival, since a
+# 1048576 GiB budget is never actually exceeded by this test's tiny fixture
+# file either way -- only the logged clamped value distinguishes a correctly
+# clamped run from one that silently used the raw oversized input instead.
+@test "maybe_prune_syslog clamps an in-range-but-over-ceiling and a u32-overflowing SYSLOG_MAX_GB to the same 1048576 budget" {
+    make_log_file a.log 1 1
+
+    # In-range for a 32-bit value, but above watchdog's own ceiling.
+    rm -f "$SYSLOG_PRUNE_STAMP"
+    SYSLOG_MAX_GB=2000000 run maybe_prune_syslog
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"budget=1048576GB"* ]] || {
+        echo "expected SYSLOG_MAX_GB=2000000 to clamp to budget=1048576GB, got: $output" >&2
+        return 1
+    }
+
+    # Overflows a 32-bit value; must clamp to the same ceiling, not fall back
+    # to some other default.
+    rm -f "$SYSLOG_PRUNE_STAMP"
+    SYSLOG_MAX_GB=9999999999 run maybe_prune_syslog
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"budget=1048576GB"* ]] || {
+        echo "expected SYSLOG_MAX_GB=9999999999 to clamp to budget=1048576GB, got: $output" >&2
+        return 1
+    }
 }
