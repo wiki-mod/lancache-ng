@@ -36,7 +36,7 @@ jobs:
   #
   # "Almost": this job's own hash-only derivation has no coordination
   # between concurrent runs at all, so two runs deriving the exact same
-  # octet close together was a genuine (rare, but confirmed for real -
+  # slot close together was a genuine (rare, but confirmed for real -
   # #703) race, not just a low-probability event. This job's `subnet`/
   # `gateway`/`*_ip` outputs below are therefore only the STARTING
   # candidate: full-setup-validate's own "Reserve a validation subnet and
@@ -83,25 +83,25 @@ jobs:
     # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT used to be set here from
     # compute-validation-network's outputs on the theory that only the
     # subnet itself is affected by a retry. That was wrong: both are also
-    # derived from the SAME octet compute-validation-network derives
-    # (project_name = "lancache-ng-validation-<octet>", ui_port = 9000 +
-    # <octet>, see that action's own derive step), so whenever a retry lands
-    # on a DIFFERENT octet than the one two colliding concurrent runs both
+    # derived from the SAME slot compute-validation-network derives
+    # (project_name = "lancache-ng-validation-<slot>", ui_port = 9000 +
+    # <slot>, see that action's own derive step), so whenever a retry lands
+    # on a DIFFERENT slot than the one two colliding concurrent runs both
     # started from -- exactly the #703 scenario this whole mechanism exists
-    # to handle -- the run that retried would keep the ORIGINAL octet's
+    # to handle -- the run that retried would keep the ORIGINAL slot's
     # project name and UI port (job-level env, unaffected by $GITHUB_ENV)
-    # while using the NEW octet's subnet. That reintroduces, on the compose
+    # while using the NEW slot's subnet. That reintroduces, on the compose
     # project name and host UI port specifically, the exact same
     # concurrent-run collision (colliding container/network names, colliding
     # 127.0.0.1:<port> bind) that deriving them per-run was supposed to
     # prevent in the first place. So these two are now rederived from the
-    # actually-reserved octet by that same step, alongside
+    # actually-reserved slot by that same step, alongside
     # VALIDATION_SUBNET/GATEWAY/*_IP, for the same reason.
     #
     # Downstream jobs (ssl-mitm-cache-simulation and later) are unaffected by
     # THIS job's own retry loop specifically, but were NOT actually safe
     # before issue #820: an earlier version of this comment claimed they
-    # "deliberately use the fixed 172.30.99.0/24 default subnet" as if that
+    # "deliberately use the fixed 172.30.99.0/27 default subnet" as if that
     # were an intentional, harmless choice -- it was not. They simply never
     # had VALIDATION_SUBNET/GATEWAY/*_IP threaded to them at all (only
     # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT), so every one of them fell
@@ -151,7 +151,7 @@ jobs:
       # that job's own hash derivation alone had an unlocked check-then-
       # create race between two different, genuinely concurrent workflow
       # runs on the same self-hosted host (#703): two runs could derive the
-      # same octet, both pass a `docker network ls`-based pre-flight check
+      # same slot, both pass a `docker network ls`-based pre-flight check
       # (only catches a leftover Docker network, not another run mid-way
       # through its own check-then-create window), and then race the kernel
       # to actually create the bridge, with only one winning.
@@ -161,16 +161,16 @@ jobs:
       # (build-tools.yml/build-push.yml's Buildx cache lock), via
       # scripts/lib/reserve-validation-subnet.sh: before this job ever
       # touches Docker, it must hold an exclusive, non-blocking flock on the
-      # candidate octet, for as long as the validation stack stays up (the
+      # candidate slot, for as long as the validation stack stays up (the
       # lock's holder PID is threaded through $GITHUB_ENV so the teardown
       # step below can release it explicitly once the stack comes down).
       # flock's lock is tied to an open file descriptor, not to a marker
       # file's mere existence, so a crashed or cancelled run can never leave
       # a stale lock behind.
       #
-      # Three things can still make a given candidate octet unusable even
+      # Three things can still make a given candidate slot unusable even
       # after its lock is held: (1) another concurrent run already holds
-      # that octet's lock; (2) the defense-in-depth check below (carried
+      # that slot's lock; (2) the defense-in-depth check below (carried
       # over from the pre-#703 "Check for a validation subnet collision"
       # step, which only this step's own header comment used to hold) finds
       # a real host-interface or non-project Docker-network conflict Docker
@@ -237,68 +237,61 @@ jobs:
 
           docker compose pull --quiet
 
-          reserved_octet=""
+          reserved_slot=""
           holder_pid=""
           next_attempt=1
 
-          while [[ -z "$reserved_octet" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
-              echo "::error::Could not lock a free validation subnet octet after $max_attempts attempts."
+          while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
+            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+              echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
               exit 1
             }
             attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-            octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
+            slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
             candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
 
-            # Rederive COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT from THIS
-            # attempt's own candidate octet, using the exact same formula
-            # .github/actions/derive-validation-network's own derive step
-            # uses. Both used to come only from compute-validation-network's
-            # job-level outputs -- i.e. from the FIRST octet ever tried,
-            # attempt 1 -- which stayed wrong for the rest of this loop on
-            # any actual retry (a different octet). That mattered in two
-            # ways: (1) validation_subnet_conflicts below reads
-            # COMPOSE_PROJECT_NAME to recognize a leftover Docker network from
-            # THIS SAME run's own earlier (crashed, never torn down) attempt
-            # at the CURRENT
-            # candidate octet as "ours" rather than a foreign conflict -- a
-            # stale value would misidentify a genuinely reusable leftover as
-            # a foreign collision and waste a retry; (2) two different,
-            # genuinely concurrent workflow runs that both started from the
-            # SAME initial octet (the exact #703 scenario) but where one
-            # loses the lock race and retries onto a DIFFERENT octet would
-            # otherwise keep sharing the ORIGINAL octet's project name and UI
-            # port even after diverging on subnet -- reintroducing, on the
-            # compose project namespace and host UI port specifically, the
-            # very same concurrent-run collision deriving them per-run was
-            # meant to prevent in the first place.
-            export COMPOSE_PROJECT_NAME="lancache-ng-validation-${octet}"
-            export VALIDATION_UI_PORT=$((9000 + octet))
+            # Rederive the COMPLETE VALIDATION_* set (subnet, gateway, every
+            # service IP, COMPOSE_PROJECT_NAME, VALIDATION_UI_PORT) from THIS
+            # attempt's own candidate slot via the single shared
+            # validation_subnet_export_env (reserve-validation-subnet.sh) --
+            # the SAME function full-setup-deep-validate.yml's own reserve
+            # step and scripts/lib/run-in-validation-subnet.sh call, instead
+            # of this step keeping its own separate, hand-written copy of the
+            # export formula (a real divergence risk #832's inventory found:
+            # this step and build-push.yml's own "Reserve a validation subnet
+            # and start the stack" step had each drifted into their own
+            # copy-pasted export block). Both used to come only from
+            # compute-validation-network's job-level outputs -- i.e. from the
+            # FIRST slot ever tried, attempt 1 -- which stayed wrong for the
+            # rest of this loop on any actual retry (a different slot). That
+            # mattered in two ways: (1) validation_subnet_conflicts below
+            # reads COMPOSE_PROJECT_NAME to recognize a leftover Docker
+            # network from THIS SAME run's own earlier (crashed, never torn
+            # down) attempt at the CURRENT candidate slot as "ours" rather
+            # than a foreign conflict -- a stale value would misidentify a
+            # genuinely reusable leftover as a foreign collision and waste a
+            # retry; (2) two different, genuinely concurrent workflow runs
+            # that both started from the SAME initial slot (the exact #703
+            # scenario) but where one loses the lock race and retries onto a
+            # DIFFERENT slot would otherwise keep sharing the ORIGINAL slot's
+            # project name and UI port even after diverging on subnet --
+            # reintroducing, on the compose project namespace and host UI
+            # port specifically, the very same concurrent-run collision
+            # deriving them per-run was meant to prevent in the first place.
+            validation_subnet_export_env "$slot"
 
-            target_subnet="172.30.${octet}.0/24"
-            conflict="$(validation_subnet_conflicts "$target_subnet" "$COMPOSE_PROJECT_NAME")"
+            conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
             if [[ -n "$conflict" ]]; then
-              echo "Octet $octet's subnet $target_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+              echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
               validation_subnet_release "$candidate_pid"
               next_attempt=$((attempt + 1))
               continue
             fi
 
-            export VALIDATION_SUBNET="$target_subnet"
-            export VALIDATION_GATEWAY="172.30.${octet}.1"
-            export VALIDATION_PROXY_IP="172.30.${octet}.2"
-            export VALIDATION_DNS_STANDARD_IP="172.30.${octet}.3"
-            export VALIDATION_PROXY_SSL_IP="172.30.${octet}.4"
-            export VALIDATION_DNS_SSL_IP="172.30.${octet}.5"
-            export VALIDATION_WATCHDOG_IP="172.30.${octet}.6"
-            export VALIDATION_NETDATA_IP="172.30.${octet}.7"
-            export VALIDATION_NATS_IP="172.30.${octet}.8"
-            export VALIDATION_UI_IP="172.30.${octet}.9"
-
-            echo "Attempting to start the validation stack on locked, pre-checked subnet $target_subnet (attempt $attempt)."
+            echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
             if up_output="$(docker compose up -d 2>&1)"; then
               echo "$up_output"
-              reserved_octet="$octet"
+              reserved_slot="$slot"
               holder_pid="$candidate_pid"
               break
             fi
@@ -306,7 +299,7 @@ jobs:
             echo "$up_output"
             validation_subnet_release "$candidate_pid"
 
-            if [[ "$up_output" != *"Pool overlaps"* && "$up_output" != *"already in use"* && "$up_output" != *"Address already in use"* ]]; then
+            if ! validation_subnet_output_is_collision "$up_output"; then
               echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
               exit 1
             fi
@@ -315,37 +308,36 @@ jobs:
             next_attempt=$((attempt + 1))
           done
 
-          if [[ -z "$reserved_octet" ]]; then
+          if [[ -z "$reserved_slot" ]]; then
             echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
             exit 1
           fi
 
-          echo "Validation stack is up on subnet 172.30.${reserved_octet}.0/24 (lock held by PID $holder_pid)."
+          echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
 
-          # Persist the SAME rederived project name/UI port the winning
-          # attempt above already exported for its own `docker compose up`,
-          # so every later step in this job (the health-check step, the
-          # client-simulation step, and the teardown step's own
-          # `docker compose down`) keeps targeting the actually-running
-          # stack instead of falling back to whatever a stale job-level env
-          # would have held on a retry.
-          reserved_project_name="lancache-ng-validation-${reserved_octet}"
-          reserved_ui_port=$((9000 + reserved_octet))
-
+          # Persist the SAME VALIDATION_*/COMPOSE_PROJECT_NAME/
+          # VALIDATION_UI_PORT set the winning attempt above already
+          # exported (via validation_subnet_export_env) for its own
+          # `docker compose up`, so every later step in this job (the
+          # health-check step, the client-simulation step, and the teardown
+          # step's own `docker compose down`) keeps targeting the
+          # actually-running stack instead of falling back to whatever a
+          # stale job-level env would have held on a retry.
           {
-            echo "COMPOSE_PROJECT_NAME=$reserved_project_name"
-            echo "VALIDATION_UI_PORT=$reserved_ui_port"
+            echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+            echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
             echo "VALIDATION_LOCK_HOLDER_PID=$holder_pid"
-            echo "VALIDATION_SUBNET=172.30.${reserved_octet}.0/24"
-            echo "VALIDATION_GATEWAY=172.30.${reserved_octet}.1"
-            echo "VALIDATION_PROXY_IP=172.30.${reserved_octet}.2"
-            echo "VALIDATION_DNS_STANDARD_IP=172.30.${reserved_octet}.3"
-            echo "VALIDATION_PROXY_SSL_IP=172.30.${reserved_octet}.4"
-            echo "VALIDATION_DNS_SSL_IP=172.30.${reserved_octet}.5"
-            echo "VALIDATION_WATCHDOG_IP=172.30.${reserved_octet}.6"
-            echo "VALIDATION_NETDATA_IP=172.30.${reserved_octet}.7"
-            echo "VALIDATION_NATS_IP=172.30.${reserved_octet}.8"
-            echo "VALIDATION_UI_IP=172.30.${reserved_octet}.9"
+            echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
+            echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
+            echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
+            echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
+            echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
+            echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
+            echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
+            echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
+            echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
+            echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
+            echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
           } >> "$GITHUB_ENV"
 
       - name: Wait for the stack to stabilize and check container health
@@ -441,7 +433,7 @@ jobs:
           # validation_project_networks_teardown's own comment in
           # reserve-validation-subnet.sh) and silently leave this project's
           # network(s) non-empty, poisoning them for whichever run reserves
-          # this octet next. Wait for and force a real removal instead of
+          # this slot next. Wait for and force a real removal instead of
           # trusting `down`'s own exit code.
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
@@ -458,7 +450,7 @@ jobs:
 
           # Release the host-local subnet lock the "Reserve a validation
           # subnet and start the stack" step above acquired (see that
-          # step's own comment), so the octet becomes available to the next
+          # step's own comment), so the slot becomes available to the next
           # run immediately rather than waiting for this whole job's process
           # tree to exit. $VALIDATION_LOCK_HOLDER_PID is only set once that
           # step actually reserved a lock -- if it failed before reaching
@@ -502,12 +494,12 @@ jobs:
     # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (below, now removed). Every
     # invocation of scripts/ssl-mitm-cache-simulation.sh in THIS workflow
     # therefore always fell back to deploy/full-setup/docker-compose.yml's
-    # own hardcoded ${VALIDATION_SUBNET:-172.30.99.0/24} default, regardless
-    # of the run's own derived octet -- a deterministic collision the
+    # own hardcoded ${VALIDATION_SUBNET:-172.30.99.0/27} default, regardless
+    # of the run's own derived slot -- a deterministic collision the
     # moment any two such networks (from any job, any concurrent run) existed
     # at once, not a rare birthday-paradox event. scripts/lib/
     # run-in-validation-subnet.sh (issue #820) now wraps this job's script
-    # invocation: it reserves a host-locked, overlap-checked octet per
+    # invocation: it reserves a host-locked, overlap-checked slot per
     # attempt, exports the complete VALIDATION_* set (superseding the
     # removed job-level COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT, which the
     # wrapper's own export would have shadowed within this step anyway), and
@@ -560,7 +552,7 @@ jobs:
     # never had VALIDATION_SUBNET/GATEWAY/*_IP threaded to it, only
     # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (now removed, superseded by
     # the wrapper's own export) -- so it always fell back to the compose
-    # file's hardcoded 172.30.99.0/24 default, a deterministic collision
+    # file's hardcoded 172.30.99.0/27 default, a deterministic collision
     # magnet shared with every other unwrapped job on this same subnet.
     name: UI/NATS/DNS integration simulation
     needs: [compute-validation-network, ssl-mitm-cache-simulation]
@@ -681,7 +673,7 @@ jobs:
         # rollback-safety test: at that exact failure's timestamp, several
         # *other* branches' Full-Setup Deep Validate runs were independently
         # in flight too. Not the #820/#821 class (that fix only covers the
-        # per-octet Docker *network* subnet full-setup-validate/deep-validate
+        # per-slot Docker *network* subnet full-setup-validate/deep-validate
         # reserve for their own throwaway stacks) -- this job never goes
         # through that reservation at all, since it installs the real
         # quickstart flow with real fixed names instead. A host-local flock
@@ -845,7 +837,7 @@ jobs:
     # VALIDATION_SUBNET/GATEWAY/*_IP threaded to it, only
     # COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT (now removed, superseded by the
     # wrapper's own export) -- so its own compose stack always fell back to
-    # the hardcoded 172.30.99.0/24 default, confirmed for real: this exact
+    # the hardcoded 172.30.99.0/27 default, confirmed for real: this exact
     # job died on "Pool overlaps" for lancache-ng-validation-69-auth-callout_
     # validation in the run that surfaced this gap.
     name: NATS auth-callout simulation
@@ -912,7 +904,7 @@ jobs:
     # the shared self-hosted runner tier rather than introducing new
     # concurrency here.
     # Wrapped in run-in-validation-subnet.sh (issue #820): this job's own
-    # script used to hardcode 172.30.99.0/24 unconditionally, with no per-run
+    # script used to hardcode 172.30.99.0/27 unconditionally, with no per-run
     # derivation and no retry at all -- worse than the birthday-paradox-odds
     # bug its siblings had, since EVERY invocation of this exact script, from
     # ANY concurrent run, requested the identical literal subnet (a

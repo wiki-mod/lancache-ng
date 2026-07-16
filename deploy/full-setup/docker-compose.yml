@@ -419,7 +419,15 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/24}
+        # #832: the default fell back to a whole /24 per octet; runs now
+        # reserve a /27 instead (see scripts/lib/reserve-validation-subnet.sh),
+        # but this literal fallback (used only when a script/job runs
+        # standalone with no CI reservation) deliberately keeps the SAME
+        # dotted addresses as before (.99.1 gateway, .99.2 proxy, etc. below)
+        # -- only the CIDR suffix changes, so every other
+        # ${VALIDATION_*_IP:-172.30.99.N} default in this file needed no
+        # change at all.
+        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/27}
           gateway: ${VALIDATION_GATEWAY:-172.30.99.1}
   validation-api:
     internal: true
