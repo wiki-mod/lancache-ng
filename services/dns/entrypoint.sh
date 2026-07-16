@@ -10,12 +10,151 @@
 # with Admin UI changes.
 set -euo pipefail
 
+# ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
+# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
+# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats),
+# for the same reason as the known-good-snapshot library below: this image
+# builds from services/dns/ alone with no shared-file build context.
+# BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
+# lancache_shared_secret_dir
+# Directory holding the cross-container shared secrets, mounted from the
+# `shared-secrets` named volume into every container that must agree on a
+# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+lancache_shared_secret_dir() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
+}
+
+# lancache_shared_secret_gid
+# The Admin UI process runs as this gid (services/ui/Dockerfile pins uid/gid
+# 10001); dns/dhcp/nats run as root. Shared secret files are created group-owned
+# by this gid and mode 0640 so the unprivileged UI can read a root-created file
+# without the secret becoming world-readable -- the same cross-uid model the
+# nats.conf bootstrap already uses. Overridable for tests.
+lancache_shared_secret_gid() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
+}
+
+# lancache_gen_hex32
+# 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
+# `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
+# images AND the BusyBox nats:2-alpine image, and nats:2-alpine ships no openssl.
+lancache_gen_hex32() {
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# lancache_gen_base64_32
+# base64 of 32 random bytes, for the DDNS TSIG key (PowerDNS/Kea expect a
+# base64-encoded HMAC key, matching setup.sh's `openssl rand -base64 32`).
+lancache_gen_base64_32() {
+    head -c 32 /dev/urandom | base64 | tr -d '\n'
+}
+
+# secret_is_placeholder <value>
+# True (returns 0) when the value is empty or one of the universal checked-in
+# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
+# The split-brain invariant requires every consumer of a given secret to decide
+# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
+# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
+# so routing their placeholder decision through this one definition keeps them in
+# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
+# dev tokens) match those in addition to this.
+secret_is_placeholder() {
+    case "${1:-}" in
+        "" | CHANGE_ME* | changeme* | YOUR_* | *_HERE) return 0 ;;
+    esac
+    return 1
+}
+
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# Resolves a shared secret and prints it on stdout with no trailing newline.
+#   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
+#     operator/setup.sh-supplied real value always wins and is never persisted
+#     to the shared volume (all containers share one .env, so they all already
+#     agree on it). The CALLER is responsible for passing empty here when the
+#     configured value is a known placeholder for that specific secret.
+#   - Otherwise reads $dir/<name> if it already exists (some container generated
+#     it first), else atomically creates it with a freshly generated value.
+# Atomicity/race: the value is written to a temp file on the shared volume FIRST,
+# then the final name is claimed with `ln` (a hardlink, atomic and failing if the
+# target already exists). Because the temp already holds the full value before
+# the link, a concurrent reader in another container never observes a partial or
+# empty file, and a container that loses the create race falls back to reading
+# the winner's value instead of erroring. Returns non-zero (and prints nothing)
+# only if the shared volume is unwritable, so the caller can fail closed rather
+# than silently diverge.
+resolve_shared_secret() {
+    _rss_name="$1"
+    _rss_cur="$2"
+    _rss_gen="$3"
+
+    if [ -n "$_rss_cur" ]; then
+        printf '%s' "$_rss_cur"
+        return 0
+    fi
+
+    _rss_dir="$(lancache_shared_secret_dir)"
+    _rss_file="${_rss_dir}/${_rss_name}"
+
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+
+    mkdir -p "$_rss_dir" 2>/dev/null || true
+
+    _rss_val="$($_rss_gen)"
+    if [ -z "$_rss_val" ]; then
+        return 1
+    fi
+
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    printf '%s' "$_rss_val" > "$_rss_tmp"
+    chmod 0640 "$_rss_tmp" 2>/dev/null || true
+    chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
+
+    if ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
+        rm -f "$_rss_tmp"
+        printf '%s' "$_rss_val"
+        return 0
+    fi
+
+    rm -f "$_rss_tmp"
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    return 1
+}
+# END shared-secret-bootstrap library
+
 # ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
-PDNS_API_KEY="${PDNS_API_KEY:-CHANGE_ME_PDNS_API_KEY}"
+# Resolve the shared PDNS_API_KEY (issue #858): PowerDNS here (authoritative +
+# recursor REST API) and the Admin UI's PowerDNS REST client must use the exact
+# same key or the UI's domain writes get 401. A real configured value wins; an
+# empty or checked-in placeholder is replaced by a first-writer-wins value shared
+# with the UI via the shared-secrets volume, instead of crash-looping this
+# container. The placeholder/length assertions further below still run on the
+# resolved value as defense in depth.
+_pdns_api_key_cfg="${PDNS_API_KEY:-}"
+if secret_is_placeholder "$_pdns_api_key_cfg"; then _pdns_api_key_cfg=""; fi
+if ! PDNS_API_KEY="$(resolve_shared_secret pdns-api-key "$_pdns_api_key_cfg" lancache_gen_hex32)"; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is unset/placeholder and the shared-secrets volume is not writable, so no shared key could be generated."
+    echo "[lancache-dns] Mount the shared-secrets volume, or set PDNS_API_KEY to a real value (openssl rand -hex 32)."
+    exit 1
+fi
 DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
-DDNS_TSIG_KEY="${DDNS_TSIG_KEY:-}"
+# Resolve the shared DDNS_TSIG_KEY (issue #858): the TSIG key PowerDNS imports
+# here must be byte-identical to the one Kea's DHCP-DDNS daemon signs updates
+# with. Historically an empty value meant "TSIG off, DDNS loopback-only"; now an
+# empty/placeholder value is replaced by a first-writer-wins shared key so DDNS
+# is TSIG-authenticated end-to-end (documented in docs/threat-model.md). If the
+# shared volume is unwritable, fall back to the old empty = TSIG-off fail-safe
+# rather than crash-looping.
+_ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
+if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
+DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 DDNS_TSIG_NAME="${DDNS_TSIG_NAME:-lancache-ddns-key}"
 DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 
@@ -44,19 +183,37 @@ DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 # strictly need this (configure_ddns_tsig already exits 1 before pdns_server
 # ever starts, further down this script), but is included anyway so this
 # check doesn't silently rely on staying in sync with that later exit.
-case "$DDNS_TSIG_KEY" in
-    ""|CHANGE_ME*|changeme*)
-        if [ "$DDNS_ALLOW_FROM" != "127.0.0.1" ]; then
-            echo "[lancache-dns] No usable DDNS_TSIG_KEY is configured; forcing DDNS_ALLOW_FROM back to 127.0.0.1 (was: ${DDNS_ALLOW_FROM}) so unsigned DNS UPDATE packets from LAN hosts are not accepted."
-            DDNS_ALLOW_FROM="127.0.0.1"
-        fi
-        ;;
-esac
+if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+    if [ "$DDNS_ALLOW_FROM" != "127.0.0.1" ]; then
+        echo "[lancache-dns] No usable DDNS_TSIG_KEY is configured; forcing DDNS_ALLOW_FROM back to 127.0.0.1 (was: ${DDNS_ALLOW_FROM}) so unsigned DNS UPDATE packets from LAN hosts are not accepted."
+        DDNS_ALLOW_FROM="127.0.0.1"
+    fi
+fi
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
 NATS_USER="${NATS_USER:-}"
+# Resolve the shared NATS password (issue #858). The nats server and this dns
+# client must agree on the password for this container's role (dns-standard is
+# the writer, dns-ssl the replica). NATS_PASSWORD_SHARED_SECRET names the
+# shared-secrets file for that role; when set, an empty/placeholder NATS_PASSWORD
+# is replaced by the first-writer-wins shared value. When unset (e.g. a remote
+# secondary whose credentials come from setup.sh registration, with no shared
+# volume) NATS_PASSWORD is left exactly as configured.
 NATS_PASSWORD="${NATS_PASSWORD:-}"
+if [ -n "${NATS_PASSWORD_SHARED_SECRET:-}" ]; then
+    _nats_pw_cfg="$NATS_PASSWORD"
+    if secret_is_placeholder "$_nats_pw_cfg"; then _nats_pw_cfg=""; fi
+    # Fail closed (Codex review, PR #886): unlike DDNS_TSIG_KEY, an empty
+    # NATS_PASSWORD has no safe fallback -- nats-subscriber just fails auth
+    # silently and keeps retrying while this container's own DNS healthcheck
+    # stays green, so record/flush propagation breaks with no boot-time signal.
+    if ! NATS_PASSWORD="$(resolve_shared_secret "$NATS_PASSWORD_SHARED_SECRET" "$_nats_pw_cfg" lancache_gen_hex32)"; then
+        echo "[lancache-dns] FATAL: NATS_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated."
+        echo "[lancache-dns] Mount the shared-secrets volume, or set NATS_PASSWORD to the real value the nats service uses."
+        exit 1
+    fi
+fi
 NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
@@ -82,15 +239,16 @@ PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 PDNS_LOG_DIR="/var/log/lancache-dns"
 mkdir -p "$PDNS_LOG_DIR"
 
-# Fail if PDNS_API_KEY is a known placeholder value
-case "$PDNS_API_KEY" in
-    CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*)
-        echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to a default placeholder ('$PDNS_API_KEY')"
-        echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
-        echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
-        exit 1
-        ;;
-esac
+# Fail if PDNS_API_KEY is a known placeholder value. secret_is_placeholder's
+# universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
+# uses YOUR_*_HERE elsewhere, e.g. SECONDARY_REGISTRATION_TOKEN) fully cover
+# the PDNS-specific literals this check used to list separately.
+if secret_is_placeholder "$PDNS_API_KEY"; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to a default placeholder ('$PDNS_API_KEY')"
+    echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
+    echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
+    exit 1
+fi
 
 # Fail if PDNS_API_KEY is too short (weak) — checked for all values, not just placeholders
 if [ ${#PDNS_API_KEY} -lt 16 ]; then
@@ -411,17 +569,15 @@ PRIVATE_REVERSE_ZONES=(
 DDNS_UPDATE_ZONES=("${LAN_ZONES[@]}" "${PRIVATE_REVERSE_ZONES[@]}")
 
 configure_ddns_tsig() {
-    case "$DDNS_TSIG_KEY" in
-        "")
-            echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured."
-            return
-            ;;
-        CHANGE_ME*|changeme*)
-            echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is still set to a default placeholder."
-            printf '%s\n' "[lancache-dns] Generate a shared key with: openssl rand -base64 32 | tr -d '\\n'"
-            exit 1
-            ;;
-    esac
+    if [ -z "$DDNS_TSIG_KEY" ]; then
+        echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured."
+        return
+    fi
+    if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+        echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is still set to a default placeholder."
+        printf '%s\n' "[lancache-dns] Generate a shared key with: openssl rand -base64 32 | tr -d '\\n'"
+        exit 1
+    fi
 
     pdnsutil --config-dir=/etc/pdns/auth import-tsig-key \
         "$DDNS_TSIG_NAME" "$DDNS_TSIG_ALGORITHM" "$DDNS_TSIG_KEY" >/dev/null

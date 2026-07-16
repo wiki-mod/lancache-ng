@@ -23,6 +23,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
 DHCP_PROBE_SCRIPT="$SCRIPT_DIR/services/ui/dhcp-probe.sh"
+# Shared-secret bootstrap helper (#858): the quickstart nats service sources this
+# to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
+# Copied flat into $install_dir/scripts/ like the two scripts above, so the
+# quickstart compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
+SHARED_SECRET_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/scripts/lib/shared-secret-bootstrap.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -1425,10 +1430,11 @@ compose_file_args_for_install_dir() {
 # that force-removes a stale auto-vivified directory before reinstalling
 # dhcp-probe.sh/docker-socket-proxy.sh.
 install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target dhcp_probe_target
+    local install_dir="$1" socket_proxy_target dhcp_probe_target helper_target
 
     socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
     dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
+    helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
     # A prior install that hit the missing-copy bug (#538) left Docker's own
@@ -1451,6 +1457,17 @@ install_quickstart_compose_assets() {
         install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
     else
         chmod 0755 "$socket_proxy_target"
+    fi
+    # Shared-secret bootstrap helper (#858), same auto-vivified-directory guard
+    # as the two scripts above (#538): the nats service bind-mounts this to
+    # source resolve_shared_secret for the NATS_*_PASSWORD handshake secrets.
+    if [[ -d "$helper_target" ]]; then
+        rm -rf "$helper_target"
+    fi
+    if [[ "$(realpath -m "$SHARED_SECRET_BOOTSTRAP_SCRIPT")" != "$(realpath -m "$helper_target")" ]]; then
+        install -m 0644 "$SHARED_SECRET_BOOTSTRAP_SCRIPT" "$helper_target"
+    else
+        chmod 0644 "$helper_target"
     fi
 }
 
@@ -1525,6 +1542,13 @@ deploy_prod_repo_input_paths() {
     # silently omit the one file that defines which container names the
     # socket proxy allows the Admin UI/watchdog to act on.
     [[ -f "$repo_root/scripts/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/docker-socket-proxy.sh"
+    # Shared-secret bootstrap helper (issue #858) is likewise mounted read-only
+    # via ../../scripts/lib/shared-secret-bootstrap.sh into the nats service in
+    # deploy/prod/docker-compose.yml. Without it in the manifest, a config
+    # backup/restore taken before a bad git pull changes or removes this file
+    # would restore a compose tree whose nats service sources a missing/stale
+    # helper and exits before generating nats.conf.
+    [[ -f "$repo_root/scripts/lib/shared-secret-bootstrap.sh" ]] && printf '%s\n' "$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }
 
 # Resolves the config files cmd_update_ip must edit for a given install_dir.

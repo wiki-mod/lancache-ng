@@ -56,5 +56,10 @@ per change type: shell, Rust, Dockerfile/Compose, workflow, setup/migration, DNS
 - [ ] Chore
 
 ## Changelog
-<!-- User-facing summary for release notes. Keep this section updated as the PR evolves --
-edit this body directly rather than adding new comments for progress/changelog updates. -->
+<!-- User-facing summary for release notes: user-visible behavior, operational impact,
+validation performed, and any explicit follow-up issue. Keep this section updated as the
+PR evolves -- edit this body directly rather than adding new comments for progress/changelog
+updates. Do NOT edit CHANGELOG.md in this PR: every simultaneously-open PR editing the same
+"### Fixed"-style heading guarantees a merge conflict with every other one. CHANGELOG.md is
+edited exactly once, at release time, by collecting these PR-body sections into a new version
+heading (see CONTRIBUTING.md's "Releasing Changes to CHANGELOG.md"). -->
