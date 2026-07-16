@@ -232,8 +232,14 @@ appliance spoofs.
   validated before being written into the RPZ zone. DNS record changes flow only
   over the authenticated NATS event bus and the PowerDNS API (see T5), not from
   arbitrary clients.
-- The PowerDNS API is fail-closed: `services/dns/entrypoint.sh` refuses to start
-  if `PDNS_API_KEY` is a known placeholder or shorter than 16 characters.
+- The PowerDNS API key is a shared handshake secret bootstrapped safely (issue
+  #858): `services/dns/entrypoint.sh` resolves `PDNS_API_KEY` through the
+  shared-secrets volume so PowerDNS and the Admin UI's PowerDNS REST client
+  always agree on the exact same value. A real operator/`setup.sh` value always
+  wins; an empty or known-placeholder one is replaced by a generated
+  first-writer-wins value shared with the UI instead of crash-looping. The
+  entrypoint still refuses to run a known placeholder or a key shorter than 16
+  characters as defense in depth.
 - RPZ SOA serials are kept monotonic so secondary nodes converge correctly.
 
 **Residual risk**: Low — correct client DNS configuration is the operator's
@@ -452,13 +458,24 @@ networking would otherwise expose that API on all LAN interfaces.
 (reprogramming DHCP-issued DNS redirects the whole LAN)
 
 **Mitigations** (verified in `services/dhcp/entrypoint.sh`):
-- `KEA_CTRL_TOKEN` is **fail-closed**: the container refuses to start on an empty
-  or known-placeholder token. The Control Agent API requires this token.
+- `KEA_CTRL_TOKEN` is a shared handshake secret bootstrapped safely (issue #858):
+  resolved through the shared-secrets volume so Kea's Control Agent and the Admin
+  UI's DHCP API client always agree. A real value wins; an empty or
+  known-placeholder one is generated first-writer-wins and shared instead of
+  crash-looping, and the container still refuses to run a known-placeholder token
+  as fail-closed defense in depth. The Control Agent API requires this token.
 - The entrypoint installs **iptables rules that restrict port 8000 to
   Docker-internal ranges** (`172.16.0.0/12`, `127.0.0.0/8`) and DROP everything
   else — specifically because host networking would otherwise publish it LAN-wide.
   The managed chain is idempotent and self-heals across restarts.
-- `DDNS_TSIG_KEY` is fail-closed, authenticating Kea→PowerDNS dynamic updates.
+- `DDNS_TSIG_KEY` authenticates Kea→PowerDNS dynamic updates and is a shared
+  handshake secret (issue #858): PowerDNS (verifier) and Kea (signer) resolve the
+  same key through the shared-secrets volume. **Behavior change:** an empty
+  `DDNS_TSIG_KEY` previously meant "TSIG off, DDNS restricted to loopback"; it now
+  generates a shared TSIG key so DDNS is TSIG-authenticated end-to-end by default.
+  A known-placeholder value is still rejected fail-closed, and if the shared
+  volume is unwritable the old empty = TSIG-off, loopback-only fail-safe still
+  applies.
 
 **Residual risk**: Medium — depends on the host's iptables being effective and on
 the operator running Kea only where it is the sole DHCP server on the LAN.
