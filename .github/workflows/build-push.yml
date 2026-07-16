@@ -3343,31 +3343,62 @@ jobs:
     # above (detect-changes, dns_rust_quality, ui_rust_quality, dns_test,
     # ui_test, watchdog_test, dns_cargo_audit, ui_cargo_audit) or to
     # validate-compose, even though several were named as candidates in #891.
-    # Reason: this job's own require_success()/require_success_or_intentional_skip()
-    # helpers below only tolerate a `success` (and, for the
-    # _or_intentional_skip variant, `skipped`) result -- neither tolerates
-    # `cancelled`. If any of those upstream jobs got their own job-level
-    # cancel-in-progress group, the exact PR-event storm #888/#892 already
-    # found unsafe for the top-level group (opening a PR with labels/milestone
-    # set fires `opened` + `labeled` + `milestoned` for the same commit within
-    # the same second, each spawning a competing run under the same
-    # ref-scoped group) would cancel one run's copy of that job mid-flight,
-    # and THIS job -- running with `if: always()` in that same now-superseded
-    # run -- would then hard-fail with a spurious "must succeed, got
-    # 'cancelled'" error instead of cleanly skipping. That is a real,
-    # reproducible regression of the exact failure mode #892 was written to
-    # avoid, not a hypothetical one: validate-compose is an especially sharp
-    # case, since its cascade (a cancelled validate-compose forces
-    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit to skip via their own
-    # `needs['validate-compose'].result == 'success'` guard) would trip this
-    # on ordinary superseded push events to master/v0.2.0, not just the rarer
-    # PR-open storm. Fixing this properly would mean teaching
+    #
+    # The hazard is PUSH-event parallelism, not the PR-metadata storm. This
+    # workflow's top-level concurrency group (top of file) already fully
+    # serializes pull_request-triggered runs for the same ref
+    # (`{workflow}-{ref}`, cancel-in-progress: false): a burst of opened +
+    # labeled + milestoned events for one PR queues each run behind the
+    # previous one rather than running them concurrently, so two PR runs for
+    # the same ref can never have an in-progress job for the same job-level
+    # group at the same time -- confirmed live on this PR (#915): a 3-event
+    # opened/labeled/milestoned burst produced one run that executed every
+    # job to completion, one run bumped from the queue with zero jobs ever
+    # started (pre-existing top-level queue behavior, unrelated to this PR),
+    # and one run that queued cleanly behind the first and ran clean once it
+    # finished -- no job anywhere showed `cancelled`. That serialization is
+    # exactly what already makes this PR's five included jobs (rust_coverage,
+    # shellcheck, file-headers, line-endings, ci_scope_policy itself) safe on
+    # `pull_request` events, and it would make detect-changes/dns_test/
+    # ui_test/dns_cargo_audit/ui_cargo_audit/validate-compose equally
+    # collision-free there too.
+    #
+    # push/tag events are different: the top-level group's key for those is
+    # `{workflow}-publish-{run_id}` (unique per run, deliberately never
+    # collides -- see that group's own comment), so rapid pushes to
+    # master/v0.2.0 genuinely run fully in parallel with no top-level
+    # throttle at all. THAT is where a job-level cancel-in-progress group on
+    # detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit/
+    # validate-compose would let a newer push cancel an older, still
+    # in-progress push's copy of that job mid-flight. This job's own
+    # require_success()/require_success_or_intentional_skip() helpers below
+    # only tolerate a `success` (and, for the _or_intentional_skip variant,
+    # `skipped`) result for each of those jobs -- neither tolerates
+    # `cancelled` -- so that cancelled/skipped-cascade result would make
+    # THIS job (`if: always()`, running in that same now-superseded push's
+    # run) hard-fail with a spurious "must succeed, got 'cancelled'" error
+    # instead of cleanly skipping. validate-compose is an especially sharp
+    # case: cancelling IT (not detect-changes/dns_test/etc. directly) would
+    # force dns_test/ui_test/dns_cargo_audit/ui_cargo_audit to skip via their
+    # own `needs['validate-compose'].result == 'success'` guard, which then
+    # trips this job's push-branch `require_success` on THEIR results.
+    #
+    # detect-changes itself is not actually at risk either way: it only runs
+    # `if: github.event_name == 'pull_request'` (never on push, so the push
+    # hazard above does not apply to it), and on pull_request it is already
+    # serialization-protected by the top-level group exactly like this PR's
+    # five included jobs. Adding a cancel-in-progress group to it would just
+    # be a no-op (nothing left for it to ever collide with) -- it is left out
+    # here because it gains nothing, not because it is unsafe.
+    #
+    # Fixing the real (push-only) hazard for dns_test/ui_test/
+    # dns_cargo_audit/ui_cargo_audit/validate-compose properly means teaching
     # require_success()/require_success_or_intentional_skip() to treat a
-    # supersession-`cancelled` result as tolerable (the same soft-skip
-    # semantics build/build-arm64's own `if:` gates already use) -- a policy
-    # change to what this job enforces, not a mechanical copy of the
-    # build/container-scan concurrency pattern, so it is intentionally left
-    # out of this PR. See #891 for tracking.
+    # supersession-`cancelled` (or the skip cascade it causes) as tolerable
+    # (the same soft-skip semantics build/build-arm64's own `if:` gates
+    # already use) -- a policy change to what this job enforces, not a
+    # mechanical copy of the build/container-scan concurrency pattern, so it
+    # is intentionally left out of this PR. See #891 for tracking.
     name: CI scope policy
     needs:
       - detect-changes
