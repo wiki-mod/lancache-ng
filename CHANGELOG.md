@@ -517,6 +517,48 @@ is real, live, running code, not just work sitting in source control.
   is not enough on its own: the `nats` service itself still needs
   `docker-compose.nats-secondary.yml` included (and the stack recreated with
   it) to actually publish port 4222 on that address.
+- Fixed `SYSLOG_ENABLED` and `SYSLOG_MAX_GB` parsing diverging between the
+  Admin UI and `watchdog.sh` (#874, found via the #849 vacuum-first bug
+  hunt): the UI's `env_bool()` (`services/ui/src/config.rs`) accepted
+  `1`/`yes`/`on`/`true` (case-insensitive) as truthy for `SYSLOG_ENABLED`,
+  but `watchdog.sh`'s `maybe_prune_syslog()` gate only accepted the exact
+  literal string `true` -- any other spelling made the Admin UI display
+  syslog retention as enabled while watchdog's storage-budget/retention
+  engine silently never ran, with no error or operator-visible signal, and
+  the syslog store could grow unbounded. Fixed by adding a new
+  `is_truthy()` helper to `watchdog.sh` that mirrors `env_bool()`'s exact
+  truthy set (1/true/yes/on, case-insensitive, trimmed) and switching
+  `maybe_prune_syslog()`'s gate to use it -- a literal shared function
+  across the Rust/Bash boundary isn't possible, so both sides now carry a
+  documented contract and parity tests exercising the identical set of
+  truthy/falsy input values (`tests/bats/watchdog_truthy_parsing.bats`,
+  `tests/bats/watchdog_syslog_prune.bats`'s new end-to-end cases, and
+  `services/ui/src/config.rs`'s new
+  `syslog_enabled_truthy_parsing_matches_watchdog_contract` test) so the
+  two cannot silently drift apart again. Also fixed the related
+  `SYSLOG_MAX_GB` clamp divergence the issue named: the UI's
+  `env_u32_clamped` already rejected a literal `0` in favor of the default
+  (10 GB), but `watchdog.sh`'s clamp only guarded against oversized values
+  (`> 1048576` GiB, an arithmetic-overflow guard) and let `SYSLOG_MAX_GB=0`
+  through unchanged -- a real 0 GB budget made the size-based prune pass
+  treat every file as over budget and delete everything it could except
+  today's still-open active log. `watchdog.sh` now clamps any value below
+  1 to the same default of 10 GB, matching the UI's floor. A second,
+  previously unaddressed divergence in the same clamp was found during PR
+  review: `env_u32_clamped` (the UI side) had no ceiling at all, while
+  `watchdog.sh`'s own guard already capped its enforced budget at 1048576
+  GiB -- an operator-set value above that ceiling (or one large enough to
+  overflow a `u32`, e.g. `9999999999`) displayed as its literal,
+  unclamped size in the Admin UI while watchdog silently enforced a much
+  smaller budget. Fixed by adding `env_u32_clamped_with_max` (parses as
+  `u64` so an overflowing value converges on the same result as an
+  in-range-but-over-ceiling one, instead of falling back to `default`) and
+  using it for `SYSLOG_MAX_GB` with the same `1048576` ceiling
+  (`SYSLOG_MAX_GB_CEILING`) `watchdog.sh` already enforces, plus parity
+  tests on both sides (`services/ui/src/config.rs`'s
+  `syslog_max_gb_oversized_value_clamps_to_watchdog_ceiling` and
+  `tests/bats/watchdog_syslog_prune.bats`'s new ceiling-parity case) that
+  assert the identical clamped value, not just that neither side crashes.
 - Generalized the single-consumer secret auto-generation from PR #855 into a
   reusable **shared-secret bootstrap** for handshake secrets that multiple
   independent containers must agree on (#858). All seven such secrets --
@@ -1213,6 +1255,28 @@ is real, live, running code, not just work sitting in source control.
   keep their guaranteed floor rather than being squeezed to zero; all
   pre-existing `parse_syslog_tail` tests (including the #758 regression
   test) continue to pass unmodified.
+- Fixed `build-push.yml`'s top-level concurrency group serializing whole
+  pipeline runs one at a time on rapid pushes, wasting self-hosted
+  `lancache-heavy` capacity on commits already superseded (#888). The
+  originally-proposed fix (flip the group's `cancel-in-progress` to
+  `true`) turned out unsafe: it cancels an entire in-progress run
+  including any job currently executing, and `promote`'s own job-level
+  concurrency group (#793) does not protect it from that. Implemented
+  instead: the group's push/tag key is now run-scoped (a no-op for
+  serialization, also fixing master/`v0.2.0` pushes contending for the
+  same slot); `build`/`container-scan` gained their own service+ref-scoped
+  job-level concurrency so a superseded commit's heavy work is cancelled
+  promptly, while `merge-manifests`/`promote` cleanly skip it via their
+  existing `needs` gates instead of being killed mid-write. This trades a
+  new (but bounded, light-tier-only) cost for the heavy-tier savings:
+  superseded commits' cheap `detect-changes`/`shellcheck`/etc. jobs now
+  run to completion instead of being dropped while queued. `cancel-in-
+  progress` deliberately stays `false` for `pull_request` events too --
+  live-tested flipping it and found it kills an already-running
+  `detect-changes` job when a PR is opened with labels/milestone set in
+  the same call (this project's own convention), a real regression for no
+  registry-safety benefit since PR runs never reach `promote`/`release`
+  anyway.
 - Clarified the PR template's `## Changelog` heading to explicitly say not to
   edit `CHANGELOG.md` in the same PR (#889): every simultaneously-open PR
   appending to this same section's heading guaranteed a merge conflict with
