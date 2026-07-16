@@ -146,6 +146,37 @@ EOF
     [[ "$output" == *"neither a"* ]]
 }
 
+@test "fails when the raw output is referenced in GitHub Actions bracket-notation form" {
+    # `needs['compute-validation-network'].outputs.subnet` is an equally
+    # valid GitHub Actions expression to `needs.compute-validation-network.
+    # outputs.subnet` -- and bracket form already has real precedent in this
+    # exact file: full-setup-deep-validate.yml's own `if:` conditions use
+    # `needs['compute-validation-network'].result`. A guard matching only
+    # dot form would silently pass a job that threads the raw subnet through
+    # bracket notation instead, which is exactly the failure mode this test
+    # guards against.
+    write_trivial_deep_validate_yml
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+
+  ui-reachability-crash-loop-simulation:
+    needs: compute-validation-network
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs['"'"'compute-validation-network'"'"'].outputs.subnet }}
+    steps:
+      - run: bash scripts/ui-reachability-crash-loop-simulation.sh
+'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ui-reachability-crash-loop-simulation"* ]]
+}
+
 @test "does not count a comment merely mentioning the wrapper filename as protection" {
     # Several real header comments in this repo mention
     # "run-in-validation-subnet.sh" in prose while describing OTHER jobs,

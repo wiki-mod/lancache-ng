@@ -20,6 +20,16 @@
 # is the exact per-run-but-otherwise-unlocked candidate #820/#896 diagnosed:
 # safe from OTHER runs on OTHER hosts, but not from a second, genuinely
 # concurrent run on the SAME self-hosted host deriving the identical slot.
+# GitHub Actions expressions accept this in either dot form
+# (`needs.compute-validation-network.outputs.subnet`) or bracket form
+# (`needs['compute-validation-network'].outputs.subnet` /
+# `needs["compute-validation-network"].outputs.subnet`) -- both are checked
+# here. Bracket form is not hypothetical: `full-setup-deep-validate.yml`'s
+# own `if:` conditions already use
+# `needs['compute-validation-network'].result` in this exact file, so a
+# future job author reaching for the same bracket style for `.outputs.`
+# instead of `.result` has real precedent to follow, and a guard that only
+# matched dot form would silently miss it.
 #
 # WHAT COUNTS AS "PROTECTED": the same job's body must ALSO contain one of
 # two things this repo's existing jobs actually use:
@@ -65,7 +75,14 @@ WORKFLOW_FILES=(
     ".github/workflows/full-setup-deep-validate.yml"
 )
 
-RAW_OUTPUT_MARKER='needs.compute-validation-network.outputs.'
+# Every syntactic form GitHub Actions accepts for referencing
+# compute-validation-network's own outputs -- see the header comment above
+# for why bracket form specifically must be included, not just dot form.
+RAW_OUTPUT_MARKERS=(
+    'needs.compute-validation-network.outputs.'
+    "needs['compute-validation-network'].outputs."
+    'needs["compute-validation-network"].outputs.'
+)
 WRAPPER_INVOCATION_MARKER='bash scripts/lib/run-in-validation-subnet.sh'
 INLINE_RESERVATION_MARKER='validation_subnet_reserve_slot "'
 
@@ -122,34 +139,54 @@ is_job_name_line() {
     esac
 }
 
+# body_has_raw_output_reference <body>
+# True if <body> contains ANY of RAW_OUTPUT_MARKERS' syntactic forms.
+body_has_raw_output_reference() {
+    local body="$1" marker
+    for marker in "${RAW_OUTPUT_MARKERS[@]}"; do
+        if [[ "$body" == *"$marker"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# check_job_body <file> <job_name> <job_body>
+# Runs the actual check for one already-accumulated job body: if it never
+# references the raw compute-validation-network output (in any of its
+# accepted syntactic forms), there is nothing to protect and it is skipped
+# entirely (e.g. setup-cli-simulation, which has its own independent
+# flock-based isolation and no needs on compute-validation-network at all).
+# If it does reference the raw output, it must also contain one of the two
+# protection markers, or it is exactly the #820/#896/#907 collision class.
+check_job_body() {
+    local file="$1" job_name="$2" body="$3"
+
+    if [[ -z "$job_name" ]]; then
+        return 0
+    fi
+    if ! body_has_raw_output_reference "$body"; then
+        return 0
+    fi
+    jobs_examined_with_raw_output=$((jobs_examined_with_raw_output + 1))
+    if [[ "$body" == *"$WRAPPER_INVOCATION_MARKER"* ]]; then
+        return 0
+    fi
+    if [[ "$body" == *"$INLINE_RESERVATION_MARKER"* ]]; then
+        return 0
+    fi
+    fail "check-validation-subnet-wrapper-coverage: $file job '$job_name' references compute-validation-network's raw outputs (needs.compute-validation-network.outputs.* or the bracket-form equivalent) directly but has neither a '$WRAPPER_INVOCATION_MARKER' invocation nor an inline '$INLINE_RESERVATION_MARKER' reservation call -- this is the exact #820/#896/#907 collision class: two concurrent runs deriving the same subnet will race 'docker compose up' with no lock and no retry. Wrap this job's stack-starting invocation in scripts/lib/run-in-validation-subnet.sh (see e.g. ssl-mitm-cache-simulation in either workflow file), or add an equivalent inline reservation loop if the job must hold the lock across multiple separate steps (see full-setup-validate's own job in either file)."
+}
+
 # check_workflow_file <file>
 # Splits <file> into per-job bodies (everything strictly under the top-level
-# `jobs:` key) and checks each one that references the raw
-# compute-validation-network output for one of the two protection markers.
+# `jobs:` key) and hands each one to check_job_body. current_job/body are
+# passed explicitly to check_job_body rather than read back via bash's
+# dynamic function scoping, so this stays ordinary single-direction data
+# flow a reader (or ShellCheck) can follow without knowing that quirk.
 check_workflow_file() {
     local file="$1"
     local in_jobs=0 current_job="" body="" line
-
-    # flush_current_job: run the actual check for whatever job body has been
-    # accumulated so far, then reset for the next one. Called both when a new
-    # job-name line is seen and once more after the read loop for the last
-    # job in the file.
-    flush_current_job() {
-        if [[ -z "$current_job" ]]; then
-            return 0
-        fi
-        if [[ "$body" != *"$RAW_OUTPUT_MARKER"* ]]; then
-            return 0
-        fi
-        jobs_examined_with_raw_output=$((jobs_examined_with_raw_output + 1))
-        if [[ "$body" == *"$WRAPPER_INVOCATION_MARKER"* ]]; then
-            return 0
-        fi
-        if [[ "$body" == *"$INLINE_RESERVATION_MARKER"* ]]; then
-            return 0
-        fi
-        fail "check-validation-subnet-wrapper-coverage: $file job '$current_job' references $RAW_OUTPUT_MARKER* directly but has neither a '$WRAPPER_INVOCATION_MARKER' invocation nor an inline '$INLINE_RESERVATION_MARKER' reservation call -- this is the exact #820/#896/#907 collision class: two concurrent runs deriving the same subnet will race 'docker compose up' with no lock and no retry. Wrap this job's stack-starting invocation in scripts/lib/run-in-validation-subnet.sh (see e.g. ssl-mitm-cache-simulation in either workflow file), or add an equivalent inline reservation loop if the job must hold the lock across multiple separate steps (see full-setup-validate's own job in either file)."
-    }
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$in_jobs" -eq 0 ]]; then
@@ -165,14 +202,14 @@ check_workflow_file() {
         # section.
         if [[ "$line" != '  '* && "$line" != '' && "$(indent_width "$line")" -eq 0 ]]; then
             in_jobs=0
-            flush_current_job
+            check_job_body "$file" "$current_job" "$body"
             current_job=""
             body=""
             continue
         fi
 
         if is_job_name_line "$line"; then
-            flush_current_job
+            check_job_body "$file" "$current_job" "$body"
             current_job="${line#'  '}"
             current_job="${current_job%:}"
             body=""
@@ -184,7 +221,7 @@ check_workflow_file() {
         fi
     done < "$file"
 
-    flush_current_job
+    check_job_body "$file" "$current_job" "$body"
 }
 
 for file in "${WORKFLOW_FILES[@]}"; do
@@ -203,7 +240,7 @@ done
 # "verified to actually exist ... instead of the check silently checking
 # nothing" principle.
 if [[ "$jobs_examined_with_raw_output" -eq 0 ]]; then
-    fail "check-validation-subnet-wrapper-coverage: found zero jobs referencing $RAW_OUTPUT_MARKER* across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or both workflow files changed shape; update this script rather than silently passing)."
+    fail "check-validation-subnet-wrapper-coverage: found zero jobs referencing compute-validation-network's raw outputs (in any accepted syntactic form) across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or both workflow files changed shape; update this script rather than silently passing)."
 fi
 
 if [[ "$failures" -gt 0 ]]; then
