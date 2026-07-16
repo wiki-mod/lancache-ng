@@ -414,6 +414,19 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `domains.rs`'s `add_dns`/`remove_dns` Admin UI handlers reporting
+  success to the operator even when the underlying CDN domain file write
+  failed (#875): both handlers logged the error but still returned the
+  success redirect to `/domains`, so the domain list shown in the UI and
+  the on-disk `cdn-domains.txt` (which the DNS and SSL-proxy containers read
+  at startup) could silently diverge with no operator-visible sign anything
+  went wrong. A write failure now returns `500 Internal Server Error`
+  instead of the redirect, matching this same file's existing
+  `toggle_aaaa_filter` convention for a write whose success the request
+  actually depends on. The best-effort recursor-cache-flush and SSL-proxy-
+  restart calls that follow a successful write are unchanged and remain
+  fire-and-log, since they are downstream side effects, not the request's
+  own mutation.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
