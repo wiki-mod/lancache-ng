@@ -138,9 +138,7 @@ PROXY_IPV6="${PROXY_IPV6:-}"
 # container. The placeholder/length assertions further below still run on the
 # resolved value as defense in depth.
 _pdns_api_key_cfg="${PDNS_API_KEY:-}"
-case "$_pdns_api_key_cfg" in
-    CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*) _pdns_api_key_cfg="" ;;
-esac
+if secret_is_placeholder "$_pdns_api_key_cfg"; then _pdns_api_key_cfg=""; fi
 if ! PDNS_API_KEY="$(resolve_shared_secret pdns-api-key "$_pdns_api_key_cfg" lancache_gen_hex32)"; then
     echo "[lancache-dns] FATAL: PDNS_API_KEY is unset/placeholder and the shared-secrets volume is not writable, so no shared key could be generated."
     echo "[lancache-dns] Mount the shared-secrets volume, or set PDNS_API_KEY to a real value (openssl rand -hex 32)."
@@ -155,9 +153,7 @@ DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 # shared volume is unwritable, fall back to the old empty = TSIG-off fail-safe
 # rather than crash-looping.
 _ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
-case "$_ddns_tsig_key_cfg" in
-    CHANGE_ME*|changeme*) _ddns_tsig_key_cfg="" ;;
-esac
+if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
 DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 DDNS_TSIG_NAME="${DDNS_TSIG_NAME:-lancache-ddns-key}"
 DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
@@ -187,14 +183,12 @@ DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 # strictly need this (configure_ddns_tsig already exits 1 before pdns_server
 # ever starts, further down this script), but is included anyway so this
 # check doesn't silently rely on staying in sync with that later exit.
-case "$DDNS_TSIG_KEY" in
-    ""|CHANGE_ME*|changeme*)
-        if [ "$DDNS_ALLOW_FROM" != "127.0.0.1" ]; then
-            echo "[lancache-dns] No usable DDNS_TSIG_KEY is configured; forcing DDNS_ALLOW_FROM back to 127.0.0.1 (was: ${DDNS_ALLOW_FROM}) so unsigned DNS UPDATE packets from LAN hosts are not accepted."
-            DDNS_ALLOW_FROM="127.0.0.1"
-        fi
-        ;;
-esac
+if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+    if [ "$DDNS_ALLOW_FROM" != "127.0.0.1" ]; then
+        echo "[lancache-dns] No usable DDNS_TSIG_KEY is configured; forcing DDNS_ALLOW_FROM back to 127.0.0.1 (was: ${DDNS_ALLOW_FROM}) so unsigned DNS UPDATE packets from LAN hosts are not accepted."
+        DDNS_ALLOW_FROM="127.0.0.1"
+    fi
+fi
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
@@ -210,7 +204,15 @@ NATS_PASSWORD="${NATS_PASSWORD:-}"
 if [ -n "${NATS_PASSWORD_SHARED_SECRET:-}" ]; then
     _nats_pw_cfg="$NATS_PASSWORD"
     if secret_is_placeholder "$_nats_pw_cfg"; then _nats_pw_cfg=""; fi
-    NATS_PASSWORD="$(resolve_shared_secret "$NATS_PASSWORD_SHARED_SECRET" "$_nats_pw_cfg" lancache_gen_hex32)" || NATS_PASSWORD="$_nats_pw_cfg"
+    # Fail closed (Codex review, PR #886): unlike DDNS_TSIG_KEY, an empty
+    # NATS_PASSWORD has no safe fallback -- nats-subscriber just fails auth
+    # silently and keeps retrying while this container's own DNS healthcheck
+    # stays green, so record/flush propagation breaks with no boot-time signal.
+    if ! NATS_PASSWORD="$(resolve_shared_secret "$NATS_PASSWORD_SHARED_SECRET" "$_nats_pw_cfg" lancache_gen_hex32)"; then
+        echo "[lancache-dns] FATAL: NATS_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated."
+        echo "[lancache-dns] Mount the shared-secrets volume, or set NATS_PASSWORD to the real value the nats service uses."
+        exit 1
+    fi
 fi
 NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
@@ -237,15 +239,16 @@ PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 PDNS_LOG_DIR="/var/log/lancache-dns"
 mkdir -p "$PDNS_LOG_DIR"
 
-# Fail if PDNS_API_KEY is a known placeholder value
-case "$PDNS_API_KEY" in
-    CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*)
-        echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to a default placeholder ('$PDNS_API_KEY')"
-        echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
-        echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
-        exit 1
-        ;;
-esac
+# Fail if PDNS_API_KEY is a known placeholder value. secret_is_placeholder's
+# universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
+# uses YOUR_*_HERE elsewhere, e.g. SECONDARY_REGISTRATION_TOKEN) fully cover
+# the PDNS-specific literals this check used to list separately.
+if secret_is_placeholder "$PDNS_API_KEY"; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is still set to a default placeholder ('$PDNS_API_KEY')"
+    echo "[lancache-dns] This is a security issue — the API key must be changed before deployment."
+    echo "[lancache-dns] Generate a strong key with: openssl rand -hex 32"
+    exit 1
+fi
 
 # Fail if PDNS_API_KEY is too short (weak) — checked for all values, not just placeholders
 if [ ${#PDNS_API_KEY} -lt 16 ]; then
@@ -566,17 +569,15 @@ PRIVATE_REVERSE_ZONES=(
 DDNS_UPDATE_ZONES=("${LAN_ZONES[@]}" "${PRIVATE_REVERSE_ZONES[@]}")
 
 configure_ddns_tsig() {
-    case "$DDNS_TSIG_KEY" in
-        "")
-            echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured."
-            return
-            ;;
-        CHANGE_ME*|changeme*)
-            echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is still set to a default placeholder."
-            printf '%s\n' "[lancache-dns] Generate a shared key with: openssl rand -base64 32 | tr -d '\\n'"
-            exit 1
-            ;;
-    esac
+    if [ -z "$DDNS_TSIG_KEY" ]; then
+        echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured."
+        return
+    fi
+    if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+        echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is still set to a default placeholder."
+        printf '%s\n' "[lancache-dns] Generate a shared key with: openssl rand -base64 32 | tr -d '\\n'"
+        exit 1
+    fi
 
     pdnsutil --config-dir=/etc/pdns/auth import-tsig-key \
         "$DDNS_TSIG_NAME" "$DDNS_TSIG_ALGORITHM" "$DDNS_TSIG_KEY" >/dev/null

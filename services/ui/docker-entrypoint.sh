@@ -153,19 +153,23 @@ _ui_resolve_or_die() {
 
 if [ "$(id -u)" = "0" ]; then
     _ui_pdns_cfg="${PDNS_API_KEY:-}"
-    case "$_ui_pdns_cfg" in
-        CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*) _ui_pdns_cfg="" ;;
-    esac
+    if secret_is_placeholder "$_ui_pdns_cfg"; then _ui_pdns_cfg=""; fi
     _ui_resolve_or_die PDNS_API_KEY pdns-api-key "$_ui_pdns_cfg" lancache_gen_hex32
 
     # DHCP_API_TOKEN mirrors the shared KEA_CTRL_TOKEN (the compose default already
     # falls DHCP_API_TOKEN back to KEA_CTRL_TOKEN); resolve it against the same
     # kea-ctrl-token shared file the dhcp container uses. An explicit non-placeholder
-    # operator override is preserved.
+    # operator override is preserved. secret_is_placeholder covers the universal
+    # CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions; the case below adds this
+    # service's own legacy shipped defaults, which aren't generically named.
     _ui_dhcp_tok="${DHCP_API_TOKEN:-}"
-    case "$_ui_dhcp_tok" in
-        CHANGE_ME_KEA_CTRL_TOKEN|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _ui_dhcp_tok="" ;;
-    esac
+    if secret_is_placeholder "$_ui_dhcp_tok"; then
+        _ui_dhcp_tok=""
+    else
+        case "$_ui_dhcp_tok" in
+            lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _ui_dhcp_tok="" ;;
+        esac
+    fi
     _ui_resolve_or_die DHCP_API_TOKEN kea-ctrl-token "$_ui_dhcp_tok" lancache_gen_hex32
 
     # NATS credentials the UI connects with: NATS_UI_PASSWORD (record/flush

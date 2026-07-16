@@ -181,14 +181,16 @@ fi
 # instead of crash-looping. If the shared volume is unwritable, resolution returns
 # empty and the fail-closed placeholder checks below still exit 1.
 _kea_ctrl_token_cfg="${KEA_CTRL_TOKEN:-}"
-case "$_kea_ctrl_token_cfg" in
-    CHANGE_ME_KEA_CTRL_TOKEN|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _kea_ctrl_token_cfg="" ;;
-esac
+if secret_is_placeholder "$_kea_ctrl_token_cfg"; then
+    _kea_ctrl_token_cfg=""
+else
+    case "$_kea_ctrl_token_cfg" in
+        lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _kea_ctrl_token_cfg="" ;;
+    esac
+fi
 KEA_CTRL_TOKEN="$(resolve_shared_secret kea-ctrl-token "$_kea_ctrl_token_cfg" lancache_gen_hex32)" || KEA_CTRL_TOKEN=""
 _ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
-case "$_ddns_tsig_key_cfg" in
-    CHANGE_ME*|changeme*) _ddns_tsig_key_cfg="" ;;
-esac
+if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
 DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 : "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
@@ -201,9 +203,17 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 : "${DHCP_DDNS_PORT:=5300}"
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
-# Verify KEA_CTRL_TOKEN is set to a non-default secret.
+# Verify KEA_CTRL_TOKEN is set to a non-default secret. secret_is_placeholder's
+# universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
+# uses YOUR_*_HERE elsewhere, e.g. SECONDARY_REGISTRATION_TOKEN) plus this
+# service's own legacy shipped defaults below.
+if secret_is_placeholder "$KEA_CTRL_TOKEN"; then
+    echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
+    echo "Generate one with: openssl rand -hex 32"
+    exit 1
+fi
 case "$KEA_CTRL_TOKEN" in
-    ""|"CHANGE_ME_KEA_CTRL_TOKEN"|"lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
+    "lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
         echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
         echo "Generate one with: openssl rand -hex 32"
         exit 1
@@ -296,13 +306,13 @@ build_ntp_option() {
     printf ',\n          {\n            "name": "ntp-servers",\n            "data": "%s"\n          }' "$ntp_servers_csv"
 }
 
-case "$DDNS_TSIG_KEY" in
-    ""|CHANGE_ME*|changeme*)
-        echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
-        printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
-        exit 1
-        ;;
-esac
+# Kea always requires a real DDNS_TSIG_KEY (unlike PowerDNS, which falls back
+# to a loopback-only, TSIG-off safe state) -- see docs/threat-model.md T12.
+if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+    echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
+    printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
+    exit 1
+fi
 
 # Kea's lease_cmds hook (needed for lease4-del, used by the Admin UI's
 # release-lease route and by this container's own upgrade migration below)

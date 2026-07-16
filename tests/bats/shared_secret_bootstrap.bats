@@ -72,7 +72,12 @@ teardown() {
     for i in $(seq 1 "$workers"); do
         (
             v="$(resolve_shared_secret pdns-api-key "" lancache_gen_hex32)"
-            printf '%s' "$v" > "$TEST_DIR/out/$i"
+            # Trailing newline is required here: without it, cat concatenates
+            # all 20 workers' output with no delimiter at all, so sort/wc see
+            # one giant unterminated record instead of 20 lines -- `wc -l`
+            # would then report 1 even if the workers resolved 20 DIFFERENT
+            # values, silently defeating the split-brain check below.
+            printf '%s\n' "$v" > "$TEST_DIR/out/$i"
         ) &
     done
     wait
