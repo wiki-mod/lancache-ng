@@ -1,5 +1,6 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CLD-1784220112-e2e-trigger-probe: comment-only, no behavior change -- verifying #873's build-tools.yml path-filter fix actually fires build-tools/bats for a services/dns/**-only diff. Throwaway PR, will be closed and reverted immediately after observation.
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
 # (with monotonic serial handling), renders the recursor/authoritative config
