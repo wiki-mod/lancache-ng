@@ -62,49 +62,87 @@
 # validation_subnet_export_env is the one place that decomposes it back
 # into real IP octets.
 
-# validation_subnet_derive_slot <raw_seed>
-# Prints a combined slot index, deterministically derived from <raw_seed>,
-# that identifies one `/27` candidate subnet within 172.30.0.0/16:
-# `slot = real_octet * 8 + subblock`, where real_octet (2..253, excluding 28
-# and 99) is the third octet of a 172.30.<real_octet>.0/24 and subblock
-# (0..7) selects which of that /24's eight /27 blocks this run gets
-# (172.30.<real_octet>.<subblock*32>/27). Hashing rather than using the seed
-# mod N directly: nothing guarantees the seed's low-order digits are evenly
-# distributed, and back-to-back runs (the common case: consecutive
-# pushes/PRs) hashing on raw low bits could cluster near each other instead
-# of spreading across the available range. The octet and subblock are
-# deliberately derived from two DIFFERENT slices of the same digest (not the
-# same bits reused, and not two independent hashes) so the two dimensions
-# don't correlate with each other while staying reproducible from one seed.
-validation_subnet_derive_slot() {
+# validation_subnet_derive_octet <raw_seed>
+# Prints the third octet (2..253, excluding 28 and 99) of a
+# 172.30.<octet>.0/24-shaped candidate, deterministically derived from
+# <raw_seed>. Hashing rather than using the seed mod N directly: nothing
+# guarantees the seed's low-order digits are evenly distributed, and
+# back-to-back runs (the common case: consecutive pushes/PRs) hashing on raw
+# low bits could cluster near each other instead of spreading across the
+# available range.
+#
+# UNCHANGED by the #832 `/27` redesign, deliberately: this function (and
+# validation_subnet_reserve/validation_subnet_try_lock/
+# validation_subnet_release, which it's built on) is also reused, as a
+# generic "reserve one free integer with host-local flock" primitive, by two
+# entirely independent consumers on their OWN separate /16 ranges --
+# scripts/dhcp-kea-lease-flow-simulation.sh (172.31.0.0/16) and
+# scripts/dhcp-proxy-pxe-simulation.sh (172.29.0.0/16) -- neither of which
+# has (or wants) a `/27` subdivision; both still want a single, whole `/24`
+# per octet, exactly as before. A first version of this redesign renamed
+# this function's output to "slot" and changed what it locked/derived,
+# which silently broke both of those unrelated consumers (they kept parsing
+# `sed -n 's/^octet=//p'` on validation_subnet_reserve's output, which no
+# longer existed) -- confirmed for real via a genuine CI run: both scripts'
+# `candidate_octet` came back empty, producing the literal, invalid
+# subnet string "172.31..0/24"/"172.29..0/24". Fixed by keeping THIS
+# function and validation_subnet_reserve exactly as they always were, and
+# adding SEPARATE validation_subnet_derive_slot/validation_subnet_reserve_slot
+# functions (below) for the NEW `/27`-per-slot callers instead of repurposing
+# the existing octet-only ones.
+validation_subnet_derive_octet() {
     local raw_seed="$1"
-    local digest decimal octet digest2 decimal2 subblock
+    local digest decimal octet
 
     digest="$(printf '%s' "$raw_seed" | sha256sum | cut -c1-8)"
     decimal=$((16#$digest))
 
     # Reserve the third octet of 172.30.0.0/16 as the per-run pool. 0 and 1
     # are excluded outright; 28 is deploy/dev's docker-compose subnet
-    # (172.28.0.0/16, see deploy/dev/docker-compose.yml) -- technically this
-    # octet's own /24 (172.30.28.0/24) can never actually overlap that
-    # unrelated /16 at all (different second octet entirely), but the
-    # exclusion is kept for continuity/visible-intent with the pre-#832
-    # scheme, at a negligible cost (8 of ~2000 slots); 99 was the old fixed
-    # default value (still used as deploy/full-setup/docker-compose.yml's
-    # literal fallback, see validation_subnet_export_env's own comment) --
-    # excluding it outright means a REAL per-run reservation can never be
-    # confused with an unset-env-var fallback landing on the same address.
+    # (172.28.0.0/16, see deploy/dev/docker-compose.yml) so a derived run
+    # can never reproduce that unrelated network's third octet; 99 was the
+    # old fixed value, kept excluded so a derived pool stays visibly
+    # distinct from the previous hardcoded default.
     octet=$(( (decimal % 252) + 2 )) # 2..253
     case "$octet" in
         28|99) octet=$(( octet + 100 )) ;;
     esac
 
-    # A second, independent slice of the same digest picks the /27 block
-    # within that octet's /24 (see the file header's #832 note for why this
-    # is a slot within the SAME /16 rather than a wider search range).
+    printf '%s\n' "$octet"
+}
+
+# validation_subnet_derive_subblock <raw_seed>
+# Prints a value 0..7, deterministically derived from <raw_seed>, selecting
+# which of 8 possible `/27` blocks within an octet's `/24` a NEW-style
+# (#832) reservation gets. Uses a DIFFERENT slice of the same seed's digest
+# than validation_subnet_derive_octet (not the same bits reused, and not an
+# independent hash) so the two dimensions don't correlate with each other
+# while both stay reproducible from one seed.
+validation_subnet_derive_subblock() {
+    local raw_seed="$1"
+    local digest2 decimal2
+
     digest2="$(printf '%s' "$raw_seed" | sha256sum | cut -c9-16)"
     decimal2=$((16#$digest2))
-    subblock=$(( decimal2 % 8 )) # 0..7
+
+    printf '%s\n' "$(( decimal2 % 8 ))"
+}
+
+# validation_subnet_derive_slot <raw_seed>
+# Prints a combined slot index for the #832 `/27` pool: `slot = octet * 8 +
+# subblock` (octet from validation_subnet_derive_octet, subblock from
+# validation_subnet_derive_subblock), identifying one `/27` candidate
+# subnet within 172.30.0.0/16 (172.30.<octet>.<subblock*32>/27). Used ONLY
+# by validation_subnet_reserve_slot and its callers (the general
+# 172.30.0.0/16 validation-stack pool) -- NOT by validation_subnet_reserve
+# or the two DHCP simulation scripts, which still want a plain octet (see
+# validation_subnet_derive_octet's own comment for why).
+validation_subnet_derive_slot() {
+    local raw_seed="$1"
+    local octet subblock
+
+    octet="$(validation_subnet_derive_octet "$raw_seed")"
+    subblock="$(validation_subnet_derive_subblock "$raw_seed")"
 
     printf '%s\n' "$(( octet * 8 + subblock ))"
 }
@@ -129,12 +167,14 @@ validation_subnet_seed_for_attempt() {
     fi
 }
 
-# validation_subnet_try_lock <lock_root> <slot>
-# Attempts to atomically claim <slot> by holding a non-blocking exclusive
-# flock on "<lock_root>/<slot>.lock" for as long as the returned holder
+# validation_subnet_try_lock <lock_root> <id>
+# Attempts to atomically claim <id> by holding a non-blocking exclusive
+# flock on "<lock_root>/<id>.lock" for as long as the returned holder
 # process stays alive. On success, prints the holder PID on stdout and
-# returns 0; on failure (another process already holds this slot's lock),
-# prints nothing and returns 1.
+# returns 0; on failure (another process already holds this id's lock),
+# prints nothing and returns 1. <id> is an opaque integer -- a plain octet
+# for validation_subnet_reserve's callers, or a combined `/27` slot for
+# validation_subnet_reserve_slot's -- this function does not care which.
 #
 # The lock is acquired directly on an fd owned by the very process that
 # stays alive to hold it (`exec 9>...; flock -n 9; exec sleep infinity`, the
@@ -147,8 +187,8 @@ validation_subnet_seed_for_attempt() {
 # process holding the lock: killing exactly that PID always releases it
 # immediately, with no orphaned child left holding it behind.
 validation_subnet_try_lock() {
-    local lock_root="$1" slot="$2"
-    local lock_file="$lock_root/${slot}.lock"
+    local lock_root="$1" id="$2"
+    local lock_file="$lock_root/${id}.lock"
     local holder_pid
 
     mkdir -p "$lock_root"
@@ -209,23 +249,63 @@ validation_subnet_release() {
 
 # validation_subnet_reserve <lock_root> <run_id> <run_attempt> <start_attempt> <max_attempts>
 # Tries attempt numbers from <start_attempt> up to <max_attempts> (inclusive),
-# deriving each one's candidate slot via validation_subnet_seed_for_attempt
-# + validation_subnet_derive_slot and attempting to lock it via
-# validation_subnet_try_lock. On the first attempt number whose slot locks
-# successfully, prints three lines -- "attempt=<n>", "slot=<n>",
+# deriving each one's candidate octet via validation_subnet_seed_for_attempt
+# + validation_subnet_derive_octet and attempting to lock it via
+# validation_subnet_try_lock. On the first attempt number whose octet locks
+# successfully, prints three lines -- "attempt=<n>", "octet=<n>",
 # "holder_pid=<n>" -- and returns 0. If every attempt number in the range is
 # already locked by another concurrent run, prints nothing and returns 1.
+#
+# For the general 172.30.0.0/16 validation-stack pool ONLY -- see
+# validation_subnet_reserve_slot (below) for the `/27`-per-slot equivalent.
+# scripts/dhcp-kea-lease-flow-simulation.sh and
+# scripts/dhcp-proxy-pxe-simulation.sh call THIS function (on their own,
+# separate 172.31.0.0/16 / 172.29.0.0/16 lock_root/range), expecting a plain
+# octet, unchanged by the #832 redesign.
 #
 # This function only arbitrates HOST-LOCAL LOCK contention -- it has no
 # Docker dependency at all, deliberately, so it can be unit tested without a
 # Docker daemon. A caller that also needs to validate the candidate against
-# Docker's own network state or an actual `docker compose up` failure (see
-# the workflow step that calls this) should call validation_subnet_release
-# on a reservation that fails its own check, then call this function again
-# with start_attempt set one past the attempt number that just failed -- so
-# a subsequent call never re-tries (and re-fails identically on) the same
+# Docker's own network state or an actual `docker compose up`/`docker
+# network create` failure should call validation_subnet_release on a
+# reservation that fails its own check, then call this function again with
+# start_attempt set one past the attempt number that just failed -- so a
+# subsequent call never re-tries (and re-fails identically on) the same
 # already-rejected candidate.
 validation_subnet_reserve() {
+    local lock_root="$1" run_id="$2" run_attempt="$3" start_attempt="$4" max_attempts="$5"
+    local attempt seed octet holder_pid
+
+    for (( attempt = start_attempt; attempt <= max_attempts; attempt++ )); do
+        seed="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" "$attempt")"
+        octet="$(validation_subnet_derive_octet "$seed")"
+
+        if holder_pid="$(validation_subnet_try_lock "$lock_root" "$octet")"; then
+            printf 'attempt=%s\noctet=%s\nholder_pid=%s\n' "$attempt" "$octet" "$holder_pid"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# validation_subnet_reserve_slot <lock_root> <run_id> <run_attempt> <start_attempt> <max_attempts>
+# The `/27`-per-slot (#832) equivalent of validation_subnet_reserve: same
+# attempt-range/retry shape, but derives each candidate via
+# validation_subnet_derive_slot (octet AND subblock, combined) and locks on
+# the COMBINED slot value -- not just the octet -- so two concurrent runs
+# that land on the SAME octet but a DIFFERENT `/27` block within it are
+# correctly treated as non-conflicting (this is the entire point of the
+# `/27` redesign: locking at slot granularity is what actually multiplies
+# the usable pool from ~250 to ~2,000; locking at octet granularity while
+# allocating at slot granularity would silently re-serialize concurrent
+# runs down to the old, smaller effective pool). Prints "attempt=<n>",
+# "slot=<n>", "holder_pid=<n>". Used by the general 172.30.0.0/16
+# validation-stack pool ONLY (full-setup-validate.yml,
+# full-setup-deep-validate.yml, build-push.yml,
+# scripts/lib/run-in-validation-subnet.sh) -- NOT by the two DHCP
+# simulation scripts, which call validation_subnet_reserve (above) instead.
+validation_subnet_reserve_slot() {
     local lock_root="$1" run_id="$2" run_attempt="$3" start_attempt="$4" max_attempts="$5"
     local attempt seed slot holder_pid
 

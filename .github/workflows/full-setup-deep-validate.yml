@@ -326,7 +326,7 @@ jobs:
           next_attempt=1
 
           while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
               echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
               exit 1
             }
@@ -1063,7 +1063,10 @@ jobs:
     # rather than chained after dns-zone-rollback-simulation while this job
     # is still being iterated on in CI: chaining last would mean waiting on
     # the entire existing ~10-job serial suite for every single iteration.
-    # TODO(#453): once this job is green, move it back to
+    # Originally tracked as a follow-up under #453 (now closed -- its
+    # closure covered #453's own core scope, not this narrow CI-ordering
+    # item, so the pending reordering below is still outstanding, not
+    # resolved by that closure): once this job is green, move it back to
     # `needs: [plan, ensure-pr-staging-images, dns-zone-rollback-simulation]`
     # to match every other simulation job's serial position ahead of the
     # aggregate.
@@ -1121,8 +1124,9 @@ jobs:
         # i.e. the same physical host, which is exactly what a per-host lock
         # file serializes. MUST be the SAME lock file setup-cli-simulation.sh
         # uses, not a separate one: this job's own `needs:` is deliberately
-        # hoisted to [plan, ensure-pr-staging-images] (see the TODO(#453)
-        # above) rather than chained after the existing serial sim sequence,
+        # hoisted to [plan, ensure-pr-staging-images] (see the pending
+        # reordering note on the job definition above) rather than chained
+        # after the existing serial sim sequence,
         # so within a single PR's own CI run this job can run genuinely
         # CONCURRENTLY with setup-cli-simulation -- and both drive the exact
         # same fixed container names from the exact same

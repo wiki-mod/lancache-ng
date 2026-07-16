@@ -452,7 +452,23 @@ is real, live, running code, not just work sitting in source control.
   `validation_subnet_export_env`/`validation_subnet_conflicts` functions
   instead of each keeping its own hand-written copy of the address-export
   formula, closing off the exact kind of silent divergence a partial `/24`
-  to `/27` migration could otherwise have left behind.
+  to `/27` migration could otherwise have left behind. **Real regression
+  caught by this PR's own CI run and fixed before merge**:
+  `validation_subnet_reserve` (in `scripts/lib/reserve-validation-subnet.sh`)
+  turned out to be a generic "reserve one free integer with host-local
+  flock" primitive ALSO reused, on their own separate `172.31.0.0/16` /
+  `172.29.0.0/16` ranges, by `scripts/dhcp-kea-lease-flow-simulation.sh` and
+  `scripts/dhcp-proxy-pxe-simulation.sh` -- neither of which has (or wants)
+  a `/27` subdivision. An earlier version of this change renamed that
+  function's output from `octet=` to `slot=` for the general pool's benefit,
+  which silently broke both DHCP scripts (still parsing the now-gone
+  `octet=` key), producing the literal invalid subnet string
+  `"172.31..0/24"`/`"172.29..0/24"` in real CI. Fixed by restoring
+  `validation_subnet_reserve`/`validation_subnet_derive_octet` to their
+  exact original, octet-only behavior (used by the two DHCP scripts,
+  unchanged) and adding separate `validation_subnet_reserve_slot`/
+  `validation_subnet_derive_slot` functions for the four general-pool call
+  sites instead.
 
 ### Fixed
 

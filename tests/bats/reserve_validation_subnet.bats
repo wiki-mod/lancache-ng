@@ -47,24 +47,49 @@ teardown() {
     [ "$seed1" != "$seed2" ]
 }
 
+@test "octet derivation is deterministic for the same seed" {
+    octet_a="$(validation_subnet_derive_octet "123456-1")"
+    octet_b="$(validation_subnet_derive_octet "123456-1")"
+    [ "$octet_a" = "$octet_b" ]
+}
+
+@test "derived octet always falls in the reserved pool, excluding 0, 1, 28, and 99" {
+    # UNCHANGED by the #832 /27 redesign: scripts/dhcp-kea-lease-flow-
+    # simulation.sh and scripts/dhcp-proxy-pxe-simulation.sh both still call
+    # validation_subnet_reserve (which derives via THIS function) on their
+    # own separate 172.31.0.0/16 / 172.29.0.0/16 ranges, expecting a plain
+    # octet -- a real CI regression (confirmed via a genuine run) came from
+    # a first version of this redesign changing what this function/
+    # validation_subnet_reserve returned out from under those two scripts.
+    for seed in "run-1" "run-2" "run-3" "run-4" "run-5" "another-seed" "yet-another"; do
+        octet="$(validation_subnet_derive_octet "$seed")"
+        [ "$octet" -ge 2 ]
+        [ "$octet" -le 253 ]
+        [ "$octet" -ne 28 ]
+        [ "$octet" -ne 99 ]
+    done
+}
+
 @test "slot derivation is deterministic for the same seed" {
     slot_a="$(validation_subnet_derive_slot "123456-1")"
     slot_b="$(validation_subnet_derive_slot "123456-1")"
     [ "$slot_a" = "$slot_b" ]
 }
 
-@test "derived slot decomposes into an octet excluding 0, 1, 28, 99, and a subblock 0..7" {
-    # #832: a slot is `real_octet * 8 + subblock`. Assert both dimensions
-    # stay within the ranges validation_subnet_export_env's own decomposition
-    # (octet = slot/8, subblock = slot%8) expects.
+@test "derived slot decomposes into the SAME octet validation_subnet_derive_octet gives, plus a subblock 0..7" {
+    # #832: a slot is `real_octet * 8 + subblock`, where real_octet must be
+    # IDENTICAL to what validation_subnet_derive_octet alone computes for
+    # the same seed (validation_subnet_derive_slot is built on top of it,
+    # not a separate/diverging formula) -- this is what keeps the two
+    # reservation systems (validation_subnet_reserve for the DHCP scripts,
+    # validation_subnet_reserve_slot for the general pool) from ever
+    # producing inconsistent octet math for the same seed.
     for seed in "run-1" "run-2" "run-3" "run-4" "run-5" "another-seed" "yet-another"; do
+        octet_direct="$(validation_subnet_derive_octet "$seed")"
         slot="$(validation_subnet_derive_slot "$seed")"
-        octet=$(( slot / 8 ))
+        octet_from_slot=$(( slot / 8 ))
         subblock=$(( slot % 8 ))
-        [ "$octet" -ge 2 ]
-        [ "$octet" -le 253 ]
-        [ "$octet" -ne 28 ]
-        [ "$octet" -ne 99 ]
+        [ "$octet_from_slot" = "$octet_direct" ]
         [ "$subblock" -ge 0 ]
         [ "$subblock" -le 7 ]
     done
@@ -101,13 +126,44 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-@test "reserve skips an already-locked candidate and lands on a different, unlocked slot" {
+@test "reserve (octet-only, DHCP scripts' path) skips an already-locked candidate and lands on a different, unlocked octet" {
     # Pin the FIRST candidate validation_subnet_reserve would try (attempt 1
     # for this run_id/run_attempt) and pre-lock it directly, simulating a
     # second, genuinely concurrent workflow run that got there first -- this
     # is #703's exact scenario, reproduced with two real flock-backed
-    # processes instead of two real GitHub Actions runs.
+    # processes instead of two real GitHub Actions runs. Exercises the exact
+    # path scripts/dhcp-kea-lease-flow-simulation.sh/
+    # scripts/dhcp-proxy-pxe-simulation.sh use (validation_subnet_reserve,
+    # NOT validation_subnet_reserve_slot -- see the separate slot-based test
+    # below for the general pool's own path).
     run_id="run-abc"
+    run_attempt="1"
+    first_seed="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" 1)"
+    first_octet="$(validation_subnet_derive_octet "$first_seed")"
+
+    holder_pid="$(validation_subnet_try_lock "$lock_root" "$first_octet")"
+    [ -n "$holder_pid" ]
+
+    result="$(validation_subnet_reserve "$lock_root" "$run_id" "$run_attempt" 1 20)"
+    [ -n "$result" ]
+
+    won_octet="$(printf '%s\n' "$result" | sed -n 's/^octet=//p')"
+    holder_pid_2="$(printf '%s\n' "$result" | sed -n 's/^holder_pid=//p')"
+
+    [ -n "$won_octet" ]
+    [ "$won_octet" != "$first_octet" ]
+    [ -n "$holder_pid_2" ]
+    kill -0 "$holder_pid_2"
+}
+
+@test "reserve_slot (general-pool path) skips an already-locked candidate and lands on a different, unlocked slot" {
+    # Same scenario as the octet-only test above, but for
+    # validation_subnet_reserve_slot -- the path full-setup-validate.yml/
+    # full-setup-deep-validate.yml/build-push.yml/run-in-validation-subnet.sh
+    # actually use. Asserts the OUTPUT KEY is "slot=" (not "octet="), since a
+    # real regression (confirmed via CI) came from these two reservation
+    # paths' output formats getting confused/merged.
+    run_id="run-abc-slot"
     run_attempt="1"
     first_seed="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" 1)"
     first_slot="$(validation_subnet_derive_slot "$first_seed")"
@@ -115,12 +171,13 @@ teardown() {
     holder_pid="$(validation_subnet_try_lock "$lock_root" "$first_slot")"
     [ -n "$holder_pid" ]
 
-    result="$(validation_subnet_reserve "$lock_root" "$run_id" "$run_attempt" 1 20)"
+    result="$(validation_subnet_reserve_slot "$lock_root" "$run_id" "$run_attempt" 1 20)"
     [ -n "$result" ]
 
     won_slot="$(printf '%s\n' "$result" | sed -n 's/^slot=//p')"
     holder_pid_2="$(printf '%s\n' "$result" | sed -n 's/^holder_pid=//p')"
 
+    [ -n "$won_slot" ]
     [ "$won_slot" != "$first_slot" ]
     [ -n "$holder_pid_2" ]
     kill -0 "$holder_pid_2"
@@ -132,20 +189,20 @@ teardown() {
 
     # Lock the only two attempt numbers this call is allowed to try (1 and
     # 2), so the range is fully exhausted and reserve must fail cleanly
-    # rather than loop forever or silently reuse a locked slot.
+    # rather than loop forever or silently reuse a locked octet.
     seed1="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" 1)"
-    slot1="$(validation_subnet_derive_slot "$seed1")"
+    octet1="$(validation_subnet_derive_octet "$seed1")"
     seed2="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" 2)"
-    slot2="$(validation_subnet_derive_slot "$seed2")"
+    octet2="$(validation_subnet_derive_octet "$seed2")"
 
-    holder_pid="$(validation_subnet_try_lock "$lock_root" "$slot1")"
+    holder_pid="$(validation_subnet_try_lock "$lock_root" "$octet1")"
     [ -n "$holder_pid" ]
 
-    # Extremely unlikely (~1/2000) but possible: both attempt seeds hash to
-    # the same slot. Locking it once already covers that case, so only
-    # lock slot2 separately when it's actually different.
-    if [ "$slot2" != "$slot1" ]; then
-        holder_pid_2="$(validation_subnet_try_lock "$lock_root" "$slot2")"
+    # Extremely unlikely (~1/252) but possible: both attempt seeds hash to
+    # the same octet. Locking it once already covers that case, so only
+    # lock octet2 separately when it's actually different.
+    if [ "$octet2" != "$octet1" ]; then
+        holder_pid_2="$(validation_subnet_try_lock "$lock_root" "$octet2")"
         [ -n "$holder_pid_2" ]
     fi
 

@@ -2217,7 +2217,7 @@ jobs:
           next_attempt=1
 
           while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
               echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
               exit 1
             }
