@@ -77,6 +77,11 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:-lancache-dns-writer}
       - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-lancache-nats-writer-dev-secret}
+      # Shared-secret bootstrap (#858): resolve NATS_PASSWORD against this role's
+      # shared file so it matches the value the nats server generates. Inert in
+      # stock dev (the dev-secret default above is non-placeholder, so the
+      # entrypoint's resolver returns it untouched) -- present for parity.
+      - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
@@ -128,6 +133,11 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_REPLICA_USER:-lancache-dns-replica}
       - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-lancache-nats-replica-dev-secret}
+      # Shared-secret bootstrap (#858): resolve NATS_PASSWORD against this role's
+      # shared file so it matches the value the nats server generates. Inert in
+      # stock dev (the dev-secret default above is non-placeholder, so the
+      # entrypoint's resolver returns it untouched) -- present for parity.
+      - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
@@ -372,6 +382,24 @@ services:
     command:
       - |
         set -e
+        # Shared-secret bootstrap (#858): resolve the four NATS_*_PASSWORD
+        # handshake secrets from the shared-secrets volume so nats-server and its
+        # clients (Admin UI, dns writer/replica) agree even when .env left them
+        # empty/placeholder. Sources the same tested helper the dns/dhcp/ui
+        # entrypoints embed (mounted read-only below). Inert in stock dev (the
+        # checked-in defaults are already consistent non-placeholder values, so
+        # every resolve_shared_secret call below returns its input untouched and
+        # never touches the shared volume) -- present for parity across all
+        # deploy profiles per issue #858, not just where the gap was found.
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        if secret_is_placeholder "$$NATS_UI_PASSWORD"; then NATS_UI_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-ui-password "$$NATS_UI_PASSWORD" lancache_gen_hex32)"; then NATS_UI_PASSWORD="$$_v"; fi
+        if secret_is_placeholder "$$NATS_DNS_WRITER_PASSWORD"; then NATS_DNS_WRITER_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-dns-writer-password "$$NATS_DNS_WRITER_PASSWORD" lancache_gen_hex32)"; then NATS_DNS_WRITER_PASSWORD="$$_v"; fi
+        if secret_is_placeholder "$$NATS_DNS_REPLICA_PASSWORD"; then NATS_DNS_REPLICA_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-dns-replica-password "$$NATS_DNS_REPLICA_PASSWORD" lancache_gen_hex32)"; then NATS_DNS_REPLICA_PASSWORD="$$_v"; fi
+        if secret_is_placeholder "$$NATS_CALLOUT_PASSWORD"; then NATS_CALLOUT_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-callout-password "$$NATS_CALLOUT_PASSWORD" lancache_gen_hex32)"; then NATS_CALLOUT_PASSWORD="$$_v"; fi
         mkdir -p /etc/nats
         mkdir -p /var/log/lancache-nats
         escape_sed() {
@@ -505,6 +533,10 @@ services:
         fi
         exec nats-server -c /etc/nats/nats.conf
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins NATS_*_PASSWORD, plus the
+      # canonical helper sourced by the command block above (mounted read-only).
+      - shared-secrets:/var/lib/lancache-secrets
+      - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - nats-data:/data
       - nats-conf:/etc/nats
       - ../../services/nats/nats.conf:/nats-default.conf:ro

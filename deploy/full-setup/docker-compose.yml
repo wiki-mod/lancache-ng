@@ -223,6 +223,16 @@ services:
   # pair itself. The Admin UI still writes auth_callout.conf on startup with its
   # fixed-seed issuer (matching the prebaked one), but since the restart
   # no-ops, the already-loaded prebaked pair is what serves the simulation.
+  #
+  # Deliberately NOT wired into the shared-secret bootstrap (#858): every
+  # credential here is a literal string baked into the heredoc below, not an
+  # interpolated `${NATS_..._PASSWORD}` -- there is no environment: block and
+  # no placeholder-or-empty case this harness can ever hit, by design (fixed
+  # values are what make the auth-callout restart-no-op simulation above
+  # reproducible). dev/prod/quickstart's real `${VAR}`-driven nats service is
+  # what the bootstrap targets; retrofitting resolve_shared_secret here would
+  # mean restructuring a CI-only validation harness for no self-heal benefit
+  # it could ever exercise.
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     entrypoint: ["/bin/sh", "-c"]
