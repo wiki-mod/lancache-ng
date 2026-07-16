@@ -662,7 +662,9 @@ mod tests {
         let pub_allow = perms["pub"]["allow"].as_array().unwrap();
         assert!(pub_allow.iter().any(|v| v == "$JS.ACK.LANCACHE_DNS.>"));
         // Secondaries must never get raw publish access to the DNS record
-        // subject itself -- only the DNS-writer role publishes records.
+        // subject itself -- only the trusted, primary-side static roles
+        // (DNS-writer, and DNS-replica for its narrow rollback-republish
+        // case) publish records; auth-callout-issued secondaries never do.
         assert!(!pub_allow.iter().any(|v| v == "lancache.dns.record"));
     }
 
