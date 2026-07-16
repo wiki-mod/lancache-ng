@@ -24,6 +24,8 @@
 bats_require_minimum_version 1.5.0
 
 setup() {
+    orig_path="$PATH"
+
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     helper_file="$BATS_TEST_TMPDIR/setup-functional-health-helpers.sh"
 
@@ -38,6 +40,15 @@ setup() {
     env_file="$BATS_TEST_TMPDIR/lancache.env"
 }
 
+# Tests below replace PATH with the sandbox for the `run` call and never
+# restore it -- left unrestored, bats' own post-test tmpdir cleanup (which
+# shells out to `rm`) fails with "command not found" since the sandbox has
+# no `rm`. Restoring here keeps that cleanup on the real PATH regardless of
+# what a test pointed PATH at.
+teardown() {
+    PATH="$orig_path"
+}
+
 write_env() {
     cat > "$env_file" <<EOF
 IP_STANDARD=$1
@@ -49,8 +60,14 @@ EOF
 
 stub_tool() {
     local name="$1" exit_code="$2" stdout="${3:-}"
+    # #!/bin/bash, not #!/usr/bin/env bash: PATH is fully replaced by the
+    # caller (see the file header), so an env-indirected shebang would have
+    # `env` itself search that same restricted PATH for `bash` and fail with
+    # "No such file or directory" the moment this stub is actually executed
+    # (not just `command -v`-checked) -- turning every real/broken probe
+    # scenario into an indistinguishable exec failure.
     cat > "$sandbox/$name" <<EOF
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s' '$stdout'
 exit $exit_code
 EOF
