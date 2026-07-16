@@ -436,7 +436,15 @@ is real, live, running code, not just work sitting in source control.
   flush publish/ack fails is now collected and surfaced in the response
   body as `flush_ok`/`flush_failed_names`, a signal distinct from
   `applied` (which still only reflects whether the PATCH itself was
-  applied to PowerDNS).
+  applied to PowerDNS). Also added a bats regression test asserting the
+  real generated `nats.conf` grants the permission across dev/prod/
+  quickstart, and a `flush_ok` assertion in the existing
+  `scripts/dns-zone-rollback-simulation.sh` E2E test -- that stack's own
+  identities carry no `publish` block at all (nats-server treats that as
+  unrestricted, unlike the restrictive allow-lists this bug actually
+  lived in), so the new assertion is what proves the response's
+  success/failure signal is really wired to the live per-name
+  publish/ack loop, not just correctly shaped in isolation.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
