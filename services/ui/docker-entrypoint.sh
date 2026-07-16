@@ -170,6 +170,29 @@ if [ "$(id -u)" = "0" ]; then
         NATS_CALLOUT_PASSWORD="$_ui_nats_callout_pw"
         export NATS_CALLOUT_PASSWORD
     fi
+
+    # The UI never connects to NATS as the dns-writer/dns-replica roles (only
+    # dns-standard/dns-ssl do), but config.rs holds both passwords anyway and
+    # main.rs's preflight_startup_config() -> validate_runtime_nats_credentials()
+    # rejects a missing value for either one before the HTTP listener binds
+    # (defense-in-depth: catch a broken NATS credential set as a whole, not just
+    # the two roles this process happens to use). Resolving them here against
+    # the exact same shared files dns-standard/dns-ssl read
+    # (NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password / ...-replica-...)
+    # keeps this preflight check in lockstep with the real generated values
+    # instead of hard-failing the whole container on an empty/placeholder .env.
+    _ui_nats_writer_cfg="${NATS_DNS_WRITER_PASSWORD:-}"
+    if secret_is_placeholder "$_ui_nats_writer_cfg"; then _ui_nats_writer_cfg=""; fi
+    if _ui_nats_writer_pw="$(resolve_shared_secret nats-dns-writer-password "$_ui_nats_writer_cfg" lancache_gen_hex32)"; then
+        NATS_DNS_WRITER_PASSWORD="$_ui_nats_writer_pw"
+        export NATS_DNS_WRITER_PASSWORD
+    fi
+    _ui_nats_replica_cfg="${NATS_DNS_REPLICA_PASSWORD:-}"
+    if secret_is_placeholder "$_ui_nats_replica_cfg"; then _ui_nats_replica_cfg=""; fi
+    if _ui_nats_replica_pw="$(resolve_shared_secret nats-dns-replica-password "$_ui_nats_replica_cfg" lancache_gen_hex32)"; then
+        NATS_DNS_REPLICA_PASSWORD="$_ui_nats_replica_pw"
+        export NATS_DNS_REPLICA_PASSWORD
+    fi
 fi
 
 # Bind mounts and shared volumes are often created as root-owned paths at
