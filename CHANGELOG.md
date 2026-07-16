@@ -867,17 +867,28 @@ is real, live, running code, not just work sitting in source control.
   uptime. This was a general capacity/fairness bug in the merge, not
   watchdog-specific, so the fix is general too: the merge now groups
   collected lines by host, reserves each host with data at least
-  `max(1, limit / hosts_with_data)` of its own most recent lines via a
-  round-robin pass, and only then fills any remaining budget with the
+  `per_host_floor = (limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)`
+  (`PER_HOST_FLOOR` is a small constant, 10) of its own most recent lines
+  via a round-robin pass, and only then fills any remaining budget with the
   globally most recent leftover lines across all hosts -- so a quiet host
   can no longer be fully evicted, while a genuinely high-volume, genuinely
   recent host still dominates the window whenever it isn't competing with
-  other hosts for space. New unit tests in `services/ui/src/
-  syslog_client.rs` cover a quiet host surviving alongside 50 newer lines
-  from a noisy host while the overall limit is still respected, and a
-  single uncontested noisy host still getting exactly its most recent
-  lines with no fairness penalty; all pre-existing `parse_syslog_tail`
-  tests (including the #758 regression test) continue to pass unmodified.
+  other hosts for space, and can still win most of the shared budget even
+  when it IS competing against other active hosts. The floor is
+  deliberately a small constant rather than a pure equal share of `limit`
+  across hosts: an equal share would, once every active host has at least
+  that many lines, consume the entire budget in the floor pass and leave
+  nothing for the recency-fill pass, degrading the merge to a fixed count
+  per host regardless of actual recency -- an over-correction caught during
+  review before merge. New unit tests in `services/ui/src/syslog_client.rs`
+  cover a quiet host surviving alongside 50 newer lines from a noisy host
+  while the overall limit is still respected, a single uncontested noisy
+  host still getting exactly its most recent lines with no fairness
+  penalty, and four simultaneously-active hosts where the two genuinely
+  newer hosts each win their entire history while the two older hosts still
+  keep their guaranteed floor rather than being squeezed to zero; all
+  pre-existing `parse_syslog_tail` tests (including the #758 regression
+  test) continue to pass unmodified.
 
 ## [0.1.0] - 2026-07-06
 

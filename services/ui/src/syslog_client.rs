@@ -153,6 +153,23 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
     select_fair_window(collected, limit)
 }
 
+// A host with data is guaranteed at least this many of its own most recent
+// lines (fewer if it has less data than this), regardless of how many other
+// hosts are competing for the shared `limit` budget. Deliberately a small
+// constant, not an equal share of `limit` across hosts_with_data: an equal
+// share (limit / hosts_with_data) would, once every active host has at
+// least that many lines, consume the *entire* budget in the per-host floor
+// pass below and leave nothing for the global-recency fill pass, degrading
+// the merge to "same fixed count per host" regardless of actual recency --
+// exactly the kind of over-correction #859 warns against (the fix must
+// protect quiet hosts from starvation without preventing a genuinely more
+// active/recent host from dominating the window when it deserves to). A
+// small constant keeps every host with data visible (comfortably above
+// lancache-watchdog's ~7-line startup burst) while leaving most of `limit`
+// for the recency-fill pass to award to whichever host(s) actually produced
+// the most recent activity.
+const PER_HOST_FLOOR: usize = 10;
+
 // Merges per-host lines into a single `limit`-sized window without letting a
 // noisy host fully evict a quiet one (#859). A plain global
 // sort-by-timestamp + truncate-to-`limit` (the pre-#859 behavior) is
@@ -163,15 +180,22 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
 //
 //   1. Group entries by host, newest-first per host.
 //   2. Round-robin across hosts (alphabetical order, for determinism) up to
-//      `per_host_floor = max(1, limit / hosts_with_data)` rounds, taking one
-//      more line per host per round. This guarantees every host with data
-//      keeps at least `per_host_floor` of its own most recent lines in the
-//      window, capped by how many lines it actually has.
+//      `per_host_floor = (limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)`
+//      rounds, taking one more line per host per round. This guarantees
+//      every host with data keeps at least `per_host_floor` of its own most
+//      recent lines in the window, capped by how many lines it actually
+//      has. The `limit / hosts_with_data` half of the min() only matters
+//      when there are so many hosts that even the small constant floor
+//      would not fit everyone -- it shrinks the floor rather than silently
+//      overrunning `limit`.
 //   3. Whatever budget remains after every host's floor is exhausted (or
 //      every host ran out of lines) is filled with the globally most recent
 //      leftover lines across all hosts -- this is where a genuinely noisy,
 //      genuinely recent host still dominates the window when it isn't
-//      competing against other hosts for space.
+//      competing against other hosts for space, and where it can still win
+//      most of the shared budget even when it IS competing against other
+//      active hosts (see parse_syslog_tail_lets_recent_activity_win_the_
+//      shared_budget_across_multiple_active_hosts).
 //
 // Lines that failed to match the expected format get an empty timestamp
 // (see parse_syslog_line) and sort as oldest; this is a documented
@@ -202,7 +226,7 @@ fn select_fair_window(collected: Vec<SyslogEntry>, limit: usize) -> Vec<SyslogEn
         return vec![];
     }
 
-    let per_host_floor = (limit / host_count).max(1);
+    let per_host_floor = (limit / host_count).clamp(1, PER_HOST_FLOOR);
     let mut kept: Vec<SyslogEntry> = Vec::new();
     let mut taken_per_host: HashMap<String, usize> = HashMap::new();
 
@@ -688,6 +712,63 @@ mod tests {
             ],
             "with a single host contributing, the merge must still keep \
              exactly the most recent `limit` lines; got {messages:?}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // A per-host floor equal to `limit / hosts_with_data` (an equal share)
+    // would, once every active host has at least that many lines, consume
+    // the entire budget in the floor pass and leave nothing for the
+    // recency-fill pass -- degrading the merge to a fixed count per host
+    // regardless of which host actually produced the most recent activity.
+    // That is an over-correction of the #859 starvation bug, not a fix:
+    // four equally-active hosts here would each get pinned to exactly 20
+    // lines, hiding hostA's and hostB's newest 10 lines behind hostC's and
+    // hostD's oldest ones. With PER_HOST_FLOOR capping the floor at 10, the
+    // remaining 40-line budget after the floor pass goes to whichever lines
+    // are genuinely most recent across all hosts -- here hostA and hostB
+    // (whose entire 30-line history is newer than hostC's and hostD's),
+    // so they end up fully represented (30/30) while hostC and hostD still
+    // keep their guaranteed floor (10 each) rather than being starved out.
+    #[test]
+    fn parse_syslog_tail_lets_recent_activity_win_the_shared_budget_across_multiple_active_hosts() {
+        let root = temp_root("multi-active");
+        let hosts_oldest_to_newest = ["hostD", "hostC", "hostB", "hostA"];
+        for (block, host) in hosts_oldest_to_newest.iter().enumerate() {
+            let hour = 9 + block;
+            let mut content = String::new();
+            for minute in 0..30 {
+                content.push_str(&format!(
+                    "2026-07-13T{hour:02}:{minute:02}:00+00:00 {host} nginx: {host}-{minute}\n"
+                ));
+            }
+            write_plain(&root, host, "20260713.log", &content);
+        }
+
+        let entries = parse_syslog_tail(root.to_str().unwrap(), None, 80);
+        assert_eq!(entries.len(), 80);
+
+        let count_for = |host: &str| entries.iter().filter(|e| e.host == host).count();
+        assert_eq!(
+            count_for("hostA"),
+            30,
+            "hostA's entire (newest) history should fit"
+        );
+        assert_eq!(
+            count_for("hostB"),
+            30,
+            "hostB's entire (second-newest) history should fit"
+        );
+        assert_eq!(
+            count_for("hostC"),
+            10,
+            "hostC must still keep its guaranteed floor, not be squeezed to 0"
+        );
+        assert_eq!(
+            count_for("hostD"),
+            10,
+            "hostD must still keep its guaranteed floor, not be squeezed to 0"
         );
 
         fs::remove_dir_all(root).expect("cleanup");
