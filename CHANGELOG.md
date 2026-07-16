@@ -1123,6 +1123,26 @@ is real, live, running code, not just work sitting in source control.
   keep their guaranteed floor rather than being squeezed to zero; all
   pre-existing `parse_syslog_tail` tests (including the #758 regression
   test) continue to pass unmodified.
+- Fixed `build-push.yml`'s top-level concurrency group serializing whole
+  pipeline runs one at a time on rapid pushes, wasting self-hosted
+  `lancache-heavy` capacity on commits that were already superseded (#888).
+  Investigated the originally-proposed fix (flip the group's
+  `cancel-in-progress` to `true`) and found it unsafe: workflow-level
+  `cancel-in-progress: true` cancels an entire in-progress run including
+  any job that happens to be executing, and `promote`'s own job-level
+  concurrency group (#793) does not protect it from that -- it only
+  serializes `promote` against other users of that same group name, not
+  against its own run being torn down. Implemented a narrower fix instead:
+  the top-level group now uses a run-scoped key for push/tag events (a
+  no-op for serialization purposes, also fixing master/`v0.2.0` pushes
+  contending for the same slot) and stays safely flippable to
+  `cancel-in-progress: true` for PR runs (which never reach
+  `promote`/`release`); `build` and `container-scan` gained their own
+  service+ref-scoped job-level concurrency groups so a superseded commit's
+  heavy build/scan work is cancelled promptly, while `merge-manifests`/
+  `promote` cleanly skip (never start) for it via their existing
+  `needs.<job>.result == 'success'` gates instead of being killed
+  mid-write.
 
 ## [0.1.0] - 2026-07-06
 
