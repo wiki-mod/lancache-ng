@@ -472,6 +472,24 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Generalized the single-consumer secret auto-generation from PR #855 into a
+  reusable **shared-secret bootstrap** for handshake secrets that multiple
+  independent containers must agree on (#858). All seven such secrets --
+  `PDNS_API_KEY`, `KEA_CTRL_TOKEN`, `DDNS_TSIG_KEY`, and the four
+  `NATS_*_PASSWORD` values (UI, DNS-writer, DNS-replica, auth-callout) -- are now
+  resolved through a shared `shared-secrets` volume:
+  an operator/`setup.sh` value in `.env` always wins untouched, but if a value is
+  ever left empty or a checked-in placeholder (a partially-completed migration, a
+  hand-blanked `.env`, a generation bug), the first container to boot generates it
+  atomically (first-writer-wins) and every other consumer -- including the Admin
+  UI's PowerDNS/Kea API clients -- reads the same value. This converts a stack
+  that previously bricked at compose interpolation or crash-looped forever into
+  one that self-heals, without ever weakening placeholder rejection (the guards
+  moved from a compose `:?` into the entrypoints, which still reject placeholders).
+  Behavior change: an empty `DDNS_TSIG_KEY` now generates a shared TSIG key so
+  Kea→PowerDNS dynamic updates are TSIG-authenticated end-to-end by default,
+  instead of the previous empty = TSIG-off, loopback-only fail-safe (which still
+  applies if the shared volume is unwritable) -- see `docs/threat-model.md`.
 - Fixed `build-tools.yml`'s bats-triggering path filter silently excluding
   most of the project's actual bats-tested files (#873). The filter only
   ever matched `tests/bats/**`/`tests/shellspec/**` themselves, `setup.sh`,

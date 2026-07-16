@@ -9,6 +9,122 @@
 
 set -e
 
+# ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
+# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
+# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats):
+# this image builds from services/dhcp/ alone with no shared-file build context.
+# BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
+# lancache_shared_secret_dir
+# Directory holding the cross-container shared secrets, mounted from the
+# `shared-secrets` named volume into every container that must agree on a
+# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+lancache_shared_secret_dir() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
+}
+
+# lancache_shared_secret_gid
+# The Admin UI process runs as this gid (services/ui/Dockerfile pins uid/gid
+# 10001); dns/dhcp/nats run as root. Shared secret files are created group-owned
+# by this gid and mode 0640 so the unprivileged UI can read a root-created file
+# without the secret becoming world-readable -- the same cross-uid model the
+# nats.conf bootstrap already uses. Overridable for tests.
+lancache_shared_secret_gid() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
+}
+
+# lancache_gen_hex32
+# 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
+# `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
+# images AND the BusyBox nats:2-alpine image, and nats:2-alpine ships no openssl.
+lancache_gen_hex32() {
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# lancache_gen_base64_32
+# base64 of 32 random bytes, for the DDNS TSIG key (PowerDNS/Kea expect a
+# base64-encoded HMAC key, matching setup.sh's `openssl rand -base64 32`).
+lancache_gen_base64_32() {
+    head -c 32 /dev/urandom | base64 | tr -d '\n'
+}
+
+# secret_is_placeholder <value>
+# True (returns 0) when the value is empty or one of the universal checked-in
+# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
+# The split-brain invariant requires every consumer of a given secret to decide
+# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
+# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
+# so routing their placeholder decision through this one definition keeps them in
+# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
+# dev tokens) match those in addition to this.
+secret_is_placeholder() {
+    case "${1:-}" in
+        "" | CHANGE_ME* | changeme* | YOUR_* | *_HERE) return 0 ;;
+    esac
+    return 1
+}
+
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# Resolves a shared secret and prints it on stdout with no trailing newline.
+#   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
+#     operator/setup.sh-supplied real value always wins and is never persisted
+#     to the shared volume (all containers share one .env, so they all already
+#     agree on it). The CALLER is responsible for passing empty here when the
+#     configured value is a known placeholder for that specific secret.
+#   - Otherwise reads $dir/<name> if it already exists (some container generated
+#     it first), else atomically creates it with a freshly generated value.
+# Atomicity/race: the value is written to a temp file on the shared volume FIRST,
+# then the final name is claimed with `ln` (a hardlink, atomic and failing if the
+# target already exists). Because the temp already holds the full value before
+# the link, a concurrent reader in another container never observes a partial or
+# empty file, and a container that loses the create race falls back to reading
+# the winner's value instead of erroring. Returns non-zero (and prints nothing)
+# only if the shared volume is unwritable, so the caller can fail closed rather
+# than silently diverge.
+resolve_shared_secret() {
+    _rss_name="$1"
+    _rss_cur="$2"
+    _rss_gen="$3"
+
+    if [ -n "$_rss_cur" ]; then
+        printf '%s' "$_rss_cur"
+        return 0
+    fi
+
+    _rss_dir="$(lancache_shared_secret_dir)"
+    _rss_file="${_rss_dir}/${_rss_name}"
+
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+
+    mkdir -p "$_rss_dir" 2>/dev/null || true
+
+    _rss_val="$($_rss_gen)"
+    if [ -z "$_rss_val" ]; then
+        return 1
+    fi
+
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    printf '%s' "$_rss_val" > "$_rss_tmp"
+    chmod 0640 "$_rss_tmp" 2>/dev/null || true
+    chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
+
+    if ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
+        rm -f "$_rss_tmp"
+        printf '%s' "$_rss_val"
+        return 0
+    fi
+
+    rm -f "$_rss_tmp"
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    return 1
+}
+# END shared-secret-bootstrap library
+
 install -d -m 750 /run/kea
 mkdir -p /var/lib/kea
 # Central logging pipeline (#633): Kea's loggers write to this file in
@@ -57,8 +173,25 @@ if [ -z "${DHCP_NTP_SERVERS+x}" ]; then
 fi
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
-: "${KEA_CTRL_TOKEN:=}"
-: "${DDNS_TSIG_KEY:=}"
+# Resolve the shared KEA_CTRL_TOKEN and DDNS_TSIG_KEY (issue #858). KEA_CTRL_TOKEN
+# is used by both Kea's control-agent here and the Admin UI's DHCP API client;
+# DDNS_TSIG_KEY by both this daemon (signing DDNS updates) and PowerDNS (verifying
+# them). A real configured value wins; an empty/placeholder value is replaced by a
+# first-writer-wins value shared via the shared-secrets volume so both sides agree,
+# instead of crash-looping. If the shared volume is unwritable, resolution returns
+# empty and the fail-closed placeholder checks below still exit 1.
+_kea_ctrl_token_cfg="${KEA_CTRL_TOKEN:-}"
+if secret_is_placeholder "$_kea_ctrl_token_cfg"; then
+    _kea_ctrl_token_cfg=""
+else
+    case "$_kea_ctrl_token_cfg" in
+        lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _kea_ctrl_token_cfg="" ;;
+    esac
+fi
+KEA_CTRL_TOKEN="$(resolve_shared_secret kea-ctrl-token "$_kea_ctrl_token_cfg" lancache_gen_hex32)" || KEA_CTRL_TOKEN=""
+_ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
+if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
+DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 : "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
 # 5300, not 53 (issue #706): 5300 is pdns_server's (the authoritative
@@ -70,9 +203,17 @@ fi
 : "${DHCP_DDNS_PORT:=5300}"
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
-# Verify KEA_CTRL_TOKEN is set to a non-default secret.
+# Verify KEA_CTRL_TOKEN is set to a non-default secret. secret_is_placeholder's
+# universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
+# uses YOUR_*_HERE elsewhere, e.g. SECONDARY_REGISTRATION_TOKEN) plus this
+# service's own legacy shipped defaults below.
+if secret_is_placeholder "$KEA_CTRL_TOKEN"; then
+    echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
+    echo "Generate one with: openssl rand -hex 32"
+    exit 1
+fi
 case "$KEA_CTRL_TOKEN" in
-    ""|"CHANGE_ME_KEA_CTRL_TOKEN"|"lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
+    "lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
         echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
         echo "Generate one with: openssl rand -hex 32"
         exit 1
@@ -165,13 +306,13 @@ build_ntp_option() {
     printf ',\n          {\n            "name": "ntp-servers",\n            "data": "%s"\n          }' "$ntp_servers_csv"
 }
 
-case "$DDNS_TSIG_KEY" in
-    ""|CHANGE_ME*|changeme*)
-        echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
-        printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
-        exit 1
-        ;;
-esac
+# Kea always requires a real DDNS_TSIG_KEY (unlike PowerDNS, which falls back
+# to a loopback-only, TSIG-off safe state) -- see docs/threat-model.md T12.
+if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+    echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
+    printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
+    exit 1
+fi
 
 # Kea's lease_cmds hook (needed for lease4-del, used by the Admin UI's
 # release-lease route and by this container's own upgrade migration below)
