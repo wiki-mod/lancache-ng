@@ -490,6 +490,33 @@ is real, live, running code, not just work sitting in source control.
   Kea→PowerDNS dynamic updates are TSIG-authenticated end-to-end by default,
   instead of the previous empty = TSIG-off, loopback-only fail-safe (which still
   applies if the shared volume is unwritable) -- see `docs/threat-model.md`.
+- Fixed `build-tools.yml`'s bats-triggering path filter silently excluding
+  most of the project's actual bats-tested files (#873). The filter only
+  ever matched `tests/bats/**`/`tests/shellspec/**` themselves, `setup.sh`,
+  and `scripts/check-idempotence-test-coverage.sh` -- so a PR that changed
+  only, say, `services/watchdog/watchdog.sh` never ran the
+  `watchdog_idempotence.bats`/`watchdog_syslog_prune.bats` suite already
+  written for it, since `build-tools.yml` is the only workflow that ever
+  executes bats/shellspec. Traced every `tests/bats/*.bats` file's real
+  (non-fixture) file dependency and confirmed the gap was not
+  watchdog-specific: `services/dns/**`, `services/dhcp/**`,
+  `services/dhcp-proxy/**`, `services/proxy/**`, `services/watchdog/**`,
+  `services/ui/dhcp-probe.sh`, `deploy/{dev,prod,quickstart}/
+  docker-compose.yml`, `scripts/lib/**`, and seven individual top-level
+  `scripts/*.sh` files (`classify-image-impact.sh`,
+  `compute-next-release-tag.sh`, `detect-full-setup-changes.sh`,
+  `ensure-pr-staging-images.sh`, `plan-deep-validation.sh`,
+  `docker-socket-proxy.sh`, `check-action-node-versions.sh`) all had real
+  bats coverage the path filter never triggered on. Added all of these to
+  both the `push` and `pull_request` path filters in `build-tools.yml`.
+  Publish scope is unaffected -- `determine-publish-scope` still only
+  rebuilds/publishes the build-tools image itself on `tools/build-tools/**`
+  or workflow-file changes, so the added paths only cause the existing
+  local build-and-bats-run to execute, never a new image publish. Refs
+  #822 (the cross-cutting "point-fix without a guard" pattern audit this
+  gap is an instance of); a durable CI guard that keeps the filter in sync
+  with actual bats dependencies going forward is tracked separately as
+  follow-up #879 rather than built into this fix.
 - Fixed `setup.sh update`'s post-update functional health gate
   (`verify_stack_functional_health`) silently no-oping instead of failing
   when its required probe tool was missing (#868). `dig` was never part of
@@ -1141,6 +1168,20 @@ is real, live, running code, not just work sitting in source control.
   keep their guaranteed floor rather than being squeezed to zero; all
   pre-existing `parse_syslog_tail` tests (including the #758 regression
   test) continue to pass unmodified.
+- Clarified the PR template's `## Changelog` heading to explicitly say not to
+  edit `CHANGELOG.md` in the same PR (#889): every simultaneously-open PR
+  appending to this same section's heading guaranteed a merge conflict with
+  every other one, which is exactly what motivated this entry to be added
+  the old way one more time. Added `scripts/collect-changelog-entries.sh`,
+  a maintainer-invoked, read-only aid that gathers merged PRs' `## Changelog`
+  body sections since the last release so they can be hand-organized into
+  this file at release time, per CONTRIBUTING.md's existing "Releasing
+  Changes to CHANGELOG.md" process. Evaluated GitHub's native
+  `--generate-notes`/`.github/release.yml` and `release-drafter` as
+  off-the-shelf alternatives; neither can pull a PR's full body text (both
+  summarize by title/label only), which would have been a real regression
+  against this file's long-form, prose-heavy entry style, so a small custom
+  script was written instead.
 
 ## [0.1.0] - 2026-07-06
 
