@@ -202,7 +202,16 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
+          # Temporary diagnostics (2026-07-16): this fetch has failed to
+          # return the real PR body twice despite #903/#905's fixes, with no
+          # visible gh CLI error -- capture stderr and byte count to find out
+          # why, instead of guessing further. Remove once root-caused.
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
+            echo "::error::gh pr view failed, exit code $?"
+            cat /tmp/pr-body-live.stderr
+            exit 1
+          }
+          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
           bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-template-check-hosted:
