@@ -472,6 +472,48 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `SYSLOG_ENABLED` and `SYSLOG_MAX_GB` parsing diverging between the
+  Admin UI and `watchdog.sh` (#874, found via the #849 vacuum-first bug
+  hunt): the UI's `env_bool()` (`services/ui/src/config.rs`) accepted
+  `1`/`yes`/`on`/`true` (case-insensitive) as truthy for `SYSLOG_ENABLED`,
+  but `watchdog.sh`'s `maybe_prune_syslog()` gate only accepted the exact
+  literal string `true` -- any other spelling made the Admin UI display
+  syslog retention as enabled while watchdog's storage-budget/retention
+  engine silently never ran, with no error or operator-visible signal, and
+  the syslog store could grow unbounded. Fixed by adding a new
+  `is_truthy()` helper to `watchdog.sh` that mirrors `env_bool()`'s exact
+  truthy set (1/true/yes/on, case-insensitive, trimmed) and switching
+  `maybe_prune_syslog()`'s gate to use it -- a literal shared function
+  across the Rust/Bash boundary isn't possible, so both sides now carry a
+  documented contract and parity tests exercising the identical set of
+  truthy/falsy input values (`tests/bats/watchdog_truthy_parsing.bats`,
+  `tests/bats/watchdog_syslog_prune.bats`'s new end-to-end cases, and
+  `services/ui/src/config.rs`'s new
+  `syslog_enabled_truthy_parsing_matches_watchdog_contract` test) so the
+  two cannot silently drift apart again. Also fixed the related
+  `SYSLOG_MAX_GB` clamp divergence the issue named: the UI's
+  `env_u32_clamped` already rejected a literal `0` in favor of the default
+  (10 GB), but `watchdog.sh`'s clamp only guarded against oversized values
+  (`> 1048576` GiB, an arithmetic-overflow guard) and let `SYSLOG_MAX_GB=0`
+  through unchanged -- a real 0 GB budget made the size-based prune pass
+  treat every file as over budget and delete everything it could except
+  today's still-open active log. `watchdog.sh` now clamps any value below
+  1 to the same default of 10 GB, matching the UI's floor. A second,
+  previously unaddressed divergence in the same clamp was found during PR
+  review: `env_u32_clamped` (the UI side) had no ceiling at all, while
+  `watchdog.sh`'s own guard already capped its enforced budget at 1048576
+  GiB -- an operator-set value above that ceiling (or one large enough to
+  overflow a `u32`, e.g. `9999999999`) displayed as its literal,
+  unclamped size in the Admin UI while watchdog silently enforced a much
+  smaller budget. Fixed by adding `env_u32_clamped_with_max` (parses as
+  `u64` so an overflowing value converges on the same result as an
+  in-range-but-over-ceiling one, instead of falling back to `default`) and
+  using it for `SYSLOG_MAX_GB` with the same `1048576` ceiling
+  (`SYSLOG_MAX_GB_CEILING`) `watchdog.sh` already enforces, plus parity
+  tests on both sides (`services/ui/src/config.rs`'s
+  `syslog_max_gb_oversized_value_clamps_to_watchdog_ceiling` and
+  `tests/bats/watchdog_syslog_prune.bats`'s new ceiling-parity case) that
+  assert the identical clamped value, not just that neither side crashes.
 - Generalized the single-consumer secret auto-generation from PR #855 into a
   reusable **shared-secret bootstrap** for handshake secrets that multiple
   independent containers must agree on (#858). All seven such secrets --
