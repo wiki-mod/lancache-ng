@@ -3852,37 +3852,69 @@ jobs:
         # keyed only by service+platform, not by ref -- safe back when the
         # top-level "publish" concurrency group serialized whole pipeline
         # runs, but #892 narrowed cancellation to per-job groups keyed by
-        # (service, platform, ref), which made it genuinely possible for two
-        # different trusted refs (e.g. push to `master` and push to
+        # (service, platform, ref[, run_id]) -- see this job's own
+        # `concurrency:` block above -- which made it genuinely possible for
+        # two different trusted refs (e.g. push to `master` and push to
         # `v0.2.0`) to run this job for the *same* service+platform at the
         # same time. Two such runs used to race on this exact directory,
         # producing a cache-lock error or a corrupted/partially-written
-        # cache in one of them (#904). Folding the sanitized ref into the
+        # cache in one of them (#904).
+        #
+        # INVARIANT: concurrency only guarantees mutual exclusion *within* a
+        # group, so this directory's key must be at least as fine as the
+        # concurrency-group key above, not just "finer than before". Two
+        # runs landing in *different* groups (so they CAN run concurrently)
+        # must never collapse onto the same cache-dir string. That means
+        # mirroring the group key's full shape, not only its ref component:
+        #   - Sanitizing `github.ref` (not `github.ref_name`): the group key
+        #     uses the full ref, so a branch and a same-named tag (e.g.
+        #     branch `v0.2.0` vs a future tag also literally named `v0.2.0`)
+        #     are different groups and must get different cache dirs too --
+        #     `ref_name` alone would collapse them.
+        #   - Appending `run_id` in exactly the same condition the group key
+        #     does (`workflow_dispatch` or `run_attempt != 1`): the group's
+        #     own comment above explains why -- two dispatches of the same
+        #     ref, or a rerun of an already-superseded run overlapping a
+        #     fresh push, must not cancel each other, and per this same
+        #     reasoning must not share a cache dir either.
+        # An earlier revision of this fix keyed only on sanitized
+        # `ref_name` with no run_id component -- strictly coarser than the
+        # concurrency-group key above, so it left exactly this race open
+        # for the dispatch/rerun case despite "closing" the ordinary-push
+        # case. Caught in review before merge; corrected to mirror the
+        # group key exactly.
+        #
+        # Folding the sanitized ref (and, where applicable, run_id) into the
         # path makes each concurrency-group instance own a directory no
-        # other ref can ever write to, closing the race without touching
-        # #892's scheduling behavior. Reuses the same sanitization
+        # other instance can ever write to, closing the race without
+        # touching #892's scheduling behavior. Reuses the same sanitization
         # build-tools.yml already applies to its own per-ref mutable tag, so
         # this doesn't invent a second ref-to-filesystem-name convention.
-        # Trade-off (see #904/PR body): a ref's first scan after a fresh
-        # push, or a brand-new release tag, no longer benefits from another
-        # ref's warm cache the way the single shared directory used to
-        # allow -- each ref (and, over time, each immutable release tag)
-        # gets its own persistent directory on the self-hosted runner, so
-        # disk usage grows with the number of distinct refs ever scanned
-        # instead of staying flat; tracked as a follow-up retention item
-        # rather than solved here, matching this PR's narrow race-fix scope.
+        # Trade-off (see #904/PR body): a ref's first ordinary-push scan, or
+        # a brand-new release tag, no longer benefits from another ref's
+        # warm cache the way the single shared directory used to allow --
+        # each ref (and, over time, each immutable release tag) gets its own
+        # persistent directory on the self-hosted runner, so disk usage
+        # grows with the number of distinct refs ever scanned instead of
+        # staying flat; tracked as a follow-up retention item (#912) rather
+        # than solved here, matching this PR's narrow race-fix scope. A
+        # `workflow_dispatch` run or a rerun additionally always starts with
+        # a cold cache (its own isolated, run_id-suffixed directory) rather
+        # than reusing anything -- an intentional, matching consequence of
+        # giving it the same isolation its concurrency group already has.
         id: trivy-cache
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
           if [ -z "$sanitized_ref" ]; then
-            echo "::error::Could not derive a safe Trivy cache directory name from ref '$REF_NAME'."
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
             exit 1
           fi
           cache_dir="/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}-${{ matrix.platform_tag }}-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+          fi
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
       - name: Scan image with Trivy
@@ -4484,11 +4516,17 @@ jobs:
       - name: Prepare pushed build-tools Trivy cache
         # Same shared-cache-directory race as container-scan's own Trivy step
         # above (#904): this job's own concurrency group (see top of `build`)
-        # is keyed by service+ref, so two different trusted refs building
-        # `build-tools` can now run this step concurrently, and a static
-        # `build-tools-pushed` directory would let them race on the same
-        # BoltDB cache file. Fold in the sanitized ref for the same reason
-        # and with the same disk-growth trade-off documented on that step.
+        # is keyed by service+ref[+run_id], so two different trusted refs (or
+        # a dispatch/rerun overlapping a fresh push) building `build-tools`
+        # can now run this step concurrently, and a static `build-tools-
+        # pushed` directory would let them race on the same BoltDB cache
+        # file. Mirrors that job's concurrency-group key exactly (sanitized
+        # `github.ref`, plus a `run_id` suffix in the identical
+        # workflow_dispatch/rerun condition the group uses) -- see
+        # container-scan's equivalent step above for the full invariant this
+        # has to satisfy (cache-dir key must be at least as fine as the
+        # concurrency-group key, not merely finer than the old static path)
+        # and the same disk-growth trade-off, tracked as #912.
         id: trivy-cache
         if: >-
           ${{
@@ -4496,16 +4534,17 @@ jobs:
             matrix.service == 'build-tools' &&
             steps.build.outcome == 'success'
           }}
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
           if [ -z "$sanitized_ref" ]; then
-            echo "::error::Could not derive a safe Trivy cache directory name from ref '$REF_NAME'."
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
             exit 1
           fi
           cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+          fi
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
