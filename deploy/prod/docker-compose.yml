@@ -531,7 +531,7 @@ services:
               permissions = {
                 publish = [
                   "lancache.dns.record",
-                  # #867: the zone-rollback listener (rollback_listener.rs,
+                  # The zone-rollback listener (rollback_listener.rs,
                   # dns-standard's own identity) publishes a post-rollback
                   # cache-flush on this subject. Without it here, the
                   # publish was silently denied by nats-server and the
@@ -555,7 +555,7 @@ services:
               password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
-                  # #867: same reasoning as the writer identity above --
+                  # Same reasoning as the writer identity above --
                   # dns-ssl's own nats-subscriber runs the same rollback
                   # listener and needs to publish the post-rollback
                   # cache-flush too.

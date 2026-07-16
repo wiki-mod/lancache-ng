@@ -23,14 +23,14 @@
 # rollback value cached with a real TTL), not just that PowerDNS's
 # authoritative data changed underneath it.
 #
-# #867: this stack's dns-standard/dns-ssl NATS identities carry no
-# `publish` block at all in deploy/full-setup/docker-compose.yml (the
-# compose file this script drives), which nats-server treats as
-# unrestricted publish -- unlike the restrictive dev/prod/quickstart
-# allow-lists that actually shipped the #867 bug (missing publish on
-# lancache.dns.flush). So the dig-based flush proof below would have
-# passed here even before that fix; it does not by itself prove the
-# permission fix. The explicit `flush_ok` assertion added below IS a real
+# This stack's dns-standard/dns-ssl NATS identities carry no `publish`
+# block at all in deploy/full-setup/docker-compose.yml (the compose file
+# this script drives), which nats-server treats as unrestricted publish --
+# unlike the restrictive dev/prod/quickstart allow-lists that actually
+# shipped the missing-publish-on-lancache.dns.flush bug. So the dig-based
+# flush proof below would have passed here even before that fix; it does
+# not by itself prove the permission fix. The explicit `flush_ok` assertion
+# added below IS a real
 # regression guard though: it proves the response body's own
 # success/failure signal (rollback_listener.rs's `rollback_response_body`)
 # is actually wired to the real per-name publish/ack loop against a live
@@ -311,9 +311,9 @@ if [[ "$changed_names" != *"$test_fqdn"* ]]; then
     echo "::error::Rollback response did not list $test_fqdn among changed_names: $rollback_response" >&2
     exit 1
 fi
-# #867: assert the response's OWN flush signal, not just that the flush
-# happened to work (verify_record_resolves below proves that separately via
-# a real dig). Before #867's fix, this identity's NATS publish permission on
+# Assert the response's OWN flush signal, not just that the flush happened
+# to work (verify_record_resolves below proves that separately via a real
+# dig). Before this fix, this identity's NATS publish permission on
 # lancache.dns.flush was silently denied, and this field is the only thing
 # that would have exposed that from the response itself; `flush_ok` and
 # `flush_failed_names` are the pure-function-tested fields in

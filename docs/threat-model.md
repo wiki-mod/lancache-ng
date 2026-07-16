@@ -268,12 +268,17 @@ record changes, or subscribes to read cache/DNS metadata.
 - Access is **credentialled and role-scoped**, not a single shared account.
   Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
-  - **DNS writer** (standard node / reconciler) — publish DNS records + the
-    specific JetStream stream/consumer subjects it needs; subscribe to
-    `lancache.dns.>`.
+  - **DNS writer** (standard node / reconciler) — publish DNS records,
+    `lancache.dns.flush` (the same post-rollback cache-flush signal as the
+    DNS replica, above), and the specific JetStream stream/consumer subjects
+    it needs; subscribe to `lancache.dns.>`.
   - **DNS replica** (the primary's own co-located dns-ssl container only —
-    there is always exactly one) — consume-only JetStream permissions;
-    cannot publish DNS records.
+    there is always exactly one) — consume-only JetStream permissions, plus
+    one narrow exception: `publish` on `lancache.dns.flush` only, so its own
+    `nats-subscriber` can signal a post-rollback recursor cache-flush (see
+    `services/dns/nats-subscriber/src/rollback_listener.rs`). It still
+    cannot publish `lancache.dns.record` — it cannot forge or replicate DNS
+    record changes.
   - **Auth-callout responder** (the Admin UI itself) — no subject permissions
     of its own; only recognized by name so its own connection to answer
     `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to

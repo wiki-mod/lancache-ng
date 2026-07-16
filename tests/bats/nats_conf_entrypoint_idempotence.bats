@@ -25,10 +25,10 @@
 #
 # Also covers a real-content regression, not just repeat-run convergence: the
 # `generate`/`nats_conf_content` helpers below make asserting on specific
-# rendered nats.conf permissions cheap, so the #867 fix (dns-writer/dns-replica
-# must hold `publish` on `lancache.dns.flush`) gets its own direct assertion
-# against the real generated config, alongside the idempotence properties this
-# suite was originally written for.
+# rendered nats.conf permissions cheap, so the fix requiring dns-writer/
+# dns-replica to hold `publish` on `lancache.dns.flush` gets its own direct
+# assertion against the real generated config, alongside the idempotence
+# properties this suite was originally written for.
 
 bats_require_minimum_version 1.5.0
 
@@ -176,23 +176,23 @@ nats_conf_content() {
     [ "$(nats_conf_content "$root_prod")" = "$(nats_conf_content "$root_quick")" ]
 }
 
-# ── #867 regression: dns-writer/dns-replica must hold publish on the flush subject ──
+# ── regression: dns-writer/dns-replica must hold publish on the flush subject ──
 
-# Issue #867: `rollback_listener.rs::rollback_handler` publishes
-# `lancache.dns.flush` under the dns-standard/dns-ssl container's own
-# identity (NATS_DNS_WRITER_USER / NATS_DNS_REPLICA_USER respectively).
-# Neither identity's `publish` allow-list originally included that subject
-# -- only the separate UI identity did -- so nats-server silently denied
-# every post-rollback cache-flush. The full-setup validation compose's
-# equivalent identities carry no `publish` block at all, which nats-server
-# treats as unrestricted (confirmed against nats-server's own
-# `pubAllowedFullCheck`: `c.perms.pub.allow == nil && c.perms.pub.deny ==
-# nil` returns `true`, i.e. no restriction), so the deep-validate E2E
-# rollback simulation (scripts/dns-zone-rollback-simulation.sh) never
-# actually exercises the restrictive allow-list dev/prod/quickstart ship --
-# it would pass identically with or without this fix. This test closes
-# that gap directly against the real generated config content instead.
-@test "dev/prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.flush (#867)" {
+# `rollback_listener.rs::rollback_handler` publishes `lancache.dns.flush`
+# under the dns-standard/dns-ssl container's own identity
+# (NATS_DNS_WRITER_USER / NATS_DNS_REPLICA_USER respectively). Neither
+# identity's `publish` allow-list originally included that subject -- only
+# the separate UI identity did -- so nats-server silently denied every
+# post-rollback cache-flush. The full-setup validation compose's equivalent
+# identities carry no `publish` block at all, which nats-server treats as
+# unrestricted (confirmed against nats-server's own `pubAllowedFullCheck`:
+# `c.perms.pub.allow == nil && c.perms.pub.deny == nil` returns `true`, i.e.
+# no restriction), so the deep-validate E2E rollback simulation
+# (scripts/dns-zone-rollback-simulation.sh) never actually exercises the
+# restrictive allow-list dev/prod/quickstart ship -- it would pass
+# identically with or without this fix. This test closes that gap directly
+# against the real generated config content instead.
+@test "dev/prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.flush" {
     for compose in \
         "$repo_root/deploy/dev/docker-compose.yml" \
         "$repo_root/deploy/prod/docker-compose.yml" \
