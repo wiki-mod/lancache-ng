@@ -124,13 +124,29 @@ jobs:
     name: PR template validation
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Validate PR template completeness
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          # Fetched live via `gh pr view` instead of trusting
+          # github.event.pull_request.body: that field is a snapshot taken
+          # when THIS event fired, and a rerun/retrigger of an older event
+          # (or, per a real 2026-07-16 incident, an event whose payload
+          # lagged the PR's actual current body for other reasons) can carry
+          # a stale value -- causing this check to report sections "missing"
+          # that a live look at the PR shows are genuinely present and
+          # filled. A live fetch is always current regardless of why/when
+          # this job runs.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
-        run: bash scripts/validate-pr-template.sh
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
+          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-template-check-hosted:
     # Same zero-LAN-dependency property as file-headers-hosted: this check
@@ -142,6 +158,9 @@ jobs:
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: GitHub-hosted fallback notice
@@ -149,9 +168,16 @@ jobs:
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Validate PR template completeness
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          # See the primary pr-template-check job's identical step for why
+          # this fetches the body live via `gh pr view` instead of trusting
+          # github.event.pull_request.body.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
-        run: bash scripts/validate-pr-template.sh
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
+          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
     # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone,
@@ -3067,6 +3093,16 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
+      # This job never checked out the repo itself (#901): its only file read
+      # (the grep below) relied entirely on whatever another job on the same
+      # self-hosted runner happened to leave in the shared `_work` workspace
+      # directory. Under real concurrent load (many PRs' runs sharing a small
+      # runner pool) that workspace can hold a different, unrelated run's
+      # checkout -- or nothing at all -- producing both a false "file not
+      # found" failure and, worse, a silent false pass/fail against the wrong
+      # commit's content. Every other job in this workflow already checks out
+      # its own commit; this is the one job that didn't.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
