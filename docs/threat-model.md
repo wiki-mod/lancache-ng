@@ -473,9 +473,13 @@ networking would otherwise expose that API on all LAN interfaces.
   same key through the shared-secrets volume. **Behavior change:** an empty
   `DDNS_TSIG_KEY` previously meant "TSIG off, DDNS restricted to loopback"; it now
   generates a shared TSIG key so DDNS is TSIG-authenticated end-to-end by default.
-  A known-placeholder value is still rejected fail-closed, and if the shared
-  volume is unwritable the old empty = TSIG-off, loopback-only fail-safe still
-  applies.
+  A known-placeholder (`CHANGE_ME*`/`changeme*`) value is normalized to empty
+  before resolution and replaced the same way: with a writable shared-secrets
+  volume it is **not** rejected — a real key is generated and used, same as an
+  empty value. Only if the shared volume is unwritable does resolution fall back
+  to empty; PowerDNS then applies the old empty = TSIG-off, loopback-only
+  fail-safe, while Kea's DHCP entrypoint always requires a non-empty
+  `DDNS_TSIG_KEY` and refuses to start in that case instead.
 
 **Residual risk**: Medium — depends on the host's iptables being effective and on
 the operator running Kea only where it is the sole DHCP server on the LAN.

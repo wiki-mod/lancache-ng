@@ -1542,6 +1542,13 @@ deploy_prod_repo_input_paths() {
     # silently omit the one file that defines which container names the
     # socket proxy allows the Admin UI/watchdog to act on.
     [[ -f "$repo_root/scripts/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/docker-socket-proxy.sh"
+    # Shared-secret bootstrap helper (issue #858) is likewise mounted read-only
+    # via ../../scripts/lib/shared-secret-bootstrap.sh into the nats service in
+    # deploy/prod/docker-compose.yml. Without it in the manifest, a config
+    # backup/restore taken before a bad git pull changes or removes this file
+    # would restore a compose tree whose nats service sources a missing/stale
+    # helper and exits before generating nats.conf.
+    [[ -f "$repo_root/scripts/lib/shared-secret-bootstrap.sh" ]] && printf '%s\n' "$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }
 
 # Resolves the config files cmd_update_ip must edit for a given install_dir.

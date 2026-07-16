@@ -130,15 +130,33 @@ resolve_shared_secret() {
 # shared file the server side does, instead of the UI reading an empty/placeholder
 # env while the server self-generated a real value. Only runs in the root branch
 # (an operator-overridden non-root user cannot write the shared volume anyway).
+# _ui_resolve_or_die <var_name> <shared_secret_name> <current_value> <gen_func>
+# Fail closed (Codex review, PR #886): resolve_shared_secret only returns
+# non-zero when the shared-secrets volume itself is unwritable. Previously each
+# call site below silently left the original empty/placeholder value in place
+# on that failure and kept booting -- the Rust process (config.rs) has no
+# startup validation for PDNS_API_KEY/DHCP_API_TOKEN, so the UI would start
+# with a different secret than the dns/dhcp/nats containers generated and every
+# handshake using it (PowerDNS REST calls, Kea API calls) would fail with 401
+# at request time instead of a clear boot-time error. Matches the exit-1
+# pattern services/dns/entrypoint.sh already uses for PDNS_API_KEY.
+_ui_resolve_or_die() {
+    _uird_var="$1" _uird_name="$2" _uird_cur="$3" _uird_gen="$4"
+    if ! _uird_val="$(resolve_shared_secret "$_uird_name" "$_uird_cur" "$_uird_gen")"; then
+        echo "[lancache-ui] FATAL: ${_uird_var} is unset/placeholder and the shared-secrets volume is not writable, so no shared value could be generated." >&2
+        echo "[lancache-ui] Mount the shared-secrets volume, or set ${_uird_var} to the real value the corresponding backend container uses." >&2
+        exit 1
+    fi
+    eval "$_uird_var=\$_uird_val"
+    eval "export $_uird_var"
+}
+
 if [ "$(id -u)" = "0" ]; then
     _ui_pdns_cfg="${PDNS_API_KEY:-}"
     case "$_ui_pdns_cfg" in
         CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*) _ui_pdns_cfg="" ;;
     esac
-    if _ui_pdns_key="$(resolve_shared_secret pdns-api-key "$_ui_pdns_cfg" lancache_gen_hex32)"; then
-        PDNS_API_KEY="$_ui_pdns_key"
-        export PDNS_API_KEY
-    fi
+    _ui_resolve_or_die PDNS_API_KEY pdns-api-key "$_ui_pdns_cfg" lancache_gen_hex32
 
     # DHCP_API_TOKEN mirrors the shared KEA_CTRL_TOKEN (the compose default already
     # falls DHCP_API_TOKEN back to KEA_CTRL_TOKEN); resolve it against the same
@@ -148,10 +166,7 @@ if [ "$(id -u)" = "0" ]; then
     case "$_ui_dhcp_tok" in
         CHANGE_ME_KEA_CTRL_TOKEN|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _ui_dhcp_tok="" ;;
     esac
-    if _ui_dhcp_tok="$(resolve_shared_secret kea-ctrl-token "$_ui_dhcp_tok" lancache_gen_hex32)"; then
-        DHCP_API_TOKEN="$_ui_dhcp_tok"
-        export DHCP_API_TOKEN
-    fi
+    _ui_resolve_or_die DHCP_API_TOKEN kea-ctrl-token "$_ui_dhcp_tok" lancache_gen_hex32
 
     # NATS credentials the UI connects with: NATS_UI_PASSWORD (record/flush
     # publisher) and NATS_CALLOUT_PASSWORD (the auth-callout responder's own
@@ -160,16 +175,10 @@ if [ "$(id -u)" = "0" ]; then
     # keeps the UI and the server in lockstep.
     _ui_nats_ui_cfg="${NATS_UI_PASSWORD:-}"
     if secret_is_placeholder "$_ui_nats_ui_cfg"; then _ui_nats_ui_cfg=""; fi
-    if _ui_nats_ui_pw="$(resolve_shared_secret nats-ui-password "$_ui_nats_ui_cfg" lancache_gen_hex32)"; then
-        NATS_UI_PASSWORD="$_ui_nats_ui_pw"
-        export NATS_UI_PASSWORD
-    fi
+    _ui_resolve_or_die NATS_UI_PASSWORD nats-ui-password "$_ui_nats_ui_cfg" lancache_gen_hex32
     _ui_nats_callout_cfg="${NATS_CALLOUT_PASSWORD:-}"
     if secret_is_placeholder "$_ui_nats_callout_cfg"; then _ui_nats_callout_cfg=""; fi
-    if _ui_nats_callout_pw="$(resolve_shared_secret nats-callout-password "$_ui_nats_callout_cfg" lancache_gen_hex32)"; then
-        NATS_CALLOUT_PASSWORD="$_ui_nats_callout_pw"
-        export NATS_CALLOUT_PASSWORD
-    fi
+    _ui_resolve_or_die NATS_CALLOUT_PASSWORD nats-callout-password "$_ui_nats_callout_cfg" lancache_gen_hex32
 
     # The UI never connects to NATS as the dns-writer/dns-replica roles (only
     # dns-standard/dns-ssl do), but config.rs holds both passwords anyway and
@@ -183,16 +192,10 @@ if [ "$(id -u)" = "0" ]; then
     # instead of hard-failing the whole container on an empty/placeholder .env.
     _ui_nats_writer_cfg="${NATS_DNS_WRITER_PASSWORD:-}"
     if secret_is_placeholder "$_ui_nats_writer_cfg"; then _ui_nats_writer_cfg=""; fi
-    if _ui_nats_writer_pw="$(resolve_shared_secret nats-dns-writer-password "$_ui_nats_writer_cfg" lancache_gen_hex32)"; then
-        NATS_DNS_WRITER_PASSWORD="$_ui_nats_writer_pw"
-        export NATS_DNS_WRITER_PASSWORD
-    fi
+    _ui_resolve_or_die NATS_DNS_WRITER_PASSWORD nats-dns-writer-password "$_ui_nats_writer_cfg" lancache_gen_hex32
     _ui_nats_replica_cfg="${NATS_DNS_REPLICA_PASSWORD:-}"
     if secret_is_placeholder "$_ui_nats_replica_cfg"; then _ui_nats_replica_cfg=""; fi
-    if _ui_nats_replica_pw="$(resolve_shared_secret nats-dns-replica-password "$_ui_nats_replica_cfg" lancache_gen_hex32)"; then
-        NATS_DNS_REPLICA_PASSWORD="$_ui_nats_replica_pw"
-        export NATS_DNS_REPLICA_PASSWORD
-    fi
+    _ui_resolve_or_die NATS_DNS_REPLICA_PASSWORD nats-dns-replica-password "$_ui_nats_replica_cfg" lancache_gen_hex32
 fi
 
 # Bind mounts and shared volumes are often created as root-owned paths at
