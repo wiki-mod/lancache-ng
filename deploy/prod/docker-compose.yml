@@ -81,6 +81,8 @@ services:
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       # Normal production keeps these overrides unset so one LANCACHE_STATE_DIR
       # move retargets DNS and NATS together. setup.sh writes explicit keys only
@@ -147,6 +149,8 @@ services:
       - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
       - NATS_CONSUMER=dns-ssl
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - ${PDNS_SSL_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-ssl}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
@@ -280,6 +284,8 @@ services:
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       # Kea follows the same state-root contract as PowerDNS/NATS; leave
       # KEA_DATA_DIR unset unless this service truly lives off the shared root.
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
@@ -1240,6 +1246,9 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
+      # Shared-secret bootstrap (#858): the UI entrypoint (root, pre privilege-drop)
+      # resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here to match the server side.
+      - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - proxy-logs:/var/log/nginx:ro
@@ -1405,6 +1414,13 @@ networks:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858): persistent volume mounted into every
+  # container that must agree on a generated secret value (PDNS_API_KEY,
+  # KEA_CTRL_TOKEN, DDNS_TSIG_KEY). An operator/setup.sh value in .env always
+  # wins; if a value is left empty/placeholder the first container to boot
+  # generates it atomically (first-writer-wins) and the rest read the same
+  # value, so a blanked secret self-heals instead of crash-looping.
+  shared-secrets:
   proxy-cache:
     driver: local
     driver_opts:

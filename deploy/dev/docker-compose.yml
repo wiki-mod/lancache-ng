@@ -81,6 +81,8 @@ services:
       - NATS_RECONCILER=1
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-standard:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       # Known-good pdns.conf/recursor.conf snapshots (#615): must be a
@@ -129,6 +131,8 @@ services:
       - NATS_CONSUMER=dns-ssl
     volumes:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-ssl:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       - pdns-config-snapshots-ssl:/var/lib/lancache-dns
@@ -242,6 +246,8 @@ services:
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - kea-data:/var/lib/kea    # runtime config + leases persist across restarts
       # Central logging pipeline (#633): Kea's loggers dual-write here (see
       # kea-dhcp4.conf.template's "output-options") in addition to stdout.
@@ -1191,6 +1197,9 @@ services:
     build:
       context: ../../services/ui
     volumes:
+      # Shared-secret bootstrap (#858): the UI entrypoint (root, pre privilege-drop)
+      # resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here to match the server side.
+      - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - proxy-logs:/var/log/nginx:ro
@@ -1353,6 +1362,12 @@ networks:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858): persistent volume every container that must
+  # agree on a generated secret (PDNS_API_KEY, KEA_CTRL_TOKEN, DDNS_TSIG_KEY)
+  # mounts. Operator/setup.sh value wins; an empty/placeholder one is generated
+  # first-writer-wins and shared, so a blanked secret self-heals. In dev the
+  # checked-in defaults are already consistent, so the mechanism short-circuits.
+  shared-secrets:
   proxy-cache:
   proxy-logs:
   # Known-good config snapshots (#415, #615), one persistent volume per

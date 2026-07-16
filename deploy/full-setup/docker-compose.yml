@@ -120,6 +120,9 @@ services:
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY
+      # (inert here: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-standard:/var/lib/powerdns
     networks:
       validation:
@@ -145,6 +148,9 @@ services:
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-ssl
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY
+      # (inert here: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-ssl:/var/lib/powerdns
     networks:
       validation:
@@ -312,6 +318,9 @@ services:
   ui:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
+      # Shared-secret bootstrap (#858): UI entrypoint resolves PDNS_API_KEY from
+      # here (inert: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - nats-conf:/etc/nats
     ports:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
@@ -413,6 +422,10 @@ networks:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858): mounted into every service that must agree
+  # on a generated secret. Inert in this validation stack (secrets are hardcoded
+  # and consistent); present for parity with the dev/prod/quickstart profiles.
+  shared-secrets:
   proxy-cache:
   pdns-data-standard:
   pdns-data-ssl:

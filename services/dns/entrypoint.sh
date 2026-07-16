@@ -10,12 +10,139 @@
 # with Admin UI changes.
 set -euo pipefail
 
+# ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
+# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
+# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats),
+# for the same reason as the known-good-snapshot library below: this image
+# builds from services/dns/ alone with no shared-file build context.
+# BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
+# lancache_shared_secret_dir
+# Directory holding the cross-container shared secrets, mounted from the
+# `shared-secrets` named volume into every container that must agree on a
+# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+lancache_shared_secret_dir() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
+}
+
+# lancache_shared_secret_gid
+# The Admin UI process runs as this gid (services/ui/Dockerfile pins uid/gid
+# 10001); dns/dhcp/nats run as root. Shared secret files are created group-owned
+# by this gid and mode 0640 so the unprivileged UI can read a root-created file
+# without the secret becoming world-readable -- the same cross-uid model the
+# nats.conf bootstrap already uses. Overridable for tests.
+lancache_shared_secret_gid() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
+}
+
+# lancache_gen_hex32
+# 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
+# `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
+# images AND the BusyBox nats:2-alpine image, and nats:2-alpine ships no openssl.
+lancache_gen_hex32() {
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# lancache_gen_base64_32
+# base64 of 32 random bytes, for the DDNS TSIG key (PowerDNS/Kea expect a
+# base64-encoded HMAC key, matching setup.sh's `openssl rand -base64 32`).
+lancache_gen_base64_32() {
+    head -c 32 /dev/urandom | base64 | tr -d '\n'
+}
+
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# Resolves a shared secret and prints it on stdout with no trailing newline.
+#   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
+#     operator/setup.sh-supplied real value always wins and is never persisted
+#     to the shared volume (all containers share one .env, so they all already
+#     agree on it). The CALLER is responsible for passing empty here when the
+#     configured value is a known placeholder for that specific secret.
+#   - Otherwise reads $dir/<name> if it already exists (some container generated
+#     it first), else atomically creates it with a freshly generated value.
+# Atomicity/race: the value is written to a temp file on the shared volume FIRST,
+# then the final name is claimed with `ln` (a hardlink, atomic and failing if the
+# target already exists). Because the temp already holds the full value before
+# the link, a concurrent reader in another container never observes a partial or
+# empty file, and a container that loses the create race falls back to reading
+# the winner's value instead of erroring. Returns non-zero (and prints nothing)
+# only if the shared volume is unwritable, so the caller can fail closed rather
+# than silently diverge.
+resolve_shared_secret() {
+    _rss_name="$1"
+    _rss_cur="$2"
+    _rss_gen="$3"
+
+    if [ -n "$_rss_cur" ]; then
+        printf '%s' "$_rss_cur"
+        return 0
+    fi
+
+    _rss_dir="$(lancache_shared_secret_dir)"
+    _rss_file="${_rss_dir}/${_rss_name}"
+
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+
+    mkdir -p "$_rss_dir" 2>/dev/null || true
+
+    _rss_val="$($_rss_gen)"
+    if [ -z "$_rss_val" ]; then
+        return 1
+    fi
+
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    printf '%s' "$_rss_val" > "$_rss_tmp"
+    chmod 0640 "$_rss_tmp" 2>/dev/null || true
+    chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
+
+    if ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
+        rm -f "$_rss_tmp"
+        printf '%s' "$_rss_val"
+        return 0
+    fi
+
+    rm -f "$_rss_tmp"
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    return 1
+}
+# END shared-secret-bootstrap library
+
 # ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"
-PDNS_API_KEY="${PDNS_API_KEY:-CHANGE_ME_PDNS_API_KEY}"
+# Resolve the shared PDNS_API_KEY (issue #858): PowerDNS here (authoritative +
+# recursor REST API) and the Admin UI's PowerDNS REST client must use the exact
+# same key or the UI's domain writes get 401. A real configured value wins; an
+# empty or checked-in placeholder is replaced by a first-writer-wins value shared
+# with the UI via the shared-secrets volume, instead of crash-looping this
+# container. The placeholder/length assertions further below still run on the
+# resolved value as defense in depth.
+_pdns_api_key_cfg="${PDNS_API_KEY:-}"
+case "$_pdns_api_key_cfg" in
+    CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*) _pdns_api_key_cfg="" ;;
+esac
+if ! PDNS_API_KEY="$(resolve_shared_secret pdns-api-key "$_pdns_api_key_cfg" lancache_gen_hex32)"; then
+    echo "[lancache-dns] FATAL: PDNS_API_KEY is unset/placeholder and the shared-secrets volume is not writable, so no shared key could be generated."
+    echo "[lancache-dns] Mount the shared-secrets volume, or set PDNS_API_KEY to a real value (openssl rand -hex 32)."
+    exit 1
+fi
 DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
-DDNS_TSIG_KEY="${DDNS_TSIG_KEY:-}"
+# Resolve the shared DDNS_TSIG_KEY (issue #858): the TSIG key PowerDNS imports
+# here must be byte-identical to the one Kea's DHCP-DDNS daemon signs updates
+# with. Historically an empty value meant "TSIG off, DDNS loopback-only"; now an
+# empty/placeholder value is replaced by a first-writer-wins shared key so DDNS
+# is TSIG-authenticated end-to-end (documented in docs/threat-model.md). If the
+# shared volume is unwritable, fall back to the old empty = TSIG-off fail-safe
+# rather than crash-looping.
+_ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
+case "$_ddns_tsig_key_cfg" in
+    CHANGE_ME*|changeme*) _ddns_tsig_key_cfg="" ;;
+esac
+DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 DDNS_TSIG_NAME="${DDNS_TSIG_NAME:-lancache-ddns-key}"
 DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 

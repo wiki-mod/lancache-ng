@@ -944,7 +944,7 @@ services:
       - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
-      - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
+      - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
       # issue #706: without this, DDNS_ALLOW_FROM defaults to 127.0.0.1
       # (services/dns/entrypoint.sh), silently rejecting every DDNS update
@@ -956,6 +956,8 @@ services:
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-standard:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       - pdns-config-snapshots-standard:/var/lib/lancache-dns
@@ -992,7 +994,7 @@ services:
       - NATS_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
       - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
       - NATS_CONSUMER=dns-ssl
-      - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
+      - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
       # issue #706: see the identical DDNS_ALLOW_FROM override on
       # dns-standard above for the full reasoning -- this service needs the
@@ -1002,6 +1004,8 @@ services:
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-ssl:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       - pdns-config-snapshots-ssl:/var/lib/lancache-dns
@@ -1122,13 +1126,15 @@ services:
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
       - DHCP_DNS_SERVER_IP_SSL=${IP_SSL:-${IP_STANDARD}}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
-      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN:?KEA_CTRL_TOKEN is required}
+      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN:-}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - DHCP_SUBNET=${DHCP_SUBNET:-}
       - DHCP_GATEWAY=${DHCP_GATEWAY:-}
       - DHCP_RANGE_START=${DHCP_RANGE_START:-}
       - DHCP_RANGE_END=${DHCP_RANGE_END:-}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - ${KEA_DATA_DIR:-./kea}:/var/lib/kea
       # Central logging pipeline (#633): Kea's loggers dual-write here (see
       # kea-dhcp4.conf.template's "output-options") in addition to stdout.
@@ -1233,6 +1239,10 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
+      # Shared-secret bootstrap (#858): the UI entrypoint (running as root before
+      # the privilege drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here so its
+      # PowerDNS/Kea API clients use the same value the server side generated.
+      - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data
       - proxy-logs:/var/log/nginx:ro
       # Read-only cache mount is for size reporting only. Mutations stay in the proxy/watchdog.
@@ -1299,7 +1309,7 @@ services:
       # dns_snapshots.rs's module doc comment for why dns-ssl isn't wired up
       # here yet).
       - DNS_ROLLBACK_URL=http://dns-standard:8083
-      - PDNS_API_KEY=${PDNS_API_KEY:?PDNS_API_KEY is required}
+      - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
@@ -1390,6 +1400,15 @@ networks:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858). A persistent volume mounted into every
+  # container that must agree on a generated secret value (PDNS_API_KEY,
+  # KEA_CTRL_TOKEN, DDNS_TSIG_KEY). Each consumer's entrypoint resolves the
+  # secret through a file here: an operator/setup.sh value in .env always wins,
+  # but if a value is left empty/placeholder the first container to boot
+  # generates it atomically (first-writer-wins) and the rest read the same
+  # value, so a blanked secret self-heals instead of crash-looping. Persistent
+  # so the generated value never rotates across restarts.
+  shared-secrets:
   proxy-logs:
   # Known-good config snapshots (#415, #615), one persistent volume per
   # adapter. dns-standard and dns-ssl are separate containers with

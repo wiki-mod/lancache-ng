@@ -1,16 +1,42 @@
 #!/bin/sh
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Admin UI container entrypoint: fixes up ownership on shared/bind-mounted
-# data paths when started as root, then drops privileges to the unprivileged
-# `lancache` user before exec-ing the real command.
-set -eu
+# Shared-secret bootstrap helper (issue #858).
+#
+# Some secrets in this stack are HANDSHAKE secrets: more than one independent
+# container has to arrive at the exact same value (e.g. PDNS_API_KEY is used by
+# both PowerDNS and the Admin UI's PowerDNS REST client; KEA_CTRL_TOKEN by both
+# Kea's control-agent and the Admin UI; DDNS_TSIG_KEY by both PowerDNS and Kea;
+# the NATS_*_PASSWORD values by nats-server and its clients). setup.sh generates
+# these once and writes them into a single shared .env, so every container reads
+# an identical value. But if a shared secret is ever left empty/placeholder for
+# any reason outside setup.sh (a partially-completed migration, an operator
+# blanking a value in .env by hand, a bug in the generation step), there is no
+# self-healing path: the affected containers either fail closed at compose
+# interpolation or crash-loop, with no way to converge.
+#
+# This helper generalizes the single-consumer load_or_create pattern already in
+# services/ui/src/main.rs to MULTIPLE independent consumers coordinating through
+# a shared Docker volume. The invariant it protects is not "no crash-loop", it
+# is "no split-brain": every consumer of a given secret must resolve the exact
+# same value. It does that with one rule -- an operator/setup.sh-supplied value
+# always wins untouched; only when the value is missing/placeholder does the
+# container fall back to a first-writer-wins atomic read-or-create on the shared
+# volume, so whichever container boots first generates the value and every other
+# container reads that same value.
+#
+# It is not baked into the dns/dhcp/ui images through a shared Docker build
+# context (each of those Dockerfiles builds from its own service directory, the
+# same constraint documented for the known-good-snapshot library). Instead this
+# file is the single canonical copy, and services/dns/entrypoint.sh,
+# services/dhcp/entrypoint.sh, and services/ui/docker-entrypoint.sh each embed a
+# byte-identical copy of the function definitions below between
+# "# BEGIN shared-secret-bootstrap library" and "# END shared-secret-bootstrap
+# library" markers. tests/bats/shared_secret_bootstrap_sync.bats fails loudly if
+# any copy drifts. The nats service resolves the same way but inline in its
+# compose command (it has no service image/entrypoint of its own, and its
+# BusyBox shell escapes `$` as `$$` in YAML, so it cannot be byte-identical).
 
-# ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
-# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
-# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats):
-# this image builds from services/ui/ alone with no shared-file build context.
-# BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
 # lancache_shared_secret_dir
 # Directory holding the cross-container shared secrets, mounted from the
 # `shared-secrets` named volume into every container that must agree on a
@@ -104,55 +130,3 @@ resolve_shared_secret() {
     fi
     return 1
 }
-# END shared-secret-bootstrap library
-
-# Resolve the Admin UI's share of the handshake secrets (issue #858) while still
-# root, so the same first-writer-wins value the dns/dhcp/nats containers use is
-# exported into the environment the Rust process (config.rs) reads after the
-# privilege drop below. Doing it here means no split-brain: the UI's PowerDNS
-# REST client (PDNS_API_KEY) and Kea API client (DHCP_API_TOKEN) resolve the same
-# shared file the server side does, instead of the UI reading an empty/placeholder
-# env while the server self-generated a real value. Only runs in the root branch
-# (an operator-overridden non-root user cannot write the shared volume anyway).
-if [ "$(id -u)" = "0" ]; then
-    _ui_pdns_cfg="${PDNS_API_KEY:-}"
-    case "$_ui_pdns_cfg" in
-        CHANGE_ME_PDNS_API_KEY|changeme-pdns-api-key-change-this|changeme*) _ui_pdns_cfg="" ;;
-    esac
-    if _ui_pdns_key="$(resolve_shared_secret pdns-api-key "$_ui_pdns_cfg" lancache_gen_hex32)"; then
-        PDNS_API_KEY="$_ui_pdns_key"
-        export PDNS_API_KEY
-    fi
-
-    # DHCP_API_TOKEN mirrors the shared KEA_CTRL_TOKEN (the compose default already
-    # falls DHCP_API_TOKEN back to KEA_CTRL_TOKEN); resolve it against the same
-    # kea-ctrl-token shared file the dhcp container uses. An explicit non-placeholder
-    # operator override is preserved.
-    _ui_dhcp_tok="${DHCP_API_TOKEN:-}"
-    case "$_ui_dhcp_tok" in
-        CHANGE_ME_KEA_CTRL_TOKEN|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _ui_dhcp_tok="" ;;
-    esac
-    if _ui_dhcp_tok="$(resolve_shared_secret kea-ctrl-token "$_ui_dhcp_tok" lancache_gen_hex32)"; then
-        DHCP_API_TOKEN="$_ui_dhcp_tok"
-        export DHCP_API_TOKEN
-    fi
-fi
-
-# Bind mounts and shared volumes are often created as root-owned paths at
-# container start, after image-time chown has run. When the entrypoint starts as
-# root, normalize the writable paths before dropping privileges so Admin UI
-# writes -- including init_tracing()'s ui.log file under /var/log/lancache-ui
-# (#633 central logging pipeline) -- keep working. If an operator overrides
-# the container user, do not try to chown or call setpriv from an
-# unprivileged account.
-if [ "$(id -u)" = "0" ]; then
-    for path in /data /etc/nats /var/lib/powerdns-state /var/log/lancache-ui; do
-        if [ -e "$path" ]; then
-            chown -R lancache:lancache "$path"
-        fi
-    done
-
-    exec setpriv --reuid=lancache --regid=lancache --init-groups "$@"
-fi
-
-exec "$@"
