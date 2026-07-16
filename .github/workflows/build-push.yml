@@ -2903,6 +2903,28 @@ jobs:
     needs: rust_coverage
     if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Job-level concurrency, keyed per source ref: the top-level group (see
+    # top of file) is run_id-suffixed for push events and therefore never
+    # collides, so it no longer serializes two rapid consecutive pushes to
+    # the SAME branch the way it used to. Without a group here, two such
+    # pushes could both reach the "Publish Rust coverage badge endpoint"
+    # step at once and race the `git push origin "$BADGE_BRANCH"` below --
+    # either a plain non-fast-forward push failure, or, if one run's fetch
+    # lands between the other's push and its own push, a stale coverage
+    # snapshot fast-forwarding over a newer one for the same BADGE_FILE.
+    # cancel-in-progress stays false: this queues a second same-branch
+    # publish behind a running one instead of racing it (GitHub still only
+    # holds one job pending per group, so a third rapid push in the same
+    # window can still replace the second in the queue -- that only means
+    # the middle commit's badge update is skipped, which is fine, since the
+    # newest commit's coverage still wins and is never lost). A badge push
+    # is cheap/fast enough that this queueing is not the capacity concern it
+    # would be for `build`/`container-scan`. Different branches use
+    # different keys (and different BADGE_FILE paths), so they still
+    # publish independently of each other.
+    concurrency:
+      group: ${{ github.workflow }}-badge-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -2916,9 +2938,9 @@ jobs:
       - name: Publish Rust coverage badge endpoint
         # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
         # so pushes to master and to the active vX.Y.Z integration branch don't
-        # overwrite each other's badge data -- the workflow-level concurrency
-        # group only serializes writes, it doesn't stop two different branches
-        # from racing to own the same file.
+        # overwrite each other's badge data -- this job's own concurrency group
+        # (above) only serializes writes for the SAME branch, it doesn't stop
+        # two different branches from racing to own the same `badges` branch.
         env:
           BADGE_BRANCH: badges
           BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
@@ -3294,8 +3316,25 @@ jobs:
     # requires this job's success on non-PR events, so a cancelled scan
     # cleanly stops the pipeline there via that `needs` gate rather than
     # racing it.
+    #
+    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) get
+    # their own run_id-suffixed key instead of sharing the plain
+    # service+platform+ref one: a plain ref-only key would let two manual
+    # dispatches of the same ref (e.g. spot-checking `channel=dev` then
+    # `channel=edge` minutes apart) or a rerun of an old, already-superseded
+    # run cancel each other's or a currently-running newer push's scan --
+    # cancel-in-progress cancels whatever already holds the group
+    # regardless of which commit is actually newer, so a ref-only key has no
+    # way to tell "genuinely superseded" apart from "unrelated manual
+    # retrigger". Ordinary push/tag events keep the plain key so consecutive
+    # pushes to the same ref still get the intended fast supersession.
     concurrency:
-      group: ${{ github.workflow }}-container-scan-${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.ref }}
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-container-scan-{1}-{2}-{3}-{4}', github.workflow, matrix.service, matrix.platform_tag, github.ref, github.run_id) ||
+          format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
+        }}
       cancel-in-progress: true
     # Each matrix row carries its own JSON-encoded runner selector so amd64
     # rows stay on the self-hosted pool (with LAN acceleration available) and
@@ -3737,8 +3776,26 @@ jobs:
     # `merge-manifests` below already requires `needs.build.result ==
     # 'success'`, so a cancelled build cleanly stops the pipeline there via
     # that `needs` gate rather than racing a partial image.
+    #
+    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) get
+    # their own run_id-suffixed key instead of sharing the plain
+    # service+ref one, for the same reason as container-scan just above:
+    # two manual dispatches of the same ref with different `channel` inputs
+    # (or a rerun of an old, already-superseded run) would otherwise share
+    # this group with each other and with any currently-running fresh push
+    # build, and cancel-in-progress cancels whoever already holds the group
+    # regardless of which commit is actually newer -- silently dropping the
+    # earlier dispatch's requested channel promotion, or killing a
+    # legitimately newer push's build in favor of rebuilding a stale rerun.
+    # Ordinary push/tag events keep the plain key so consecutive pushes to
+    # the same ref still get the intended fast supersession.
     concurrency:
-      group: ${{ github.workflow }}-build-${{ matrix.service }}-${{ github.ref }}
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-build-{1}-{2}-{3}', github.workflow, matrix.service, github.ref, github.run_id) ||
+          format('{0}-build-{1}-{2}', github.workflow, matrix.service, github.ref)
+        }}
       cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -5450,6 +5507,23 @@ jobs:
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency, keyed per tag ref: this job's GET-then-create-or-
+    # PATCH logic against the GitHub Releases API is only safe if at most one
+    # instance runs per tag at a time (two concurrent instances for the same
+    # tag could both GET "no release yet" and then race two separate POSTs,
+    # or one could PATCH over the other's body-preservation read). Before
+    # this workflow's top-level group became run_id-suffixed for tag pushes
+    # (see top of file), that whole-run serialization made two `release`
+    # runs for the same tag effectively impossible; it no longer does, so
+    # this job needs its own guarantee. Scoped by ref (not global like
+    # `promote`'s group) because release publishing for different tags is
+    # genuinely independent -- there is no shared mutable resource across
+    # tags the way `promote`'s channel-tag moves have. cancel-in-progress
+    # stays false: queue a second attempt for the same tag (e.g. a manual
+    # rerun) rather than cancel the first mid-write.
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
       packages: read
