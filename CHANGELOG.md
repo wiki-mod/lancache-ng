@@ -495,7 +495,21 @@ is real, live, running code, not just work sitting in source control.
   hung/unresponsive docker-socket-proxy could stall the entire
   single-threaded main loop indefinitely with no way for Docker or an
   operator to notice; both now pass `--max-time` (`CURL_MAX_TIME`,
-  default 5s). `deploy/full-setup` already had a working
+  default 5s). Adding that timeout surfaced a second, adjacent latent bug in
+  the same function, caught by this PR's own new test suite: `get_health()`
+  piped `curl` straight into `jq -r '.State.Health.Status // "none"' ||
+  echo "unreachable"`, but `jq` exits 0 with no output on a completely empty
+  stdin (not a parse error) -- so a `curl` failure that produced empty
+  output (connection refused, or exactly what a real `--max-time` timeout
+  itself produces) never reached the `|| echo "unreachable"` fallback at
+  all, and `get_health()` silently returned an empty string instead.
+  `check_and_maybe_restart()` only recognizes the literal strings
+  "healthy"/"unhealthy", so an empty result was silently ignored every
+  cycle -- no failure counter, no restart, ever, for a container the proxy
+  genuinely could not reach. Fixed by capturing curl's own exit status
+  directly (`body=$(curl ...) || { echo "unreachable"; return; }`) before
+  ever handing anything to `jq`, instead of relying on the pipeline's
+  combined exit behavior. `deploy/full-setup` already had a working
   `test -f status.json` healthcheck for watchdog, but dev/prod/quickstart
   had none at all -- a new `services/watchdog/healthcheck.sh`, shipped in
   the image and wired into all four compose files (upgrading full-setup's

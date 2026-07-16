@@ -148,14 +148,27 @@ CACHE_DIR="$(resolve_cache_dir)"
 CURL_MAX_TIME="${CURL_MAX_TIME:-5}"
 
 get_health() {
-    local name="$1"
+    local name="$1" body
     # Docker socket access is routed through the narrowed proxy, so health reads
     # must stay on the allowed container-inspect endpoint rather than exec.
     # --max-time bounds a hung/unresponsive docker-socket-proxy: without it, a
     # stalled proxy stalls this single-threaded main loop indefinitely (no
     # further health checks, no restarts, no status.json refresh).
-    curl -sf --max-time "$CURL_MAX_TIME" "${DOCKER_PROXY_URL}/containers/${name}/json" 2>/dev/null \
-        | jq -r '.State.Health.Status // "none"' 2>/dev/null \
+    #
+    # curl's exit status is captured directly here rather than piping straight
+    # into jq: a curl failure (connection refused, or exactly what --max-time
+    # itself now produces on a real timeout) leaves curl's stdout completely
+    # empty, and `jq -r '... // "none"'` exits 0 with no output on a fully
+    # empty input -- not a parse error -- so a `curl | jq || echo unreachable`
+    # pipeline would never reach the fallback and get_health() would silently
+    # return an empty string instead of "unreachable". check_and_maybe_restart()
+    # only recognizes the literal strings "healthy"/"unhealthy", so an empty
+    # result would be silently ignored every cycle: no failure counter
+    # increment, no restart, ever, for a container the proxy can't reach at
+    # all -- exactly the scenario this fix's --max-time is meant to surface.
+    body=$(curl -sf --max-time "$CURL_MAX_TIME" "${DOCKER_PROXY_URL}/containers/${name}/json" 2>/dev/null) \
+        || { echo "unreachable"; return; }
+    jq -r '.State.Health.Status // "none"' 2>/dev/null <<< "$body" \
         || echo "unreachable"
 }
 
