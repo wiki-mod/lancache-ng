@@ -166,7 +166,10 @@ pub async fn rollback_zone_snapshot(
             // entirely.
             match resp.json::<Value>().await {
                 Ok(body) => {
-                    let flush_ok = body.get("flush_ok").and_then(Value::as_bool).unwrap_or(true);
+                    let flush_ok = body
+                        .get("flush_ok")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
                     let zone_check_passed = body
                         .get("zone_check_passed")
                         .and_then(Value::as_bool)
