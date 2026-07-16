@@ -2,20 +2,20 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Fast, Docker-free unit coverage for scripts/lib/reserve-validation-subnet.sh
-# (issue #703). The real race this closes -- two genuinely concurrent
-# workflow runs on the same self-hosted host -- cannot be exercised directly
-# in a bats run (there is no second, truly concurrent GitHub Actions run to
-# provoke here). Instead this: (1) proves the derivation stays deterministic
-# and backward-compatible with .github/actions/derive-validation-network's
-# own pre-#703 formula for the common, uncontested attempt-1 case, so a
-# single, uncontested run still derives the exact octet it always did; (2)
-# proves the actual mechanism this issue adds -- pre-holding an octet's lock
-# and confirming a second, independent attempt to claim the SAME octet is
-# correctly refused while it's held, and correctly succeeds again once
-# released -- using two real flock-backed processes against a throwaway
-# $BATS_TEST_TMPDIR lock root, which is the same mechanism a genuinely
-# concurrent second workflow run would hit on the real, shared /tmp lock
-# root.
+# (issue #703; slot/`/27` redesign issue #832). The real race this closes --
+# two genuinely concurrent workflow runs on the same self-hosted host --
+# cannot be exercised directly in a bats run (there is no second, truly
+# concurrent GitHub Actions run to provoke here). Instead this: (1) proves
+# the derivation stays deterministic and matches
+# .github/actions/derive-validation-network's own formula for the common,
+# uncontested attempt-1 case, so a single, uncontested run still derives the
+# exact slot it always did; (2) proves the actual mechanism this issue adds
+# -- pre-holding a slot's lock and confirming a second, independent attempt
+# to claim the SAME slot is correctly refused while it's held, and correctly
+# succeeds again once released -- using two real flock-backed processes
+# against a throwaway $BATS_TEST_TMPDIR lock root, which is the same
+# mechanism a genuinely concurrent second workflow run would hit on the
+# real, shared /tmp lock root.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -54,6 +54,13 @@ teardown() {
 }
 
 @test "derived octet always falls in the reserved pool, excluding 0, 1, 28, and 99" {
+    # UNCHANGED by the #832 /27 redesign: scripts/dhcp-kea-lease-flow-
+    # simulation.sh and scripts/dhcp-proxy-pxe-simulation.sh both still call
+    # validation_subnet_reserve (which derives via THIS function) on their
+    # own separate 172.31.0.0/16 / 172.29.0.0/16 ranges, expecting a plain
+    # octet -- a real CI regression (confirmed via a genuine run) came from
+    # a first version of this redesign changing what this function/
+    # validation_subnet_reserve returned out from under those two scripts.
     for seed in "run-1" "run-2" "run-3" "run-4" "run-5" "another-seed" "yet-another"; do
         octet="$(validation_subnet_derive_octet "$seed")"
         [ "$octet" -ge 2 ]
@@ -63,7 +70,32 @@ teardown() {
     done
 }
 
-@test "try_lock succeeds on a free octet and the same octet is refused while held" {
+@test "slot derivation is deterministic for the same seed" {
+    slot_a="$(validation_subnet_derive_slot "123456-1")"
+    slot_b="$(validation_subnet_derive_slot "123456-1")"
+    [ "$slot_a" = "$slot_b" ]
+}
+
+@test "derived slot decomposes into the SAME octet validation_subnet_derive_octet gives, plus a subblock 0..7" {
+    # #832: a slot is `real_octet * 8 + subblock`, where real_octet must be
+    # IDENTICAL to what validation_subnet_derive_octet alone computes for
+    # the same seed (validation_subnet_derive_slot is built on top of it,
+    # not a separate/diverging formula) -- this is what keeps the two
+    # reservation systems (validation_subnet_reserve for the DHCP scripts,
+    # validation_subnet_reserve_slot for the general pool) from ever
+    # producing inconsistent octet math for the same seed.
+    for seed in "run-1" "run-2" "run-3" "run-4" "run-5" "another-seed" "yet-another"; do
+        octet_direct="$(validation_subnet_derive_octet "$seed")"
+        slot="$(validation_subnet_derive_slot "$seed")"
+        octet_from_slot=$(( slot / 8 ))
+        subblock=$(( slot % 8 ))
+        [ "$octet_from_slot" = "$octet_direct" ]
+        [ "$subblock" -ge 0 ]
+        [ "$subblock" -le 7 ]
+    done
+}
+
+@test "try_lock succeeds on a free slot and the same slot is refused while held" {
     holder_pid="$(validation_subnet_try_lock "$lock_root" 42)"
     [ -n "$holder_pid" ]
     kill -0 "$holder_pid"
@@ -73,7 +105,7 @@ teardown() {
     [ -z "$output" ]
 }
 
-@test "releasing a lock lets a later attempt claim the same octet again" {
+@test "releasing a lock lets a later attempt claim the same slot again" {
     holder_pid="$(validation_subnet_try_lock "$lock_root" 77)"
     [ -n "$holder_pid" ]
 
@@ -94,12 +126,16 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-@test "reserve skips an already-locked candidate and lands on a different, unlocked octet" {
+@test "reserve (octet-only, DHCP scripts' path) skips an already-locked candidate and lands on a different, unlocked octet" {
     # Pin the FIRST candidate validation_subnet_reserve would try (attempt 1
     # for this run_id/run_attempt) and pre-lock it directly, simulating a
     # second, genuinely concurrent workflow run that got there first -- this
     # is #703's exact scenario, reproduced with two real flock-backed
-    # processes instead of two real GitHub Actions runs.
+    # processes instead of two real GitHub Actions runs. Exercises the exact
+    # path scripts/dhcp-kea-lease-flow-simulation.sh/
+    # scripts/dhcp-proxy-pxe-simulation.sh use (validation_subnet_reserve,
+    # NOT validation_subnet_reserve_slot -- see the separate slot-based test
+    # below for the general pool's own path).
     run_id="run-abc"
     run_attempt="1"
     first_seed="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" 1)"
@@ -114,7 +150,35 @@ teardown() {
     won_octet="$(printf '%s\n' "$result" | sed -n 's/^octet=//p')"
     holder_pid_2="$(printf '%s\n' "$result" | sed -n 's/^holder_pid=//p')"
 
+    [ -n "$won_octet" ]
     [ "$won_octet" != "$first_octet" ]
+    [ -n "$holder_pid_2" ]
+    kill -0 "$holder_pid_2"
+}
+
+@test "reserve_slot (general-pool path) skips an already-locked candidate and lands on a different, unlocked slot" {
+    # Same scenario as the octet-only test above, but for
+    # validation_subnet_reserve_slot -- the path full-setup-validate.yml/
+    # full-setup-deep-validate.yml/build-push.yml/run-in-validation-subnet.sh
+    # actually use. Asserts the OUTPUT KEY is "slot=" (not "octet="), since a
+    # real regression (confirmed via CI) came from these two reservation
+    # paths' output formats getting confused/merged.
+    run_id="run-abc-slot"
+    run_attempt="1"
+    first_seed="$(validation_subnet_seed_for_attempt "$run_id" "$run_attempt" 1)"
+    first_slot="$(validation_subnet_derive_slot "$first_seed")"
+
+    holder_pid="$(validation_subnet_try_lock "$lock_root" "$first_slot")"
+    [ -n "$holder_pid" ]
+
+    result="$(validation_subnet_reserve_slot "$lock_root" "$run_id" "$run_attempt" 1 20)"
+    [ -n "$result" ]
+
+    won_slot="$(printf '%s\n' "$result" | sed -n 's/^slot=//p')"
+    holder_pid_2="$(printf '%s\n' "$result" | sed -n 's/^holder_pid=//p')"
+
+    [ -n "$won_slot" ]
+    [ "$won_slot" != "$first_slot" ]
     [ -n "$holder_pid_2" ]
     kill -0 "$holder_pid_2"
 }
@@ -147,14 +211,19 @@ teardown() {
     [ -z "$output" ]
 }
 
-@test "export_env sets the complete VALIDATION_* set for the octet, incl. the shim IP" {
+@test "export_env sets the complete VALIDATION_* set for the slot, incl. the shim IP" {
     # The wrapper's whole correctness rests on exporting the FULL address set
-    # for a reserved octet, not just the subnet: a missing var silently falls
+    # for a reserved slot, not just the subnet: a missing var silently falls
     # back to the fixed .99 default and lands a service OUTSIDE the reserved
-    # /24. Assert every var the derive action emits is present and octet-scoped.
-    validation_subnet_export_env 42
+    # /27. Assert every var the derive action emits is present and
+    # slot-scoped. slot=336 decomposes to octet=42 (336/8), subblock=0
+    # (336%8), base=0 -- chosen so the resulting dotted addresses match this
+    # test's pre-#832 values exactly (only the subnet's CIDR suffix and the
+    # project-name/port formulas, which now use the whole slot rather than
+    # just the octet, actually changed).
+    validation_subnet_export_env 336
 
-    [ "$VALIDATION_SUBNET" = "172.30.42.0/24" ]
+    [ "$VALIDATION_SUBNET" = "172.30.42.0/27" ]
     [ "$VALIDATION_GATEWAY" = "172.30.42.1" ]
     [ "$VALIDATION_PROXY_IP" = "172.30.42.2" ]
     [ "$VALIDATION_DNS_STANDARD_IP" = "172.30.42.3" ]
@@ -168,14 +237,28 @@ teardown() {
     # the var most easily forgotten because most sim scripts never read it
     # directly, yet omitting it strands the shim on the .99 default subnet.
     [ "$VALIDATION_STANDARD_SHIM_IP" = "172.30.42.10" ]
-    [ "$COMPOSE_PROJECT_NAME" = "lancache-ng-validation-42" ]
-    [ "$VALIDATION_UI_PORT" = "9042" ]
+    [ "$COMPOSE_PROJECT_NAME" = "lancache-ng-validation-336" ]
+    [ "$VALIDATION_UI_PORT" = "9336" ]
+}
+
+@test "export_env decomposes a slot with a non-zero subblock into the correct /27 base" {
+    # slot=339 -> octet=42 (339/8), subblock=3 (339%8), base=96 -- proves the
+    # decomposition arithmetic itself (not just the subblock=0 case above,
+    # which could hide an off-by-base bug).
+    validation_subnet_export_env 339
+
+    [ "$VALIDATION_SUBNET" = "172.30.42.96/27" ]
+    [ "$VALIDATION_GATEWAY" = "172.30.42.97" ]
+    [ "$VALIDATION_PROXY_IP" = "172.30.42.98" ]
+    [ "$VALIDATION_STANDARD_SHIM_IP" = "172.30.42.106" ]
+    [ "$COMPOSE_PROJECT_NAME" = "lancache-ng-validation-339" ]
+    [ "$VALIDATION_UI_PORT" = "9339" ]
 }
 
 @test "export_env's project name/UI port match derive-validation-network's own formula" {
     # The uncontested attempt-1 case must reproduce EXACTLY what the derive
-    # action computed up front (project name = lancache-ng-validation-<octet>,
-    # UI port = 9000+octet), so a run that never hits contention keeps the
+    # action computed up front (project name = lancache-ng-validation-<slot>,
+    # UI port = 9000+slot), so a run that never hits contention keeps the
     # identical wiring rather than a subtly different one.
     validation_subnet_export_env 7
     [ "$COMPOSE_PROJECT_NAME" = "lancache-ng-validation-7" ]
@@ -184,7 +267,7 @@ teardown() {
 
 @test "output_is_collision matches Docker's real subnet/address contention signatures" {
     # These three strings are the ONLY failures the wrapper retries on a new
-    # octet; everything else must fail fast. Pin the exact daemon phrasings so
+    # slot; everything else must fail fast. Pin the exact daemon phrasings so
     # a future Docker wording change that breaks the classifier is caught here
     # rather than silently turning every collision into a hard failure.
     run validation_subnet_output_is_collision "Error response from daemon: invalid pool request: Pool overlaps with other one on this address space"
@@ -198,7 +281,7 @@ teardown() {
 }
 
 @test "output_is_collision does NOT match unrelated, non-retryable failures" {
-    # A real test assertion or a bad image fails identically on every octet;
+    # A real test assertion or a bad image fails identically on every slot;
     # misclassifying it as a collision would waste the whole retry budget and
     # bury the true error. Assert a representative non-collision failure is
     # correctly rejected.
@@ -273,7 +356,7 @@ net2|lancache-ng-validation-22_validation|172.30.22.0/24" ""
 @test "conflicts: a different numbered project is NOT excluded by a bare startswith footgun" {
     # The exact regression this delimited-child match guards against:
     # own_prefix "lancache-ng-validation-22" must NOT swallow
-    # "lancache-ng-validation-220..." (a different, unrelated octet's
+    # "lancache-ng-validation-220..." (a different, unrelated slot's
     # project) as if it were "ours" -- a bare startswith() would.
     fake_docker_and_ip "net1|lancache-ng-validation-220-foo_validation|172.30.99.0/24" ""
     run validation_subnet_conflicts "172.30.99.0/24" "lancache-ng-validation-22"

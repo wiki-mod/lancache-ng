@@ -411,6 +411,64 @@ is real, live, running code, not just work sitting in source control.
   (a synthetic PXE client, via `scapy`) that proves it against a real
   `dnsmasq` container for both architectures and confirms an ordinary,
   non-PXE-tagged client still receives no reply.
+- CI: redesigned the `full-setup-validate`/`full-setup-deep-validate`/
+  `build-push` validation-subnet reservation pool from one `/24` per octet
+  of `172.30.0.0/16` (252 usable slots, of which the validation stack only
+  ever actually used ~10 of each `/24`'s 256 addresses) to one `/27` per
+  slot -- 30 usable hosts, comfortably more than the stack needs today with
+  headroom for it to grow -- drawn from a pool of 8 `/27` blocks per octet
+  within the SAME already-owned `172.30.0.0/16` (~2,000 slots, an ~8x
+  increase), rather than widening the search into the wider private
+  `172.16.0.0/12` block (#832). The small pool was the direct root cause of
+  the birthday-paradox collision frequency issue #820/#821's flock+retry
+  mechanism exists to route around; that retry mechanism is unchanged and
+  still the safety net for a genuine collision, it should now just fire far
+  less often. Deliberately did NOT widen into the full `172.16.0.0/12`
+  range: that range is ALSO Docker's own default address-pool range for
+  other, unrelated bridge networks on the same self-hosted runner host, and
+  this project already hit a real bug from relying on that exact range once
+  (PowerDNS's `webserver-allow-from` only covering it, above). A full
+  inventory of every fixed-subnet reservation in the project (`172.28.0.0/16`
+  dev compose, `172.31.0.0/16` DHCP Kea lease-flow simulation,
+  `172.29.0.0/16` DHCP proxy PXE simulation -- all untouched, all in
+  different, unrelated `/16`s) and every consumer that assumed the
+  reservation's old `/24` shape was done as part of this change; besides the
+  three workflows and `scripts/lib/reserve-validation-subnet.sh`/
+  `.github/actions/derive-validation-network` themselves, this found and
+  fixed two consumer scripts that computed their OWN additional addresses
+  (beyond the ~10 the core services claim) directly from the reserved
+  subnet's assumed `/24` shape --
+  `scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh` (a Kea test server,
+  DHCP pool, and static reservation address) and
+  `scripts/setup-reset-kea-config-simulation.sh` (the same, for its own
+  separate Kea instance) -- both renumbered to fit within a `/27` and
+  rewritten to parse the reserved subnet's actual base offset instead of
+  assuming it is always `.0`. Also consolidated three call sites
+  (`build-push.yml`, `full-setup-validate.yml`, and a separate,
+  never-actually-shared inline copy of the Docker-network conflict check in
+  `build-push.yml` that still had the exact bare-`startswith` footgun the
+  shared `validation_subnet_conflicts` helper (#820) was supposed to have
+  already fixed everywhere) onto the single shared
+  `validation_subnet_export_env`/`validation_subnet_conflicts` functions
+  instead of each keeping its own hand-written copy of the address-export
+  formula, closing off the exact kind of silent divergence a partial `/24`
+  to `/27` migration could otherwise have left behind. **Real regression
+  caught by this PR's own CI run and fixed before merge**:
+  `validation_subnet_reserve` (in `scripts/lib/reserve-validation-subnet.sh`)
+  turned out to be a generic "reserve one free integer with host-local
+  flock" primitive ALSO reused, on their own separate `172.31.0.0/16` /
+  `172.29.0.0/16` ranges, by `scripts/dhcp-kea-lease-flow-simulation.sh` and
+  `scripts/dhcp-proxy-pxe-simulation.sh` -- neither of which has (or wants)
+  a `/27` subdivision. An earlier version of this change renamed that
+  function's output from `octet=` to `slot=` for the general pool's benefit,
+  which silently broke both DHCP scripts (still parsing the now-gone
+  `octet=` key), producing the literal invalid subnet string
+  `"172.31..0/24"`/`"172.29..0/24"` in real CI. Fixed by restoring
+  `validation_subnet_reserve`/`validation_subnet_derive_octet` to their
+  exact original, octet-only behavior (used by the two DHCP scripts,
+  unchanged) and adding separate `validation_subnet_reserve_slot`/
+  `validation_subnet_derive_slot` functions for the four general-pool call
+  sites instead.
 
 ### Fixed
 
@@ -441,6 +499,42 @@ is real, live, running code, not just work sitting in source control.
   gap is an instance of); a durable CI guard that keeps the filter in sync
   with actual bats dependencies going forward is tracked separately as
   follow-up #879 rather than built into this fix.
+- Fixed `setup.sh update`'s post-update functional health gate
+  (`verify_stack_functional_health`) silently no-oping instead of failing
+  when its required probe tool was missing (#868). `dig` was never part of
+  setup.sh's own dependency bootstrap, so on the common default install
+  (`curl | bash`, no `dig` on the host) the DNS half of the gate silently
+  skipped itself and reported the update healthy regardless of whether DNS
+  actually worked; the HTTP `/healthz` half had the identical
+  `command -v curl` skip-shaped gap. Fixed the whole pattern, not just the
+  observed `dig` symptom: every probe now routes through a new
+  `require_functional_check_tool` helper that treats a missing tool as a
+  FAILED check, not a skipped one, so a missing dependency can never look
+  like "verified healthy". `perform_stack_update_flow` now also installs
+  `curl` and `dig` up front via `install_missing_tools` (extended with a new
+  `package_name_for_tool` mapping, since `dig` ships in the
+  `bind9-dnsutils`/`dnsutils` package, not a package literally named `dig`)
+  before anything else in the update is mutated, so the fail-closed branch
+  above stays the rare exception on a real run rather than the normal case.
+  See `tests/bats/setup_functional_health_gate.bats` for coverage proving
+  both the missing-tool fail-closed path and that the probes still
+  correctly fail on a real broken HTTP/DNS endpoint when the tool is
+  present.
+- Fixed DNS healthchecks being inconsistent across deploy profiles and, in
+  4 of 5 cases, non-compliant with this repo's own AGENTS.md rules
+  (AG-VAL-018/019/020) (#869). Only `deploy/quickstart/docker-compose.yml`
+  used a real query/response probe (`dig @127.0.0.1 steamcontent.com A
+  +short`). `dev` and `prod` used `rec_control ping && ss -lnu | grep -q
+  ':53 '` -- `ss` is explicitly banned as a DNS healthcheck (AG-VAL-020,
+  it only proves a socket is listening) and `rec_control ping` alone is
+  liveness-only (AG-VAL-019). `full-setup` used `rec_control ping
+  2>/dev/null || true`, where the trailing `|| true` forced exit 0
+  regardless of the real result, so the healthcheck could never report
+  unhealthy. `secondary` used bare `rec_control ping`, the same
+  liveness-only gap as dev/prod. All four now use the identical
+  `dig`-based probe `quickstart` already used correctly; `dnsutils` is
+  already installed in every profile's `dns` image
+  (`services/dns/Dockerfile`), so no new tooling was required.
 - Fixed the Admin UI's `/logs` page silently ignoring any filter in syslog
   mode (#848): `logs_page()` called `syslog_client::parse_syslog_tail(&log_root,
   None, max_entries)` with a hardcoded `None` host argument regardless of
@@ -509,6 +603,76 @@ is real, live, running code, not just work sitting in source control.
   full-setup validation stack" step in `full-setup-deep-validate.yml`,
   `full-setup-validate.yml`, and `build-push.yml`. CI-only, no
   production/runtime behavior change.
+- Fixed a bundle of four watchdog.sh defects plus two related divergences
+  found via the #849 vacuum-first bug hunt (#872): `disk_info()` was calling
+  `df` without `-P`, so a wrapped long-device-name line made `awk 'NR==2'`
+  read the wrong row and the JSON percentage come back empty; the printf
+  that assembled the JSON then interpolated the raw (possibly empty)
+  `$pct` instead of `${pct:-0}`, so a single empty read produced
+  syntactically invalid JSON (`{"pct": , ...}`) that corrupted the whole
+  `status.json` for every reader, including the Admin UI dashboard. Fixed
+  both: `df -P` plus `${pct:-0}` in the printf. Separately, `get_health()`
+  and `restart_container()`'s `curl -sf` calls had no `--max-time`, so a
+  hung/unresponsive docker-socket-proxy could stall the entire
+  single-threaded main loop indefinitely with no way for Docker or an
+  operator to notice; both now pass `--max-time` (`CURL_MAX_TIME`,
+  default 5s). Adding that timeout surfaced a second, adjacent latent bug in
+  the same function, caught by this PR's own new test suite: `get_health()`
+  piped `curl` straight into `jq -r '.State.Health.Status // "none"' ||
+  echo "unreachable"`, but `jq` exits 0 with no output on a completely empty
+  stdin (not a parse error) -- so a `curl` failure that produced empty
+  output (connection refused, or exactly what a real `--max-time` timeout
+  itself produces) never reached the `|| echo "unreachable"` fallback at
+  all, and `get_health()` silently returned an empty string instead.
+  `check_and_maybe_restart()` only recognizes the literal strings
+  "healthy"/"unhealthy", so an empty result was silently ignored every
+  cycle -- no failure counter, no restart, ever, for a container the proxy
+  genuinely could not reach. Fixed by capturing curl's own exit status
+  directly (`body=$(curl ...) || { echo "unreachable"; return; }`) before
+  ever handing anything to `jq`, instead of relying on the pipeline's
+  combined exit behavior. `deploy/full-setup` already had a working
+  `test -f status.json` healthcheck for watchdog, but dev/prod/quickstart
+  had none at all -- a new `services/watchdog/healthcheck.sh`, shipped in
+  the image and wired into all four compose files (upgrading full-setup's
+  too), checks the file's *mtime* rather than mere existence (3x
+  `CHECK_INTERVAL`, floored at 60s), since a stalled main loop leaves a
+  stale-but-present file that an existence check would read as healthy
+  forever; the main loop also now re-runs `write_status()` a second time
+  after `maybe_purge()`/`maybe_prune_syslog()` so the once-daily long-running
+  purge scan can't age the file out on its own and cause a false-positive
+  unhealthy flap. `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+  `CONTAINER_DNS_SSL` looked like supported renaming knobs, but
+  `scripts/docker-socket-proxy.sh`'s HAProxy allowlist and the Admin UI's
+  `docker_client.rs` both hardcode the same three default container names
+  and read neither knob at all -- a rename silently made every health check
+  for that container return "unreachable" and every restart 403 through the
+  proxy. Since wiring real renaming support end-to-end would require
+  changes to the proxy allowlist and the Admin UI (out of scope for a
+  watchdog.sh hardening pass), watchdog now fails loudly at startup instead
+  on a mismatch. `maybe_purge()` used to stamp the daily-purge rate-limit
+  file unconditionally even when `CACHE_DIR` didn't exist (the purge block
+  was silently skipped with no log line, yet the stamp claimed it ran) and
+  swallowed real `find` errors via `2>/dev/null`, unlike the sibling
+  `maybe_prune_syslog()`, which logs them -- both now match that sibling's
+  pattern: an early `return` before any stamp write on a missing
+  `CACHE_DIR`, and `find` failures captured and logged instead of hidden.
+  Also fixed: `CHECK_INTERVAL` was unvalidated while every other numeric
+  knob got a `case ''|*[!0-9]*)` guard (a bad value reaches `sleep` under
+  `set -e` and crashes the daemon); it now gets the same guard plus a floor
+  of 1 (a literal 0 would busy-loop). `SSL_ENABLED` used to require the
+  exact literal `"1"`, diverging from the Admin UI's
+  `env_bool("SSL_ENABLED", true)`, which also accepts `true`/`yes`/`on`
+  case-insensitively -- `SSL_ENABLED=true` silently left dns-ssl
+  unmonitored; a new `is_truthy()` helper (matching #874's identically-named
+  fix for `SYSLOG_ENABLED`) normalizes it to a canonical `1`/`0` at startup.
+  Finally, `resolve_cache_dir()`'s fail-closed error for a legacy divergent
+  `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` misconfiguration was logged via
+  `log()` to stdout, which the `CACHE_DIR="$(resolve_cache_dir)"` command
+  substitution silently captured and discarded -- it now goes to stderr via
+  a new `log_err()` helper. New bats coverage: `watchdog_disk_info.bats`,
+  `watchdog_purge.bats` (no dedicated test file existed for `maybe_purge()`
+  before this fix), `watchdog_config_validation.bats`, and
+  `watchdog_curl_timeout.bats`.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated

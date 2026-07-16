@@ -2,8 +2,8 @@
 # GitHub Action for deriving a per-CI-run full-setup validation Docker subnet
 name: Derive validation network
 description: >-
-  Compute a per-run 172.30.<n>.0/24 validation Docker subnet (and its
-  matching gateway/service IPs) from the current workflow run ID and
+  Compute a per-run 172.30.<octet>.<base>/27 validation Docker subnet (and
+  its matching gateway/service IPs) from the current workflow run ID and
   attempt. Used by the full-setup validation jobs so two different,
   concurrent workflow runs sharing a self-hosted runner host never fight
   over the same fixed bridge subnet (see issue #623). This action's own
@@ -14,10 +14,24 @@ description: >-
   stack" step is what makes the actually-used subnet collision-safe, via a
   host-local flock plus retry loop (scripts/lib/reserve-validation-subnet.sh)
   if that starting candidate turns out to be locked or in use.
+  #832 redesign: each reservation claims a /27 (30 usable hosts, comfortably
+  more than the ~10 the validation stack assigns today) drawn from a pool of
+  eight /27 blocks per third octet of the SAME already-owned 172.30.0.0/16
+  (~2,000 slots total, versus 252 one-per-octet /24 slots before), rather
+  than widening the search into the wider private 172.16.0.0/12 block --
+  that range is ALSO Docker's own default address-pool range for other,
+  unrelated networks on the same runner host (see CHANGELOG's #654 entry
+  for a real bug this project already hit from relying on that same range).
+  This formula MUST stay byte-for-byte identical to
+  scripts/lib/reserve-validation-subnet.sh's own
+  validation_subnet_derive_slot + validation_subnet_export_env, since both
+  independently compute the SAME slot for a run's first (uncontested)
+  attempt -- tests/bats/reserve_validation_subnet.bats's own "matches
+  derive-validation-network's own formula" tests assert this.
 
 outputs:
   subnet:
-    description: Validation network subnet, e.g. 172.30.42.0/24
+    description: Validation network subnet, e.g. 172.30.42.96/27
     value: ${{ steps.derive.outputs.subnet }}
   gateway:
     description: Validation network gateway IP
@@ -97,41 +111,64 @@ runs:
         #   - 0 and 1 are excluded from the pool outright (not derived at all).
         #   - 28 is deploy/dev's docker-compose subnet (172.28.0.0/16,
         #     see deploy/dev/docker-compose.yml) -- excluded so a derived
-        #     run can never reproduce that unrelated network's third octet.
-        #   - 99 was the old fixed value; excluding it isn't required for
-        #     correctness, it just keeps the derived pool visibly distinct
-        #     from the previous hardcoded default.
+        #     run can never reproduce that unrelated network's third octet
+        #     (technically redundant since a different second octet can
+        #     never overlap, but kept for continuity/visible intent).
+        #   - 99 was the old fixed value; excluding it outright means a real
+        #     per-run reservation can never be confused with an unset-env-var
+        #     fallback landing on the same address (see
+        #     deploy/full-setup/docker-compose.yml's own ${VAR:-172.30.99.x}
+        #     defaults).
         octet=$(( (decimal % 252) + 2 )) # 2..253
         case "$octet" in
           28|99) octet=$(( octet + 100 )) ;;
         esac
 
-        subnet="172.30.${octet}.0/24"
-        echo "Derived validation subnet ${subnet} from run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}."
+        # #832: a second, independent slice of the SAME digest selects which
+        # of the 8 possible /27 blocks within that octet's /24 this run
+        # gets -- multiplying the pool from 252 one-per-octet /24 slots to
+        # ~2,000 /27 slots, all still inside the same already-owned
+        # 172.30.0.0/16 (see this action's own top-of-file description for
+        # why the pool is widened THIS way rather than into the wider
+        # 172.16.0.0/12 block). MUST use a different slice than the octet
+        # above (not the same bits reused) so the two dimensions don't
+        # correlate, and MUST match
+        # scripts/lib/reserve-validation-subnet.sh's own
+        # validation_subnet_derive_slot formula byte-for-byte.
+        digest2="$(printf '%s' "$raw" | sha256sum | cut -c9-16)"
+        decimal2=$((16#$digest2))
+        subblock=$(( decimal2 % 8 )) # 0..7
+        base=$(( subblock * 32 ))
+        slot=$(( octet * 8 + subblock ))
+
+        subnet="172.30.${octet}.${base}/27"
+        echo "Derived validation subnet ${subnet} (slot ${slot}) from run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}."
 
         # Derive per-run compose project name for isolation (GitHub's run_id
         # and run_attempt are globally unique, no collision with other runs).
-        # Uses octet as a human-readable suffix for debugging.
-        project_name="lancache-ng-validation-${octet}"
+        # Uses the combined slot (not just the octet) as a human-readable
+        # suffix for debugging, since two different runs can now share the
+        # same octet but land in different /27 blocks within it.
+        project_name="lancache-ng-validation-${slot}"
 
-        # Derive per-run host port for the Admin UI (9000 + octet gives a
-        # collision-free range 9002–9253, avoiding the standard 9090 that
-        # could collide when two runs on the same host use the same port).
-        ui_port=$((9000 + octet))
+        # Derive per-run host port for the Admin UI (9000 + slot gives a
+        # collision-free range, avoiding the standard 9090 that could
+        # collide when two runs on the same host use the same port).
+        ui_port=$((9000 + slot))
 
         {
-          echo "octet=${octet}"
+          echo "slot=${slot}"
           echo "subnet=${subnet}"
-          echo "gateway=172.30.${octet}.1"
-          echo "proxy_ip=172.30.${octet}.2"
-          echo "dns_standard_ip=172.30.${octet}.3"
-          echo "proxy_ssl_ip=172.30.${octet}.4"
-          echo "dns_ssl_ip=172.30.${octet}.5"
-          echo "watchdog_ip=172.30.${octet}.6"
-          echo "netdata_ip=172.30.${octet}.7"
-          echo "nats_ip=172.30.${octet}.8"
-          echo "ui_ip=172.30.${octet}.9"
-          echo "standard_shim_ip=172.30.${octet}.10"
+          echo "gateway=172.30.${octet}.$((base + 1))"
+          echo "proxy_ip=172.30.${octet}.$((base + 2))"
+          echo "dns_standard_ip=172.30.${octet}.$((base + 3))"
+          echo "proxy_ssl_ip=172.30.${octet}.$((base + 4))"
+          echo "dns_ssl_ip=172.30.${octet}.$((base + 5))"
+          echo "watchdog_ip=172.30.${octet}.$((base + 6))"
+          echo "netdata_ip=172.30.${octet}.$((base + 7))"
+          echo "nats_ip=172.30.${octet}.$((base + 8))"
+          echo "ui_ip=172.30.${octet}.$((base + 9))"
+          echo "standard_shim_ip=172.30.${octet}.$((base + 10))"
           echo "project_name=${project_name}"
           echo "ui_port=${ui_port}"
         } >> "$GITHUB_OUTPUT"

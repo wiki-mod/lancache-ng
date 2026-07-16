@@ -78,38 +78,51 @@ image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 # COMPOSE_PROJECT_NAME/VALIDATION_SUBNET/VALIDATION_GATEWAY/VALIDATION_UI_IP
 # are exported by scripts/lib/run-in-validation-subnet.sh (issue #820),
 # which full-setup-validate.yml's own job wraps this script's invocation in
-# -- it reserves a host-locked, overlap-checked 172.30.<octet>.0/24 subnet
-# per attempt and retries on a genuine collision, exactly like this script's
-# siblings (ssl-mitm-cache-simulation.sh, ui-nats-dns-integration-
-# simulation.sh) already consume. This used to hardcode a fixed
-# 172.30.99.0/24 unconditionally, with NO per-run derivation and NO retry at
-# all -- worse than the birthday-paradox-odds bug those siblings had before
-# #820, since EVERY invocation of this exact script, from ANY concurrent
-# run, requested the identical literal subnet: not a rare collision, a
-# deterministic one the moment two such networks existed on the same host at
-# once (confirmed for real: this job died on "Pool overlaps" for
+# -- it reserves a host-locked, overlap-checked /27 subnet within
+# 172.30.0.0/16 (issue #832; a whole /24 per octet before) per attempt and
+# retries on a genuine collision, exactly like this script's siblings
+# (ssl-mitm-cache-simulation.sh, ui-nats-dns-integration-simulation.sh)
+# already consume. This used to hardcode a fixed 172.30.99.0/24
+# unconditionally, with NO per-run derivation and NO retry at all -- worse
+# than the birthday-paradox-odds bug those siblings had before #820, since
+# EVERY invocation of this exact script, from ANY concurrent run, requested
+# the identical literal subnet: not a rare collision, a deterministic one
+# the moment two such networks existed on the same host at once (confirmed
+# for real: this job died on "Pool overlaps" for
 # lancache-ng-validation-69_validation in the run that surfaced this gap).
-# The fallback defaults below only matter for a local, outside-CI invocation.
-validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/24}"
-# "172.30.<octet>" -- every other script-private (non-compose-service)
-# address below is derived from this same prefix, so kea_ip/pool_start/
-# pool_end/reserved_ip always stay inside whatever subnet this run/job
-# actually reserved instead of drifting onto the old fixed .99 octet while
-# $ui_ip and the surrounding compose stack use a genuinely different one.
-subnet_prefix="${validation_subnet%.0/24}"
+# The fallback default below only matters for a local, outside-CI invocation.
+validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/27}"
+# #832: a /27 only has 30 usable host addresses, and this script needs a few
+# MORE than the 10 (.1-.10, base-relative) deploy/full-setup/docker-
+# compose.yml's own services already claim inside the SAME reserved subnet
+# -- so, unlike before, this can no longer assume the subnet's fourth octet
+# starts at 0 (a /27's base is base_octet = subblock*32, one of
+# 0/32/64/.../224, see scripts/lib/reserve-validation-subnet.sh's own
+# validation_subnet_export_env). Parse the network prefix and base octet out
+# of $validation_subnet directly instead of the old "%.0/24" string-strip,
+# which only worked because the pre-#832 base was always literally 0.
+subnet_no_prefixlen="${validation_subnet%/*}"      # e.g. 172.30.147.64
+subnet_prefix="${subnet_no_prefixlen%.*}"          # e.g. 172.30.147
+subnet_base_octet="${subnet_no_prefixlen##*.}"     # e.g. 64
 gateway_ip="${VALIDATION_GATEWAY:-172.30.99.1}"
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
-# .2-.9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/netdata/nats/ui
-# in deploy/full-setup/docker-compose.yml; .20 is unused by any of them.
-kea_ip="${subnet_prefix}.20"
-pool_start="${subnet_prefix}.100"
-pool_end="${subnet_prefix}.150"
+# base+2..base+10 are already claimed by proxy/dns-standard/dns-ssl/watchdog/
+# netdata/nats/ui in deploy/full-setup/docker-compose.yml (base+1 is the
+# gateway); base+11..base+30 are this script's own to use, sized to fit
+# comfortably within what's left of the /27 (30 usable hosts total) alongside
+# setup-reset-kea-config-simulation.sh's own base+21..base+29, which the two
+# scripts deliberately keep non-overlapping (see that script's own comment)
+# so both could run concurrently on a shared runner without colliding even
+# if they somehow ever landed on the same reserved subnet.
+kea_ip="${subnet_prefix}.$((subnet_base_octet + 11))"
+pool_start="${subnet_prefix}.$((subnet_base_octet + 12))"
+pool_end="${subnet_prefix}.$((subnet_base_octet + 19))"
 # Deliberately outside the dynamic pool above: the whole point of a static
 # reservation is that Kea must hand it out even though ordinary dynamic
 # allocation never would.
-reserved_ip="${subnet_prefix}.222"
+reserved_ip="${subnet_prefix}.$((subnet_base_octet + 20))"
 # A fixed, locally-administered (0x02 high nibble) test MAC -- never a real
 # vendor OUI, and unique enough per run (low bits from this run's PID) that
 # concurrent local runs of this script don't collide on the same reservation.

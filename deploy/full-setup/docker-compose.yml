@@ -128,7 +128,13 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      # Real query/response probe (AG-VAL-018). The prior `rec_control ping
+      # 2>/dev/null || true` could never report unhealthy: the trailing
+      # `|| true` forces exit 0 regardless of what `rec_control ping` returns,
+      # so this healthcheck was pure decoration (#869). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
+      # is already installed in this image (services/dns/Dockerfile).
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -153,7 +159,13 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      # Real query/response probe (AG-VAL-018). The prior `rec_control ping
+      # 2>/dev/null || true` could never report unhealthy: the trailing
+      # `|| true` forces exit 0 regardless of what `rec_control ping` returns,
+      # so this healthcheck was pure decoration (#869). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
+      # is already installed in this image (services/dns/Dockerfile).
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -185,11 +197,17 @@ services:
       validation-api:
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "test -f /var/run/watchdog/status.json || exit 1"]
+      # Freshness-based (mtime), not just existence -- see
+      # services/watchdog/healthcheck.sh's own comment for why a stalled
+      # main loop would otherwise leave a stale-but-present status.json
+      # reading as healthy forever. Upgraded from the previous
+      # `test -f status.json` check (same script now shared with
+      # dev/prod/quickstart) for the same reason.
+      test: ["CMD", "/healthcheck.sh"]
       interval: 10s
       timeout: 5s
       retries: 2
-      start_period: 10s
+      start_period: 15s
 
   # NATS message bus for DNS record sync
   #
@@ -407,7 +425,15 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/24}
+        # #832: the default fell back to a whole /24 per octet; runs now
+        # reserve a /27 instead (see scripts/lib/reserve-validation-subnet.sh),
+        # but this literal fallback (used only when a script/job runs
+        # standalone with no CI reservation) deliberately keeps the SAME
+        # dotted addresses as before (.99.1 gateway, .99.2 proxy, etc. below)
+        # -- only the CIDR suffix changes, so every other
+        # ${VALIDATION_*_IP:-172.30.99.N} default in this file needed no
+        # change at all.
+        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/27}
           gateway: ${VALIDATION_GATEWAY:-172.30.99.1}
   validation-api:
     internal: true
