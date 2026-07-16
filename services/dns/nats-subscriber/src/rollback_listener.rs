@@ -235,6 +235,23 @@ async fn publish_rollback_records(js: &jetstream::Context, zone_field: &str, pat
 /// restored records so replicated secondaries converge -> record a fresh
 /// known-good snapshot of the now-current (post-rollback) state, mirroring
 /// Kea's own rollback behavior of snapshotting the restored config.
+///
+/// #867: the cache-flush publish above requires the running identity
+/// (`NATS_DNS_WRITER_USER` on dns-standard, `NATS_DNS_REPLICA_USER` on
+/// dns-ssl) to actually hold `publish` on `lancache.dns.flush` in
+/// `nats.conf`/the compose-generated equivalent -- previously neither did,
+/// so nats-server silently denied every flush and the response still
+/// claimed `applied: true` with no way for a caller to tell. Both the JS
+/// send AND its ack are awaited per name now (`state.js.publish(...).await`
+/// for the send, then the returned `PublishAckFuture` for JetStream's
+/// confirmation the message actually reached the stream -- mirroring
+/// `nats_publish::publish_dns_record`'s existing double-await pattern),
+/// because a permission-denied publish is dropped server-side without a
+/// synchronous error on the first await; the failure only ever surfaces as
+/// the ack never arriving. Any name whose flush send or ack fails is
+/// collected into `flush_failed_names` and surfaced in the response body
+/// (`rollback_response_body`) as `flush_ok`/`flush_failed_names`, instead of
+/// only an `eprintln!` warning nobody calling this endpoint ever sees.
 async fn rollback_handler(
     State(state): State<Arc<RollbackState>>,
     headers: HeaderMap,
@@ -446,19 +463,45 @@ async fn rollback_handler(
     }
 
     let changed = zone_snapshots::changed_names(&patch);
+    // #867: names whose cache-flush publish did not both send AND get
+    // JetStream-acked -- surfaced in the response body below instead of
+    // only logged, since a NATS-permission gap (the actual bug this closes)
+    // or a down recursor previously left `applied: true` with no way for a
+    // caller to tell the flush never really happened.
+    let mut flush_failed_names: Vec<String> = Vec::new();
     for name in &changed {
         let flush_payload = json!({"domain": name});
-        match serde_json::to_vec(&flush_payload) {
-            Ok(bytes) => {
-                if let Err(e) = state.js.publish("lancache.dns.flush", bytes.into()).await {
+        let bytes = match serde_json::to_vec(&flush_payload) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "[known-good-snapshot][dns][WARNING] failed to marshal cache-flush for {name}: {e}"
+                );
+                flush_failed_names.push(name.clone());
+                continue;
+            }
+        };
+        // Two awaits, matching `nats_publish::publish_dns_record`'s
+        // established pattern: the first only confirms the message was
+        // handed to the connection, not that nats-server accepted it. A
+        // subject-permission denial (the #867 bug) is enforced server-side
+        // and dropped silently -- it never comes back as an error on this
+        // first await, only as the second await's ack never arriving.
+        match state.js.publish("lancache.dns.flush", bytes.into()).await {
+            Ok(publish_ack) => {
+                if let Err(e) = publish_ack.await {
                     eprintln!(
-                        "[known-good-snapshot][dns][WARNING] failed to publish cache-flush for {name} after rollback: {e}"
+                        "[known-good-snapshot][dns][WARNING] cache-flush for {name} after rollback was not acknowledged by JetStream (missing publish permission or an unreachable stream): {e}"
                     );
+                    flush_failed_names.push(name.clone());
                 }
             }
-            Err(e) => eprintln!(
-                "[known-good-snapshot][dns][WARNING] failed to marshal cache-flush for {name}: {e}"
-            ),
+            Err(e) => {
+                eprintln!(
+                    "[known-good-snapshot][dns][WARNING] failed to publish cache-flush for {name} after rollback: {e}"
+                );
+                flush_failed_names.push(name.clone());
+            }
         }
     }
 
@@ -489,14 +532,40 @@ async fn rollback_handler(
 
     (
         StatusCode::OK,
-        Json(json!({
-            "applied": true,
-            "changed_names": changed,
-            "zone_check_passed": zone_check_passed,
-            "republished_to_nats": republished_to_nats,
-        })),
+        Json(rollback_response_body(
+            &changed,
+            zone_check_passed,
+            republished_to_nats,
+            &flush_failed_names,
+        )),
     )
         .into_response()
+}
+
+/// Builds the `/rollback` JSON response body. Pulled out as its own pure
+/// function (no `RollbackState`/network access) so the #867 fix -- a
+/// cache-flush failure actually reaching the response as `flush_ok: false`
+/// / `flush_failed_names: [...]`, rather than only an `eprintln!` warning
+/// with the body still claiming unqualified success -- is unit-testable
+/// without a live NATS/PowerDNS connection. `applied` keeps its existing
+/// meaning ("the rollback PATCH itself was applied to PowerDNS"); flush
+/// success is a separate, independently-checkable signal now, not folded
+/// into it, since a caller that only checks `applied` today must keep
+/// working unchanged.
+fn rollback_response_body(
+    changed_names: &[String],
+    zone_check_passed: bool,
+    republished_to_nats: bool,
+    flush_failed_names: &[String],
+) -> Value {
+    json!({
+        "applied": true,
+        "changed_names": changed_names,
+        "zone_check_passed": zone_check_passed,
+        "republished_to_nats": republished_to_nats,
+        "flush_ok": flush_failed_names.is_empty(),
+        "flush_failed_names": flush_failed_names,
+    })
 }
 
 pub fn router(state: Arc<RollbackState>) -> Router {
@@ -559,5 +628,43 @@ mod tests {
     fn rollback_request_rejects_a_body_missing_snapshot_id() {
         let body = r#"{"zone": "lan."}"#;
         assert!(serde_json::from_str::<RollbackRequest>(body).is_err());
+    }
+
+    // #867: these two cover the actual bug -- the `/rollback` response body
+    // used to claim `applied: true` with zero signal of whether the
+    // post-rollback cache-flush actually reached the recursor. Both go
+    // through the exact function `rollback_handler` calls to build its
+    // response, not a reimplementation of it.
+    #[test]
+    fn rollback_response_reports_flush_ok_when_every_name_flushed() {
+        let changed = vec!["steamcontent.com".to_string(), "akamai.net".to_string()];
+        let body = rollback_response_body(&changed, true, false, &[]);
+        assert_eq!(body["applied"], json!(true));
+        assert_eq!(body["flush_ok"], json!(true));
+        assert_eq!(body["flush_failed_names"], json!(Vec::<String>::new()));
+        assert_eq!(body["changed_names"], json!(changed));
+        assert_eq!(body["zone_check_passed"], json!(true));
+        assert_eq!(body["republished_to_nats"], json!(false));
+    }
+
+    #[test]
+    fn rollback_response_surfaces_flush_failure_instead_of_silently_claiming_success() {
+        let changed = vec!["steamcontent.com".to_string(), "akamai.net".to_string()];
+        let flush_failed = vec!["steamcontent.com".to_string()];
+        let body = rollback_response_body(&changed, true, true, &flush_failed);
+        // The PATCH itself still applied -- that part of the claim is true --
+        // but the flush signal must now be distinguishable from success,
+        // which is exactly what issue #867 reported as missing.
+        assert_eq!(body["applied"], json!(true));
+        assert_eq!(body["flush_ok"], json!(false));
+        assert_eq!(body["flush_failed_names"], json!(flush_failed));
+    }
+
+    #[test]
+    fn rollback_response_flush_ok_is_false_when_every_name_fails() {
+        let changed = vec!["steamcontent.com".to_string()];
+        let body = rollback_response_body(&changed, true, false, &changed);
+        assert_eq!(body["flush_ok"], json!(false));
+        assert_eq!(body["flush_failed_names"], json!(changed));
     }
 }

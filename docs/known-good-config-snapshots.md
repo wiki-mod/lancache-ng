@@ -609,6 +609,21 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   above) and flush each one against every recursor instance (both
   `dns-standard` and `dns-ssl`, matching the two-mode/two-IP architecture),
   not rely on a single whole-zone or root flush call.
+  - **NATS permission dependency (#867).** This flush is a
+    `lancache.dns.flush` JetStream publish sent under whichever
+    container's own identity runs `rollback_handler` (`NATS_DNS_WRITER_USER`
+    on `dns-standard`, `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only
+    works if that identity's `publish` allow-list in `nats.conf` (and the
+    byte-identical generators in `deploy/dev`, `deploy/prod`,
+    `deploy/quickstart/docker-compose.yml`) actually includes that subject.
+    It shipped without it: every rollback correctly patched PowerDNS but
+    the flush was silently denied server-side, and the `POST /rollback`
+    response had no field reflecting that. Both identities now carry the
+    permission, and any per-name flush publish/ack failure is surfaced in
+    the response body as `flush_ok`/`flush_failed_names` rather than only
+    logged, so a future permission regression (or a genuinely down
+    recursor) is visible to whatever calls this endpoint instead of
+    silently swallowed.
 
 **Secondary nodes and NATS replication.** Every DNS node (primary and each
 remote secondary from `setup.sh secondary`) runs its own

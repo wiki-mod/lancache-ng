@@ -414,6 +414,29 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed the PowerDNS zone/record rollback listener's post-rollback
+  recursor cache-flush being silently denied by NATS permissions (#867):
+  `rollback_listener.rs::rollback_handler` publishes `lancache.dns.flush`
+  under whichever container's own identity is running it
+  (`NATS_DNS_WRITER_USER` for `dns-standard`, `NATS_DNS_REPLICA_USER` for
+  `dns-ssl`), but neither identity's `publish` allow-list in `nats.conf`
+  (`services/nats/nats.conf` and the byte-identical generators in
+  `deploy/dev`, `deploy/prod`, `deploy/quickstart/docker-compose.yml`)
+  included that subject -- only the separate UI identity did. Every
+  operator-triggered rollback correctly patched PowerDNS but never
+  actually flushed the stale rolled-back-away answer from either
+  recursor, contradicting the module's own doc comment, while the `POST
+  /rollback` response still reported `applied: true` with no way to tell.
+  Fixed by granting both identities `publish` on `lancache.dns.flush` (the
+  same treatment the UI identity already had) and by awaiting the actual
+  JetStream ack for each flush publish, not just the initial send -- a
+  subject-permission denial is dropped server-side without a synchronous
+  error on the first await, so the previous single-await check could never
+  have caught this class of failure even with logging. Any name whose
+  flush publish/ack fails is now collected and surfaced in the response
+  body as `flush_ok`/`flush_failed_names`, a signal distinct from
+  `applied` (which still only reflects whether the PATCH itself was
+  applied to PowerDNS).
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
