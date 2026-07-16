@@ -22,6 +22,13 @@
 # `nats-server` and `chown` are stubbed as no-ops (the only two I/O boundaries:
 # the final `exec nats-server` and the ownership handoff to UID 10001); the
 # config-generation logic runs unmodified.
+#
+# Also covers a real-content regression, not just repeat-run convergence: the
+# `generate`/`nats_conf_content` helpers below make asserting on specific
+# rendered nats.conf permissions cheap, so the fix requiring dns-writer/
+# dns-replica to hold `publish` on `lancache.dns.flush` gets its own direct
+# assertion against the real generated config, alongside the idempotence
+# properties this suite was originally written for.
 
 bats_require_minimum_version 1.5.0
 
@@ -167,6 +174,64 @@ nats_conf_content() {
     # three deployments -- which must never happen silently.
     [ "$(nats_conf_content "$root_dev")" = "$(nats_conf_content "$root_prod")" ]
     [ "$(nats_conf_content "$root_prod")" = "$(nats_conf_content "$root_quick")" ]
+}
+
+# ── regression: dns-writer/dns-replica must hold publish on the flush subject ──
+
+# `rollback_listener.rs::rollback_handler` publishes `lancache.dns.flush`
+# under the dns-standard/dns-ssl container's own identity
+# (NATS_DNS_WRITER_USER / NATS_DNS_REPLICA_USER respectively). Neither
+# identity's `publish` allow-list originally included that subject -- only
+# the separate UI identity did -- so nats-server silently denied every
+# post-rollback cache-flush. The full-setup validation compose's equivalent
+# identities carry no `publish` block at all, which nats-server treats as
+# unrestricted (confirmed against nats-server's own `pubAllowedFullCheck`:
+# `c.perms.pub.allow == nil && c.perms.pub.deny == nil` returns `true`, i.e.
+# no restriction), so the deep-validate E2E rollback simulation
+# (scripts/dns-zone-rollback-simulation.sh) never actually exercises the
+# restrictive allow-list dev/prod/quickstart ship -- it would pass
+# identically with or without this fix. This test closes that gap directly
+# against the real generated config content instead.
+@test "dev/prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.flush" {
+    for compose in \
+        "$repo_root/deploy/dev/docker-compose.yml" \
+        "$repo_root/deploy/prod/docker-compose.yml" \
+        "$repo_root/deploy/quickstart/docker-compose.yml"
+    do
+        local root
+        root="$(make_sandbox "flush-perm-$(basename "$(dirname "$compose")")")"
+        generate "$compose" "$root"
+        local conf="$root/etc/nats/nats.conf"
+
+        # Slice out just the writer's and replica's own user{} blocks (each
+        # runs from its "user: ..." line to the matching 4-space-indented
+        # closing brace that ends that user entry) so a match against
+        # "lancache.dns.flush" elsewhere in the file (e.g. the UI identity,
+        # which already had it) can't produce a false pass.
+        local writer_block replica_block
+        writer_block="$(awk '/user: "lancache-dns-writer"/,/^    \}$/' "$conf")"
+        replica_block="$(awk '/user: "lancache-dns-replica"/,/^    \}$/' "$conf")"
+
+        [[ -n "$writer_block" ]] || {
+            echo "could not locate the dns-writer user block in $conf" >&2
+            return 1
+        }
+        [[ -n "$replica_block" ]] || {
+            echo "could not locate the dns-replica user block in $conf" >&2
+            return 1
+        }
+
+        echo "$writer_block" | grep -qF '"lancache.dns.flush"' || {
+            echo "dns-writer identity is missing publish on lancache.dns.flush in $compose:" >&2
+            echo "$writer_block" >&2
+            return 1
+        }
+        echo "$replica_block" | grep -qF '"lancache.dns.flush"' || {
+            echo "dns-replica identity is missing publish on lancache.dns.flush in $compose:" >&2
+            echo "$replica_block" >&2
+            return 1
+        }
+    done
 }
 
 # ── extraction fails loudly when the anchor is gone (guard the guard) ──────────
