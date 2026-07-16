@@ -361,7 +361,9 @@ is real, live, running code, not just work sitting in source control.
   additive database migration and cannot authenticate until it is
   re-registered (`setup.sh secondary ...`) or its credential is rotated from
   the Admin UI's Secondaries page.
-
+- Recorded completion of the #135 review-gate cleanup stream so remaining
+  work can continue as ordinary `v0.2.0` development instead of blocking the
+  closed review umbrella.
 - CI: `build-push`, `codeql`, and `build-tools` workflows now also trigger on
   PRs/pushes targeting `v0.2.0`, not just `master` (#503).
 - The CodeQL Rust job now reports CodeQL's own extraction-quality
@@ -409,9 +411,286 @@ is real, live, running code, not just work sitting in source control.
   (a synthetic PXE client, via `scapy`) that proves it against a real
   `dnsmasq` container for both architectures and confirms an ordinary,
   non-PXE-tagged client still receives no reply.
+- CI: redesigned the `full-setup-validate`/`full-setup-deep-validate`/
+  `build-push` validation-subnet reservation pool from one `/24` per octet
+  of `172.30.0.0/16` (252 usable slots, of which the validation stack only
+  ever actually used ~10 of each `/24`'s 256 addresses) to one `/27` per
+  slot -- 30 usable hosts, comfortably more than the stack needs today with
+  headroom for it to grow -- drawn from a pool of 8 `/27` blocks per octet
+  within the SAME already-owned `172.30.0.0/16` (~2,000 slots, an ~8x
+  increase), rather than widening the search into the wider private
+  `172.16.0.0/12` block (#832). The small pool was the direct root cause of
+  the birthday-paradox collision frequency issue #820/#821's flock+retry
+  mechanism exists to route around; that retry mechanism is unchanged and
+  still the safety net for a genuine collision, it should now just fire far
+  less often. Deliberately did NOT widen into the full `172.16.0.0/12`
+  range: that range is ALSO Docker's own default address-pool range for
+  other, unrelated bridge networks on the same self-hosted runner host, and
+  this project already hit a real bug from relying on that exact range once
+  (PowerDNS's `webserver-allow-from` only covering it, above). A full
+  inventory of every fixed-subnet reservation in the project (`172.28.0.0/16`
+  dev compose, `172.31.0.0/16` DHCP Kea lease-flow simulation,
+  `172.29.0.0/16` DHCP proxy PXE simulation -- all untouched, all in
+  different, unrelated `/16`s) and every consumer that assumed the
+  reservation's old `/24` shape was done as part of this change; besides the
+  three workflows and `scripts/lib/reserve-validation-subnet.sh`/
+  `.github/actions/derive-validation-network` themselves, this found and
+  fixed two consumer scripts that computed their OWN additional addresses
+  (beyond the ~10 the core services claim) directly from the reserved
+  subnet's assumed `/24` shape --
+  `scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh` (a Kea test server,
+  DHCP pool, and static reservation address) and
+  `scripts/setup-reset-kea-config-simulation.sh` (the same, for its own
+  separate Kea instance) -- both renumbered to fit within a `/27` and
+  rewritten to parse the reserved subnet's actual base offset instead of
+  assuming it is always `.0`. Also consolidated three call sites
+  (`build-push.yml`, `full-setup-validate.yml`, and a separate,
+  never-actually-shared inline copy of the Docker-network conflict check in
+  `build-push.yml` that still had the exact bare-`startswith` footgun the
+  shared `validation_subnet_conflicts` helper (#820) was supposed to have
+  already fixed everywhere) onto the single shared
+  `validation_subnet_export_env`/`validation_subnet_conflicts` functions
+  instead of each keeping its own hand-written copy of the address-export
+  formula, closing off the exact kind of silent divergence a partial `/24`
+  to `/27` migration could otherwise have left behind. **Real regression
+  caught by this PR's own CI run and fixed before merge**:
+  `validation_subnet_reserve` (in `scripts/lib/reserve-validation-subnet.sh`)
+  turned out to be a generic "reserve one free integer with host-local
+  flock" primitive ALSO reused, on their own separate `172.31.0.0/16` /
+  `172.29.0.0/16` ranges, by `scripts/dhcp-kea-lease-flow-simulation.sh` and
+  `scripts/dhcp-proxy-pxe-simulation.sh` -- neither of which has (or wants)
+  a `/27` subdivision. An earlier version of this change renamed that
+  function's output from `octet=` to `slot=` for the general pool's benefit,
+  which silently broke both DHCP scripts (still parsing the now-gone
+  `octet=` key), producing the literal invalid subnet string
+  `"172.31..0/24"`/`"172.29..0/24"` in real CI. Fixed by restoring
+  `validation_subnet_reserve`/`validation_subnet_derive_octet` to their
+  exact original, octet-only behavior (used by the two DHCP scripts,
+  unchanged) and adding separate `validation_subnet_reserve_slot`/
+  `validation_subnet_derive_slot` functions for the four general-pool call
+  sites instead.
 
 ### Fixed
 
+- Generalized the single-consumer secret auto-generation from PR #855 into a
+  reusable **shared-secret bootstrap** for handshake secrets that multiple
+  independent containers must agree on (#858). All seven such secrets --
+  `PDNS_API_KEY`, `KEA_CTRL_TOKEN`, `DDNS_TSIG_KEY`, and the four
+  `NATS_*_PASSWORD` values (UI, DNS-writer, DNS-replica, auth-callout) -- are now
+  resolved through a shared `shared-secrets` volume:
+  an operator/`setup.sh` value in `.env` always wins untouched, but if a value is
+  ever left empty or a checked-in placeholder (a partially-completed migration, a
+  hand-blanked `.env`, a generation bug), the first container to boot generates it
+  atomically (first-writer-wins) and every other consumer -- including the Admin
+  UI's PowerDNS/Kea API clients -- reads the same value. This converts a stack
+  that previously bricked at compose interpolation or crash-looped forever into
+  one that self-heals, without ever weakening placeholder rejection (the guards
+  moved from a compose `:?` into the entrypoints, which still reject placeholders).
+  Behavior change: an empty `DDNS_TSIG_KEY` now generates a shared TSIG key so
+  Kea→PowerDNS dynamic updates are TSIG-authenticated end-to-end by default,
+  instead of the previous empty = TSIG-off, loopback-only fail-safe (which still
+  applies if the shared volume is unwritable) -- see `docs/threat-model.md`.
+- Fixed `build-tools.yml`'s bats-triggering path filter silently excluding
+  most of the project's actual bats-tested files (#873). The filter only
+  ever matched `tests/bats/**`/`tests/shellspec/**` themselves, `setup.sh`,
+  and `scripts/check-idempotence-test-coverage.sh` -- so a PR that changed
+  only, say, `services/watchdog/watchdog.sh` never ran the
+  `watchdog_idempotence.bats`/`watchdog_syslog_prune.bats` suite already
+  written for it, since `build-tools.yml` is the only workflow that ever
+  executes bats/shellspec. Traced every `tests/bats/*.bats` file's real
+  (non-fixture) file dependency and confirmed the gap was not
+  watchdog-specific: `services/dns/**`, `services/dhcp/**`,
+  `services/dhcp-proxy/**`, `services/proxy/**`, `services/watchdog/**`,
+  `services/ui/dhcp-probe.sh`, `deploy/{dev,prod,quickstart}/
+  docker-compose.yml`, `scripts/lib/**`, and seven individual top-level
+  `scripts/*.sh` files (`classify-image-impact.sh`,
+  `compute-next-release-tag.sh`, `detect-full-setup-changes.sh`,
+  `ensure-pr-staging-images.sh`, `plan-deep-validation.sh`,
+  `docker-socket-proxy.sh`, `check-action-node-versions.sh`) all had real
+  bats coverage the path filter never triggered on. Added all of these to
+  both the `push` and `pull_request` path filters in `build-tools.yml`.
+  Publish scope is unaffected -- `determine-publish-scope` still only
+  rebuilds/publishes the build-tools image itself on `tools/build-tools/**`
+  or workflow-file changes, so the added paths only cause the existing
+  local build-and-bats-run to execute, never a new image publish. Refs
+  #822 (the cross-cutting "point-fix without a guard" pattern audit this
+  gap is an instance of); a durable CI guard that keeps the filter in sync
+  with actual bats dependencies going forward is tracked separately as
+  follow-up #879 rather than built into this fix.
+- Fixed `setup.sh update`'s post-update functional health gate
+  (`verify_stack_functional_health`) silently no-oping instead of failing
+  when its required probe tool was missing (#868). `dig` was never part of
+  setup.sh's own dependency bootstrap, so on the common default install
+  (`curl | bash`, no `dig` on the host) the DNS half of the gate silently
+  skipped itself and reported the update healthy regardless of whether DNS
+  actually worked; the HTTP `/healthz` half had the identical
+  `command -v curl` skip-shaped gap. Fixed the whole pattern, not just the
+  observed `dig` symptom: every probe now routes through a new
+  `require_functional_check_tool` helper that treats a missing tool as a
+  FAILED check, not a skipped one, so a missing dependency can never look
+  like "verified healthy". `perform_stack_update_flow` now also installs
+  `curl` and `dig` up front via `install_missing_tools` (extended with a new
+  `package_name_for_tool` mapping, since `dig` ships in the
+  `bind9-dnsutils`/`dnsutils` package, not a package literally named `dig`)
+  before anything else in the update is mutated, so the fail-closed branch
+  above stays the rare exception on a real run rather than the normal case.
+  See `tests/bats/setup_functional_health_gate.bats` for coverage proving
+  both the missing-tool fail-closed path and that the probes still
+  correctly fail on a real broken HTTP/DNS endpoint when the tool is
+  present.
+- Fixed DNS healthchecks being inconsistent across deploy profiles and, in
+  4 of 5 cases, non-compliant with this repo's own AGENTS.md rules
+  (AG-VAL-018/019/020) (#869). Only `deploy/quickstart/docker-compose.yml`
+  used a real query/response probe (`dig @127.0.0.1 steamcontent.com A
+  +short`). `dev` and `prod` used `rec_control ping && ss -lnu | grep -q
+  ':53 '` -- `ss` is explicitly banned as a DNS healthcheck (AG-VAL-020,
+  it only proves a socket is listening) and `rec_control ping` alone is
+  liveness-only (AG-VAL-019). `full-setup` used `rec_control ping
+  2>/dev/null || true`, where the trailing `|| true` forced exit 0
+  regardless of the real result, so the healthcheck could never report
+  unhealthy. `secondary` used bare `rec_control ping`, the same
+  liveness-only gap as dev/prod. All four now use the identical
+  `dig`-based probe `quickstart` already used correctly; `dnsutils` is
+  already installed in every profile's `dns` image
+  (`services/dns/Dockerfile`), so no new tooling was required.
+- Fixed the Admin UI's `/logs` page silently ignoring any filter in syslog
+  mode (#848): `logs_page()` called `syslog_client::parse_syslog_tail(&log_root,
+  None, max_entries)` with a hardcoded `None` host argument regardless of
+  what was requested, even though `parse_syslog_tail` already accepted and
+  correctly handled a `host: Option<&str>` filter (existing test coverage in
+  `syslog_client.rs` proved the underlying capability worked -- only the
+  route never passed anything through). The nginx-log branch's existing
+  `?filter=` query parameter filters by `cache_status` (HIT/MISS/EXPIRED),
+  which has no meaning for syslog lines, so a new, separate `?host=` query
+  parameter was added instead of overloading `filter` with mode-dependent
+  semantics -- a bookmarked `?filter=HIT` URL would otherwise be silently
+  reinterpreted as a (nonexistent) host named "HIT" if syslog mode were
+  toggled on the same install. `logs.rs` now passes the parsed `host` straight
+  to `parse_syslog_tail`, and a new `syslog_client::list_syslog_hosts()`
+  helper lists every wired host currently under `SYSLOG_LOG_ROOT` so the
+  Admin UI can offer a real host dropdown instead of a text field the
+  operator has to guess values for; `logs.html`'s syslog-mode branch
+  previously had no filter UI at all (only the legacy nginx branch did), so
+  a `<select>` bound to `?host=` was added, mirroring the existing
+  `dhcp.html`/`setup.html` dropdown styling. Selecting "Alle Hosts" clears
+  the filter by navigating back to `/logs` with no query string.
+  Independent review caught that wiring a raw, caller-controlled `?host=`
+  straight into `parse_syslog_tail`'s `Path::new(log_root).join(h)` would
+  have been a path-traversal / arbitrary-file-read regression (e.g.
+  `?host=../../../data` reading the session secret) -- this was fixed
+  two ways: `logs_page()` now only ever honors a `?host=` value that is an
+  exact member of `list_syslog_hosts()`'s real result (an unrecognized or
+  traversal-shaped value silently falls back to "all hosts"), and
+  `parse_syslog_tail` itself independently rejects any `host` argument that
+  is not a single bare directory-name segment (empty, `.`, `..`, or
+  containing `/`/`\`), so every future caller is protected, not just this
+  one. Added `list_syslog_hosts_returns_sorted_host_directory_names`,
+  `list_syslog_hosts_returns_empty_for_missing_root`, and
+  `parse_syslog_tail_ignores_host_with_path_traversal` unit tests in
+  `syslog_client.rs`, plus a `logs_html_renders_syslog_host_filter_dropdown_with_selection`
+  test in `main.rs` that renders the real on-disk `logs.html` template
+  (not a throwaway inline one) to prove the dropdown reflects the selected
+  host correctly.
+- Fixed an intermittent `has active endpoints` teardown race that could poison
+  a shared validation Docker network for whichever job ran next in
+  `full-setup-deep-validate.yml` (#834) -- a distinct bug from the
+  octet-hash-collision class #820 already fixed above (`has active
+  endpoints` does not match `validation_subnet_output_is_collision`'s
+  collision signatures, and correctly so). All simulation jobs in one run
+  share the same Compose project/network name, and every teardown trap ran
+  `docker compose down -v --remove-orphans >/dev/null 2>&1 || true`: when
+  `down`'s own container-removal-vs-network-endpoint-detach step lost
+  Docker's real async race, the failure was silently swallowed and the job
+  still reported success, while leaving the shared network non-empty for
+  the next job in the sequential `needs:` chain to trip over (a real,
+  unguarded failure that time). Confirmed directly from two same-run job
+  failures hitting the identical network id 7 minutes apart, and live-
+  reproduced against a real Docker daemon on a runner host. Fixed in #835 by
+  adding `validation_network_await_detached` / `validation_network_teardown`
+  / `validation_project_networks_teardown` to
+  `scripts/lib/reserve-validation-subnet.sh` (poll until Docker itself
+  confirms zero attached containers, force-disconnect stragglers past a
+  bounded timeout, clear `::error::` if still stuck), applied at every
+  `docker compose down ... || true` / bare `docker network rm ... || true`
+  teardown site sharing this pattern across the codebase, not only the two
+  jobs that happened to surface it: `dns-zone-rollback-simulation.sh`,
+  `ssl-mitm-cache-simulation.sh`, `ui-nats-dns-integration-simulation.sh`,
+  `nats-secondary-auth-callout-simulation.sh`, `setup-cli-simulation.sh`
+  (both teardown sites), `dhcp-kea-lease-flow-simulation.sh`,
+  `dhcp-proxy-pxe-simulation.sh`, `ui-rust-checks.sh`, and the "Tear down
+  full-setup validation stack" step in `full-setup-deep-validate.yml`,
+  `full-setup-validate.yml`, and `build-push.yml`. CI-only, no
+  production/runtime behavior change.
+- Fixed a bundle of four watchdog.sh defects plus two related divergences
+  found via the #849 vacuum-first bug hunt (#872): `disk_info()` was calling
+  `df` without `-P`, so a wrapped long-device-name line made `awk 'NR==2'`
+  read the wrong row and the JSON percentage come back empty; the printf
+  that assembled the JSON then interpolated the raw (possibly empty)
+  `$pct` instead of `${pct:-0}`, so a single empty read produced
+  syntactically invalid JSON (`{"pct": , ...}`) that corrupted the whole
+  `status.json` for every reader, including the Admin UI dashboard. Fixed
+  both: `df -P` plus `${pct:-0}` in the printf. Separately, `get_health()`
+  and `restart_container()`'s `curl -sf` calls had no `--max-time`, so a
+  hung/unresponsive docker-socket-proxy could stall the entire
+  single-threaded main loop indefinitely with no way for Docker or an
+  operator to notice; both now pass `--max-time` (`CURL_MAX_TIME`,
+  default 5s). Adding that timeout surfaced a second, adjacent latent bug in
+  the same function, caught by this PR's own new test suite: `get_health()`
+  piped `curl` straight into `jq -r '.State.Health.Status // "none"' ||
+  echo "unreachable"`, but `jq` exits 0 with no output on a completely empty
+  stdin (not a parse error) -- so a `curl` failure that produced empty
+  output (connection refused, or exactly what a real `--max-time` timeout
+  itself produces) never reached the `|| echo "unreachable"` fallback at
+  all, and `get_health()` silently returned an empty string instead.
+  `check_and_maybe_restart()` only recognizes the literal strings
+  "healthy"/"unhealthy", so an empty result was silently ignored every
+  cycle -- no failure counter, no restart, ever, for a container the proxy
+  genuinely could not reach. Fixed by capturing curl's own exit status
+  directly (`body=$(curl ...) || { echo "unreachable"; return; }`) before
+  ever handing anything to `jq`, instead of relying on the pipeline's
+  combined exit behavior. `deploy/full-setup` already had a working
+  `test -f status.json` healthcheck for watchdog, but dev/prod/quickstart
+  had none at all -- a new `services/watchdog/healthcheck.sh`, shipped in
+  the image and wired into all four compose files (upgrading full-setup's
+  too), checks the file's *mtime* rather than mere existence (3x
+  `CHECK_INTERVAL`, floored at 60s), since a stalled main loop leaves a
+  stale-but-present file that an existence check would read as healthy
+  forever; the main loop also now re-runs `write_status()` a second time
+  after `maybe_purge()`/`maybe_prune_syslog()` so the once-daily long-running
+  purge scan can't age the file out on its own and cause a false-positive
+  unhealthy flap. `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+  `CONTAINER_DNS_SSL` looked like supported renaming knobs, but
+  `scripts/docker-socket-proxy.sh`'s HAProxy allowlist and the Admin UI's
+  `docker_client.rs` both hardcode the same three default container names
+  and read neither knob at all -- a rename silently made every health check
+  for that container return "unreachable" and every restart 403 through the
+  proxy. Since wiring real renaming support end-to-end would require
+  changes to the proxy allowlist and the Admin UI (out of scope for a
+  watchdog.sh hardening pass), watchdog now fails loudly at startup instead
+  on a mismatch. `maybe_purge()` used to stamp the daily-purge rate-limit
+  file unconditionally even when `CACHE_DIR` didn't exist (the purge block
+  was silently skipped with no log line, yet the stamp claimed it ran) and
+  swallowed real `find` errors via `2>/dev/null`, unlike the sibling
+  `maybe_prune_syslog()`, which logs them -- both now match that sibling's
+  pattern: an early `return` before any stamp write on a missing
+  `CACHE_DIR`, and `find` failures captured and logged instead of hidden.
+  Also fixed: `CHECK_INTERVAL` was unvalidated while every other numeric
+  knob got a `case ''|*[!0-9]*)` guard (a bad value reaches `sleep` under
+  `set -e` and crashes the daemon); it now gets the same guard plus a floor
+  of 1 (a literal 0 would busy-loop). `SSL_ENABLED` used to require the
+  exact literal `"1"`, diverging from the Admin UI's
+  `env_bool("SSL_ENABLED", true)`, which also accepts `true`/`yes`/`on`
+  case-insensitively -- `SSL_ENABLED=true` silently left dns-ssl
+  unmonitored; a new `is_truthy()` helper (matching #874's identically-named
+  fix for `SYSLOG_ENABLED`) normalizes it to a canonical `1`/`0` at startup.
+  Finally, `resolve_cache_dir()`'s fail-closed error for a legacy divergent
+  `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` misconfiguration was logged via
+  `log()` to stdout, which the `CACHE_DIR="$(resolve_cache_dir)"` command
+  substitution silently captured and discarded -- it now goes to stderr via
+  a new `log_err()` helper. New bats coverage: `watchdog_disk_info.bats`,
+  `watchdog_purge.bats` (no dedicated test file existed for `maybe_purge()`
+  before this fix), `watchdog_config_validation.bats`, and
+  `watchdog_curl_timeout.bats`.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
@@ -847,6 +1126,62 @@ is real, live, running code, not just work sitting in source control.
   static `name: lancache-ng` is deliberately left unchanged for real installs
   (see #669 item 6 for why per-install-dir project naming stays out of scope
   for that case).
+- Fixed the Admin UI's `/logs` view (syslog mode) permanently starving a
+  naturally quiet host once a noisier host produced enough recent lines to
+  fill the global entry budget (#859). `syslog_client::parse_syslog_tail`
+  already guaranteed (via the #758 `dirs_with_candidates`/`hosts_seen` fix)
+  that every host's newest file gets opened before the collection loop's
+  early-break can fire, but the final merge step afterward
+  (`collected.sort_by(timestamp)` + truncate-to-`limit`) was completely
+  host-blind: if every other host's lines happened to be newer, a quiet
+  host's entire contribution could still be sorted out of the window and
+  silently disappear from the rendered page, even though its file was read
+  correctly and its data was still on disk. The concrete, safety-critical
+  instance: `services/watchdog/watchdog.sh` logs a handful of lines at
+  container start and then stays silent unless it detects and acts on a
+  real problem, while `netdata`'s continuous PLUGINSD/health-check chatter
+  can burn through the default 200-line budget within minutes -- once that
+  happens, watchdog's log (including a future real-incident line) becomes
+  permanently invisible via the Admin UI for the rest of the container's
+  uptime. This was a general capacity/fairness bug in the merge, not
+  watchdog-specific, so the fix is general too: the merge now groups
+  collected lines by host, reserves each host with data at least
+  `per_host_floor = (limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)`
+  (`PER_HOST_FLOOR` is a small constant, 10) of its own most recent lines
+  via a round-robin pass, and only then fills any remaining budget with the
+  globally most recent leftover lines across all hosts -- so a quiet host
+  can no longer be fully evicted, while a genuinely high-volume, genuinely
+  recent host still dominates the window whenever it isn't competing with
+  other hosts for space, and can still win most of the shared budget even
+  when it IS competing against other active hosts. The floor is
+  deliberately a small constant rather than a pure equal share of `limit`
+  across hosts: an equal share would, once every active host has at least
+  that many lines, consume the entire budget in the floor pass and leave
+  nothing for the recency-fill pass, degrading the merge to a fixed count
+  per host regardless of actual recency -- an over-correction caught during
+  review before merge. New unit tests in `services/ui/src/syslog_client.rs`
+  cover a quiet host surviving alongside 50 newer lines from a noisy host
+  while the overall limit is still respected, a single uncontested noisy
+  host still getting exactly its most recent lines with no fairness
+  penalty, and four simultaneously-active hosts where the two genuinely
+  newer hosts each win their entire history while the two older hosts still
+  keep their guaranteed floor rather than being squeezed to zero; all
+  pre-existing `parse_syslog_tail` tests (including the #758 regression
+  test) continue to pass unmodified.
+- Clarified the PR template's `## Changelog` heading to explicitly say not to
+  edit `CHANGELOG.md` in the same PR (#889): every simultaneously-open PR
+  appending to this same section's heading guaranteed a merge conflict with
+  every other one, which is exactly what motivated this entry to be added
+  the old way one more time. Added `scripts/collect-changelog-entries.sh`,
+  a maintainer-invoked, read-only aid that gathers merged PRs' `## Changelog`
+  body sections since the last release so they can be hand-organized into
+  this file at release time, per CONTRIBUTING.md's existing "Releasing
+  Changes to CHANGELOG.md" process. Evaluated GitHub's native
+  `--generate-notes`/`.github/release.yml` and `release-drafter` as
+  off-the-shelf alternatives; neither can pull a PR's full body text (both
+  summarize by title/label only), which would have been a real regression
+  against this file's long-form, prose-heavy entry style, so a small custom
+  script was written instead.
 
 ## [0.1.0] - 2026-07-06
 
