@@ -120,6 +120,9 @@ services:
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY
+      # (inert here: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-standard:/var/lib/powerdns
     networks:
       validation:
@@ -151,6 +154,9 @@ services:
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-ssl
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY
+      # (inert here: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-ssl:/var/lib/powerdns
     networks:
       validation:
@@ -235,6 +241,16 @@ services:
   # pair itself. The Admin UI still writes auth_callout.conf on startup with its
   # fixed-seed issuer (matching the prebaked one), but since the restart
   # no-ops, the already-loaded prebaked pair is what serves the simulation.
+  #
+  # Deliberately NOT wired into the shared-secret bootstrap (#858): every
+  # credential here is a literal string baked into the heredoc below, not an
+  # interpolated `${NATS_..._PASSWORD}` -- there is no environment: block and
+  # no placeholder-or-empty case this harness can ever hit, by design (fixed
+  # values are what make the auth-callout restart-no-op simulation above
+  # reproducible). dev/prod/quickstart's real `${VAR}`-driven nats service is
+  # what the bootstrap targets; retrofitting resolve_shared_secret here would
+  # mean restructuring a CI-only validation harness for no self-heal benefit
+  # it could ever exercise.
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     entrypoint: ["/bin/sh", "-c"]
@@ -330,6 +346,9 @@ services:
   ui:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
+      # Shared-secret bootstrap (#858): UI entrypoint resolves PDNS_API_KEY from
+      # here (inert: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - nats-conf:/etc/nats
     ports:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
@@ -449,6 +468,10 @@ networks:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858): mounted into every service that must agree
+  # on a generated secret. Inert in this validation stack (secrets are hardcoded
+  # and consistent); present for parity with the dev/prod/quickstart profiles.
+  shared-secrets:
   proxy-cache:
   pdns-data-standard:
   pdns-data-ssl:
