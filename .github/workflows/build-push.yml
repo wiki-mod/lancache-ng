@@ -172,6 +172,23 @@ jobs:
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Job-level concurrency (#891, extending #888/#892's proven build/
+    # container-scan pattern): a superseded commit's file-headers run gets
+    # reclaimed instead of running to completion. Safe to cancel mid-flight:
+    # unlike detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit
+    # (excluded from this pattern -- see this workflow's ci_scope_policy job),
+    # nothing asserts file-headers' result with a hard-failing script. The
+    # only consumers are build/build-arm64's own `if:` gates
+    # (`needs['file-headers'].result == 'success'`, PR-only), which cleanly
+    # skip rather than error when this job shows cancelled.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-file-headers-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-file-headers-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check repository header on all tracked files
@@ -416,6 +433,23 @@ jobs:
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Job-level concurrency (#891, extending #888/#892's proven build/
+    # container-scan pattern): a superseded commit's line-endings run gets
+    # reclaimed instead of running to completion. Safe to cancel mid-flight:
+    # nothing asserts this job's result with a hard-failing script (unlike
+    # detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit, deliberately
+    # excluded from this pattern -- see ci_scope_policy's comment below). The
+    # only consumers are build/build-arm64's own `if:` gates
+    # (`needs['line-endings'].result == 'success'`), which cleanly skip rather
+    # than error when this job shows cancelled.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-line-endings-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-line-endings-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
@@ -469,6 +503,23 @@ jobs:
     # to be installed on the runner host.
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Job-level concurrency (#891, extending #888/#892's proven build/
+    # container-scan pattern): a superseded commit's shellcheck run gets
+    # reclaimed instead of running to completion. Safe to cancel mid-flight:
+    # nothing asserts this job's result with a hard-failing script (unlike
+    # detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit, deliberately
+    # excluded from this pattern -- see ci_scope_policy's comment below). The
+    # only consumers are build/build-arm64's own `if:` gates
+    # (`needs.shellcheck.result == 'success'`), which cleanly skip rather than
+    # error when this job shows cancelled.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-shellcheck-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-shellcheck-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
@@ -2798,6 +2849,26 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency (#891, extending #888/#892's proven build/
+    # container-scan pattern): rust_coverage is on the scarce self-hosted
+    # lancache-heavy pool, same as build/container-scan, so reclaiming a
+    # superseded commit's coverage run matters for real capacity, not just
+    # consistency. Safe to cancel mid-flight: it is NOT one of
+    # ci_scope_policy's `needs` (unlike dns_test/ui_test/dns_cargo_audit/
+    # ui_cargo_audit, deliberately excluded from this pattern -- see
+    # ci_scope_policy's own comment below), so nothing hard-asserts its
+    # result. Its only consumer, publish_coverage_badge, gates with
+    # `!cancelled() && needs.rust_coverage.result == 'success'` and only runs
+    # on push events -- a cancelled rust_coverage cleanly skips the badge
+    # publish instead of erroring.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-rust-coverage-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-rust-coverage-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # This job resolves its own build-tools image rather than reusing
@@ -3260,6 +3331,43 @@ jobs:
     # Central policy reconciliation for PR path filtering. Individual jobs may
     # skip for speed, but this job verifies that every required check really ran
     # for the files touched by the PR.
+    #
+    # #891 scope note: this job itself is safe to give a job-level
+    # cancel-in-progress group (below), same as build/container-scan/
+    # build-arm64 -- nothing else in this workflow hard-asserts
+    # ci_scope_policy's own result via `needs:`, only build/build-arm64's soft
+    # `if:` gate (`needs.ci_scope_policy.result == 'success'`), which cleanly
+    # skips rather than errors when this job shows cancelled.
+    #
+    # #891 deliberately did NOT add the same pattern to this job's own inputs
+    # above (detect-changes, dns_rust_quality, ui_rust_quality, dns_test,
+    # ui_test, watchdog_test, dns_cargo_audit, ui_cargo_audit) or to
+    # validate-compose, even though several were named as candidates in #891.
+    # Reason: this job's own require_success()/require_success_or_intentional_skip()
+    # helpers below only tolerate a `success` (and, for the
+    # _or_intentional_skip variant, `skipped`) result -- neither tolerates
+    # `cancelled`. If any of those upstream jobs got their own job-level
+    # cancel-in-progress group, the exact PR-event storm #888/#892 already
+    # found unsafe for the top-level group (opening a PR with labels/milestone
+    # set fires `opened` + `labeled` + `milestoned` for the same commit within
+    # the same second, each spawning a competing run under the same
+    # ref-scoped group) would cancel one run's copy of that job mid-flight,
+    # and THIS job -- running with `if: always()` in that same now-superseded
+    # run -- would then hard-fail with a spurious "must succeed, got
+    # 'cancelled'" error instead of cleanly skipping. That is a real,
+    # reproducible regression of the exact failure mode #892 was written to
+    # avoid, not a hypothetical one: validate-compose is an especially sharp
+    # case, since its cascade (a cancelled validate-compose forces
+    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit to skip via their own
+    # `needs['validate-compose'].result == 'success'` guard) would trip this
+    # on ordinary superseded push events to master/v0.2.0, not just the rarer
+    # PR-open storm. Fixing this properly would mean teaching
+    # require_success()/require_success_or_intentional_skip() to treat a
+    # supersession-`cancelled` result as tolerable (the same soft-skip
+    # semantics build/build-arm64's own `if:` gates already use) -- a policy
+    # change to what this job enforces, not a mechanical copy of the
+    # build/container-scan concurrency pattern, so it is intentionally left
+    # out of this PR. See #891 for tracking.
     name: CI scope policy
     needs:
       - detect-changes
@@ -3272,6 +3380,14 @@ jobs:
       - ui_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-ci-scope-policy-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-ci-scope-policy-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     steps:
       # This job never checked out the repo itself (#901): its only file read
       # (the grep below) relied entirely on whatever another job on the same
