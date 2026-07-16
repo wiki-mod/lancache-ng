@@ -1125,24 +1125,26 @@ is real, live, running code, not just work sitting in source control.
   test) continue to pass unmodified.
 - Fixed `build-push.yml`'s top-level concurrency group serializing whole
   pipeline runs one at a time on rapid pushes, wasting self-hosted
-  `lancache-heavy` capacity on commits that were already superseded (#888).
-  Investigated the originally-proposed fix (flip the group's
-  `cancel-in-progress` to `true`) and found it unsafe: workflow-level
-  `cancel-in-progress: true` cancels an entire in-progress run including
-  any job that happens to be executing, and `promote`'s own job-level
-  concurrency group (#793) does not protect it from that -- it only
-  serializes `promote` against other users of that same group name, not
-  against its own run being torn down. Implemented a narrower fix instead:
-  the top-level group now uses a run-scoped key for push/tag events (a
-  no-op for serialization purposes, also fixing master/`v0.2.0` pushes
-  contending for the same slot) and stays safely flippable to
-  `cancel-in-progress: true` for PR runs (which never reach
-  `promote`/`release`); `build` and `container-scan` gained their own
-  service+ref-scoped job-level concurrency groups so a superseded commit's
-  heavy build/scan work is cancelled promptly, while `merge-manifests`/
-  `promote` cleanly skip (never start) for it via their existing
-  `needs.<job>.result == 'success'` gates instead of being killed
-  mid-write.
+  `lancache-heavy` capacity on commits already superseded (#888). The
+  originally-proposed fix (flip the group's `cancel-in-progress` to
+  `true`) turned out unsafe: it cancels an entire in-progress run
+  including any job currently executing, and `promote`'s own job-level
+  concurrency group (#793) does not protect it from that. Implemented
+  instead: the group's push/tag key is now run-scoped (a no-op for
+  serialization, also fixing master/`v0.2.0` pushes contending for the
+  same slot); `build`/`container-scan` gained their own service+ref-scoped
+  job-level concurrency so a superseded commit's heavy work is cancelled
+  promptly, while `merge-manifests`/`promote` cleanly skip it via their
+  existing `needs` gates instead of being killed mid-write. This trades a
+  new (but bounded, light-tier-only) cost for the heavy-tier savings:
+  superseded commits' cheap `detect-changes`/`shellcheck`/etc. jobs now
+  run to completion instead of being dropped while queued. `cancel-in-
+  progress` deliberately stays `false` for `pull_request` events too --
+  live-tested flipping it and found it kills an already-running
+  `detect-changes` job when a PR is opened with labels/milestone set in
+  the same call (this project's own convention), a real regression for no
+  registry-safety benefit since PR runs never reach `promote`/`release`
+  anyway.
 
 ## [0.1.0] - 2026-07-06
 
