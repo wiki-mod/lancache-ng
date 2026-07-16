@@ -50,29 +50,42 @@ image_tag="${LANCACHE_IMAGE_TAG:-edge}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required (an image providing curl, e.g. the build-tools image)}"
 
 # full-setup-deep-validate.yml's compute-validation-network job derives a
-# COLLISION-FREE per-run subnet (e.g. 172.30.147.0/24), not always the fixed
-# 172.30.99.0/24 dhcp-kea-ctrl-agent-mutation-simulation.sh's own comment
-# describes -- that sibling script only gets away with a hardcoded subnet
-# because it is manual-workflow-only (full-setup-validate.yml), where this
-# job's env block does not thread VALIDATION_SUBNET through at all (#703).
-# THIS script's job DOES thread it, so every address below must be derived
-# from the real subnet in effect this run, not assumed fixed -- confirmed the
-# hard way: a first version of this script hardcoded 172.30.99.x and failed
-# with "no configured subnet contains IP address 172.30.99.21" the first time
-# it actually ran against a per-run-derived, non-default subnet.
-subnet_cidr="${VALIDATION_SUBNET:-172.30.99.0/24}"
-subnet_prefix="${subnet_cidr%.*/*}"
-ui_ip="${VALIDATION_UI_IP:-${subnet_prefix}.9}"
-gateway_ip="${VALIDATION_GATEWAY:-${subnet_prefix}.1}"
-# .2-.9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/netdata/
-# nats/ui in deploy/full-setup/docker-compose.yml (see compute-validation-network's
-# derivation), .21 avoids dhcp-kea-ctrl-agent-mutation-simulation.sh's own .20
-# so both could run concurrently on a shared runner without colliding.
-kea_ip="${subnet_prefix}.21"
-dhcp_pool_start="${subnet_prefix}.100"
-dhcp_pool_end="${subnet_prefix}.150"
-reservation_ip_a="${subnet_prefix}.223"
-reservation_ip_b="${subnet_prefix}.224"
+# COLLISION-FREE per-run /27 subnet within 172.30.0.0/16 (issue #832; e.g.
+# 172.30.147.96/27), not always the fixed 172.30.99.0/27
+# dhcp-kea-ctrl-agent-mutation-simulation.sh's own comment describes -- that
+# sibling script only gets away with a hardcoded subnet because it is
+# manual-workflow-only (full-setup-validate.yml), where this job's env block
+# does not thread VALIDATION_SUBNET through at all (#703). THIS script's job
+# DOES thread it, so every address below must be derived from the real
+# subnet in effect this run, not assumed fixed -- confirmed the hard way: a
+# first version of this script hardcoded 172.30.99.x and failed with "no
+# configured subnet contains IP address 172.30.99.21" the first time it
+# actually ran against a per-run-derived, non-default subnet.
+subnet_cidr="${VALIDATION_SUBNET:-172.30.99.0/27}"
+# #832: a /27's base (the fourth octet the reserved block actually starts
+# at) is no longer always 0 -- it's one of 0/32/64/.../224 depending on
+# which of the 8 blocks within the octet this run's slot landed on (see
+# scripts/lib/reserve-validation-subnet.sh's own validation_subnet_export_env).
+# Parse the network prefix and base octet out of $subnet_cidr directly
+# instead of the old "%.*/*" string-strip, which only worked because the
+# pre-#832 base was always literally 0.
+subnet_no_prefixlen="${subnet_cidr%/*}"          # e.g. 172.30.147.96
+subnet_prefix="${subnet_no_prefixlen%.*}"        # e.g. 172.30.147
+subnet_base_octet="${subnet_no_prefixlen##*.}"   # e.g. 96
+ui_ip="${VALIDATION_UI_IP:-${subnet_prefix}.$((subnet_base_octet + 9))}"
+gateway_ip="${VALIDATION_GATEWAY:-${subnet_prefix}.$((subnet_base_octet + 1))}"
+# base+2..base+9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/
+# netdata/nats/ui in deploy/full-setup/docker-compose.yml (see
+# compute-validation-network's derivation), base+21 avoids
+# dhcp-kea-ctrl-agent-mutation-simulation.sh's own base+11..base+20 so both
+# could run concurrently on a shared runner without colliding even if they
+# somehow ever landed on the same reserved subnet -- sized to fit comfortably
+# within the /27's 30 usable hosts alongside that sibling script's own range.
+kea_ip="${subnet_prefix}.$((subnet_base_octet + 21))"
+dhcp_pool_start="${subnet_prefix}.$((subnet_base_octet + 22))"
+dhcp_pool_end="${subnet_prefix}.$((subnet_base_octet + 27))"
+reservation_ip_a="${subnet_prefix}.$((subnet_base_octet + 28))"
+reservation_ip_b="${subnet_prefix}.$((subnet_base_octet + 29))"
 
 kea_ctrl_token="$(openssl rand -hex 32)"
 ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"
