@@ -216,6 +216,16 @@ services:
       - watchdog-status:/var/run/watchdog
       - logs-syslog-ng:/var/log/lancache-syslog-ng
       - watchdog-logs:/var/log/lancache-watchdog
+    healthcheck:
+      # Freshness-based (mtime), not just existence -- see
+      # services/watchdog/healthcheck.sh's own comment for why a stalled
+      # main loop would otherwise leave a stale-but-present status.json
+      # reading as healthy forever.
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 15s
     depends_on:
       - docker-socket-proxy
     networks:

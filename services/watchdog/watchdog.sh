@@ -20,8 +20,73 @@ PURGE_STAMP="/var/run/watchdog/purge.stamp"
 SYSLOG_ENABLED="${SYSLOG_ENABLED:-false}"
 SYSLOG_PRUNE_STAMP="/var/run/watchdog/syslog-prune.stamp"
 
-SSL_ENABLED="${SSL_ENABLED:-1}"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
 
+log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
+# Some diagnostics (resolve_cache_dir()'s fail-closed error, the CONTAINER_*
+# mismatch checks below) fire from inside `$(...)` command substitution or
+# before the main loop even starts; log()'s plain stdout `echo` would be
+# silently captured and discarded in the first case, and either way an
+# operator needs these visible regardless of how `docker logs` is piped.
+log_err() { echo "[watchdog] $(date -u +%H:%M:%S) $*" >&2; }
+
+# CHECK_INTERVAL gets the same digit-only guard the other numeric knobs
+# (CACHE_VALID_DAYS, SYSLOG_RETENTION_DAYS, SYSLOG_MAX_GB) already have --
+# unvalidated, a bad value reaches `sleep "$CHECK_INTERVAL"` under `set -e`
+# and crashes the whole daemon (crash-loop risk). A literal 0 is additionally
+# floored to 1: it would make `sleep` a no-op, turning the main loop into a
+# busy-loop hammering docker-socket-proxy every iteration -- never a sane
+# operator intent, so it gets the same treatment as an invalid value.
+case "$CHECK_INTERVAL" in
+    ''|*[!0-9]*)
+        log "Invalid CHECK_INTERVAL=${CHECK_INTERVAL}; using default 30"
+        CHECK_INTERVAL=30
+        ;;
+esac
+if [ "$CHECK_INTERVAL" -lt 1 ]; then
+    log "CHECK_INTERVAL=${CHECK_INTERVAL} is below the supported minimum (1s); using 1"
+    CHECK_INTERVAL=1
+fi
+
+# Canonical truthy-parsing contract shared with the Admin UI's env_bool()
+# (services/ui/src/config.rs). Recognizes 1/true/yes/on as truthy,
+# case-insensitively and after trimming surrounding whitespace, exactly like
+# env_bool()'s `value.trim().to_ascii_lowercase()` match. Anything else
+# (including 0/false/no/off, empty, or unrecognized garbage) is not-truthy;
+# callers combine this with their own `${VAR:-default}` fallback for the
+# "unset" case, same as env_bool()'s `unwrap_or(default)`.
+is_truthy() {
+    local v="$1"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v,,}"
+    case "$v" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# SSL_ENABLED used to require the exact literal "1", but the Admin UI's
+# env_bool("SSL_ENABLED", true) already accepts true/yes/on
+# (case-insensitive) -- SSL_ENABLED=true showed SSL mode as enabled in the
+# Admin UI while watchdog silently left dns-ssl unmonitored. Normalizing
+# once here to a canonical "1"/"0" keeps every later comparison in this file
+# (`[ "$SSL_ENABLED" = "1" ]`) unchanged.
+if is_truthy "${SSL_ENABLED:-1}"; then
+    SSL_ENABLED=1
+else
+    SSL_ENABLED=0
+fi
+
+# docker-socket-proxy.sh's HAProxy allowlist hardcodes these exact container
+# names, and every compose file's `container_name:` does too (the Admin
+# UI's docker_client.rs hardcodes them a third time) -- nothing in the stack
+# actually reads CONTAINER_PROXY/CONTAINER_DNS_STANDARD/CONTAINER_DNS_SSL to
+# rename anything. Honoring a mismatched value here would only make health
+# checks silently return "unreachable" and restarts silently 403 through the
+# proxy, not actually support renaming end-to-end. Fail loudly at startup
+# instead of pretending the knob works.
 C_PROXY="${CONTAINER_PROXY:-lancache-proxy}"
 C_DNS_STD="${CONTAINER_DNS_STANDARD:-lancache-dns-standard}"
 if [ "$SSL_ENABLED" = "1" ]; then
@@ -30,10 +95,18 @@ else
     C_DNS_SSL=""
 fi
 
-F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0
-H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
-
-log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
+if [ "$C_PROXY" != "lancache-proxy" ]; then
+    log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-proxy'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
+    exit 1
+fi
+if [ "$C_DNS_STD" != "lancache-dns-standard" ]; then
+    log_err "FATAL: CONTAINER_DNS_STANDARD=${C_DNS_STD} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-dns-standard'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_STANDARD to the default."
+    exit 1
+fi
+if [ "$SSL_ENABLED" = "1" ] && [ "$C_DNS_SSL" != "lancache-dns-ssl" ]; then
+    log_err "FATAL: CONTAINER_DNS_SSL=${C_DNS_SSL} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-dns-ssl'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
+    exit 1
+fi
 
 # Keep the watchdog on one cache path only. If an old install still carries
 # split cache vars, they must agree or the helper refuses to guess.
@@ -50,7 +123,10 @@ resolve_cache_dir() {
     fi
 
     if [ -n "$cache_std" ] && [ -n "$cache_ssl" ] && [ "$cache_std" != "$cache_ssl" ]; then
-        log "ERROR: CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
+        # log() writes to stdout, which the `CACHE_DIR="$(resolve_cache_dir)"`
+        # command substitution below captures and discards -- this fail-closed
+        # diagnostic must reach the operator, so it goes to stderr instead.
+        log_err "ERROR: CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
         exit 1
     fi
 
@@ -69,11 +145,16 @@ resolve_cache_dir() {
 
 CACHE_DIR="$(resolve_cache_dir)"
 
+CURL_MAX_TIME="${CURL_MAX_TIME:-5}"
+
 get_health() {
     local name="$1"
     # Docker socket access is routed through the narrowed proxy, so health reads
     # must stay on the allowed container-inspect endpoint rather than exec.
-    curl -sf "${DOCKER_PROXY_URL}/containers/${name}/json" 2>/dev/null \
+    # --max-time bounds a hung/unresponsive docker-socket-proxy: without it, a
+    # stalled proxy stalls this single-threaded main loop indefinitely (no
+    # further health checks, no restarts, no status.json refresh).
+    curl -sf --max-time "$CURL_MAX_TIME" "${DOCKER_PROXY_URL}/containers/${name}/json" 2>/dev/null \
         | jq -r '.State.Health.Status // "none"' 2>/dev/null \
         || echo "unreachable"
 }
@@ -83,7 +164,8 @@ restart_container() {
     log "RESTARTING $name"
     # Restart is intentionally the only mutating Docker operation watchdog uses.
     # Container creation/exec remain unavailable through the proxy allowlist.
-    curl -sf -X POST "${DOCKER_PROXY_URL}/containers/${name}/restart" >/dev/null 2>&1 \
+    # --max-time: see get_health() above -- same stalled-proxy risk applies here.
+    curl -sf --max-time "$CURL_MAX_TIME" -X POST "${DOCKER_PROXY_URL}/containers/${name}/restart" >/dev/null 2>&1 \
         || log "WARNING: restart call failed for $name"
 }
 
@@ -102,13 +184,21 @@ disk_info() {
     [ -d "$dir" ] || { printf '{"pct": 0, "status": "unknown"}'; return; }
     local pct
     # df reports the filesystem behind CACHE_DIR, which is the operator-visible
-    # capacity limit for the single shared cache path.
-    pct=$(df "$dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}') || pct=0
+    # capacity limit for the single shared cache path. -P forces POSIX output
+    # format (one line per filesystem): without it, a long device name (common
+    # for overlay/mapper devices) wraps onto its own line, and `awk 'NR==2'`
+    # then reads the wrapped device-name line instead of the real data row,
+    # leaving $5/pct empty.
+    pct=$(df -P "$dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}') || pct=0
     local status="green"
     if   [ "${pct:-0}" -ge "$DISK_ALARM_PCT" ]; then status="red"
     elif [ "${pct:-0}" -ge "$DISK_WARN_PCT"  ]; then status="yellow"
     fi
-    printf '{"pct": %s, "status": "%s"}' "$pct" "$status"
+    # ${pct:-0}, not $pct: an empty pct (df failure, unexpected output shape)
+    # must still produce valid JSON. Interpolating a raw empty "$pct" here
+    # emitted `{"pct": , "status": ...}` -- syntactically invalid JSON that
+    # corrupted the whole status.json for every reader (Admin UI dashboard).
+    printf '{"pct": %s, "status": "%s"}' "${pct:-0}" "$status"
 }
 
 # Called once per monitored container each loop iteration. `_fcount` and
@@ -208,16 +298,46 @@ maybe_purge() {
             ;;
     esac
 
-    log "Daily purge: removing cache files older than ${CACHE_VALID_DAYS} days"
-    if [ -d "$CACHE_DIR" ]; then
-        local count=0
-        while IFS= read -r -d '' file; do
-            if [ -f "$file" ] && rm -- "$file"; then
-                count=$(( count + 1 ))
-            fi
-        done < <(find "$CACHE_DIR" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 2>/dev/null)
-        log "Purged $count files from $CACHE_DIR"
+    # Fail-closed on a missing CACHE_DIR, matching maybe_prune_syslog()'s
+    # missing-log_root pattern: return BEFORE writing the stamp, so the next
+    # cycle retries instead of the rate-limit stamp claiming a purge ran when
+    # it was actually skipped entirely.
+    if [ ! -d "$CACHE_DIR" ]; then
+        log "CACHE_DIR=${CACHE_DIR} does not exist; skipping purge (stamp left untouched so this retries next cycle)"
+        return
     fi
+
+    log "Daily purge: removing cache files older than ${CACHE_VALID_DAYS} days"
+
+    # mktemp scan+err files, not `find ... 2>/dev/null` piped straight into
+    # the read loop: the old pattern silently swallowed real find errors
+    # (permission denied, I/O error) the same way maybe_prune_syslog()'s age
+    # pass used to before that function's own fix -- mirror its corrected
+    # pattern here instead of re-introducing the same swallowed-error bug.
+    local count=0
+    local purge_scan purge_err
+    purge_scan="$(mktemp)"
+    purge_err="$(mktemp)"
+    if ! find "$CACHE_DIR" -type f -mtime "+${CACHE_VALID_DAYS}" -print0 > "$purge_scan" 2>"$purge_err"; then
+        # Non-fatal `return` (not `return 1`) under `set -e`: this function is
+        # called as a bare statement from the main loop, so a nonzero return
+        # would kill the whole watchdog daemon on a transient find failure.
+        # The stamp is intentionally NOT updated on this path either, for the
+        # same reason as the missing-CACHE_DIR case above.
+        log "ERROR: find failed while scanning $CACHE_DIR for cache purge: $(cat "$purge_err")"
+        rm -f "$purge_scan" "$purge_err"
+        return
+    fi
+    rm -f "$purge_err"
+
+    while IFS= read -r -d '' file; do
+        if [ -f "$file" ] && rm -- "$file"; then
+            count=$(( count + 1 ))
+        fi
+    done < "$purge_scan"
+    rm -f "$purge_scan"
+    log "Purged $count files from $CACHE_DIR"
+
     mkdir -p "$(dirname "$PURGE_STAMP")"
     echo "$now" > "$PURGE_STAMP"
 }
@@ -446,5 +566,14 @@ while true; do
     write_status
     maybe_purge
     maybe_prune_syslog
+    # maybe_purge()/maybe_prune_syslog() only actually scan once every ~24h,
+    # but that scan can legitimately run for minutes against a large cache or
+    # syslog tree -- without this second write, status.json's mtime would go
+    # stale for the whole scan, and the freshness-based healthcheck (see
+    # deploy/*/docker-compose.yml) would flap unhealthy on a watchdog that is
+    # working exactly as intended. Re-running write_status() here refreshes
+    # both the timestamp and the disk-usage figures immediately after a
+    # purge, instead of waiting up to CHECK_INTERVAL for the next cycle.
+    write_status
     sleep "$CHECK_INTERVAL"
 done

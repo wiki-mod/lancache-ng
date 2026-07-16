@@ -482,6 +482,62 @@ is real, live, running code, not just work sitting in source control.
   full-setup validation stack" step in `full-setup-deep-validate.yml`,
   `full-setup-validate.yml`, and `build-push.yml`. CI-only, no
   production/runtime behavior change.
+- Fixed a bundle of four watchdog.sh defects plus two related divergences
+  found via the #849 vacuum-first bug hunt (#872): `disk_info()` was calling
+  `df` without `-P`, so a wrapped long-device-name line made `awk 'NR==2'`
+  read the wrong row and the JSON percentage come back empty; the printf
+  that assembled the JSON then interpolated the raw (possibly empty)
+  `$pct` instead of `${pct:-0}`, so a single empty read produced
+  syntactically invalid JSON (`{"pct": , ...}`) that corrupted the whole
+  `status.json` for every reader, including the Admin UI dashboard. Fixed
+  both: `df -P` plus `${pct:-0}` in the printf. Separately, `get_health()`
+  and `restart_container()`'s `curl -sf` calls had no `--max-time`, so a
+  hung/unresponsive docker-socket-proxy could stall the entire
+  single-threaded main loop indefinitely with no way for Docker or an
+  operator to notice; both now pass `--max-time` (`CURL_MAX_TIME`,
+  default 5s). `deploy/full-setup` already had a working
+  `test -f status.json` healthcheck for watchdog, but dev/prod/quickstart
+  had none at all -- a new `services/watchdog/healthcheck.sh`, shipped in
+  the image and wired into all four compose files (upgrading full-setup's
+  too), checks the file's *mtime* rather than mere existence (3x
+  `CHECK_INTERVAL`, floored at 60s), since a stalled main loop leaves a
+  stale-but-present file that an existence check would read as healthy
+  forever; the main loop also now re-runs `write_status()` a second time
+  after `maybe_purge()`/`maybe_prune_syslog()` so the once-daily long-running
+  purge scan can't age the file out on its own and cause a false-positive
+  unhealthy flap. `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+  `CONTAINER_DNS_SSL` looked like supported renaming knobs, but
+  `scripts/docker-socket-proxy.sh`'s HAProxy allowlist and the Admin UI's
+  `docker_client.rs` both hardcode the same three default container names
+  and read neither knob at all -- a rename silently made every health check
+  for that container return "unreachable" and every restart 403 through the
+  proxy. Since wiring real renaming support end-to-end would require
+  changes to the proxy allowlist and the Admin UI (out of scope for a
+  watchdog.sh hardening pass), watchdog now fails loudly at startup instead
+  on a mismatch. `maybe_purge()` used to stamp the daily-purge rate-limit
+  file unconditionally even when `CACHE_DIR` didn't exist (the purge block
+  was silently skipped with no log line, yet the stamp claimed it ran) and
+  swallowed real `find` errors via `2>/dev/null`, unlike the sibling
+  `maybe_prune_syslog()`, which logs them -- both now match that sibling's
+  pattern: an early `return` before any stamp write on a missing
+  `CACHE_DIR`, and `find` failures captured and logged instead of hidden.
+  Also fixed: `CHECK_INTERVAL` was unvalidated while every other numeric
+  knob got a `case ''|*[!0-9]*)` guard (a bad value reaches `sleep` under
+  `set -e` and crashes the daemon); it now gets the same guard plus a floor
+  of 1 (a literal 0 would busy-loop). `SSL_ENABLED` used to require the
+  exact literal `"1"`, diverging from the Admin UI's
+  `env_bool("SSL_ENABLED", true)`, which also accepts `true`/`yes`/`on`
+  case-insensitively -- `SSL_ENABLED=true` silently left dns-ssl
+  unmonitored; a new `is_truthy()` helper (matching #874's identically-named
+  fix for `SYSLOG_ENABLED`) normalizes it to a canonical `1`/`0` at startup.
+  Finally, `resolve_cache_dir()`'s fail-closed error for a legacy divergent
+  `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` misconfiguration was logged via
+  `log()` to stdout, which the `CACHE_DIR="$(resolve_cache_dir)"` command
+  substitution silently captured and discarded -- it now goes to stderr via
+  a new `log_err()` helper. New bats coverage: `watchdog_disk_info.bats`,
+  `watchdog_purge.bats` (no dedicated test file existed for `maybe_purge()`
+  before this fix), `watchdog_config_validation.bats`, and
+  `watchdog_curl_timeout.bats`.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
