@@ -361,7 +361,9 @@ is real, live, running code, not just work sitting in source control.
   additive database migration and cannot authenticate until it is
   re-registered (`setup.sh secondary ...`) or its credential is rotated from
   the Admin UI's Secondaries page.
-
+- Recorded completion of the #135 review-gate cleanup stream so remaining
+  work can continue as ordinary `v0.2.0` development instead of blocking the
+  closed review umbrella.
 - CI: `build-push`, `codeql`, and `build-tools` workflows now also trigger on
   PRs/pushes targeting `v0.2.0`, not just `master` (#503).
 - The CodeQL Rust job now reports CodeQL's own extraction-quality
