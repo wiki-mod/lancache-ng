@@ -560,6 +560,20 @@ services:
                   # listener and needs to publish the post-rollback
                   # cache-flush too.
                   "lancache.dns.flush",
+                  # publish_rollback_records (rollback_listener.rs, called
+                  # for zone == "lan.") republishes restored records on
+                  # this subject under whichever identity runs the rollback
+                  # listener -- the writer identity above already had this;
+                  # dns-ssl's replica identity did not. Not reachable today
+                  # (DNS_ROLLBACK_URL always defaults to dns-standard:8083),
+                  # but if it were ever pointed at dns-ssl, the republish
+                  # would be silently denied and secondaries would not
+                  # converge after a lan. rollback. Deliberate tradeoff,
+                  # accepted by the maintainer: widens what a compromised
+                  # dns-ssl credential could do (forge/replicate DNS records
+                  # via this subject, not just signal a cache-flush) rather
+                  # than adding a fail-closed guard in the listener itself.
+                  "lancache.dns.record",
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
                   "$$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",

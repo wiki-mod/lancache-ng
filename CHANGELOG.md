@@ -503,6 +503,33 @@ is real, live, running code, not just work sitting in source control.
   lived in), so the new assertion is what proves the response's
   success/failure signal is really wired to the live per-name
   publish/ack loop, not just correctly shaped in isolation.
+- Fixed the PowerDNS zone/record rollback listener's `lan.`-zone record
+  republish being silently deniable by NATS permissions on `dns-ssl`
+  (#906, a follow-up to #867/#882's flush-permission fix above):
+  `rollback_listener.rs::publish_rollback_records` (called for `zone ==
+  "lan."`) publishes restored records on `lancache.dns.record` under
+  whichever container's own identity runs the rollback listener
+  (`NATS_DNS_WRITER_USER` on `dns-standard`, `NATS_DNS_REPLICA_USER` on
+  `dns-ssl`). The writer identity already held this subject; the replica
+  identity did not. Not reachable on the default `DNS_ROLLBACK_URL`
+  (`dns-standard:8083` everywhere), but the identity's permissions must be
+  correct regardless of which URL is configured. Fixed by granting
+  `NATS_DNS_REPLICA_USER` `publish` on `lancache.dns.record` in
+  `services/nats/nats.conf` and the byte-identical generators in
+  `deploy/dev`, `deploy/prod`, `deploy/quickstart/docker-compose.yml`
+  (`deploy/full-setup/docker-compose.yml` left unchanged, same as #882 --
+  its equivalent identities carry no `publish` block at all and are
+  already unrestricted). This is a deliberate security-surface tradeoff:
+  a compromised dns-ssl NATS credential can now forge or replicate `lan.`
+  DNS record changes, not just signal a cache-flush, accepted in favor of
+  keeping the rollback path correct independent of which DNS node runs it
+  rather than adding a fail-closed guard in the listener itself. Added a
+  bats regression test mirroring the existing flush-permission one,
+  asserting the real generated `nats.conf` grants both identities
+  `publish` on `lancache.dns.record` across dev/prod/quickstart. Also
+  updated `docs/threat-model.md` and `docs/known-good-config-snapshots.md`,
+  which previously documented the DNS replica identity as unable to
+  publish DNS records at all.
 - Fixed `domains.rs`'s `add_dns`/`remove_dns` Admin UI handlers reporting
   success to the operator even when the underlying CDN domain file write
   failed (#875): both handlers logged the error but still returned the

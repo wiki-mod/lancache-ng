@@ -274,11 +274,23 @@ record changes, or subscribes to read cache/DNS metadata.
     it needs; subscribe to `lancache.dns.>`.
   - **DNS replica** (the primary's own co-located dns-ssl container only —
     there is always exactly one) — consume-only JetStream permissions, plus
-    one narrow exception: `publish` on `lancache.dns.flush` only, so its own
-    `nats-subscriber` can signal a post-rollback recursor cache-flush (see
-    `services/dns/nats-subscriber/src/rollback_listener.rs`). It still
-    cannot publish `lancache.dns.record` — it cannot forge or replicate DNS
-    record changes.
+    two narrow exceptions on top: `publish` on `lancache.dns.flush`, so its
+    own `nats-subscriber` can signal a post-rollback recursor cache-flush,
+    and (issue #906, a deliberate widening beyond the original least-
+    privilege scope) `publish` on `lancache.dns.record`, so the same
+    `rollback_listener.rs`'s `publish_rollback_records` can republish
+    restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
+    dns-ssl instead of its default `dns-standard:8083` (not the case in any
+    shipped deployment today, but the identity's permissions must hold
+    regardless of which URL an operator configures). **Accepted tradeoff**:
+    unlike the narrower flush-only grant this replaces, a compromised
+    dns-ssl NATS credential can now forge or replicate `lan.` DNS record
+    changes too, not merely trigger a cache-flush signal — this was a
+    conscious maintainer decision (widen the permission) over the
+    alternative of making the rollback listener itself fail closed when it
+    lacks this permission, made explicitly to keep the rollback path
+    working correctly regardless of which DNS node runs it, rather than
+    depending on `DNS_ROLLBACK_URL`'s default never changing.
   - **Auth-callout responder** (the Admin UI itself) — no subject permissions
     of its own; only recognized by name so its own connection to answer
     `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to
