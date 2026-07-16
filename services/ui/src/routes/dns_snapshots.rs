@@ -150,7 +150,56 @@ pub async fn rollback_zone_snapshot(
         .await;
 
     match result {
-        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) if resp.status().is_success() => {
+            // A 2xx here only means `nats-subscriber` applied the rollback
+            // PATCH and returned a response -- `rollback_response_body`
+            // (rollback_listener.rs) can still carry `flush_ok: false` /
+            // `zone_check_passed: false` in that same 2xx body when the
+            // post-rollback cache-flush or the `pdnsutil check-zone`
+            // confirmation failed. This still redirects as success (no
+            // flash-message/banner mechanism exists in this UI today to
+            // surface a partial failure inline -- adding one is a real
+            // follow-up, not done here), but the body is now at least
+            // parsed and logged so the operator's own log tail or `journalctl`
+            // shows exactly which names failed to flush, instead of that
+            // signal being read from the response and then thrown away
+            // entirely.
+            match resp.json::<Value>().await {
+                Ok(body) => {
+                    let flush_ok = body
+                        .get("flush_ok")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    let zone_check_passed = body
+                        .get("zone_check_passed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if !flush_ok {
+                        tracing::error!(
+                            zone = %form.zone,
+                            snapshot_id = %form.snapshot_id,
+                            flush_failed_names = %body.get("flush_failed_names").cloned().unwrap_or(json!([])),
+                            "zone rollback applied but the post-rollback cache-flush failed for one or more names -- affected clients may see stale answers until TTL expiry"
+                        );
+                    }
+                    if !zone_check_passed {
+                        tracing::error!(
+                            zone = %form.zone,
+                            snapshot_id = %form.snapshot_id,
+                            "zone rollback applied but pdnsutil check-zone failed post-rollback -- inspect the zone manually"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        zone = %form.zone,
+                        snapshot_id = %form.snapshot_id,
+                        "zone rollback succeeded but its response body could not be decoded, so flush/zone-check status is unknown"
+                    );
+                }
+            }
+        }
         Ok(resp) => {
             tracing::error!(
                 status = %resp.status(),

@@ -531,6 +531,14 @@ services:
               permissions = {
                 publish = [
                   "lancache.dns.record",
+                  # The zone-rollback listener (rollback_listener.rs,
+                  # dns-standard's own identity) publishes a post-rollback
+                  # cache-flush on this subject. Without it here, the
+                  # publish was silently denied by nats-server and the
+                  # recursor never actually flushed the stale
+                  # rolled-back-away answer -- see that file's
+                  # rollback_handler doc comment.
+                  "lancache.dns.flush",
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
                   "$$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
@@ -547,6 +555,11 @@ services:
               password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
+                  # Same reasoning as the writer identity above --
+                  # dns-ssl's own nats-subscriber runs the same rollback
+                  # listener and needs to publish the post-rollback
+                  # cache-flush too.
+                  "lancache.dns.flush",
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
                   "$$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",

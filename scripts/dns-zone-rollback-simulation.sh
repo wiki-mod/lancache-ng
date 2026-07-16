@@ -22,6 +22,20 @@
 # rollback (a real `dig` against the same recursor that had the pre-
 # rollback value cached with a real TTL), not just that PowerDNS's
 # authoritative data changed underneath it.
+#
+# This stack's dns-standard/dns-ssl NATS identities carry no `publish`
+# block at all in deploy/full-setup/docker-compose.yml (the compose file
+# this script drives), which nats-server treats as unrestricted publish --
+# unlike the restrictive dev/prod/quickstart allow-lists that actually
+# shipped the missing-publish-on-lancache.dns.flush bug. So the dig-based
+# flush proof below would have passed here even before that fix; it does
+# not by itself prove the permission fix. The explicit `flush_ok` assertion
+# added below IS a real
+# regression guard though: it proves the response body's own
+# success/failure signal (rollback_listener.rs's `rollback_response_body`)
+# is actually wired to the real per-name publish/ack loop against a live
+# NATS server, which the crate's unit tests (fed a hand-built
+# flush_failed_names) cannot prove on their own.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -297,7 +311,21 @@ if [[ "$changed_names" != *"$test_fqdn"* ]]; then
     echo "::error::Rollback response did not list $test_fqdn among changed_names: $rollback_response" >&2
     exit 1
 fi
-echo "Rollback applied; changed_names includes $test_fqdn."
+# Assert the response's OWN flush signal, not just that the flush happened
+# to work (verify_record_resolves below proves that separately via a real
+# dig). Before this fix, this identity's NATS publish permission on
+# lancache.dns.flush was silently denied, and this field is the only thing
+# that would have exposed that from the response itself; `flush_ok` and
+# `flush_failed_names` are the pure-function-tested fields in
+# rollback_listener.rs::rollback_response_body, so this line is what proves
+# the loop-that-publishes actually wires into the response that reports it,
+# not just that the shape is right in isolation.
+flush_ok="$(jq -r '.flush_ok // false' <<<"$rollback_response")"
+if [[ "$flush_ok" != "true" ]]; then
+    echo "::error::POST /rollback did not report flush_ok=true: $rollback_response" >&2
+    exit 1
+fi
+echo "Rollback applied; changed_names includes $test_fqdn; flush_ok=true."
 
 echo "== Verifying the record actually rolled back to $old_content via a real DNS query against dns-standard's recursor (this also proves the post-rollback cache flush worked -- see verify_record_resolves's comment) =="
 verify_record_resolves "$old_content"

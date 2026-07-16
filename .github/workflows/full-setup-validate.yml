@@ -960,13 +960,21 @@ jobs:
     # workflow's serial chain) for the same reason every other job here
     # chains onto the previous one: one job at a time on the shared
     # self-hosted runner tier.
+    #
+    # Wrapped in run-in-validation-subnet.sh (issue #820): this job used to
+    # only thread COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT at job level (now
+    # removed, superseded by the wrapper's own export), never
+    # VALIDATION_SUBNET/GATEWAY/*_IP -- so its own `docker compose up ui`
+    # call against deploy/full-setup/docker-compose.yml always fell back to
+    # the hardcoded 172.30.99.0/27 default regardless of what
+    # compute-validation-network derived for this run, exactly the same gap
+    # nats-auth-callout-simulation's own comment above documented and fixed.
+    # Confirmed as a real, reproduced failure: this exact job died on "Pool
+    # overlaps" for a concurrent run's _validation network.
     name: Admin UI reachability during dependency crash-loop
     needs: [compute-validation-network, dhcp-kea-ctrl-agent-mutation-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -988,7 +996,9 @@ jobs:
           LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/ui-reachability-crash-loop-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it rather than racing the shared job-level subnet.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-reachability-crash-loop-simulation.sh
 
   setup-reset-kea-config-simulation:
     # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
@@ -1000,13 +1010,21 @@ jobs:
     # ui-reachability-crash-loop-simulation (the current last job in this
     # workflow's serial chain) for the same one-job-at-a-time reason every
     # other job here chains onto the previous one.
+    #
+    # Wrapped in run-in-validation-subnet.sh (issue #820): this job used to
+    # only thread COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT at job level (now
+    # removed, superseded by the wrapper's own export), never
+    # VALIDATION_SUBNET/GATEWAY/*_IP, even though the script itself
+    # (scripts/setup-reset-kea-config-simulation.sh) derives its
+    # Kea/reservation IPs directly from $VALIDATION_SUBNET -- so it always
+    # fell back to the hardcoded 172.30.99.0/27 default regardless of what
+    # compute-validation-network derived for this run. Confirmed as a real,
+    # reproduced failure: this exact job died on "Pool overlaps" for a
+    # concurrent run's _validation network.
     name: setup.sh reset-to-last-known-good-config (Kea) simulation
     needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -1026,4 +1044,6 @@ jobs:
           LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/setup-reset-kea-config-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it rather than racing the shared job-level subnet.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
