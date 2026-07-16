@@ -1145,6 +1145,20 @@ is real, live, running code, not just work sitting in source control.
   the same call (this project's own convention), a real regression for no
   registry-safety benefit since PR runs never reach `promote`/`release`
   anyway.
+- Clarified the PR template's `## Changelog` heading to explicitly say not to
+  edit `CHANGELOG.md` in the same PR (#889): every simultaneously-open PR
+  appending to this same section's heading guaranteed a merge conflict with
+  every other one, which is exactly what motivated this entry to be added
+  the old way one more time. Added `scripts/collect-changelog-entries.sh`,
+  a maintainer-invoked, read-only aid that gathers merged PRs' `## Changelog`
+  body sections since the last release so they can be hand-organized into
+  this file at release time, per CONTRIBUTING.md's existing "Releasing
+  Changes to CHANGELOG.md" process. Evaluated GitHub's native
+  `--generate-notes`/`.github/release.yml` and `release-drafter` as
+  off-the-shelf alternatives; neither can pull a PR's full body text (both
+  summarize by title/label only), which would have been a real regression
+  against this file's long-form, prose-heavy entry style, so a small custom
+  script was written instead.
 
 ## [0.1.0] - 2026-07-06
 
