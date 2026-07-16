@@ -87,6 +87,25 @@ PROMOTE_LOCK_REF="refs/promote-lock/global"
 # construct per attempt.
 PROMOTE_LOCK_EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+# promote_lock_create_commit <holder_note>
+# Creates the lock commit object (empty tree, <holder_note> as the message)
+# and prints its SHA. Author/committer identity is supplied explicitly via
+# environment overrides rather than relying on any ambient `git config
+# user.name`/`user.email` -- confirmed for real that this cannot be assumed:
+# the build-tools container `promote`/`backfill-latest`'s own bats coverage
+# runs in has none configured at all, and `git commit-tree` (like `git
+# commit`) refuses with "Please tell me who you are" without one. Using a
+# fixed, obviously-synthetic identity here (not a real person/bot account)
+# keeps this function correct on any host or container, with nothing to
+# configure ahead of time.
+promote_lock_create_commit() {
+    local holder_note="$1"
+
+    GIT_AUTHOR_NAME="promote-lock" GIT_AUTHOR_EMAIL="promote-lock@lancache-ng.invalid" \
+    GIT_COMMITTER_NAME="promote-lock" GIT_COMMITTER_EMAIL="promote-lock@lancache-ng.invalid" \
+        git commit-tree "$PROMOTE_LOCK_EMPTY_TREE" -m "$holder_note" 2>/dev/null
+}
+
 # promote_lock_holder_note <run_id> <run_attempt> <runner_name>
 # Builds the single-line commit message identifying a lock holder. Kept as
 # its own function so both the acquire path (writing the note) and the
@@ -145,7 +164,7 @@ promote_lock_try_acquire() {
                 # (git's ref-creation push is a compare-against-zero
                 # operation), so two simultaneous creators can never both
                 # win.
-                commit_sha="$(git commit-tree "$PROMOTE_LOCK_EMPTY_TREE" -m "$holder_note" 2>/dev/null)" || return 3
+                commit_sha="$(promote_lock_create_commit "$holder_note")" || return 3
                 if git push "$remote" "${commit_sha}:${lock_ref}" >/dev/null 2>&1; then
                     return 0
                 fi
@@ -188,7 +207,7 @@ promote_lock_try_acquire() {
     # read -- if another waiter's takeover lands first, our expected-old-sha
     # will no longer match and this push fails safely instead of clobbering
     # the new, legitimate holder.
-    commit_sha="$(git commit-tree "$PROMOTE_LOCK_EMPTY_TREE" -m "$holder_note" 2>/dev/null)" || return 3
+    commit_sha="$(promote_lock_create_commit "$holder_note")" || return 3
     if git push --force-with-lease="${lock_ref}:${current_sha}" "$remote" "${commit_sha}:${lock_ref}" >/dev/null 2>&1; then
         echo "::warning::promote-lock: took over a stale lock (previous holder: '${previous_note}', age ${age}s >= ${stale_after}s threshold)." >&2
         return 0

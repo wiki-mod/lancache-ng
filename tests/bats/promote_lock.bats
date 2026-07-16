@@ -30,7 +30,20 @@ setup() {
     git init --quiet --bare "$bare_repo"
 
     git clone --quiet "$bare_repo" "$clone_a"
-    (cd "$clone_a" && git commit --quiet --allow-empty -m init && git push --quiet origin HEAD:refs/heads/master)
+    # Repo-local identity (not --global): a CI runner/container has no
+    # configured git user by default (confirmed for real: the build-tools
+    # container's `git commit` fails with "Please tell me who you are"),
+    # and this whole file's promote_lock_try_acquire/_release calls only
+    # ever run `git commit-tree` (which needs no identity at all, matching
+    # the library's own real production usage), so this init-commit is the
+    # ONLY place in this suite that ever needs one.
+    (
+        cd "$clone_a" || exit 1
+        git config user.email "promote-lock-bats@example.invalid"
+        git config user.name "promote-lock-bats"
+        git commit --quiet --allow-empty -m init
+        git push --quiet origin HEAD:refs/heads/master
+    )
 
     git clone --quiet "$bare_repo" "$clone_b"
 }
