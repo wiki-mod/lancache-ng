@@ -49,6 +49,22 @@ lancache_gen_base64_32() {
     head -c 32 /dev/urandom | base64 | tr -d '\n'
 }
 
+# secret_is_placeholder <value>
+# True (returns 0) when the value is empty or one of the universal checked-in
+# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
+# The split-brain invariant requires every consumer of a given secret to decide
+# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
+# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
+# so routing their placeholder decision through this one definition keeps them in
+# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
+# dev tokens) match those in addition to this.
+secret_is_placeholder() {
+    case "${1:-}" in
+        "" | CHANGE_ME* | changeme* | YOUR_* | *_HERE) return 0 ;;
+    esac
+    return 1
+}
+
 # resolve_shared_secret <name> <current_value_or_empty> <gen_func>
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
@@ -183,7 +199,19 @@ LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
 NATS_USER="${NATS_USER:-}"
+# Resolve the shared NATS password (issue #858). The nats server and this dns
+# client must agree on the password for this container's role (dns-standard is
+# the writer, dns-ssl the replica). NATS_PASSWORD_SHARED_SECRET names the
+# shared-secrets file for that role; when set, an empty/placeholder NATS_PASSWORD
+# is replaced by the first-writer-wins shared value. When unset (e.g. a remote
+# secondary whose credentials come from setup.sh registration, with no shared
+# volume) NATS_PASSWORD is left exactly as configured.
 NATS_PASSWORD="${NATS_PASSWORD:-}"
+if [ -n "${NATS_PASSWORD_SHARED_SECRET:-}" ]; then
+    _nats_pw_cfg="$NATS_PASSWORD"
+    if secret_is_placeholder "$_nats_pw_cfg"; then _nats_pw_cfg=""; fi
+    NATS_PASSWORD="$(resolve_shared_secret "$NATS_PASSWORD_SHARED_SECRET" "$_nats_pw_cfg" lancache_gen_hex32)" || NATS_PASSWORD="$_nats_pw_cfg"
+fi
 NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"

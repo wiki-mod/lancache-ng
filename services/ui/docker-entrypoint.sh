@@ -44,6 +44,22 @@ lancache_gen_base64_32() {
     head -c 32 /dev/urandom | base64 | tr -d '\n'
 }
 
+# secret_is_placeholder <value>
+# True (returns 0) when the value is empty or one of the universal checked-in
+# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
+# The split-brain invariant requires every consumer of a given secret to decide
+# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
+# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
+# so routing their placeholder decision through this one definition keeps them in
+# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
+# dev tokens) match those in addition to this.
+secret_is_placeholder() {
+    case "${1:-}" in
+        "" | CHANGE_ME* | changeme* | YOUR_* | *_HERE) return 0 ;;
+    esac
+    return 1
+}
+
 # resolve_shared_secret <name> <current_value_or_empty> <gen_func>
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
@@ -135,6 +151,24 @@ if [ "$(id -u)" = "0" ]; then
     if _ui_dhcp_tok="$(resolve_shared_secret kea-ctrl-token "$_ui_dhcp_tok" lancache_gen_hex32)"; then
         DHCP_API_TOKEN="$_ui_dhcp_tok"
         export DHCP_API_TOKEN
+    fi
+
+    # NATS credentials the UI connects with: NATS_UI_PASSWORD (record/flush
+    # publisher) and NATS_CALLOUT_PASSWORD (the auth-callout responder's own
+    # static bypass identity). Both are also written into nats-server's static
+    # user list by the nats bootstrap; resolving them from the same shared files
+    # keeps the UI and the server in lockstep.
+    _ui_nats_ui_cfg="${NATS_UI_PASSWORD:-}"
+    if secret_is_placeholder "$_ui_nats_ui_cfg"; then _ui_nats_ui_cfg=""; fi
+    if _ui_nats_ui_pw="$(resolve_shared_secret nats-ui-password "$_ui_nats_ui_cfg" lancache_gen_hex32)"; then
+        NATS_UI_PASSWORD="$_ui_nats_ui_pw"
+        export NATS_UI_PASSWORD
+    fi
+    _ui_nats_callout_cfg="${NATS_CALLOUT_PASSWORD:-}"
+    if secret_is_placeholder "$_ui_nats_callout_cfg"; then _ui_nats_callout_cfg=""; fi
+    if _ui_nats_callout_pw="$(resolve_shared_secret nats-callout-password "$_ui_nats_callout_cfg" lancache_gen_hex32)"; then
+        NATS_CALLOUT_PASSWORD="$_ui_nats_callout_pw"
+        export NATS_CALLOUT_PASSWORD
     fi
 fi
 

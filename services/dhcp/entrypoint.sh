@@ -47,6 +47,22 @@ lancache_gen_base64_32() {
     head -c 32 /dev/urandom | base64 | tr -d '\n'
 }
 
+# secret_is_placeholder <value>
+# True (returns 0) when the value is empty or one of the universal checked-in
+# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
+# The split-brain invariant requires every consumer of a given secret to decide
+# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
+# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
+# so routing their placeholder decision through this one definition keeps them in
+# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
+# dev tokens) match those in addition to this.
+secret_is_placeholder() {
+    case "${1:-}" in
+        "" | CHANGE_ME* | changeme* | YOUR_* | *_HERE) return 0 ;;
+    esac
+    return 1
+}
+
 # resolve_shared_secret <name> <current_value_or_empty> <gen_func>
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, prints it and returns 0: an

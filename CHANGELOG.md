@@ -414,8 +414,10 @@ is real, live, running code, not just work sitting in source control.
 
 - Generalized the single-consumer secret auto-generation from PR #855 into a
   reusable **shared-secret bootstrap** for handshake secrets that multiple
-  independent containers must agree on (#858). `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
-  and `DDNS_TSIG_KEY` are now resolved through a shared `shared-secrets` volume:
+  independent containers must agree on (#858). All seven such secrets --
+  `PDNS_API_KEY`, `KEA_CTRL_TOKEN`, `DDNS_TSIG_KEY`, and the four
+  `NATS_*_PASSWORD` values (UI, DNS-writer, DNS-replica, auth-callout) -- are now
+  resolved through a shared `shared-secrets` volume:
   an operator/`setup.sh` value in `.env` always wins untouched, but if a value is
   ever left empty or a checked-in placeholder (a partially-completed migration, a
   hand-blanked `.env`, a generation bug), the first container to boot generates it

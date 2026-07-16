@@ -103,6 +103,20 @@ services:
     command:
       - |
         set -e
+        # Shared-secret bootstrap (#858): resolve the four NATS_*_PASSWORD
+        # handshake secrets from the shared-secrets volume so nats-server and its
+        # clients (Admin UI, dns writer/replica) agree even when .env left them
+        # empty/placeholder. Sources the same tested helper the dns/dhcp/ui
+        # entrypoints embed (mounted read-only below).
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        if secret_is_placeholder "$$NATS_UI_PASSWORD"; then NATS_UI_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-ui-password "$$NATS_UI_PASSWORD" lancache_gen_hex32)"; then NATS_UI_PASSWORD="$$_v"; fi
+        if secret_is_placeholder "$$NATS_DNS_WRITER_PASSWORD"; then NATS_DNS_WRITER_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-dns-writer-password "$$NATS_DNS_WRITER_PASSWORD" lancache_gen_hex32)"; then NATS_DNS_WRITER_PASSWORD="$$_v"; fi
+        if secret_is_placeholder "$$NATS_DNS_REPLICA_PASSWORD"; then NATS_DNS_REPLICA_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-dns-replica-password "$$NATS_DNS_REPLICA_PASSWORD" lancache_gen_hex32)"; then NATS_DNS_REPLICA_PASSWORD="$$_v"; fi
+        if secret_is_placeholder "$$NATS_CALLOUT_PASSWORD"; then NATS_CALLOUT_PASSWORD=""; fi
+        if _v="$$(resolve_shared_secret nats-callout-password "$$NATS_CALLOUT_PASSWORD" lancache_gen_hex32)"; then NATS_CALLOUT_PASSWORD="$$_v"; fi
         mkdir -p /etc/nats
         mkdir -p /var/log/lancache-nats
         escape_sed() {
@@ -237,18 +251,22 @@ services:
         exec nats-server -c /etc/nats/nats.conf
     environment:
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
-      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
+      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
-      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
+      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
-      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       # The auth-callout responder's static bypass identity. MUST match the ui
       # service's NATS_CALLOUT_USER/PASSWORD (same compose vars): the ui process
       # connects the responder with these creds and nats-server authenticates it
       # against the static user this entrypoint writes above (issue #811 / #583).
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
-      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins NATS_*_PASSWORD, plus the
+      # canonical helper (installed into ./scripts by setup.sh) sourced above.
+      - shared-secrets:/var/lib/lancache-secrets
+      - ./scripts/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - nats-data:/data
       - nats-conf:/etc/nats
       # Central logging pipeline (#633): this entrypoint's nats.conf sets
@@ -941,7 +959,10 @@ services:
       - LOG_QUERIES=0
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
-      - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
+      - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
+      # Shared-secret bootstrap (#858): resolve NATS_PASSWORD against this role's
+      # shared file so it matches the value the nats server generates.
+      - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
       - PDNS_API_KEY=${PDNS_API_KEY:-}
@@ -992,7 +1013,10 @@ services:
       - LOG_QUERIES=0
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
-      - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
+      # Shared-secret bootstrap (#858): resolve NATS_PASSWORD against this role's
+      # shared file so it matches the value the nats server generates.
+      - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
       - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
@@ -1293,13 +1317,13 @@ services:
       - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
       - NATS_URL=nats://nats:4222
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
-      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
+      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
-      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
+      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
-      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
-      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082

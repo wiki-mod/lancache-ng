@@ -55,6 +55,17 @@ teardown() {
     [ "$decoded_len" -eq 32 ]
 }
 
+@test "secret_is_placeholder matches empty and universal placeholders, not real values" {
+    for p in "" "CHANGE_ME_X" "changeme-thing" "YOUR_TOKEN_HERE" "anything_HERE"; do
+        run secret_is_placeholder "$p"
+        [ "$status" -eq 0 ] || { echo "expected placeholder: '$p'"; false; }
+    done
+    for real in "a-real-64-hex-value" "lancache-nats-ui-dev-secret" "validation-ui-password"; do
+        run secret_is_placeholder "$real"
+        [ "$status" -ne 0 ] || { echo "wrongly flagged real value as placeholder: '$real'"; false; }
+    done
+}
+
 @test "concurrent first-writers converge on ONE shared value (no split-brain)" {
     mkdir -p "$TEST_DIR/out"
     workers=20
