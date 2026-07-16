@@ -40,6 +40,14 @@ on:
 
 permissions:
   contents: read
+  # Workflow-level floor for pull-requests: a job's own `permissions:` block
+  # can only NARROW this, never widen it (#903 follow-up -- pr-template-check
+  # and pr-template-check-hosted added `pull-requests: read` at the job level
+  # to fetch the PR body live via `gh pr view`, but without it granted here
+  # too, that job-level grant was silently capped back down to nothing,
+  # exactly the same class of permissions-widening mistake already documented
+  # for id-token/attestations/artifact-metadata in build-tools.yml).
+  pull-requests: read
 
 concurrency:
   # Push/tag events use a run_id-suffixed key instead of the old
