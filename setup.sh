@@ -4856,7 +4856,16 @@ EOF
     SECONDARY_RESPONSE_FILE=""
     trap - EXIT
 
-    if [[ ! "$http_status" =~ ^2 ]]; then
+    if [[ "$http_status" = "503" ]]; then
+        # Issue #866: the primary's register_secondary refuses with 503,
+        # specifically (not a generic 4xx), when it has no genuinely
+        # reachable NATS URL to hand out -- neither NATS_BIND_IP nor
+        # NATS_ADVERTISE_URL is configured on the primary. This is not a
+        # problem with this command's own arguments, so give the operator
+        # the actual fix instead of the generic "verify token/name" message
+        # below, which would send them looking in the wrong place.
+        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, then its ui container restarted. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
+    elif [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi
     [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"

@@ -117,6 +117,39 @@ pub struct Config {
     pub dns_rollback_url: String,
     pub pdns_api_key: String,
     pub nats_url: String,
+    // Issue #866: nats_url above is correct for every *internal* NATS client
+    // in this deployment -- this container's own connection (main.rs),
+    // dns-standard/dns-ssl's co-located subscribers -- because they all sit
+    // on the same Docker network as the `nats` service. It is never
+    // reachable from a genuinely remote secondary DNS node, though: before
+    // this fix, routes/secondaries.rs::register_secondary handed that same
+    // internal-only value back to `setup.sh secondary` as `nats_url` in its
+    // JSON response, which wrote it verbatim into the remote host's `.env`,
+    // where it could never resolve.
+    //
+    // These two fields let an operator supply a real, externally-reachable
+    // address instead, without touching nats_url itself (still correct for
+    // every internal caller above). See `advertised_nats_url()` for the
+    // precedence between them -- and why it returns None, not a fallback to
+    // nats_url, when neither is configured: register_secondary only ever
+    // runs for a genuine remote-secondary registration, so silently handing
+    // back the internal address there would just reproduce the #866 bug
+    // under a different name.
+    //
+    // nats_bind_ip mirrors the same NATS_BIND_IP value
+    // `deploy/prod/docker-compose.nats-secondary.yml` already requires to
+    // publish NATS on a trusted LAN/VPN interface for remote secondaries
+    // (see docs/architecture-ng.md's "Remote secondary NATS access") --
+    // reusing it here means an operator who has already set it up for that
+    // override gets a correct advertised URL for free, with nothing new to
+    // configure.
+    pub nats_bind_ip: String,
+    // Explicit escape hatch, highest precedence: covers setups nats_bind_ip
+    // alone cannot express, e.g. a non-default port, a `tls://` scheme
+    // through a NATS-aware reverse proxy, or a VPN hostname instead of a
+    // literal IP. Empty (the default) means "no explicit override" -- never
+    // a real value that could silently mask a misconfiguration.
+    pub nats_advertise_url: String,
     pub nats_ui_user: String,
     // Option, not String-with-empty-default: an empty-string sentinel for
     // "unset" reads to CodeQL's rust/hard-coded-cryptographic-value query as
@@ -260,6 +293,8 @@ impl fmt::Debug for Config {
             .field("dns_rollback_url", &self.dns_rollback_url)
             .field("pdns_api_key", &"***REDACTED***")
             .field("nats_url", &self.nats_url)
+            .field("nats_bind_ip", &self.nats_bind_ip)
+            .field("nats_advertise_url", &self.nats_advertise_url)
             .field("nats_ui_user", &self.nats_ui_user)
             .field(
                 "nats_ui_password",
@@ -331,6 +366,49 @@ impl fmt::Display for Config {
 // `effective_*` getter checks that persisted override file first and only
 // falls back to the startup env value if no override line exists.
 impl Config {
+    // Issue #866: the one NATS URL that must be reachable from OUTSIDE this
+    // container's own Docker network -- handed to a genuinely remote
+    // secondary DNS node by routes/secondaries.rs::register_secondary, never
+    // used for any connection this process makes itself (main.rs keeps
+    // using self.nats_url directly for that, unconditionally correct since
+    // this container always sits on the same Docker network as `nats`).
+    //
+    // Returns None, deliberately, when neither override is configured --
+    // NOT a fallback to nats_url. register_secondary is reached exactly
+    // once per real invocation of `setup.sh secondary`, i.e. only when an
+    // operator is actively registering a genuinely remote secondary; there
+    // is no "install that never uses remote secondaries" path through this
+    // function, so silently handing back nats_url's Docker-internal value
+    // here would reproduce the exact bug #866 reports (an operator runs
+    // `setup.sh secondary`, it writes an unreachable NATS_URL into the new
+    // secondary's .env, starts the container, and prints "is running" with
+    // no signal anything is wrong -- see setup.sh's cmd_secondary). Callers
+    // that hit None must refuse the registration instead of degrading to
+    // that silent-failure value.
+    //
+    // Precedence when Some, highest first:
+    // 1. `nats_advertise_url` -- an explicit operator override. Covers
+    //    anything nats_bind_ip alone can't express (non-default port, a
+    //    `tls://` scheme, a VPN hostname).
+    // 2. `nats_bind_ip` -- the same trusted LAN/VPN IP
+    //    `docker-compose.nats-secondary.yml` already requires to publish
+    //    NATS's host port for remote secondaries. If an operator has that
+    //    override active at all, port 4222 on that IP is -- by construction
+    //    -- already reachable from wherever a remote secondary can reach
+    //    this primary, so deriving `nats://<ip>:4222` from it needs no
+    //    separate configuration step.
+    pub fn advertised_nats_url(&self) -> Option<String> {
+        let explicit = self.nats_advertise_url.trim();
+        if !explicit.is_empty() {
+            return Some(explicit.to_string());
+        }
+        let bind_ip = self.nats_bind_ip.trim();
+        if !bind_ip.is_empty() {
+            return Some(format!("nats://{bind_ip}:4222"));
+        }
+        None
+    }
+
     // The `effective_*` getters let a value the operator changed live in the
     // Admin UI (persisted to `ui_settings_file`, see `read_ui_override`) win over
     // the value `from_env()` captured at process start, without requiring a
@@ -575,6 +653,12 @@ impl Config {
             dns_rollback_url: env_str("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
+            // Issue #866: no defaults for either -- an unset value must mean
+            // "not configured", not a placeholder that could quietly stand
+            // in for a real address. See advertised_nats_url() for how
+            // these combine with nats_url above.
+            nats_bind_ip: env_str("NATS_BIND_IP", ""),
+            nats_advertise_url: env_str("NATS_ADVERTISE_URL", ""),
             nats_ui_user: env_str("NATS_UI_USER", ""),
             // env_opt, not env_str with a "" default: the real value always
             // comes from setup.sh's `get_or_generate_secret ... hex32` (a
@@ -1428,5 +1512,103 @@ mod tests {
         assert_eq!(derive_lancache_image_channel("custom-tag"), "latest");
         assert_eq!(derive_lancache_image_channel("nightly"), "latest");
         assert_eq!(derive_lancache_image_channel("main"), "latest");
+    }
+
+    // Issue #866: register_secondary must never hand a remote secondary the
+    // Docker-internal nats_url as-is -- neither directly nor as a silent
+    // fallback -- when there is no real externally-reachable address
+    // configured; it must refuse instead (see advertised_nats_url's own doc
+    // comment for why None, not a fallback to nats_url, is the correct
+    // "unconfigured" result). These tests exercise
+    // Config::advertised_nats_url directly through Config::from_env, the
+    // same way it's actually populated at process start, rather than
+    // hand-building a Config literal (the struct has no Default impl and
+    // dozens of unrelated fields).
+    #[test]
+    fn advertised_nats_url_is_none_when_neither_override_is_configured() {
+        let _guard = env_test_lock().lock().unwrap();
+        for key in ["NATS_URL", "NATS_BIND_IP", "NATS_ADVERTISE_URL"] {
+            env::remove_var(key);
+        }
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.nats_url, "nats://nats:4222");
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            "with neither override set there is no reachable address to \
+             advertise -- register_secondary must refuse the registration, \
+             never fall back to the Docker-internal nats_url that #866 \
+             reports as unreachable from every real remote secondary"
+        );
+
+        env::remove_var("NATS_URL");
+    }
+
+    // Confirms the second-highest-precedence branch: reusing NATS_BIND_IP
+    // (already required by docker-compose.nats-secondary.yml) is enough on
+    // its own, with no separate NATS_ADVERTISE_URL configuration needed.
+    #[test]
+    fn advertised_nats_url_derives_from_nats_bind_ip_when_no_explicit_override() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "192.168.1.5");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            Some("nats://192.168.1.5:4222".to_string()),
+            "nats_bind_ip is the same trusted LAN/VPN IP already used to \
+             publish NATS's host port for remote secondaries -- deriving the \
+             advertised URL from it needs no separate configuration step"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // Confirms the documented precedence order itself: with both set at
+    // once, the explicit override must win, not the derived one.
+    #[test]
+    fn advertised_nats_url_explicit_override_wins_over_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::set_var("NATS_BIND_IP", "192.168.1.5");
+        env::set_var("NATS_ADVERTISE_URL", "tls://nats.vpn.example:4333");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            Some("tls://nats.vpn.example:4333".to_string()),
+            "an explicit NATS_ADVERTISE_URL must win over a derived \
+             nats_bind_ip URL -- it's the only way to express a non-default \
+             port, a tls:// scheme, or a VPN hostname"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+        env::remove_var("NATS_ADVERTISE_URL");
+    }
+
+    // Confirms an operator who sets NATS_BIND_IP/NATS_ADVERTISE_URL to
+    // whitespace (e.g. a stray blank-string .env line) gets the same
+    // fail-closed None result as leaving it unset entirely, not a bogus
+    // "nats://   :4222"-shaped Some.
+    #[test]
+    fn advertised_nats_url_treats_whitespace_only_overrides_as_unset() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::set_var("NATS_BIND_IP", "   ");
+        env::set_var("NATS_ADVERTISE_URL", "   ");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            "a whitespace-only env value must not be mistaken for a real \
+             override, the same way other optional string fields in this \
+             module treat it as unset (see e.g. effective_dhcp_ntp_servers's \
+             callers in ui_override_lines) -- it must still resolve to None, \
+             not a false-positive Some"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+        env::remove_var("NATS_ADVERTISE_URL");
     }
 }

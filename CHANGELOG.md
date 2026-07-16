@@ -414,6 +414,39 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed remote secondary DNS node registration handing out a NATS URL that
+  can never be reached from outside the primary's own Docker network (#866).
+  `routes/secondaries.rs::register_secondary`'s JSON response always
+  returned `state.config.nats_url` verbatim -- correct for the primary's own
+  internal NATS clients (this container's own connection, the co-located
+  `dns-standard`/`dns-ssl` subscribers), all hardcoded to the same literal
+  `nats://nats:4222` across every compose file, but never overridable and
+  never reachable by a genuinely remote host. `setup.sh secondary` wrote that
+  unreachable value straight into the new secondary's `.env`, started the
+  container successfully, and printed an unconditional "is running" success
+  message with no connectivity check at all -- meanwhile `nats-subscriber`'s
+  indefinite reconnect backoff meant the container never crashed, it just
+  silently never synced a single DNS record while PowerDNS's own healthcheck
+  stayed green, leaving the operator with no signal anything was wrong. Added
+  `Config::advertised_nats_url()` (`services/ui/src/config.rs`): registration
+  now prefers a new explicit `NATS_ADVERTISE_URL` override, then a URL
+  derived from `NATS_BIND_IP` (the same trusted LAN/VPN IP
+  `docker-compose.nats-secondary.yml` already requires to publish NATS's
+  host port for remote secondaries -- reusing it needs no new configuration
+  for installs that already have that override active). When **neither** is
+  configured, `register_secondary` now refuses the request outright (HTTP
+  503, before any credential is generated or written to the database)
+  instead of silently falling back to the unreachable `nats_url` -- this
+  endpoint has no legitimate caller other than a genuine remote-secondary
+  registration (`setup.sh secondary`), so there is no "install that doesn't
+  use remote secondaries" case a fail-closed check here could break.
+  `setup.sh secondary` reports the 503 with a specific, actionable message
+  naming the exact variable to set on the primary, instead of its generic
+  "verify the token/name" fallback message. Audited the rest of the
+  registration response (`RegisterResponse`) for the same
+  internal-only-value class of bug: no other field has it -- `proxy_ip`
+  (`standard_ip`) is the LAN IP every client already uses directly by
+  design, and `pdns_api_key` is a shared secret, not an address.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated

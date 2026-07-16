@@ -82,7 +82,8 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 | `FILTER_AAAA_V4` | `false` | Filter AAAA records for IPv4 clients |
 | `FILTER_AAAA_V6` | `false` | Filter AAAA records for IPv6 clients |
 | `ENABLE_SECONDARY` | `false` | Enable secondary zones. When set to `true` for remote secondaries, also include `deploy/prod/docker-compose.nats-secondary.yml` so NATS is bound only to the trusted interface specified by `NATS_BIND_IP`. |
-| `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. |
+| `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
+| `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
 | `SECONDARY_MASTERS` | — | Primary DNS IP |
 | `SECONDARY_ZONES` | — | Comma-separated zone list |
 
@@ -106,6 +107,32 @@ ENABLE_SECONDARY=1 NATS_BIND_IP=192.168.1.5 \
 ```
 
 Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restricts access to trusted secondary nodes.
+
+**Registration hands out this same `NATS_BIND_IP` address (issue #866):** the
+Admin UI's `POST /api/secondary/register` used to always return the literal
+`nats://nats:4222` in its `nats_url` field -- correct for the primary's own
+internal services, but never reachable from a real remote secondary, since
+that address only resolves inside the primary's own Docker network.
+`setup.sh secondary` wrote that unreachable value straight into the
+secondary's `.env`, which then ran successfully and printed a false "is
+running" success message, while the `nats-subscriber` container silently
+retried a connection that could never succeed and no DNS record ever synced.
+As of #866, registration now returns `nats://<NATS_BIND_IP>:4222` whenever
+`NATS_BIND_IP` is set on the primary -- the same value already required by
+the host-binding override above, so a primary that has that override active
+for the `nats` service gets a working registration response for free.
+Setups that need something `NATS_BIND_IP` alone can't express (a
+non-default port, a `tls://` scheme, a VPN hostname) can set the explicit
+`NATS_ADVERTISE_URL` override instead, which always takes precedence.
+Neither variable has a default. If a primary has configured **neither**,
+registration now refuses the request outright with HTTP 503 instead of
+falling back to the unreachable `nats_url` -- `setup.sh secondary` reports
+this clearly (rather than its generic "verify the token/name" message) and
+names the exact variable to set. This endpoint has no other legitimate
+caller: every real invocation is a genuine remote-secondary registration, so
+there is no "install that doesn't use remote secondaries" case that could be
+broken by refusing here -- an install that never runs `setup.sh secondary`
+never reaches this code path at all.
 
 **nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns`; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`.
 

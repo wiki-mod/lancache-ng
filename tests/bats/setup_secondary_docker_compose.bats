@@ -69,3 +69,21 @@ setup() {
     [[ "$healthcheck_line" -lt "$restart_line" ]] \
         || fail "healthcheck block must come before restart block"
 }
+
+@test "cmd_secondary gives an actionable message for the issue #866 HTTP 503 refusal" {
+    # Issue #866: register_secondary now refuses (HTTP 503) when the primary
+    # has neither NATS_BIND_IP nor NATS_ADVERTISE_URL configured, instead of
+    # silently handing out an unreachable NATS URL. Before this fix,
+    # cmd_secondary's only non-2xx handling was one generic
+    # "verify the registration token, secondary name, and primary server
+    # logs" message -- accurate for a bad token/name (4xx), but actively
+    # misleading for this 503 case, which is a primary-side configuration
+    # gap the operator can't fix by re-checking their own command-line
+    # arguments. Guards against that specific, more helpful branch
+    # regressing back into the generic one on a future refactor.
+    grep -q 'http_status" = "503"' "$repo_root/setup.sh" \
+        || fail "cmd_secondary no longer special-cases HTTP 503"
+
+    grep -q 'NATS_BIND_IP.*NATS_ADVERTISE_URL' "$repo_root/setup.sh" \
+        || fail "the 503 die message no longer names NATS_BIND_IP/NATS_ADVERTISE_URL as the fix"
+}
