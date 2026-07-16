@@ -414,6 +414,36 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed an intermittent `has active endpoints` teardown race that could poison
+  a shared validation Docker network for whichever job ran next in
+  `full-setup-deep-validate.yml` (#834) -- a distinct bug from the
+  octet-hash-collision class #820 already fixed above (`has active
+  endpoints` does not match `validation_subnet_output_is_collision`'s
+  collision signatures, and correctly so). All simulation jobs in one run
+  share the same Compose project/network name, and every teardown trap ran
+  `docker compose down -v --remove-orphans >/dev/null 2>&1 || true`: when
+  `down`'s own container-removal-vs-network-endpoint-detach step lost
+  Docker's real async race, the failure was silently swallowed and the job
+  still reported success, while leaving the shared network non-empty for
+  the next job in the sequential `needs:` chain to trip over (a real,
+  unguarded failure that time). Confirmed directly from two same-run job
+  failures hitting the identical network id 7 minutes apart, and live-
+  reproduced against a real Docker daemon on a runner host. Fixed in #835 by
+  adding `validation_network_await_detached` / `validation_network_teardown`
+  / `validation_project_networks_teardown` to
+  `scripts/lib/reserve-validation-subnet.sh` (poll until Docker itself
+  confirms zero attached containers, force-disconnect stragglers past a
+  bounded timeout, clear `::error::` if still stuck), applied at every
+  `docker compose down ... || true` / bare `docker network rm ... || true`
+  teardown site sharing this pattern across the codebase, not only the two
+  jobs that happened to surface it: `dns-zone-rollback-simulation.sh`,
+  `ssl-mitm-cache-simulation.sh`, `ui-nats-dns-integration-simulation.sh`,
+  `nats-secondary-auth-callout-simulation.sh`, `setup-cli-simulation.sh`
+  (both teardown sites), `dhcp-kea-lease-flow-simulation.sh`,
+  `dhcp-proxy-pxe-simulation.sh`, `ui-rust-checks.sh`, and the "Tear down
+  full-setup validation stack" step in `full-setup-deep-validate.yml`,
+  `full-setup-validate.yml`, and `build-push.yml`. CI-only, no
+  production/runtime behavior change.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
