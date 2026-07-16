@@ -106,18 +106,20 @@ pub async fn add_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         append_domain(&state.config.cdn_domains_file, &domain)
     };
-    if let Err(e) = wrote {
-        tracing::error!("Failed to write dns domain: {}", e);
-    } else {
-        flush_recursor_cache(&state, &domain.domain).await;
-        // The SSL proxy derives its wildcard-cert root domains and nginx
-        // host-allowlist maps from this same file at container startup (see
-        // services/proxy/entrypoint.sh) — there is no separate SSL domain
-        // list to edit anymore, so adding a DNS entry that needs TLS
-        // interception also needs the proxy restarted to pick it up.
-        if state.config.ssl_enabled {
-            restart_ssl(&state).await;
-        }
+    // The UI must not report success if the CDN domain file itself was never
+    // updated -- unlike the best-effort recursor-flush/proxy-restart calls
+    // below, this write is the actual mutation the request represents (same
+    // reasoning as toggle_aaaa_filter's marker-write check further down in
+    // this file).
+    dns_write_result_to_response(wrote, "write")?;
+    flush_recursor_cache(&state, &domain.domain).await;
+    // The SSL proxy derives its wildcard-cert root domains and nginx
+    // host-allowlist maps from this same file at container startup (see
+    // services/proxy/entrypoint.sh) — there is no separate SSL domain
+    // list to edit anymore, so adding a DNS entry that needs TLS
+    // interception also needs the proxy restarted to pick it up.
+    if state.config.ssl_enabled {
+        restart_ssl(&state).await;
     }
     Ok(Redirect::to("/domains"))
 }
@@ -137,22 +139,21 @@ pub async fn remove_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         remove_domain(&state.config.cdn_domains_file, &domain)
     };
-    if let Err(e) = removed {
-        tracing::error!("Failed to remove dns domain: {}", e);
-    } else {
-        let flushed_domain = match &domain {
-            DomainDeleteTarget::Canonical(spec) => spec.domain.clone(),
-            DomainDeleteTarget::Raw(raw) => raw.clone(),
-        };
-        flush_recursor_cache(&state, &flushed_domain).await;
-        // The SSL proxy derives its wildcard-cert root domains and nginx
-        // host-allowlist maps from this same file at container startup (see
-        // services/proxy/entrypoint.sh) — removing a domain here means the
-        // proxy must no longer accept TLS-intercepted connections for it,
-        // so it needs the same restart as adding one to pick up the removal.
-        if state.config.ssl_enabled {
-            restart_ssl(&state).await;
-        }
+    // Same reasoning as add_dns: the CDN domain file write is the request's
+    // actual mutation, so a failed write must not redirect as success.
+    dns_write_result_to_response(removed, "remove")?;
+    let flushed_domain = match &domain {
+        DomainDeleteTarget::Canonical(spec) => spec.domain.clone(),
+        DomainDeleteTarget::Raw(raw) => raw.clone(),
+    };
+    flush_recursor_cache(&state, &flushed_domain).await;
+    // The SSL proxy derives its wildcard-cert root domains and nginx
+    // host-allowlist maps from this same file at container startup (see
+    // services/proxy/entrypoint.sh) — removing a domain here means the
+    // proxy must no longer accept TLS-intercepted connections for it,
+    // so it needs the same restart as adding one to pick up the removal.
+    if state.config.ssl_enabled {
+        restart_ssl(&state).await;
     }
     Ok(Redirect::to("/domains"))
 }
@@ -329,6 +330,23 @@ async fn restart_ssl(state: &AppState) {
     {
         tracing::error!("Restart proxy service failed: {}", e);
     }
+}
+
+// Maps the CDN domain file write's own Result to the operator-facing
+// response. `action` names the operation in the log line ("write"/"remove")
+// so add_dns/remove_dns keep their own distinct log message while sharing
+// this decision: on failure, log and report 500 instead of the success
+// redirect the caller would otherwise send -- the write is the actual
+// mutation the request represents, so a failure here can never look like a
+// success to the operator, same as toggle_aaaa_filter's marker-write check.
+fn dns_write_result_to_response(
+    result: anyhow::Result<()>,
+    action: &str,
+) -> Result<(), axum::http::StatusCode> {
+    result.map_err(|e| {
+        tracing::error!("Failed to {action} dns domain: {e}");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 fn aaaa_filter_marker_paths(state: &AppState) -> [PathBuf; 2] {
@@ -1133,6 +1151,96 @@ mod tests {
             fs::read_to_string(&file).unwrap(),
             "new.example.com\n".to_string()
         );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    // add_dns/remove_dns must never log a failed CDN-file write and still
+    // return the success redirect. dns_write_result_to_response is the
+    // exact mapping both handlers apply via `?`, so pinning its Ok/Err
+    // behavior here covers that handler-level error mapping without needing
+    // a fully wired AppState (Docker/NATS/SQLite), which no other route test
+    // in this file constructs either.
+    #[test]
+    fn dns_write_result_to_response_reports_ok_on_success() {
+        assert_eq!(dns_write_result_to_response(Ok(()), "write"), Ok(()));
+    }
+
+    #[test]
+    fn dns_write_result_to_response_reports_500_on_failure() {
+        let err = anyhow::anyhow!("disk full");
+        assert_eq!(
+            dns_write_result_to_response(Err(err), "write"),
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    #[test]
+    fn add_dns_write_failure_maps_to_error_not_success() {
+        // Reproduces the real failure add_dns feeds through
+        // dns_write_result_to_response: append_domain errors when its
+        // target's parent directory does not exist (the temp-file it writes
+        // before renaming has nowhere to land).
+        let base = temp_dir("add-dns-missing-parent");
+        let file = base.join("missing-subdir").join("cdn-domains.txt");
+        let domain = domain_spec("steamcontent.com", false);
+
+        let wrote = append_domain(file.to_str().unwrap(), &domain);
+        assert!(wrote.is_err());
+        assert_eq!(
+            dns_write_result_to_response(wrote, "write"),
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    // Success-path counterpart to add_dns_write_failure_maps_to_error_not_success:
+    // guards that dns_write_result_to_response's error mapping never turns a
+    // genuinely successful write into a false failure.
+    #[test]
+    fn add_dns_write_success_maps_to_ok() {
+        let base = temp_dir("add-dns-success");
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        let domain = domain_spec("steamcontent.com", false);
+
+        let wrote = append_domain(file.to_str().unwrap(), &domain);
+        assert!(wrote.is_ok());
+        assert_eq!(dns_write_result_to_response(wrote, "write"), Ok(()));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn remove_dns_write_failure_maps_to_error_not_success() {
+        // remove_domain's first step reads the CDN file; a missing file (the
+        // same class of on-disk problem the write-side test above covers)
+        // fails immediately.
+        let base = temp_dir("remove-dns-missing-file");
+        let file = base.join("cdn-domains.txt");
+        let target = DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", false));
+
+        let removed = remove_domain(file.to_str().unwrap(), &target);
+        assert!(removed.is_err());
+        assert_eq!(
+            dns_write_result_to_response(removed, "remove"),
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    // Success-path counterpart to remove_dns_write_failure_maps_to_error_not_success:
+    // guards that dns_write_result_to_response's error mapping never turns a
+    // genuinely successful removal into a false failure.
+    #[test]
+    fn remove_dns_write_success_maps_to_ok() {
+        let base = temp_dir("remove-dns-success");
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, "steamcontent.com\n").unwrap();
+        let target = DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", false));
+
+        let removed = remove_domain(file.to_str().unwrap(), &target);
+        assert!(removed.is_ok());
+        assert_eq!(dns_write_result_to_response(removed, "remove"), Ok(()));
 
         fs::remove_dir_all(&base).unwrap();
     }
