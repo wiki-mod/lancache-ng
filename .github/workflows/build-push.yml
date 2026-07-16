@@ -2903,31 +2903,32 @@ jobs:
     needs: rust_coverage
     if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Job-level concurrency, workflow-wide (NOT ref-scoped): the top-level
-    # group (see top of file) is run_id-suffixed for push events and
-    # therefore never collides, so it no longer serializes badge publishes
-    # the way its old, fully-global key used to. Every branch's publish
-    # step pushes to the SAME shared `badges` branch (only the file path
-    # inside it, BADGE_FILE, differs per source branch), so without a group
-    # here at all, two publishes for ANY branches finishing coverage close
-    # together could both fetch the same old `badges` tip and race the
-    # plain `git push origin "$BADGE_BRANCH"` below (no retry/rebase) --
-    # whichever pushes second hits a non-fast-forward failure. A ref-scoped
-    # key would only fix this for two publishes on the SAME branch, leaving
-    # different branches (e.g. master and a vX.Y.Z branch) free to race each
-    # other; one shared, workflow-wide group serializes every publish
-    # regardless of source branch, so only one ever pushes to `badges` at a
-    # time. cancel-in-progress stays false: this queues a second publish
-    # behind a running one instead of racing it (GitHub still only holds
-    # one job pending per group, so a third rapid publish in the same
-    # window can still replace the second in the queue and get skipped --
-    # harmless, since the freshness check in the publish step below already
-    # ensures the newest commit's coverage is what actually gets written,
-    # not queue order). A badge push is cheap/fast enough that this
-    # queueing is not the capacity concern it would be for
-    # `build`/`container-scan`.
+    # Job-level concurrency, keyed per source ref: the top-level group (see
+    # top of file) is run_id-suffixed for push events and therefore never
+    # collides, so it no longer serializes same-branch badge publishes the
+    # way its old, fully-global key used to. cancel-in-progress stays
+    # false: this queues a second same-branch publish behind a running one
+    # instead of racing it.
+    #
+    # Deliberately per-ref, NOT workflow-wide: a single shared group would
+    # let unrelated branches queue behind each other, and GitHub's
+    # concurrency queue only ever holds one pending job per group -- a
+    # burst of publishes for OTHER branches can bump a given branch's
+    # already-queued publish out of the queue entirely before it ever
+    # starts, silently skipping that branch's badge update for this push
+    # (see the "Queue badge publishes instead of replacing them" review
+    # finding). Per-ref scoping gives every branch its own queue slot, so
+    # branches can never bump each other out of it.
+    #
+    # What per-ref scoping does NOT do is stop two DIFFERENT branches'
+    # publishes from running at the literal same time (they're in
+    # different groups) and racing the shared `badges` branch -- that race
+    # is instead handled below, by retrying the fetch/commit/push instead
+    # of doing it once. A badge push is cheap/fast enough that neither the
+    # per-branch queueing nor the retry loop is a capacity concern the way
+    # cancellation is for `build`/`container-scan`.
     concurrency:
-      group: ${{ github.workflow }}-badge
+      group: ${{ github.workflow }}-badge-${{ github.ref }}
       cancel-in-progress: false
     permissions:
       contents: write
@@ -2943,8 +2944,9 @@ jobs:
         # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
         # so pushes to master and to the active vX.Y.Z integration branch don't
         # overwrite each other's badge data -- this job's own concurrency group
-        # (above) is workflow-wide (not per-branch), so it serializes every
-        # publish across all branches against the shared `badges` branch.
+        # (above) is per-ref, so it only serializes writes for the SAME branch;
+        # the retry loop below is what protects the shared `badges` branch
+        # itself from two DIFFERENT branches' publishes racing each other.
         env:
           BADGE_BRANCH: badges
           BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
@@ -2957,8 +2959,8 @@ jobs:
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
           # Debounce/coalesce, same reasoning and mechanism as promote's own
-          # branch-tip check (#777, see that job's comment): the workflow-wide
-          # badge concurrency group above only serializes the ORDER two
+          # branch-tip check (#777, see that job's comment): the per-ref badge
+          # concurrency group above only serializes the ORDER two same-branch
           # publishes execute in, it does not guarantee the newer commit's
           # coverage wins. A slow, older run's rust_coverage can still finish
           # and reach this step after a faster, newer run for the same branch
@@ -2985,34 +2987,59 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
-          # sparse fetch config only tracks the ref it originally checked out, so fetching a
-          # different branch by name alone lands only in FETCH_HEAD, never in
-          # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
-          # report "not found" and take the orphan-branch path even when badges already exists,
-          # and the final push would be rejected as non-fast-forward.
-          git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
-          if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
-            # -C (not --create): this is a self-hosted runner, so a local badges branch left
-            # over from a previous job on the same workspace makes a plain --create fail with
-            # "a branch named 'badges' already exists". -C resets it to origin's tip instead.
-            git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
-          else
-            git switch --orphan "$BADGE_BRANCH"
-            git rm -rf . >/dev/null 2>&1 || true
-          fi
+          # Retry loop, not a single fetch/commit/push: the concurrency group
+          # above is per-ref, so it only prevents two publishes for the SAME
+          # branch from racing each other -- it does nothing for a DIFFERENT
+          # branch's publish landing on the shared `badges` branch between
+          # this attempt's fetch and its own push (previously a single plain
+          # `git push`, no retry/rebase, would just fail non-fast-forward in
+          # that case). Re-fetching and rebuilding the commit on the fresh
+          # tip each attempt makes that self-healing instead of a hard
+          # failure, without needing a single global group that would let
+          # unrelated branches bump each other out of GitHub's one-pending-
+          # job-per-group queue (see the group's comment above).
+          max_attempts=5
+          attempt=1
+          while :; do
+            # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
+            # sparse fetch config only tracks the ref it originally checked out, so fetching a
+            # different branch by name alone lands only in FETCH_HEAD, never in
+            # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
+            # report "not found" and take the orphan-branch path even when badges already exists,
+            # and the final push would be rejected as non-fast-forward.
+            git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
+            if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
+              # -C (not --create): this is a self-hosted runner, so a local badges branch left
+              # over from a previous job on the same workspace makes a plain --create fail with
+              # "a branch named 'badges' already exists". -C resets it to origin's tip instead,
+              # discarding any local commit left over from a previous failed attempt below.
+              git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
+            else
+              git switch --orphan "$BADGE_BRANCH"
+              git rm -rf . >/dev/null 2>&1 || true
+            fi
 
-          mkdir -p "$(dirname "$BADGE_FILE")"
-          cp "$tmp_dir/rust.json" "$BADGE_FILE"
-          git add "$BADGE_FILE"
+            mkdir -p "$(dirname "$BADGE_FILE")"
+            cp "$tmp_dir/rust.json" "$BADGE_FILE"
+            git add "$BADGE_FILE"
 
-          if git diff --cached --quiet; then
-            echo "::notice::Rust coverage badge endpoint already up to date."
-            exit 0
-          fi
+            if git diff --cached --quiet; then
+              echo "::notice::Rust coverage badge endpoint already up to date."
+              exit 0
+            fi
 
-          git commit -m "chore: update rust coverage badge"
-          git push origin "$BADGE_BRANCH"
+            git commit -m "chore: update rust coverage badge"
+            if git push origin "$BADGE_BRANCH"; then
+              break
+            fi
+
+            if (( attempt >= max_attempts )); then
+              echo "::error::Failed to push the coverage badge endpoint to ${BADGE_BRANCH} after ${max_attempts} attempts (non-fast-forward every time)."
+              exit 1
+            fi
+            echo "::notice::Push to ${BADGE_BRANCH} was rejected, likely by a concurrent publish for another branch -- refetching and retrying (attempt $((attempt + 1))/${max_attempts})."
+            attempt=$((attempt + 1))
+          done
 
   watchdog_test:
     # Watchdog has its own small shell runtime and therefore its own scoped
