@@ -4,7 +4,6 @@
 
 # lancache-ng
 
-[![Build & Push](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml/badge.svg)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml)
 [![Rust coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwiki-mod%2Flancache-ng%2Fbadges%2Fcoverage%2Frust-master.json)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml?query=branch%3Amaster)
 
 LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.

@@ -361,7 +361,9 @@ is real, live, running code, not just work sitting in source control.
   additive database migration and cannot authenticate until it is
   re-registered (`setup.sh secondary ...`) or its credential is rotated from
   the Admin UI's Secondaries page.
-
+- Recorded completion of the #135 review-gate cleanup stream so remaining
+  work can continue as ordinary `v0.2.0` development instead of blocking the
+  closed review umbrella.
 - CI: `build-push`, `codeql`, and `build-tools` workflows now also trigger on
   PRs/pushes targeting `v0.2.0`, not just `master` (#503).
 - The CodeQL Rust job now reports CodeQL's own extraction-quality
@@ -450,6 +452,36 @@ is real, live, running code, not just work sitting in source control.
   test in `main.rs` that renders the real on-disk `logs.html` template
   (not a throwaway inline one) to prove the dropdown reflects the selected
   host correctly.
+- Fixed an intermittent `has active endpoints` teardown race that could poison
+  a shared validation Docker network for whichever job ran next in
+  `full-setup-deep-validate.yml` (#834) -- a distinct bug from the
+  octet-hash-collision class #820 already fixed above (`has active
+  endpoints` does not match `validation_subnet_output_is_collision`'s
+  collision signatures, and correctly so). All simulation jobs in one run
+  share the same Compose project/network name, and every teardown trap ran
+  `docker compose down -v --remove-orphans >/dev/null 2>&1 || true`: when
+  `down`'s own container-removal-vs-network-endpoint-detach step lost
+  Docker's real async race, the failure was silently swallowed and the job
+  still reported success, while leaving the shared network non-empty for
+  the next job in the sequential `needs:` chain to trip over (a real,
+  unguarded failure that time). Confirmed directly from two same-run job
+  failures hitting the identical network id 7 minutes apart, and live-
+  reproduced against a real Docker daemon on a runner host. Fixed in #835 by
+  adding `validation_network_await_detached` / `validation_network_teardown`
+  / `validation_project_networks_teardown` to
+  `scripts/lib/reserve-validation-subnet.sh` (poll until Docker itself
+  confirms zero attached containers, force-disconnect stragglers past a
+  bounded timeout, clear `::error::` if still stuck), applied at every
+  `docker compose down ... || true` / bare `docker network rm ... || true`
+  teardown site sharing this pattern across the codebase, not only the two
+  jobs that happened to surface it: `dns-zone-rollback-simulation.sh`,
+  `ssl-mitm-cache-simulation.sh`, `ui-nats-dns-integration-simulation.sh`,
+  `nats-secondary-auth-callout-simulation.sh`, `setup-cli-simulation.sh`
+  (both teardown sites), `dhcp-kea-lease-flow-simulation.sh`,
+  `dhcp-proxy-pxe-simulation.sh`, `ui-rust-checks.sh`, and the "Tear down
+  full-setup validation stack" step in `full-setup-deep-validate.yml`,
+  `full-setup-validate.yml`, and `build-push.yml`. CI-only, no
+  production/runtime behavior change.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
@@ -885,6 +917,48 @@ is real, live, running code, not just work sitting in source control.
   static `name: lancache-ng` is deliberately left unchanged for real installs
   (see #669 item 6 for why per-install-dir project naming stays out of scope
   for that case).
+- Fixed the Admin UI's `/logs` view (syslog mode) permanently starving a
+  naturally quiet host once a noisier host produced enough recent lines to
+  fill the global entry budget (#859). `syslog_client::parse_syslog_tail`
+  already guaranteed (via the #758 `dirs_with_candidates`/`hosts_seen` fix)
+  that every host's newest file gets opened before the collection loop's
+  early-break can fire, but the final merge step afterward
+  (`collected.sort_by(timestamp)` + truncate-to-`limit`) was completely
+  host-blind: if every other host's lines happened to be newer, a quiet
+  host's entire contribution could still be sorted out of the window and
+  silently disappear from the rendered page, even though its file was read
+  correctly and its data was still on disk. The concrete, safety-critical
+  instance: `services/watchdog/watchdog.sh` logs a handful of lines at
+  container start and then stays silent unless it detects and acts on a
+  real problem, while `netdata`'s continuous PLUGINSD/health-check chatter
+  can burn through the default 200-line budget within minutes -- once that
+  happens, watchdog's log (including a future real-incident line) becomes
+  permanently invisible via the Admin UI for the rest of the container's
+  uptime. This was a general capacity/fairness bug in the merge, not
+  watchdog-specific, so the fix is general too: the merge now groups
+  collected lines by host, reserves each host with data at least
+  `per_host_floor = (limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)`
+  (`PER_HOST_FLOOR` is a small constant, 10) of its own most recent lines
+  via a round-robin pass, and only then fills any remaining budget with the
+  globally most recent leftover lines across all hosts -- so a quiet host
+  can no longer be fully evicted, while a genuinely high-volume, genuinely
+  recent host still dominates the window whenever it isn't competing with
+  other hosts for space, and can still win most of the shared budget even
+  when it IS competing against other active hosts. The floor is
+  deliberately a small constant rather than a pure equal share of `limit`
+  across hosts: an equal share would, once every active host has at least
+  that many lines, consume the entire budget in the floor pass and leave
+  nothing for the recency-fill pass, degrading the merge to a fixed count
+  per host regardless of actual recency -- an over-correction caught during
+  review before merge. New unit tests in `services/ui/src/syslog_client.rs`
+  cover a quiet host surviving alongside 50 newer lines from a noisy host
+  while the overall limit is still respected, a single uncontested noisy
+  host still getting exactly its most recent lines with no fairness
+  penalty, and four simultaneously-active hosts where the two genuinely
+  newer hosts each win their entire history while the two older hosts still
+  keep their guaranteed floor rather than being squeezed to zero; all
+  pre-existing `parse_syslog_tail` tests (including the #758 regression
+  test) continue to pass unmodified.
 
 ## [0.1.0] - 2026-07-06
 
