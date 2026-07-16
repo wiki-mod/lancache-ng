@@ -1194,7 +1194,7 @@ mod tests {
     }
 
     // Success-path counterpart to add_dns_write_failure_maps_to_error_not_success:
-    // guards that the fix's stricter error mapping didn't also turn a
+    // guards that dns_write_result_to_response's error mapping never turns a
     // genuinely successful write into a false failure.
     #[test]
     fn add_dns_write_success_maps_to_ok() {
@@ -1228,7 +1228,7 @@ mod tests {
     }
 
     // Success-path counterpart to remove_dns_write_failure_maps_to_error_not_success:
-    // guards that the fix's stricter error mapping didn't also turn a
+    // guards that dns_write_result_to_response's error mapping never turns a
     // genuinely successful removal into a false failure.
     #[test]
     fn remove_dns_write_success_maps_to_ok() {
