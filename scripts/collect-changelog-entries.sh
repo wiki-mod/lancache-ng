@@ -138,7 +138,13 @@ while IFS= read -r pr_number; do
     pr_json="$(gh pr view "$pr_number" --repo wiki-mod/lancache-ng --json title,url,body)"
     pr_title="$(printf '%s' "$pr_json" | jq -r '.title')"
     pr_url="$(printf '%s' "$pr_json" | jq -r '.url')"
-    pr_body="$(printf '%s' "$pr_json" | jq -r '.body')"
+    # GitHub's API returns issue/PR body text with CRLF line endings, which
+    # breaks extract_section()'s end-anchored awk pattern on any awk build
+    # that doesn't itself normalize CRLF (e.g. mawk) -- see #908 for the
+    # same bug confirmed live in validate-pr-template.sh. Stripped here so
+    # this script doesn't silently report "no Changelog section" for every
+    # PR depending on which awk happens to be on PATH.
+    pr_body="$(printf '%s' "$pr_json" | jq -r '.body' | tr -d '\r')"
 
     changelog_text="$(extract_section "Changelog" "$pr_body")"
     trimmed="$(printf '%s' "$changelog_text" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
