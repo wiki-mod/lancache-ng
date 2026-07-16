@@ -990,7 +990,17 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/ui-reachability-crash-loop-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it, instead of racing the single job-level
+          # VALIDATION_SUBNET against every other concurrent run on this host.
+          # This job used to invoke its script directly, consuming
+          # compute-validation-network's raw output via the job-level env
+          # block above with no reservation in between -- confirmed for real:
+          # this exact job died on "Pool overlaps" for a concurrent run's
+          # _validation network, the same failure class
+          # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
+          # already guard against with this same wrapper.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-reachability-crash-loop-simulation.sh
 
   setup-reset-kea-config-simulation:
     # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
@@ -1045,7 +1055,15 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/setup-reset-kea-config-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it. This job used to invoke its script directly,
+          # consuming compute-validation-network's raw output via the
+          # job-level env block above with no reservation in between --
+          # confirmed for real: this exact job died on "Pool overlaps" for a
+          # concurrent run's _validation network, the same failure class
+          # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
+          # already guard against with this same wrapper.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
 
   syslog-forwarding-simulation:
     # Real end-to-end proof for #453's last two comments: not just "a log
