@@ -114,7 +114,13 @@ services:
       - "8082"
       - "8083"
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
+      # Real query/response probe (AG-VAL-018), not `rec_control ping` (liveness
+      # only, AG-VAL-019) or `ss -lnu` (proves a socket is listening, not that
+      # DNS actually answers -- also `ss` itself is banned outright, AG-VAL-020).
+      # Matches deploy/quickstart/docker-compose.yml's compliant check (#869):
+      # dnsutils/dig is already installed in every profile's dns image
+      # (services/dns/Dockerfile), so there's no tooling gap to work around.
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -166,7 +172,13 @@ services:
       - "8082"
       - "8083"
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping && ss -lnu | grep -q ':53 '"]
+      # Real query/response probe (AG-VAL-018), not `rec_control ping` (liveness
+      # only, AG-VAL-019) or `ss -lnu` (proves a socket is listening, not that
+      # DNS actually answers -- also `ss` itself is banned outright, AG-VAL-020).
+      # Matches deploy/quickstart/docker-compose.yml's compliant check (#869):
+      # dnsutils/dig is already installed in every profile's dns image
+      # (services/dns/Dockerfile), so there's no tooling gap to work around.
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
