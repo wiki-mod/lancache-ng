@@ -414,6 +414,21 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed DNS healthchecks being inconsistent across deploy profiles and, in
+  4 of 5 cases, non-compliant with this repo's own AGENTS.md rules
+  (AG-VAL-018/019/020) (#869). Only `deploy/quickstart/docker-compose.yml`
+  used a real query/response probe (`dig @127.0.0.1 steamcontent.com A
+  +short`). `dev` and `prod` used `rec_control ping && ss -lnu | grep -q
+  ':53 '` -- `ss` is explicitly banned as a DNS healthcheck (AG-VAL-020,
+  it only proves a socket is listening) and `rec_control ping` alone is
+  liveness-only (AG-VAL-019). `full-setup` used `rec_control ping
+  2>/dev/null || true`, where the trailing `|| true` forced exit 0
+  regardless of the real result, so the healthcheck could never report
+  unhealthy. `secondary` used bare `rec_control ping`, the same
+  liveness-only gap as dev/prod. All four now use the identical
+  `dig`-based probe `quickstart` already used correctly; `dnsutils` is
+  already installed in every profile's `dns` image
+  (`services/dns/Dockerfile`), so no new tooling was required.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated

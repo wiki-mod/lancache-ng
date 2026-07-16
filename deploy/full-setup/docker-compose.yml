@@ -128,7 +128,13 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      # Real query/response probe (AG-VAL-018). The prior `rec_control ping
+      # 2>/dev/null || true` could never report unhealthy: the trailing
+      # `|| true` forces exit 0 regardless of what `rec_control ping` returns,
+      # so this healthcheck was pure decoration (#869). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
+      # is already installed in this image (services/dns/Dockerfile).
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -153,7 +159,13 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      # Real query/response probe (AG-VAL-018). The prior `rec_control ping
+      # 2>/dev/null || true` could never report unhealthy: the trailing
+      # `|| true` forces exit 0 regardless of what `rec_control ping` returns,
+      # so this healthcheck was pure decoration (#869). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
+      # is already installed in this image (services/dns/Dockerfile).
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
