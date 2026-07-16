@@ -77,10 +77,15 @@ services:
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
-      - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
+      - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
+      # Shared-secret bootstrap (#858): resolve NATS_PASSWORD against this role's
+      # shared file so it matches the value the nats server generates.
+      - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       # Normal production keeps these overrides unset so one LANCACHE_STATE_DIR
       # move retargets DNS and NATS together. setup.sh writes explicit keys only
@@ -150,9 +155,14 @@ services:
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
-      - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
+      # Shared-secret bootstrap (#858): resolve NATS_PASSWORD against this role's
+      # shared file so it matches the value the nats server generates.
+      - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - ${PDNS_SSL_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-ssl}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
@@ -302,6 +312,8 @@ services:
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
+      - shared-secrets:/var/lib/lancache-secrets
       # Kea follows the same state-root contract as PowerDNS/NATS; leave
       # KEA_DATA_DIR unset unless this service truly lives off the shared root.
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
@@ -312,13 +324,29 @@ services:
     cap_add:
       - NET_BIND_SERVICE
       - NET_ADMIN       # needed for iptables rules restricting port 8000 to Docker-internal
+    # Shared-secret bootstrap (#858): this healthcheck runs as a separate
+    # `docker exec`-style CMD-SHELL invocation, which only sees the container's
+    # compose-defined environment, NOT anything the entrypoint later exports
+    # after resolving/generating KEA_CTRL_TOKEN. Without the fallback below, a
+    # self-healed (originally empty/placeholder) token would leave Kea's Control
+    # Agent running correctly with the generated token while this check keeps
+    # authenticating with the empty compose value -- permanently `unhealthy`
+    # despite the daemon being fine (live-verified: exactly this failure mode).
+    # Mirrors the entrypoint's placeholder classification (secret_is_placeholder's
+    # CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions, plus this service's own
+    # legacy shipped defaults) so both sides agree on which value is
+    # authoritative -- this shell has no access to the sourced helper function,
+    # so the equivalent pattern is inlined here instead.
     healthcheck:
       test:
         - CMD-SHELL
         - >-
           host="$${KEA_CTRL_HOST:-127.0.0.1}";
           [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
-          curl -sf -u admin:$${KEA_CTRL_TOKEN}
+          token="$${KEA_CTRL_TOKEN:-}";
+          case "$$token" in ""|CHANGE_ME*|changeme*|YOUR_*|*_HERE|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret)
+          token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)" ;; esac;
+          curl -sf -u admin:$$token
           -H 'Content-Type: application/json'
           -d '{"command":"config-get","service":["dhcp4"]}'
           "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
@@ -418,6 +446,42 @@ services:
     command:
       - |
         set -e
+        # Shared-secret bootstrap (#858): resolve the four NATS_*_PASSWORD
+        # handshake secrets from the shared-secrets volume so nats-server and its
+        # clients (Admin UI, dns writer/replica) agree even when .env left them
+        # empty/placeholder. Sources the same tested helper the dns/dhcp/ui
+        # entrypoints embed (mounted read-only below).
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        # Fail closed (Codex review, PR #886): resolve_shared_secret only returns
+        # non-zero when the shared-secrets volume itself is unwritable -- the same
+        # condition services/dns/entrypoint.sh treats as fatal for PDNS_API_KEY.
+        # Silently keeping the empty/placeholder value here would let nats-server
+        # boot with empty static-user passwords that the UI/dns clients can never
+        # authenticate against, instead of refusing to start.
+        if secret_is_placeholder "$$NATS_UI_PASSWORD"; then NATS_UI_PASSWORD=""; fi
+        if ! NATS_UI_PASSWORD="$$(resolve_shared_secret nats-ui-password "$$NATS_UI_PASSWORD" lancache_gen_hex32)"; then
+          echo "[lancache-nats] FATAL: NATS_UI_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
+          echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_UI_PASSWORD to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        if secret_is_placeholder "$$NATS_DNS_WRITER_PASSWORD"; then NATS_DNS_WRITER_PASSWORD=""; fi
+        if ! NATS_DNS_WRITER_PASSWORD="$$(resolve_shared_secret nats-dns-writer-password "$$NATS_DNS_WRITER_PASSWORD" lancache_gen_hex32)"; then
+          echo "[lancache-nats] FATAL: NATS_DNS_WRITER_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
+          echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_DNS_WRITER_PASSWORD to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        if secret_is_placeholder "$$NATS_DNS_REPLICA_PASSWORD"; then NATS_DNS_REPLICA_PASSWORD=""; fi
+        if ! NATS_DNS_REPLICA_PASSWORD="$$(resolve_shared_secret nats-dns-replica-password "$$NATS_DNS_REPLICA_PASSWORD" lancache_gen_hex32)"; then
+          echo "[lancache-nats] FATAL: NATS_DNS_REPLICA_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
+          echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_DNS_REPLICA_PASSWORD to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        if secret_is_placeholder "$$NATS_CALLOUT_PASSWORD"; then NATS_CALLOUT_PASSWORD=""; fi
+        if ! NATS_CALLOUT_PASSWORD="$$(resolve_shared_secret nats-callout-password "$$NATS_CALLOUT_PASSWORD" lancache_gen_hex32)"; then
+          echo "[lancache-nats] FATAL: NATS_CALLOUT_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
+          echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_CALLOUT_PASSWORD to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
         mkdir -p /etc/nats
         mkdir -p /var/log/lancache-nats
         escape_sed() {
@@ -551,6 +615,10 @@ services:
         fi
         exec nats-server -c /etc/nats/nats.conf
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins NATS_*_PASSWORD, plus the
+      # canonical helper sourced by the command block above (mounted read-only).
+      - shared-secrets:/var/lib/lancache-secrets
+      - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       # nats-conf is generated runtime state, so the root-derived default keeps
       # it outside the checkout while still allowing an explicit override.
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/data
@@ -561,17 +629,17 @@ services:
       - nats-logs:/var/log/lancache-nats
     environment:
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
-      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
+      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
-      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
+      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
-      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       # The auth-callout responder's static bypass identity. MUST match the ui
       # service's NATS_CALLOUT_USER/PASSWORD (same compose vars): the ui process
       # connects the responder with these creds and nats-server authenticates it
       # against the static user this entrypoint writes above (issue #811 / #583).
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
-      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
     expose:
       - "4222"
       - "8222"
@@ -1262,6 +1330,9 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
+      # Shared-secret bootstrap (#858): the UI entrypoint (root, pre privilege-drop)
+      # resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here to match the server side.
+      - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data
       - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
       - proxy-logs:/var/log/nginx:ro
@@ -1327,13 +1398,13 @@ services:
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
-      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:?NATS_UI_PASSWORD is required}
+      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
-      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:?NATS_DNS_WRITER_PASSWORD is required}
+      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
-      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:?NATS_DNS_REPLICA_PASSWORD is required}
+      - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
-      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:?NATS_CALLOUT_PASSWORD is required}
+      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       # Central syslog store reader (#633 PR4): same 4 vars/defaults as the
       # watchdog retention engine (PR3/#757), so the UI's "enabled" toggle
@@ -1427,6 +1498,13 @@ networks:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858): persistent volume mounted into every
+  # container that must agree on a generated secret value (PDNS_API_KEY,
+  # KEA_CTRL_TOKEN, DDNS_TSIG_KEY). An operator/setup.sh value in .env always
+  # wins; if a value is left empty/placeholder the first container to boot
+  # generates it atomically (first-writer-wins) and the rest read the same
+  # value, so a blanked secret self-heals instead of crash-looping.
+  shared-secrets:
   proxy-cache:
     driver: local
     driver_opts:
