@@ -33,6 +33,7 @@ on:
       - "tests/shellspec/**"
       - "setup.sh"
       - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/check-validation-subnet-wrapper-coverage.sh"
       - "scripts/lib/**"
       - "scripts/classify-image-impact.sh"
       - "scripts/compute-next-release-tag.sh"
@@ -59,6 +60,7 @@ on:
       - "tests/shellspec/**"
       - "setup.sh"
       - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/check-validation-subnet-wrapper-coverage.sh"
       - "scripts/lib/**"
       - "scripts/classify-image-impact.sh"
       - "scripts/compute-next-release-tag.sh"
@@ -161,6 +163,19 @@ jobs:
       # itself silently breaking). Without this entry, a PR touching only
       # the guard script would not already match tests/bats/** and so would
       # never run that suite.
+      #
+      # scripts/check-validation-subnet-wrapper-coverage.sh (#896) is listed
+      # for the identical reason: tests/bats/
+      # check_validation_subnet_wrapper_coverage.bats is what proves THAT
+      # guard catches a genuinely unwrapped stack-starting job, not just that
+      # it currently passes against today's tree. Deliberately NOT adding
+      # .github/workflows/full-setup-validate.yml or
+      # full-setup-deep-validate.yml themselves here: the actual live
+      # enforcement against those two files runs unconditionally on every PR
+      # via build-push.yml's shellcheck/shellcheck-hosted jobs (no path
+      # filter on that workflow at all), so a PR that adds an unwrapped job
+      # to either file is already blocked there regardless of whether this
+      # workflow's own bats regression-suite run also happens to fire.
       - name: Determine whether build-tools inputs actually changed
         id: should-publish
         run: |

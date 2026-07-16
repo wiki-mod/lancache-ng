@@ -544,6 +544,27 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-action-node-versions.sh
 
+      - name: Check validation-subnet wrapper coverage (#896)
+        # Standing guard: #820 wrapped every full-setup-validate.yml/
+        # full-setup-deep-validate.yml job that starts its own compose stack
+        # from compute-validation-network's raw per-run subnet in
+        # scripts/lib/run-in-validation-subnet.sh's collision-safe
+        # reservation, but only for the jobs that existed at the time. #896
+        # found two jobs added later that never got wired through it and hit
+        # a real "Pool overlaps" collision under concurrent CI load; #907
+        # fixed those two. This check is what stops a THIRD job from
+        # silently repeating the same gap -- a pure text/YAML-structure
+        # check with no LAN or Docker dependency of its own, same class as
+        # check-action-node-versions.sh above.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-validation-subnet-wrapper-coverage.sh
+
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -588,6 +609,20 @@ jobs:
             -e GH_TOKEN \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-action-node-versions.sh
+
+      - name: Check validation-subnet wrapper coverage (#896)
+        # Same guard as the self-hosted shellcheck job's own step above (see
+        # its comment for the full rationale); duplicated here so the
+        # GitHub-hosted fallback path enforces it too when self-hosted
+        # runners are unavailable.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-validation-subnet-wrapper-coverage.sh
 
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
