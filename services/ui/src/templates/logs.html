@@ -26,6 +26,20 @@
   </div>
 
   {% if syslog_mode %}
+  <!-- Host filter bar: server-side, since parse_syslog_tail's host arg
+       restricts which files are even opened, not a client-side row hider
+       like the nginx branch's filter bar below. -->
+  <div class="flex gap-3 flex-wrap">
+    <select id="syslog-host-filter"
+            onchange="location.href = this.value ? ('/logs?host=' + encodeURIComponent(this.value)) : '/logs'"
+            class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+      <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
+      {% for h in syslog_hosts %}
+      <option value="{{ h }}" {% if selected_host and h == selected_host %}selected{% endif %}>{{ h }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
   <div class="card p-0 overflow-hidden">
     <div class="overflow-x-auto">
       <table class="w-full text-xs" id="syslog-table">
