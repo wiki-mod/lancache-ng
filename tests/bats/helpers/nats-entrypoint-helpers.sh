@@ -29,13 +29,16 @@
 #      references survive Compose's own interpolation) before invoking the shell.
 #
 # The third transformation is the ONLY test-time deviation from the shipping
-# bytes: it relocates the three hardcoded absolute write targets
-# (/etc/nats, /var/log/lancache-nats, /tmp/nats.conf.template) under a sandbox
-# root so the script runs hermetically as an unprivileged bats user. It rewrites
-# mount points only -- never the heredoc template content, the env-var `sed`
-# substitution, or the never-overwrite `if [ ! -e .../auth_callout.conf ]`
-# branch, which are the actual convergence logic under test (the never-overwrite
-# branch is the property that keeps issue #811's auth_callout clobber fixed).
+# bytes: it relocates the four hardcoded absolute paths (/etc/nats,
+# /var/log/lancache-nats, /tmp/nats.conf.template, and -- since issue #858's
+# shared-secret bootstrap -- the read-only bind-mounted
+# /usr/local/lib/shared-secret-bootstrap.sh the command block now `.`-sources)
+# under a sandbox root so the script runs hermetically as an unprivileged bats
+# user. It rewrites mount points only -- never the heredoc template content, the
+# env-var `sed` substitution, or the never-overwrite `if [ ! -e
+# .../auth_callout.conf ]` branch, which are the actual convergence logic under
+# test (the never-overwrite branch is the property that keeps issue #811's
+# auth_callout clobber fixed).
 
 # extract_nats_entrypoint_command <compose_file> <sandbox_root> <out_script>
 # Materialize the nats service's inline entrypoint command as a runnable script
@@ -74,16 +77,18 @@ extract_nats_entrypoint_command() {
               -e "s#/etc/nats#${sandbox_root}/etc/nats#g" \
               -e "s#/var/log/lancache-nats#${sandbox_root}/var/log/lancache-nats#g" \
               -e "s#/tmp/nats.conf.template#${sandbox_root}/tmp/nats.conf.template#g" \
+              -e "s#/usr/local/lib/shared-secret-bootstrap.sh#${sandbox_root}/usr/local/lib/shared-secret-bootstrap.sh#g" \
         > "$out"
 
     if ! grep -q 'exec nats-server -c' "$out" \
-        || ! grep -q 'cat > .*nats.conf.template' "$out"; then
+        || ! grep -q 'cat > .*nats.conf.template' "$out" \
+        || ! grep -q 'shared-secret-bootstrap.sh' "$out"; then
         printf 'extract_nats_entrypoint_command: extracted script from %s is missing the expected nats config-generator anchors (compose layout changed?)\n' "$compose" >&2
         return 1
     fi
 }
 
-# run_nats_entrypoint <script> <sandbox_root> <stub_bin>
+# run_nats_entrypoint <script> <sandbox_root> <stub_bin> <repo_root>
 # Run an extracted entrypoint script once. Pre-creates the sandbox `/tmp`
 # (always present in the real container, but the script only mkdir -p's its
 # /etc/nats and /var/log targets, not /tmp) and puts the stub `nats-server` /
@@ -91,8 +96,21 @@ extract_nats_entrypoint_command() {
 # no-op stub lets the generation complete and return 0 without a real server,
 # and `chown 10001:10001` (the real-container ownership handoff to the Admin UI
 # user) would otherwise fail for the unprivileged bats user.
+#
+# Since issue #858, the extracted script also `.`-sources
+# ${sandbox_root}/usr/local/lib/shared-secret-bootstrap.sh (the relocated form
+# of the real container's read-only bind mount of
+# scripts/lib/shared-secret-bootstrap.sh). Staging the REAL file there --
+# rather than a stub -- keeps this suite's "test the real function, not a copy"
+# discipline: a fresh env has no shared-secrets volume in this test (no
+# LANCACHE_SHARED_SECRET_DIR override either), so every password is already
+# non-empty from setup()'s exports and resolve_shared_secret's operator-wins
+# branch returns immediately without touching the filesystem -- the same
+# short-circuit dev's own checked-in defaults rely on in the real container.
 run_nats_entrypoint() {
-    local script="$1" sandbox_root="$2" stub_bin="$3"
+    local script="$1" sandbox_root="$2" stub_bin="$3" repo_root="$4"
     mkdir -p "$sandbox_root/tmp"
+    mkdir -p "$sandbox_root/usr/local/lib"
+    cp "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$sandbox_root/usr/local/lib/shared-secret-bootstrap.sh"
     PATH="$stub_bin:$PATH" sh "$script"
 }
