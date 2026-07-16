@@ -517,6 +517,19 @@ is real, live, running code, not just work sitting in source control.
   is not enough on its own: the `nats` service itself still needs
   `docker-compose.nats-secondary.yml` included (and the stack recreated with
   it) to actually publish port 4222 on that address.
+- Fixed `domains.rs`'s `add_dns`/`remove_dns` Admin UI handlers reporting
+  success to the operator even when the underlying CDN domain file write
+  failed (#875): both handlers logged the error but still returned the
+  success redirect to `/domains`, so the domain list shown in the UI and
+  the on-disk `cdn-domains.txt` (which the DNS and SSL-proxy containers read
+  at startup) could silently diverge with no operator-visible sign anything
+  went wrong. A write failure now returns `500 Internal Server Error`
+  instead of the redirect, matching this same file's existing
+  `toggle_aaaa_filter` convention for a write whose success the request
+  actually depends on. The best-effort recursor-cache-flush and SSL-proxy-
+  restart calls that follow a successful write are unchanged and remain
+  fire-and-log, since they are downstream side effects, not the request's
+  own mutation.
 - Fixed `SYSLOG_ENABLED` and `SYSLOG_MAX_GB` parsing diverging between the
   Admin UI and `watchdog.sh` (#874, found via the #849 vacuum-first bug
   hunt): the UI's `env_bool()` (`services/ui/src/config.rs`) accepted
