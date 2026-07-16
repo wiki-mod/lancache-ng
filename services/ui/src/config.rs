@@ -1269,7 +1269,18 @@ mod tests {
         }
 
         for value in [
-            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "   ", "garbage", "1x", "truex",
+            "0",
+            "false",
+            "FALSE",
+            "no",
+            "NO",
+            "off",
+            "OFF",
+            "",
+            "   ",
+            "garbage",
+            "1x",
+            "truex",
             "yesplease",
         ] {
             env::set_var(key, value);
