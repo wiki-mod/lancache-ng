@@ -90,7 +90,16 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
     }
 
     let host_dirs = match host {
-        Some(h) => vec![Path::new(log_root).join(h)],
+        // `host` may come straight from an HTTP query parameter (#848,
+        // routes/logs.rs's `?host=`). A caller-supplied `../../../data` or
+        // an embedded `/`/`\` segment would otherwise escape `log_root`
+        // entirely via this join, exposing unrelated files (e.g. the
+        // session secret) through the same "keep unparseable lines" path
+        // that already tolerates arbitrary content -- reject anything that
+        // is not a single bare directory-name segment instead of trusting
+        // every caller to pre-validate against list_syslog_hosts() first.
+        Some(h) if is_safe_host_component(h) => vec![Path::new(log_root).join(h)],
+        Some(_) => vec![],
         None => list_host_dirs(log_root),
     };
 
@@ -364,6 +373,24 @@ pub fn get_syslog_size_gb(path: &str) -> f64 {
     }
 }
 
+// Rejects anything that is not a single bare directory-name segment --
+// empty, ".", "..", or containing a path separator (either `/` or `\`,
+// checked as plain characters rather than via std::path::Component so the
+// check is identical regardless of which OS this happens to be compiled
+// for; std's component splitting treats `\` as a separator on Windows but
+// not on Unix, which would make a traversal-shaped host string pass or fail
+// depending on target platform). Mirrors get_syslog_size_gb's own
+// string-based `path.contains("..")` allowlist check rather than trusting
+// path normalization.
+fn is_safe_host_component(host: &str) -> bool {
+    !host.is_empty()
+        && host != "."
+        && host != ".."
+        && !host.contains('/')
+        && !host.contains('\\')
+        && !host.contains('\0')
+}
+
 fn list_host_dirs(log_root: &str) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(log_root) else {
         return vec![];
@@ -373,6 +400,21 @@ fn list_host_dirs(log_root: &str) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect()
+}
+
+// Sorted list of every wired host's directory name under `log_root`, for
+// populating a host-filter dropdown in the Admin UI (#848). Unlike
+// parse_syslog_tail(..., Some(host), ...), this always lists every host
+// regardless of which one (if any) is currently selected as a filter --
+// otherwise the dropdown would shrink to just the selected host after the
+// first filtered request.
+pub fn list_syslog_hosts(log_root: &str) -> Vec<String> {
+    let mut hosts: Vec<String> = list_host_dirs(log_root)
+        .into_iter()
+        .filter_map(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    hosts.sort();
+    hosts
 }
 
 // Reads `path` fully into memory and transparently decompresses based on
@@ -816,6 +858,57 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup");
     }
 
+    // Regression test for #848 review: `host` can come directly from an
+    // HTTP query parameter (routes/logs.rs's `?host=`), so a traversal-
+    // shaped value must never be allowed to escape `log_root` and read
+    // unrelated files -- it must be treated as "no such host" (empty
+    // result), not partially honored.
+    #[test]
+    fn parse_syslog_tail_ignores_host_with_path_traversal() {
+        let root = temp_root("traversal");
+        write_plain(
+            &root,
+            "hostA",
+            "20260713.log",
+            "2026-07-13T10:00:00+00:00 hostA nginx: a1\n",
+        );
+        // A file that a traversal payload would try to reach if it escaped
+        // `root` -- must never appear in the result.
+        let outside_dir = root.parent().expect("root has a parent").join(format!(
+            "{}-outside-secret",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir_all(&outside_dir).expect("create outside dir");
+        fs::write(
+            outside_dir.join("secret.log"),
+            "2026-07-13T10:00:00+00:00 secret leaked: should-never-appear\n",
+        )
+        .expect("write outside secret file");
+
+        for payload in [
+            "../",
+            "..",
+            ".",
+            "",
+            "../secret-outside",
+            &format!(
+                "../{}-outside-secret",
+                root.file_name().unwrap().to_string_lossy()
+            ),
+            "hostA/../..",
+            "hostA/subdir",
+        ] {
+            let entries = parse_syslog_tail(root.to_str().unwrap(), Some(payload), 10);
+            assert!(
+                entries.is_empty(),
+                "traversal-shaped host {payload:?} must yield no entries, got {entries:?}"
+            );
+        }
+
+        fs::remove_dir_all(&root).expect("cleanup");
+        fs::remove_dir_all(&outside_dir).expect("cleanup outside dir");
+    }
+
     #[test]
     fn parse_syslog_tail_returns_empty_for_missing_root() {
         let root = temp_root("missing");
@@ -916,6 +1009,26 @@ mod tests {
         assert_eq!(stats.total_files, 0);
         assert_eq!(stats.total_size_bytes, 0);
         assert!(stats.hosts.is_empty());
+    }
+
+    #[test]
+    fn list_syslog_hosts_returns_sorted_host_directory_names() {
+        let root = temp_root("list-hosts");
+        write_plain(&root, "watchdog", "20260713.log", "irrelevant\n");
+        write_plain(&root, "dns-ssl", "20260713.log", "irrelevant\n");
+        write_plain(&root, "netdata", "20260713.log", "irrelevant\n");
+
+        let hosts = list_syslog_hosts(root.to_str().unwrap());
+        assert_eq!(hosts, vec!["dns-ssl", "netdata", "watchdog"]);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn list_syslog_hosts_returns_empty_for_missing_root() {
+        let root = temp_root("list-hosts-missing");
+        // Deliberately not created.
+        assert!(list_syslog_hosts(root.to_str().unwrap()).is_empty());
     }
 
     #[test]
