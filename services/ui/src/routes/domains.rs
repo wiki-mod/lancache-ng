@@ -336,9 +336,9 @@ async fn restart_ssl(state: &AppState) {
 // response. `action` names the operation in the log line ("write"/"remove")
 // so add_dns/remove_dns keep their own distinct log message while sharing
 // this decision: on failure, log and report 500 instead of the success
-// redirect the caller would otherwise send (#875 -- the write is the actual
+// redirect the caller would otherwise send -- the write is the actual
 // mutation the request represents, so a failure here can never look like a
-// success to the operator, same as toggle_aaaa_filter's marker-write check).
+// success to the operator, same as toggle_aaaa_filter's marker-write check.
 fn dns_write_result_to_response(
     result: anyhow::Result<()>,
     action: &str,
@@ -1155,12 +1155,12 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    // #875: add_dns/remove_dns previously logged a failed CDN-file write and
-    // still returned the success redirect. dns_write_result_to_response is
-    // the exact mapping both handlers now apply via `?`, so pinning its
-    // Ok/Err behavior here covers the handler-level fix without needing a
-    // fully wired AppState (Docker/NATS/SQLite), which no other route test
-    // in this file constructs either.
+    // add_dns/remove_dns previously logged a failed CDN-file write and still
+    // returned the success redirect. dns_write_result_to_response is the
+    // exact mapping both handlers now apply via `?`, so pinning its Ok/Err
+    // behavior here covers the handler-level fix without needing a fully
+    // wired AppState (Docker/NATS/SQLite), which no other route test in this
+    // file constructs either.
     #[test]
     fn dns_write_result_to_response_reports_ok_on_success() {
         assert_eq!(dns_write_result_to_response(Ok(()), "write"), Ok(()));
@@ -1193,6 +1193,9 @@ mod tests {
         );
     }
 
+    // Success-path counterpart to add_dns_write_failure_maps_to_error_not_success:
+    // guards that the fix's stricter error mapping didn't also turn a
+    // genuinely successful write into a false failure.
     #[test]
     fn add_dns_write_success_maps_to_ok() {
         let base = temp_dir("add-dns-success");
@@ -1210,7 +1213,8 @@ mod tests {
     #[test]
     fn remove_dns_write_failure_maps_to_error_not_success() {
         // remove_domain's first step reads the CDN file; a missing file (the
-        // same class of on-disk problem #875 was filed for) fails immediately.
+        // same class of on-disk problem the write-side test above covers)
+        // fails immediately.
         let base = temp_dir("remove-dns-missing-file");
         let file = base.join("cdn-domains.txt");
         let target = DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", false));
@@ -1223,6 +1227,9 @@ mod tests {
         );
     }
 
+    // Success-path counterpart to remove_dns_write_failure_maps_to_error_not_success:
+    // guards that the fix's stricter error mapping didn't also turn a
+    // genuinely successful removal into a false failure.
     #[test]
     fn remove_dns_write_success_maps_to_ok() {
         let base = temp_dir("remove-dns-success");
