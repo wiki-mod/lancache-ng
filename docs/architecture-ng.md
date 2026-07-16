@@ -118,13 +118,25 @@ secondary's `.env`, which then ran successfully and printed a false "is
 running" success message, while the `nats-subscriber` container silently
 retried a connection that could never succeed and no DNS record ever synced.
 As of #866, registration now returns `nats://<NATS_BIND_IP>:4222` whenever
-`NATS_BIND_IP` is set on the primary -- the same value already required by
-the host-binding override above, so a primary that has that override active
-for the `nats` service gets a working registration response for free.
+`NATS_BIND_IP` is set on the primary to a routable address -- the same value
+already required by the host-binding override above, so a primary that has
+that override active for the `nats` service gets a working registration
+response for free. An IPv6 `NATS_BIND_IP` literal is bracketed automatically
+(`nats://[2001:db8::5]:4222`), since an unbracketed IPv6 literal is not a
+parsable NATS URL. If `NATS_BIND_IP` is a wildcard listen address (`0.0.0.0`
+or `::`) -- the "external firewall/VPN" case described above -- it is
+**not** echoed back as the advertised address, since a wildcard is only
+meaningful as a bind address, never as something a remote secondary could
+dial; that case falls through to the same refusal described below, and needs
+the explicit `NATS_ADVERTISE_URL` override with the real routable
+LAN/VPN address or hostname instead.
 Setups that need something `NATS_BIND_IP` alone can't express (a
-non-default port, a `tls://` scheme, a VPN hostname) can set the explicit
-`NATS_ADVERTISE_URL` override instead, which always takes precedence.
-Neither variable has a default. If a primary has configured **neither**,
+non-default port, a `tls://` scheme, a VPN hostname, or the wildcard-bind
+case just described) can set the explicit
+`NATS_ADVERTISE_URL` override instead, which always takes precedence and is
+never reformatted or validated as an IP literal.
+Neither variable has a default. If a primary has configured **neither**
+(or only a wildcard `NATS_BIND_IP` with no `NATS_ADVERTISE_URL`),
 registration now refuses the request outright with HTTP 503 instead of
 falling back to the unreachable `nats_url` -- `setup.sh secondary` reports
 this clearly (rather than its generic "verify the token/name" message) and
@@ -133,6 +145,14 @@ caller: every real invocation is a genuine remote-secondary registration, so
 there is no "install that doesn't use remote secondaries" case that could be
 broken by refusing here -- an install that never runs `setup.sh secondary`
 never reaches this code path at all.
+
+Note that setting `NATS_BIND_IP`/`NATS_ADVERTISE_URL` on the primary and
+restarting only the `ui` container is not, on its own, enough to make a
+registration attempt actually succeed end-to-end: the `nats` service itself
+still needs `docker-compose.nats-secondary.yml` included (and the stack
+recreated with it) to publish port 4222 on that address in the first place.
+`ui` only computes what to *advertise*; it does not control what `nats`
+itself publishes.
 
 **nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns`; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`.
 

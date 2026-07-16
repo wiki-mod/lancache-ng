@@ -86,4 +86,14 @@ setup() {
 
     grep -q 'NATS_BIND_IP.*NATS_ADVERTISE_URL' "$repo_root/setup.sh" \
         || fail "the 503 die message no longer names NATS_BIND_IP/NATS_ADVERTISE_URL as the fix"
+
+    # Setting NATS_BIND_IP/NATS_ADVERTISE_URL and restarting only the `ui`
+    # container is not sufficient: the `nats` service itself still needs
+    # docker-compose.nats-secondary.yml included (and to be recreated with
+    # it) to actually publish port 4222 on that address. Guards against the
+    # message regressing to only mention restarting `ui`, which would leave
+    # an operator who follows it literally with the same silent
+    # never-syncs failure mode issue #866 reports, just one step later.
+    grep -q 'nats-secondary\.yml' "$repo_root/setup.sh" \
+        || fail "the 503 die message no longer tells the operator to recreate the nats service with the nats-secondary.yml override"
 }

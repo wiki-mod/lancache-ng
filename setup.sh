@@ -4925,7 +4925,18 @@ EOF
         # problem with this command's own arguments, so give the operator
         # the actual fix instead of the generic "verify token/name" message
         # below, which would send them looking in the wrong place.
-        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, then its ui container restarted. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
+        #
+        # Setting NATS_BIND_IP/NATS_ADVERTISE_URL and restarting only the
+        # `ui` container is NOT sufficient on its own: `ui` only reads the
+        # value to compute what to advertise, but the `nats` service itself
+        # still needs `docker-compose.nats-secondary.yml` included (and the
+        # stack recreated with it) to actually publish port 4222 on that
+        # address -- see that file's own `NATS_BIND_IP:?...` host-port
+        # binding. Telling the operator to restart only `ui` here would let
+        # registration "succeed" while `nats` still has no host-port
+        # publish, reproducing the exact silent-sync-failure this change
+        # exists to prevent.
+        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'nats' service recreated with the docker-compose.nats-secondary.yml override included (e.g. docker compose -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d) so NATS actually publishes that address -- restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
     elif [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi

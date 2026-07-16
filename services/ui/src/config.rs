@@ -389,7 +389,9 @@ impl Config {
     // Precedence when Some, highest first:
     // 1. `nats_advertise_url` -- an explicit operator override. Covers
     //    anything nats_bind_ip alone can't express (non-default port, a
-    //    `tls://` scheme, a VPN hostname).
+    //    `tls://` scheme, a VPN hostname). Never validated as an IP literal
+    //    here -- it may legitimately be a hostname, and the operator who set
+    //    it explicitly is asserting it is already correct.
     // 2. `nats_bind_ip` -- the same trusted LAN/VPN IP
     //    `docker-compose.nats-secondary.yml` already requires to publish
     //    NATS's host port for remote secondaries. If an operator has that
@@ -397,16 +399,43 @@ impl Config {
     //    -- already reachable from wherever a remote secondary can reach
     //    this primary, so deriving `nats://<ip>:4222` from it needs no
     //    separate configuration step.
+    //
+    //    Two corrections applied when nats_bind_ip parses as an IP literal:
+    //
+    //    - IPv6 literals must be bracketed (`nats://[::1]:4222`, not
+    //      `nats://::1:4222` -- the latter is ambiguous/unparsable as a
+    //      host:port pair since the literal's own colons collide with the
+    //      port separator).
+    //    - A wildcard listen address (`0.0.0.0`, `::`) must NOT be echoed
+    //      back as the advertised address: it is only meaningful as a bind
+    //      address (docs/architecture-ng.md documents binding to `0.0.0.0`
+    //      behind an external firewall/VPN as a supported case), never as
+    //      something a remote secondary could dial. Handing it out would
+    //      make registration look successful while the secondary still has
+    //      no reachable address -- reproducing #866 under a different
+    //      config. An operator in that situation needs the explicit,
+    //      routable `NATS_ADVERTISE_URL` instead, so this falls through to
+    //      the same fail-closed `None` that register_secondary already
+    //      turns into an HTTP 503 refusal.
+    //
+    //    A value that does not parse as an IP literal at all (e.g. a
+    //    hostname) is passed through unchanged, same as before.
     pub fn advertised_nats_url(&self) -> Option<String> {
         let explicit = self.nats_advertise_url.trim();
         if !explicit.is_empty() {
             return Some(explicit.to_string());
         }
         let bind_ip = self.nats_bind_ip.trim();
-        if !bind_ip.is_empty() {
-            return Some(format!("nats://{bind_ip}:4222"));
+        if bind_ip.is_empty() {
+            return None;
         }
-        None
+        match bind_ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(v4)) if v4.is_unspecified() => None,
+            Ok(std::net::IpAddr::V6(v6)) if v6.is_unspecified() => None,
+            Ok(std::net::IpAddr::V6(v6)) => Some(format!("nats://[{v6}]:4222")),
+            Ok(std::net::IpAddr::V4(v4)) => Some(format!("nats://{v4}:4222")),
+            Err(_) => Some(format!("nats://{bind_ip}:4222")),
+        }
     }
 
     // The `effective_*` getters let a value the operator changed live in the
@@ -1610,5 +1639,114 @@ mod tests {
 
         env::remove_var("NATS_BIND_IP");
         env::remove_var("NATS_ADVERTISE_URL");
+    }
+
+    // An IPv6 NATS_BIND_IP literal must be bracketed in the derived URL --
+    // `nats://2001:db8::5:4222` is not a parsable host:port pair (the
+    // literal's own colons collide with the port separator), so a remote
+    // secondary handed that value could never connect even though
+    // registration itself "succeeded".
+    #[test]
+    fn advertised_nats_url_brackets_ipv6_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "2001:db8::5");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            Some("nats://[2001:db8::5]:4222".to_string()),
+            "an IPv6 NATS_BIND_IP literal must be bracketed when deriving \
+             the advertised URL, or the result is not a valid, parsable \
+             NATS URL"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // An explicit NATS_ADVERTISE_URL is never IP-parsed or reformatted --
+    // an operator who set it explicitly may legitimately want a bracketed
+    // IPv6 literal, a hostname, or a non-default scheme/port, and is
+    // asserting the value is already correct.
+    #[test]
+    fn advertised_nats_url_leaves_explicit_override_untouched_for_ipv6() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_BIND_IP");
+        env::set_var("NATS_ADVERTISE_URL", "nats://[2001:db8::5]:4333");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            Some("nats://[2001:db8::5]:4333".to_string()),
+            "an explicit NATS_ADVERTISE_URL must be returned exactly as \
+             configured, never reparsed/reformatted"
+        );
+
+        env::remove_var("NATS_ADVERTISE_URL");
+    }
+
+    // A wildcard NATS_BIND_IP (0.0.0.0) is a valid *listen* address --
+    // docs/architecture-ng.md documents binding to it behind an external
+    // firewall/VPN as supported -- but is never a routable address a
+    // remote secondary could dial. Echoing it back as the advertised URL
+    // would make registration look successful while leaving the secondary
+    // with an unreachable address, reproducing #866 under a different
+    // config; this must fail closed to None (register_secondary turns that
+    // into an HTTP 503 refusal) instead.
+    #[test]
+    fn advertised_nats_url_rejects_ipv4_wildcard_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "0.0.0.0");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            "0.0.0.0 is a listen wildcard, not a routable address a remote \
+             secondary could dial -- it must not be advertised"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // Same as the IPv4 case above, for the IPv6 wildcard/unspecified
+    // address `::`.
+    #[test]
+    fn advertised_nats_url_rejects_ipv6_wildcard_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "::");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            ":: is the IPv6 listen wildcard, not a routable address a \
+             remote secondary could dial -- it must not be advertised"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // A NATS_BIND_IP that is a hostname (not an IP literal at all) must
+    // pass through unchanged -- it is neither bracketed (bracketing only
+    // applies to IPv6 literals) nor rejected as a wildcard (is_unspecified
+    // only applies to parsed IP addresses).
+    #[test]
+    fn advertised_nats_url_passes_through_hostname_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "nats.vpn.example");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            Some("nats://nats.vpn.example:4222".to_string()),
+            "a hostname NATS_BIND_IP must be passed through unchanged, \
+             same as before this IP-literal-aware handling was added"
+        );
+
+        env::remove_var("NATS_BIND_IP");
     }
 }

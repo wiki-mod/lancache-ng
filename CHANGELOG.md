@@ -505,6 +505,18 @@ is real, live, running code, not just work sitting in source control.
   internal-only-value class of bug: no other field has it -- `proxy_ip`
   (`standard_ip`) is the LAN IP every client already uses directly by
   design, and `pdns_api_key` is a shared secret, not an address.
+  Follow-up review fixes: `advertised_nats_url()` now brackets an IPv6
+  `NATS_BIND_IP` literal (`nats://[2001:db8::5]:4222`, not the unparsable
+  `nats://2001:db8::5:4222`) and refuses to derive an advertised URL from a
+  wildcard `NATS_BIND_IP` (`0.0.0.0`/`::`) -- a wildcard is only meaningful
+  as a bind address, never as something a remote secondary could dial, so
+  that case now falls through to the same HTTP 503 refusal and requires an
+  explicit, routable `NATS_ADVERTISE_URL` instead. The 503 error message
+  from `setup.sh secondary` now also makes clear that setting
+  `NATS_BIND_IP`/`NATS_ADVERTISE_URL` and restarting only the `ui` container
+  is not enough on its own: the `nats` service itself still needs
+  `docker-compose.nats-secondary.yml` included (and the stack recreated with
+  it) to actually publish port 4222 on that address.
 - Fixed `setup.sh update`'s post-update functional health gate
   (`verify_stack_functional_health`) silently no-oping instead of failing
   when its required probe tool was missing (#868). `dig` was never part of
