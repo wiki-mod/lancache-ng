@@ -96,7 +96,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 When a release ships:
 
 1. Collect the accumulated `## Changelog` sections from all merged PRs since the
-   last release.
+   last release. `scripts/collect-changelog-entries.sh` automates this
+   collection step (it does not write to `CHANGELOG.md` or cut a release).
 2. Create a new version heading in `CHANGELOG.md` using the format
    `## [X.Y.Z] - YYYY-MM-DD` with the release date.
 3. Organize the accumulated changes under standard subheadings: `Added`, `Changed`,

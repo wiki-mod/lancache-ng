@@ -70,7 +70,7 @@ make_sandbox() {
 generate() {
     local compose="$1" root="$2" script="$2/entrypoint.sh"
     extract_nats_entrypoint_command "$compose" "$root" "$script"
-    run run_nats_entrypoint "$script" "$root" "$stub_bin"
+    run run_nats_entrypoint "$script" "$root" "$stub_bin" "$repo_root"
     [ "$status" -eq 0 ] || {
         printf 'entrypoint generation failed (exit %s):\n%s\n' "$status" "$output" >&2
         return 1

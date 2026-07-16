@@ -39,4 +39,6 @@ load_setup_quickstart_helpers() {
     DOCKER_SOCKET_PROXY_SCRIPT="$repo_root/scripts/docker-socket-proxy.sh"
     # shellcheck disable=SC2034
     DHCP_PROBE_SCRIPT="$repo_root/services/ui/dhcp-probe.sh"
+    # shellcheck disable=SC2034
+    SHARED_SECRET_BOOTSTRAP_SCRIPT="$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }
