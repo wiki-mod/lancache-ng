@@ -1168,6 +1168,28 @@ is real, live, running code, not just work sitting in source control.
   keep their guaranteed floor rather than being squeezed to zero; all
   pre-existing `parse_syslog_tail` tests (including the #758 regression
   test) continue to pass unmodified.
+- Fixed `build-push.yml`'s top-level concurrency group serializing whole
+  pipeline runs one at a time on rapid pushes, wasting self-hosted
+  `lancache-heavy` capacity on commits already superseded (#888). The
+  originally-proposed fix (flip the group's `cancel-in-progress` to
+  `true`) turned out unsafe: it cancels an entire in-progress run
+  including any job currently executing, and `promote`'s own job-level
+  concurrency group (#793) does not protect it from that. Implemented
+  instead: the group's push/tag key is now run-scoped (a no-op for
+  serialization, also fixing master/`v0.2.0` pushes contending for the
+  same slot); `build`/`container-scan` gained their own service+ref-scoped
+  job-level concurrency so a superseded commit's heavy work is cancelled
+  promptly, while `merge-manifests`/`promote` cleanly skip it via their
+  existing `needs` gates instead of being killed mid-write. This trades a
+  new (but bounded, light-tier-only) cost for the heavy-tier savings:
+  superseded commits' cheap `detect-changes`/`shellcheck`/etc. jobs now
+  run to completion instead of being dropped while queued. `cancel-in-
+  progress` deliberately stays `false` for `pull_request` events too --
+  live-tested flipping it and found it kills an already-running
+  `detect-changes` job when a PR is opened with labels/milestone set in
+  the same call (this project's own convention), a real regression for no
+  registry-safety benefit since PR runs never reach `promote`/`release`
+  anyway.
 - Clarified the PR template's `## Changelog` heading to explicitly say not to
   edit `CHANGELOG.md` in the same PR (#889): every simultaneously-open PR
   appending to this same section's heading guaranteed a merge conflict with

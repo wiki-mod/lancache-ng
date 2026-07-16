@@ -42,7 +42,56 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  # Push/tag events use a run_id-suffixed key instead of the old
+  # `{workflow}-publish` one (same pattern as full-setup-deep-validate.yml's
+  # own non-PR branch): this deliberately makes the group never collide
+  # with itself, so it no longer serializes whole runs one at a time (that
+  # old key also never included the ref, so master and v0.2.0 pushes
+  # contended for the same single pending slot even though they are
+  # unrelated -- also fixed by moving to a run-scoped key). That whole-run
+  # serialization was the ONLY thing standing between a rapid burst of
+  # pushes and `promote` being torn down mid-write: `promote` has its own
+  # job-level concurrency group (`Build & Push-promote`, added by #793),
+  # but that group only serializes `promote` against OTHER users of that
+  # exact same group name (e.g. backfill-stack-latest.yml) -- it does NOT
+  # protect `promote` from being killed mid-execution if THIS group's own
+  # cancel-in-progress were true and cancelled the whole run out from
+  # under it. Confirmed against GitHub's own docs: workflow-level
+  # `cancel-in-progress: true` cancels the entire previous run, including
+  # every job already in progress, not just still-queued ones -- a job's
+  # own separate concurrency group offers no immunity from that. Rather
+  # than take that risk, per-job cancellation for the actual
+  # runner-hogging jobs (`build`, `container-scan`) is scoped directly on
+  # those jobs below, keyed by service+ref, so a superseded commit's heavy
+  # self-hosted-runner work gets reclaimed promptly while
+  # `merge-manifests`/`promote`/`release` simply never start for it (a
+  # clean skip via their existing `needs.<job>.result == 'success'` gates)
+  # instead of being torn down mid-write.
+  #
+  # `cancel-in-progress` stays false for BOTH branches of the group key
+  # below, on purpose: for push/tag events it no longer matters (the key
+  # is run-id-scoped and never collides, so no cancellation can ever fire
+  # here regardless of this value); for pull_request events it matters a
+  # lot and must stay false. Live-tested flipping it to true on this exact
+  # PR (#888) and it backfired immediately: opening a PR with labels and a
+  # milestone already set (this project's own AG-GH-008 convention) fires
+  # `opened` plus a `labeled`/`milestoned` event for each field within the
+  # same second, each spawning a competing run for this same per-PR-ref
+  # group -- with cancel-in-progress:true, the first run's `detect-changes`
+  # job (already dispatched and running) was killed mid-execution by the
+  # very next of those events, producing a spurious "detect changed paths
+  # ... got 'cancelled'" failure on a PR that had no actual problem.
+  # `promote`/`release` never run on `pull_request` events at all (gated on
+  # `github.event_name != 'pull_request'` further down) so there was never
+  # a registry-correctness reason to flip this branch -- only a scheduling
+  # one, and that one is not worth the reintroduced noise. `build` and
+  # `container-scan` still get real per-commit cancellation on PR branches
+  # via their own job-level groups below (keyed by service+ref,
+  # independent of this setting), so rapid-fire pushes to a PR branch still
+  # get the intended benefit without this failure mode. See #888 for the
+  # full investigation and #889-adjacent discussion for why this stays a
+  # code-comment rather than a CHANGELOG essay.
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
 env:
@@ -2854,6 +2903,33 @@ jobs:
     needs: rust_coverage
     if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Job-level concurrency, keyed per source ref: the top-level group (see
+    # top of file) is run_id-suffixed for push events and therefore never
+    # collides, so it no longer serializes same-branch badge publishes the
+    # way its old, fully-global key used to. cancel-in-progress stays
+    # false: this queues a second same-branch publish behind a running one
+    # instead of racing it.
+    #
+    # Deliberately per-ref, NOT workflow-wide: a single shared group would
+    # let unrelated branches queue behind each other, and GitHub's
+    # concurrency queue only ever holds one pending job per group -- a
+    # burst of publishes for OTHER branches can bump a given branch's
+    # already-queued publish out of the queue entirely before it ever
+    # starts, silently skipping that branch's badge update for this push
+    # (see the "Queue badge publishes instead of replacing them" review
+    # finding). Per-ref scoping gives every branch its own queue slot, so
+    # branches can never bump each other out of it.
+    #
+    # What per-ref scoping does NOT do is stop two DIFFERENT branches'
+    # publishes from running at the literal same time (they're in
+    # different groups) and racing the shared `badges` branch -- that race
+    # is instead handled below, by retrying the fetch/commit/push instead
+    # of doing it once. A badge push is cheap/fast enough that neither the
+    # per-branch queueing nor the retry loop is a capacity concern the way
+    # cancellation is for `build`/`container-scan`.
+    concurrency:
+      group: ${{ github.workflow }}-badge-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -2867,9 +2943,10 @@ jobs:
       - name: Publish Rust coverage badge endpoint
         # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
         # so pushes to master and to the active vX.Y.Z integration branch don't
-        # overwrite each other's badge data -- the workflow-level concurrency
-        # group only serializes writes, it doesn't stop two different branches
-        # from racing to own the same file.
+        # overwrite each other's badge data -- this job's own concurrency group
+        # (above) is per-ref, so it only serializes writes for the SAME branch;
+        # the retry loop below is what protects the shared `badges` branch
+        # itself from two DIFFERENT branches' publishes racing each other.
         env:
           BADGE_BRANCH: badges
           BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
@@ -2881,6 +2958,28 @@ jobs:
           : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
+          # Debounce/coalesce, same reasoning and mechanism as promote's own
+          # branch-tip check (#777, see that job's comment): the per-ref badge
+          # concurrency group above only serializes the ORDER two same-branch
+          # publishes execute in, it does not guarantee the newer commit's
+          # coverage wins. A slow, older run's rust_coverage can still finish
+          # and reach this step after a faster, newer run for the same branch
+          # already published -- without this check it would silently
+          # fast-forward the badge file back to stale coverage. Re-resolve
+          # the branch's current tip directly from the remote and skip as a
+          # no-op if a newer commit has already landed; that newer commit's
+          # own run (already published, or about to) is the correct source of
+          # truth.
+          current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
+          if [[ -z "$current_tip" ]]; then
+            echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
+            exit 1
+          fi
+          if [[ "$current_tip" != "$GITHUB_SHA" ]]; then
+            echo "::notice::${GITHUB_REF} has already moved to ${current_tip} since this run was triggered for ${GITHUB_SHA}; skipping badge publish so the run already targeting the current tip publishes instead."
+            exit 0
+          fi
+
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
           cp coverage-badge/rust.json "$tmp_dir/rust.json"
@@ -2888,34 +2987,59 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
-          # sparse fetch config only tracks the ref it originally checked out, so fetching a
-          # different branch by name alone lands only in FETCH_HEAD, never in
-          # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
-          # report "not found" and take the orphan-branch path even when badges already exists,
-          # and the final push would be rejected as non-fast-forward.
-          git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
-          if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
-            # -C (not --create): this is a self-hosted runner, so a local badges branch left
-            # over from a previous job on the same workspace makes a plain --create fail with
-            # "a branch named 'badges' already exists". -C resets it to origin's tip instead.
-            git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
-          else
-            git switch --orphan "$BADGE_BRANCH"
-            git rm -rf . >/dev/null 2>&1 || true
-          fi
+          # Retry loop, not a single fetch/commit/push: the concurrency group
+          # above is per-ref, so it only prevents two publishes for the SAME
+          # branch from racing each other -- it does nothing for a DIFFERENT
+          # branch's publish landing on the shared `badges` branch between
+          # this attempt's fetch and its own push (previously a single plain
+          # `git push`, no retry/rebase, would just fail non-fast-forward in
+          # that case). Re-fetching and rebuilding the commit on the fresh
+          # tip each attempt makes that self-healing instead of a hard
+          # failure, without needing a single global group that would let
+          # unrelated branches bump each other out of GitHub's one-pending-
+          # job-per-group queue (see the group's comment above).
+          max_attempts=5
+          attempt=1
+          while :; do
+            # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
+            # sparse fetch config only tracks the ref it originally checked out, so fetching a
+            # different branch by name alone lands only in FETCH_HEAD, never in
+            # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
+            # report "not found" and take the orphan-branch path even when badges already exists,
+            # and the final push would be rejected as non-fast-forward.
+            git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
+            if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
+              # -C (not --create): this is a self-hosted runner, so a local badges branch left
+              # over from a previous job on the same workspace makes a plain --create fail with
+              # "a branch named 'badges' already exists". -C resets it to origin's tip instead,
+              # discarding any local commit left over from a previous failed attempt below.
+              git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
+            else
+              git switch --orphan "$BADGE_BRANCH"
+              git rm -rf . >/dev/null 2>&1 || true
+            fi
 
-          mkdir -p "$(dirname "$BADGE_FILE")"
-          cp "$tmp_dir/rust.json" "$BADGE_FILE"
-          git add "$BADGE_FILE"
+            mkdir -p "$(dirname "$BADGE_FILE")"
+            cp "$tmp_dir/rust.json" "$BADGE_FILE"
+            git add "$BADGE_FILE"
 
-          if git diff --cached --quiet; then
-            echo "::notice::Rust coverage badge endpoint already up to date."
-            exit 0
-          fi
+            if git diff --cached --quiet; then
+              echo "::notice::Rust coverage badge endpoint already up to date."
+              exit 0
+            fi
 
-          git commit -m "chore: update rust coverage badge"
-          git push origin "$BADGE_BRANCH"
+            git commit -m "chore: update rust coverage badge"
+            if git push origin "$BADGE_BRANCH"; then
+              break
+            fi
+
+            if (( attempt >= max_attempts )); then
+              echo "::error::Failed to push the coverage badge endpoint to ${BADGE_BRANCH} after ${max_attempts} attempts (non-fast-forward every time)."
+              exit 1
+            fi
+            echo "::notice::Push to ${BADGE_BRANCH} was rejected, likely by a concurrent publish for another branch -- refetching and retrying (attempt $((attempt + 1))/${max_attempts})."
+            attempt=$((attempt + 1))
+          done
 
   watchdog_test:
     # Watchdog has its own small shell runtime and therefore its own scoped
@@ -3235,6 +3359,36 @@ jobs:
     # then, matching the established fix pattern.
     if: github.event_name != 'pull_request'
     needs: validate-compose
+    # Job-level concurrency (#888): keyed per matrix row (service + platform)
+    # and per ref, so a newer push's scan for the same service/platform
+    # cancels an older, now-superseded one instead of both queueing behind
+    # the top-level group the way the whole run used to. Safe to cancel
+    # mid-scan: this job only reads/builds a local image to scan it, it
+    # never pushes anything to GHCR, so there is no partial registry state
+    # to worry about -- worst case is a wasted Trivy run. `build` below
+    # requires this job's success on non-PR events, so a cancelled scan
+    # cleanly stops the pipeline there via that `needs` gate rather than
+    # racing it.
+    #
+    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) get
+    # their own run_id-suffixed key instead of sharing the plain
+    # service+platform+ref one: a plain ref-only key would let two manual
+    # dispatches of the same ref (e.g. spot-checking `channel=dev` then
+    # `channel=edge` minutes apart) or a rerun of an old, already-superseded
+    # run cancel each other's or a currently-running newer push's scan --
+    # cancel-in-progress cancels whatever already holds the group
+    # regardless of which commit is actually newer, so a ref-only key has no
+    # way to tell "genuinely superseded" apart from "unrelated manual
+    # retrigger". Ordinary push/tag events keep the plain key so consecutive
+    # pushes to the same ref still get the intended fast supersession.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-container-scan-{1}-{2}-{3}-{4}', github.workflow, matrix.service, matrix.platform_tag, github.ref, github.run_id) ||
+          format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
+        }}
+      cancel-in-progress: true
     # Each matrix row carries its own JSON-encoded runner selector so amd64
     # rows stay on the self-hosted pool (with LAN acceleration available) and
     # arm64 rows run natively on a GitHub-hosted arm64 runner -- QEMU on the
@@ -3663,6 +3817,39 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
+    # Job-level concurrency (#888): keyed per matrix service and per ref, so
+    # a newer push's build for the same service cancels an older,
+    # now-superseded one instead of both queueing behind the top-level
+    # group the way the whole run used to (which also meant the scarce
+    # self-hosted `lancache-heavy` runners stayed pinned to a superseded
+    # commit's build for its full ~150-minute timeout). Safe to cancel
+    # mid-push: GHCR tag writes are atomic (a cancelled push simply never
+    # completes the final manifest PUT for its sha-<short>-{amd64,arm64}
+    # tag, it never leaves a corrupt or partially-visible one), and
+    # `merge-manifests` below already requires `needs.build.result ==
+    # 'success'`, so a cancelled build cleanly stops the pipeline there via
+    # that `needs` gate rather than racing a partial image.
+    #
+    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) get
+    # their own run_id-suffixed key instead of sharing the plain
+    # service+ref one, for the same reason as container-scan just above:
+    # two manual dispatches of the same ref with different `channel` inputs
+    # (or a rerun of an old, already-superseded run) would otherwise share
+    # this group with each other and with any currently-running fresh push
+    # build, and cancel-in-progress cancels whoever already holds the group
+    # regardless of which commit is actually newer -- silently dropping the
+    # earlier dispatch's requested channel promotion, or killing a
+    # legitimately newer push's build in favor of rebuilding a stale rerun.
+    # Ordinary push/tag events keep the plain key so consecutive pushes to
+    # the same ref still get the intended fast supersession.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-build-{1}-{2}-{3}', github.workflow, matrix.service, github.ref, github.run_id) ||
+          format('{0}-build-{1}-{2}', github.workflow, matrix.service, github.ref)
+        }}
+      cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     permissions:
@@ -4257,6 +4444,23 @@ jobs:
       }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
+    # Job-level concurrency, mirroring `build` (the amd64 leg) exactly: without
+    # this, a newer push's `build` job for a service gets cancelled by its own
+    # service+ref group, but this native arm64 leg for the SAME now-superseded
+    # commit had nothing cancelling it and would run to completion (up to the
+    # full 120-minute timeout above), wasting arm64 runner capacity on a build
+    # `merge-manifests` can never use once `build`'s result for that commit is
+    # `cancelled` rather than `success`. Same `workflow_dispatch`/rerun
+    # isolation as `build`'s group, for the same reason: see that job's
+    # comment for the full rationale.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-build-arm64-{1}-{2}-{3}', github.workflow, matrix.service, github.ref, github.run_id) ||
+          format('{0}-build-arm64-{1}-{2}', github.workflow, matrix.service, github.ref)
+        }}
+      cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     permissions:
@@ -4955,16 +5159,34 @@ jobs:
     # mutable channel tags -- it is idempotent and fast, unlike the rest of
     # this workflow (build/test/scan/build-images), which is slow and where
     # cancelling stale in-flight work for a superseded commit is desirable.
-    # Sharing the workflow-level "Build & Push-publish" concurrency group
-    # (see top of file) ties promote's own scheduling to that same single
-    # pending slot, so a rapid burst of pushes can starve it just like the
-    # slow stages, and any future tightening of that group's cancellation
-    # behavior for faster build feedback would also risk killing an in-flight
-    # promote (#777). This job-level group isolates promote's own concurrency
-    # axis from that decision entirely. backfill-stack-latest.yml
-    # deliberately joins this exact same group name (not
-    # "Build & Push-publish") so the two tag-moving workflows still serialize
-    # against each other; keep both in sync if this name ever changes.
+    # Originally added (#793) because promote used to share the top-level
+    # "Build & Push-publish" concurrency group with the slow build/test/scan
+    # pipeline: a rapid burst of pushes could drop promote's entire run
+    # while it was still queued, before it ever started (#777). Giving
+    # promote its own group here stops it from competing for that same
+    # single pending slot.
+    #
+    # CORRECTION (#888): this job-level group does NOT, by itself, protect
+    # promote from being killed *mid-execution* if the top-level group's own
+    # cancel-in-progress were ever true and cancelled the whole run out from
+    # under it -- a job-level concurrency group only serializes THIS job
+    # against OTHER users of this exact same group name (currently just
+    # backfill-stack-latest.yml, so a manual `latest` backfill and an
+    # automatic channel promotion can't race each other's tag moves); it is
+    # not a shield against the enclosing workflow run's own cancellation.
+    # Confirmed against GitHub's docs: workflow-level cancel-in-progress:true
+    # tears down the entire previous run, including jobs already in
+    # progress, regardless of any job-level group they also happen to
+    # belong to. This is why the top-level group (see top of file) uses a
+    # run_id-suffixed key for push/tag events instead of being flipped to
+    # cancel-in-progress:true -- that keeps promote safe by construction
+    # rather than by this group's cancel-in-progress setting, which stays
+    # false here for the backfill-serialization reason above, not as a
+    # second line of defense against the top-level group.
+    # backfill-stack-latest.yml deliberately joins this exact same group
+    # name (not "Build & Push-publish") so the two tag-moving workflows
+    # still serialize against each other; keep both in sync if this name
+    # ever changes.
     concurrency:
       group: ${{ github.workflow }}-promote
       cancel-in-progress: false
@@ -5355,6 +5577,23 @@ jobs:
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency, keyed per tag ref: this job's GET-then-create-or-
+    # PATCH logic against the GitHub Releases API is only safe if at most one
+    # instance runs per tag at a time (two concurrent instances for the same
+    # tag could both GET "no release yet" and then race two separate POSTs,
+    # or one could PATCH over the other's body-preservation read). Before
+    # this workflow's top-level group became run_id-suffixed for tag pushes
+    # (see top of file), that whole-run serialization made two `release`
+    # runs for the same tag effectively impossible; it no longer does, so
+    # this job needs its own guarantee. Scoped by ref (not global like
+    # `promote`'s group) because release publishing for different tags is
+    # genuinely independent -- there is no shared mutable resource across
+    # tags the way `promote`'s channel-tag moves have. cancel-in-progress
+    # stays false: queue a second attempt for the same tag (e.g. a manual
+    # rerun) rather than cancel the first mid-write.
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
       packages: read
