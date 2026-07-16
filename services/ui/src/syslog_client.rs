@@ -17,7 +17,7 @@
 
 use regex::Regex;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -76,10 +76,14 @@ pub struct SyslogStats {
 // files starting from the newest until `limit` lines have been collected,
 // then stop opening any older file. This keeps the common case (tailing an
 // enabled, actively-rotating store) cheap -- it will not decompress
-// SYSLOG_MAX_GB's worth of history just to show the last 200 lines -- while
-// still being correct once multiple hosts/rotated files are involved, since
-// the final sort-by-timestamp-and-truncate step below is exact regardless of
-// which order files were opened in.
+// SYSLOG_MAX_GB's worth of history just to show the last 200 lines.
+//
+// The collected lines are then merged with a per-host floor (see
+// select_fair_window below) rather than a single global sort+truncate: a
+// naturally quiet host (e.g. lancache-watchdog, which logs a handful of
+// lines at startup and then only on an actual problem) must stay visible
+// even once a noisy host (e.g. netdata) has produced far more recent lines
+// than `limit` on its own. See #859.
 pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Vec<SyslogEntry> {
     if limit == 0 {
         return vec![];
@@ -146,17 +150,113 @@ pub fn parse_syslog_tail(log_root: &str, host: Option<&str>, limit: usize) -> Ve
         }
     }
 
-    // Files are only sorted by mtime, and lines within a file are already in
-    // append order, but this final sort makes the multi-host merge exact
-    // regardless of the order files happened to be opened in above --
-    // matches nginx_client::parse_log_tail's oldest-first-in-tail-window
-    // contract. Lines that failed to match the expected format get an empty
-    // timestamp (see parse_syslog_line) and sort first; this is a documented
-    // best-effort fallback, not a correctness bug, since such lines are kept
-    // rather than dropped.
-    collected.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-    let start = collected.len().saturating_sub(limit);
-    collected[start..].to_vec()
+    select_fair_window(collected, limit)
+}
+
+// A host with data is guaranteed at least this many of its own most recent
+// lines (fewer if it has less data than this), regardless of how many other
+// hosts are competing for the shared `limit` budget. Deliberately a small
+// constant, not an equal share of `limit` across hosts_with_data: an equal
+// share (limit / hosts_with_data) would, once every active host has at
+// least that many lines, consume the *entire* budget in the per-host floor
+// pass below and leave nothing for the global-recency fill pass, degrading
+// the merge to "same fixed count per host" regardless of actual recency --
+// exactly the kind of over-correction #859 warns against (the fix must
+// protect quiet hosts from starvation without preventing a genuinely more
+// active/recent host from dominating the window when it deserves to). A
+// small constant keeps every host with data visible (comfortably above
+// lancache-watchdog's ~7-line startup burst) while leaving most of `limit`
+// for the recency-fill pass to award to whichever host(s) actually produced
+// the most recent activity.
+const PER_HOST_FLOOR: usize = 10;
+
+// Merges per-host lines into a single `limit`-sized window without letting a
+// noisy host fully evict a quiet one (#859). A plain global
+// sort-by-timestamp + truncate-to-`limit` (the pre-#859 behavior) is
+// host-blind: if every other host's lines are newer, a quiet host's entire
+// contribution -- including a real problem it just logged -- can be sorted
+// out of the window even though dirs_with_candidates/hosts_seen above
+// guaranteed its file got opened. Instead:
+//
+//   1. Group entries by host, newest-first per host.
+//   2. Round-robin across hosts (alphabetical order, for determinism) up to
+//      `per_host_floor = (limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)`
+//      rounds, taking one more line per host per round. This guarantees
+//      every host with data keeps at least `per_host_floor` of its own most
+//      recent lines in the window, capped by how many lines it actually
+//      has. The `limit / hosts_with_data` half of the min() only matters
+//      when there are so many hosts that even the small constant floor
+//      would not fit everyone -- it shrinks the floor rather than silently
+//      overrunning `limit`.
+//   3. Whatever budget remains after every host's floor is exhausted (or
+//      every host ran out of lines) is filled with the globally most recent
+//      leftover lines across all hosts -- this is where a genuinely noisy,
+//      genuinely recent host still dominates the window when it isn't
+//      competing against other hosts for space, and where it can still win
+//      most of the shared budget even when it IS competing against other
+//      active hosts (see parse_syslog_tail_lets_recent_activity_win_the_
+//      shared_budget_across_multiple_active_hosts).
+//
+// Lines that failed to match the expected format get an empty timestamp
+// (see parse_syslog_line) and sort as oldest; this is a documented
+// best-effort fallback, not a correctness bug, since such lines are kept
+// rather than dropped. The final output is re-sorted oldest-first to match
+// nginx_client::parse_log_tail's tail-window contract.
+//
+// Caveat: if there are more hosts with data than `limit` (unusual at this
+// project's scale -- a handful of wired services, default limit 200), the
+// round-robin's alphabetical tie-break means hosts earlier in sort order are
+// slightly favored once the shared floor round runs out of budget
+// mid-round. This is a bounded, deterministic edge case, not a starvation
+// bug: every host still gets a chance at a line before any host gets a
+// second one.
+fn select_fair_window(collected: Vec<SyslogEntry>, limit: usize) -> Vec<SyslogEntry> {
+    let mut by_host: HashMap<String, Vec<SyslogEntry>> = HashMap::new();
+    for entry in collected {
+        by_host.entry(entry.host.clone()).or_default().push(entry);
+    }
+    for entries in by_host.values_mut() {
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    }
+
+    let mut host_names: Vec<String> = by_host.keys().cloned().collect();
+    host_names.sort();
+    let host_count = host_names.len();
+    if host_count == 0 {
+        return vec![];
+    }
+
+    let per_host_floor = (limit / host_count).clamp(1, PER_HOST_FLOOR);
+    let mut kept: Vec<SyslogEntry> = Vec::new();
+    let mut taken_per_host: HashMap<String, usize> = HashMap::new();
+
+    'rounds: for round in 0..per_host_floor {
+        for host in &host_names {
+            if kept.len() >= limit {
+                break 'rounds;
+            }
+            if let Some(entry) = by_host.get(host).and_then(|entries| entries.get(round)) {
+                kept.push(entry.clone());
+                *taken_per_host.entry(host.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    if kept.len() < limit {
+        let mut leftovers: Vec<&SyslogEntry> = Vec::new();
+        for host in &host_names {
+            let taken = *taken_per_host.get(host).unwrap_or(&0);
+            if let Some(entries) = by_host.get(host) {
+                leftovers.extend(entries.iter().skip(taken));
+            }
+        }
+        leftovers.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let need = limit - kept.len();
+        kept.extend(leftovers.into_iter().take(need).cloned());
+    }
+
+    kept.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    kept
 }
 
 // Aggregates file count / on-disk size per host, plus a distinct-day count
@@ -534,6 +634,141 @@ mod tests {
             "hostB must be represented in the merged tail even though \
              hostA's (newer-mtime) file alone already had >= limit lines; \
              got {hosts:?}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // Regression test for #859: the #758 fix above only guarantees every
+    // host's newest *file* gets opened before collection stops -- it does
+    // nothing to protect a quiet host's lines from the final merge step.
+    // Before this fix, `collected.sort_by(timestamp)` + truncate-to-`limit`
+    // was host-blind: hostQuiet's single old line here would be sorted
+    // ahead of every one of hostNoisy's 50 newer lines and truncated away
+    // entirely, even though hostQuiet's file was opened and read correctly.
+    #[test]
+    fn parse_syslog_tail_does_not_starve_a_quiet_host_at_the_final_merge_step() {
+        let root = temp_root("quiet-merge");
+        write_plain(
+            &root,
+            "hostQuiet",
+            "20260701.log",
+            "2026-07-01T00:00:00+00:00 hostQuiet lancache-watchdog: startup banner\n",
+        );
+        let mut noisy_content = String::new();
+        for i in 0..50 {
+            noisy_content.push_str(&format!(
+                "2026-07-13T10:{i:02}:00+00:00 hostNoisy netdata: chatter-{i}\n"
+            ));
+        }
+        write_plain(&root, "hostNoisy", "20260713.log", &noisy_content);
+
+        let entries = parse_syslog_tail(root.to_str().unwrap(), None, 10);
+
+        // (b) the overall limit is still respected.
+        assert_eq!(entries.len(), 10);
+        // (a) hostQuiet's only line survives despite being far older than
+        // every one of hostNoisy's 50 lines.
+        assert!(
+            entries.iter().any(|e| e.host == "hostQuiet"),
+            "hostQuiet's only line must survive the final merge even though \
+             hostNoisy has 50 newer lines; got hosts {:?}",
+            entries.iter().map(|e| e.host.as_str()).collect::<Vec<_>>()
+        );
+        // (c) the remaining budget is still dominated by hostNoisy's most
+        // recent lines, not arbitrary older ones.
+        assert!(entries.iter().any(|e| e.message == "chatter-49"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // Companion to the above: when only one host is contributing (or a
+    // host has no competing quiet host to protect against), the fair-window
+    // merge must degrade to plain most-recent-first behavior -- the
+    // per-host floor should never hold back a host's own most recent lines
+    // when nothing else is competing for the budget.
+    #[test]
+    fn parse_syslog_tail_lets_high_volume_activity_dominate_when_uncontested() {
+        let root = temp_root("uncontested");
+        let mut content = String::new();
+        for i in 0..30 {
+            content.push_str(&format!(
+                "2026-07-13T10:{i:02}:00+00:00 hostNoisy netdata: chatter-{i}\n"
+            ));
+        }
+        write_plain(&root, "hostNoisy", "20260713.log", &content);
+
+        let entries = parse_syslog_tail(root.to_str().unwrap(), None, 5);
+        assert_eq!(entries.len(), 5);
+        let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "chatter-25",
+                "chatter-26",
+                "chatter-27",
+                "chatter-28",
+                "chatter-29"
+            ],
+            "with a single host contributing, the merge must still keep \
+             exactly the most recent `limit` lines; got {messages:?}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // A per-host floor equal to `limit / hosts_with_data` (an equal share)
+    // would, once every active host has at least that many lines, consume
+    // the entire budget in the floor pass and leave nothing for the
+    // recency-fill pass -- degrading the merge to a fixed count per host
+    // regardless of which host actually produced the most recent activity.
+    // That is an over-correction of the #859 starvation bug, not a fix:
+    // four equally-active hosts here would each get pinned to exactly 20
+    // lines, hiding hostA's and hostB's newest 10 lines behind hostC's and
+    // hostD's oldest ones. With PER_HOST_FLOOR capping the floor at 10, the
+    // remaining 40-line budget after the floor pass goes to whichever lines
+    // are genuinely most recent across all hosts -- here hostA and hostB
+    // (whose entire 30-line history is newer than hostC's and hostD's),
+    // so they end up fully represented (30/30) while hostC and hostD still
+    // keep their guaranteed floor (10 each) rather than being starved out.
+    #[test]
+    fn parse_syslog_tail_lets_recent_activity_win_the_shared_budget_across_multiple_active_hosts() {
+        let root = temp_root("multi-active");
+        let hosts_oldest_to_newest = ["hostD", "hostC", "hostB", "hostA"];
+        for (block, host) in hosts_oldest_to_newest.iter().enumerate() {
+            let hour = 9 + block;
+            let mut content = String::new();
+            for minute in 0..30 {
+                content.push_str(&format!(
+                    "2026-07-13T{hour:02}:{minute:02}:00+00:00 {host} nginx: {host}-{minute}\n"
+                ));
+            }
+            write_plain(&root, host, "20260713.log", &content);
+        }
+
+        let entries = parse_syslog_tail(root.to_str().unwrap(), None, 80);
+        assert_eq!(entries.len(), 80);
+
+        let count_for = |host: &str| entries.iter().filter(|e| e.host == host).count();
+        assert_eq!(
+            count_for("hostA"),
+            30,
+            "hostA's entire (newest) history should fit"
+        );
+        assert_eq!(
+            count_for("hostB"),
+            30,
+            "hostB's entire (second-newest) history should fit"
+        );
+        assert_eq!(
+            count_for("hostC"),
+            10,
+            "hostC must still keep its guaranteed floor, not be squeezed to 0"
+        );
+        assert_eq!(
+            count_for("hostD"),
+            10,
+            "hostD must still keep its guaranteed floor, not be squeezed to 0"
         );
 
         fs::remove_dir_all(root).expect("cleanup");

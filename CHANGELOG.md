@@ -849,6 +849,48 @@ is real, live, running code, not just work sitting in source control.
   static `name: lancache-ng` is deliberately left unchanged for real installs
   (see #669 item 6 for why per-install-dir project naming stays out of scope
   for that case).
+- Fixed the Admin UI's `/logs` view (syslog mode) permanently starving a
+  naturally quiet host once a noisier host produced enough recent lines to
+  fill the global entry budget (#859). `syslog_client::parse_syslog_tail`
+  already guaranteed (via the #758 `dirs_with_candidates`/`hosts_seen` fix)
+  that every host's newest file gets opened before the collection loop's
+  early-break can fire, but the final merge step afterward
+  (`collected.sort_by(timestamp)` + truncate-to-`limit`) was completely
+  host-blind: if every other host's lines happened to be newer, a quiet
+  host's entire contribution could still be sorted out of the window and
+  silently disappear from the rendered page, even though its file was read
+  correctly and its data was still on disk. The concrete, safety-critical
+  instance: `services/watchdog/watchdog.sh` logs a handful of lines at
+  container start and then stays silent unless it detects and acts on a
+  real problem, while `netdata`'s continuous PLUGINSD/health-check chatter
+  can burn through the default 200-line budget within minutes -- once that
+  happens, watchdog's log (including a future real-incident line) becomes
+  permanently invisible via the Admin UI for the rest of the container's
+  uptime. This was a general capacity/fairness bug in the merge, not
+  watchdog-specific, so the fix is general too: the merge now groups
+  collected lines by host, reserves each host with data at least
+  `per_host_floor = (limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)`
+  (`PER_HOST_FLOOR` is a small constant, 10) of its own most recent lines
+  via a round-robin pass, and only then fills any remaining budget with the
+  globally most recent leftover lines across all hosts -- so a quiet host
+  can no longer be fully evicted, while a genuinely high-volume, genuinely
+  recent host still dominates the window whenever it isn't competing with
+  other hosts for space, and can still win most of the shared budget even
+  when it IS competing against other active hosts. The floor is
+  deliberately a small constant rather than a pure equal share of `limit`
+  across hosts: an equal share would, once every active host has at least
+  that many lines, consume the entire budget in the floor pass and leave
+  nothing for the recency-fill pass, degrading the merge to a fixed count
+  per host regardless of actual recency -- an over-correction caught during
+  review before merge. New unit tests in `services/ui/src/syslog_client.rs`
+  cover a quiet host surviving alongside 50 newer lines from a noisy host
+  while the overall limit is still respected, a single uncontested noisy
+  host still getting exactly its most recent lines with no fairness
+  penalty, and four simultaneously-active hosts where the two genuinely
+  newer hosts each win their entire history while the two older hosts still
+  keep their guaranteed floor rather than being squeezed to zero; all
+  pre-existing `parse_syslog_tail` tests (including the #758 regression
+  test) continue to pass unmodified.
 
 ## [0.1.0] - 2026-07-06
 
