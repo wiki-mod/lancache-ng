@@ -472,6 +472,35 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `build-push.yml`'s `promote` job silently losing an earlier tag's
+  channel promotion under concurrent tag pushes (#897, a follow-up to
+  #892/#888): `promote` shared a deliberately global (not per-ref)
+  `concurrency:` group with `backfill-stack-latest.yml` to prevent a
+  different, already-fixed race (#777, a promotion racing a manual `latest`
+  backfill's own tag move). GitHub Actions' concurrency-group primitive can
+  only ever hold one PENDING job per group -- a job that is still queued
+  (its steps have not started) can be silently CANCELLED the moment another
+  run requests the same group, regardless of which one arrived first. #892
+  (narrowing workflow-wide cancellation to `build`/`container-scan` only)
+  made this practically reachable: multiple tag pushes/dispatches can now
+  build in parallel and reach `promote` at nearly the same time, and the
+  older tag's `promote` (and its dependent `release` job) could vanish with
+  no error pointing at the real cause. Fixed by replacing that job-level
+  `concurrency:` group (which cannot be defended against from inside the
+  job -- a cancelled-while-queued job never runs any of its own steps) with
+  a self-managed, cross-host mutex: `scripts/lib/promote-lock.sh` uses an
+  atomically-creatable/CAS-updatable git ref
+  (`refs/promote-lock/global`, outside `refs/heads/*`/`refs/tags/*`) as the
+  lock, since checking this repository's actual runner fleet confirmed
+  `lancache-heavy` spans several distinct physical hosts -- a host-local
+  `flock` (this project's usual mutex idiom, see
+  `scripts/lib/reserve-validation-subnet.sh`) would not provide real
+  exclusion here. Both `promote` and `backfill-stack-latest.yml`'s
+  `backfill-latest` job now acquire/release the same global lock as
+  explicit steps (retry-with-backoff, fail-closed if the lock cannot be
+  acquired, stale-lock takeover after 15 minutes to recover from a crashed
+  holder), preserving the #777 guarantee without depending on GitHub's own
+  concurrency admission to provide it.
 - Fixed the PowerDNS zone/record rollback listener's post-rollback
   recursor cache-flush being silently denied by NATS permissions (#867):
   `rollback_listener.rs::rollback_handler` publishes `lancache.dns.flush`

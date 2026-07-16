@@ -24,21 +24,26 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # contents: write (widened from read, #897): scripts/lib/promote-lock.sh's
+  # acquire/release steps push/delete a dedicated refs/promote-lock/global
+  # ref to implement the cross-workflow mutex below -- see that file's own
+  # header comment and build-push.yml's `promote` job for the full
+  # reasoning. This ref is outside refs/heads/* and refs/tags/*, so it
+  # cannot touch protected branches or release tags.
+  contents: write
   packages: write
 
-concurrency:
-  # `latest` writes must serialize with the normal release promotion job in
-  # build-push.yml so rollback state cannot interleave across workflows.
-  # build-push.yml's `promote` job moved off the shared "Build & Push-publish"
-  # workflow-level group into its own job-level "Build & Push-promote" group
-  # (#777, so a burst of pushes can't starve promote by tying it to the same
-  # slow build/test/scan queue) -- match that group name here rather than the
-  # publish one, or a manual backfill and an automatic channel promotion could
-  # run concurrently and race each other's tag moves.
-  group: "Build & Push-promote"
-  cancel-in-progress: false
-
+# REMOVED (#897): `latest` writes used to serialize with build-push.yml's
+# `promote` job via a shared workflow/job-level `concurrency:` group name
+# ("Build & Push-promote", #777). That primitive can silently cancel
+# whichever of the two workflows' runs is still queued (not yet running) the
+# moment the other one also requests the same group -- a real, confirmed gap
+# once #892 let multiple `promote`-reaching runs build in parallel. Real
+# mutual exclusion, still global across BOTH workflows (re-scoping either one
+# per-ref would reopen #777 -- a backfill racing a promotion for a different
+# ref), now comes from the SAME scripts/lib/promote-lock.sh git-ref lock
+# build-push.yml's `promote` job uses, acquired/released as explicit steps
+# below instead of relying on GitHub's own concurrency admission.
 defaults:
   run:
     shell: bash
@@ -77,6 +82,29 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # See build-push.yml's `promote` job for the full #897 rationale: this
+      # acquires the SAME global refs/promote-lock/global ref that job uses,
+      # so a manual backfill and an automatic promotion still can never move
+      # tags at the same time (the #777 property), without relying on
+      # GitHub's own concurrency admission (which can drop a queued run).
+      - name: Acquire the cross-workflow promote lock
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/promote-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
+
+          # Same budget as build-push.yml's `promote` job -- see that job's
+          # own step for the reasoning behind these numbers.
+          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -246,3 +274,27 @@ jobs:
             printf -- '- Source commit: %s\n' "$declared_commit"
             printf -- '- Target channel: latest\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # `if: always()` (issue #897): release regardless of whether the
+      # backfill above succeeded or failed, so a real backfill failure
+      # cannot ALSO wedge every other queued promote/backfill run behind
+      # this job's own stale_after timeout for no reason.
+      - name: Release the cross-workflow promote lock
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/promote-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          # See build-push.yml's `promote` job for why `|| true` here is the
+          # documented AG-VAL-004 exception: release is best-effort cleanup,
+          # not correctness-critical (the stale_after takeover recovers a
+          # skipped/failed release), and must never flip an otherwise
+          # successful backfill to a failed job status.
+          promote_lock_release origin "$holder_note" || true
