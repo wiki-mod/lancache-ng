@@ -472,6 +472,33 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `build-tools.yml`'s bats-triggering path filter silently excluding
+  most of the project's actual bats-tested files (#873). The filter only
+  ever matched `tests/bats/**`/`tests/shellspec/**` themselves, `setup.sh`,
+  and `scripts/check-idempotence-test-coverage.sh` -- so a PR that changed
+  only, say, `services/watchdog/watchdog.sh` never ran the
+  `watchdog_idempotence.bats`/`watchdog_syslog_prune.bats` suite already
+  written for it, since `build-tools.yml` is the only workflow that ever
+  executes bats/shellspec. Traced every `tests/bats/*.bats` file's real
+  (non-fixture) file dependency and confirmed the gap was not
+  watchdog-specific: `services/dns/**`, `services/dhcp/**`,
+  `services/dhcp-proxy/**`, `services/proxy/**`, `services/watchdog/**`,
+  `services/ui/dhcp-probe.sh`, `deploy/{dev,prod,quickstart}/
+  docker-compose.yml`, `scripts/lib/**`, and seven individual top-level
+  `scripts/*.sh` files (`classify-image-impact.sh`,
+  `compute-next-release-tag.sh`, `detect-full-setup-changes.sh`,
+  `ensure-pr-staging-images.sh`, `plan-deep-validation.sh`,
+  `docker-socket-proxy.sh`, `check-action-node-versions.sh`) all had real
+  bats coverage the path filter never triggered on. Added all of these to
+  both the `push` and `pull_request` path filters in `build-tools.yml`.
+  Publish scope is unaffected -- `determine-publish-scope` still only
+  rebuilds/publishes the build-tools image itself on `tools/build-tools/**`
+  or workflow-file changes, so the added paths only cause the existing
+  local build-and-bats-run to execute, never a new image publish. Refs
+  #822 (the cross-cutting "point-fix without a guard" pattern audit this
+  gap is an instance of); a durable CI guard that keeps the filter in sync
+  with actual bats dependencies going forward is tracked separately as
+  follow-up #879 rather than built into this fix.
 - Fixed `setup.sh update`'s post-update functional health gate
   (`verify_stack_functional_health`) silently no-oping instead of failing
   when its required probe tool was missing (#868). `dig` was never part of
