@@ -35,6 +35,18 @@ else
     exit 1
 fi
 
+# `gh pr view --json body` (and GitHub's API generally) returns issue/PR
+# body text with CRLF line endings. Left in place, the trailing `\r` stays
+# part of awk's `$0` for every line, so section_exists_with_content()'s
+# end-anchored pattern (`$0 ~ ("^## " sec "$")`) never matches any section
+# heading on an awk build that doesn't itself normalize CRLF (e.g. `mawk`,
+# the default `/usr/bin/awk` on both this project's Debian self-hosted
+# runners and GitHub-hosted Ubuntu runners) -- confirmed live on PR #881:
+# a correctly fetched, fully-filled 9833-byte body was reported as missing
+# all 10 required sections. Stripping `\r` here fixes it at the source
+# instead of depending on a specific awk implementation's behavior.
+pr_body="${pr_body//$'\r'/}"
+
 # Determine if PR is a draft (default to false/non-draft for CI if not specified).
 pr_draft="${PR_DRAFT:-false}"
 
