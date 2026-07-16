@@ -1155,12 +1155,12 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    // add_dns/remove_dns previously logged a failed CDN-file write and still
-    // returned the success redirect. dns_write_result_to_response is the
-    // exact mapping both handlers now apply via `?`, so pinning its Ok/Err
-    // behavior here covers the handler-level fix without needing a fully
-    // wired AppState (Docker/NATS/SQLite), which no other route test in this
-    // file constructs either.
+    // add_dns/remove_dns must never log a failed CDN-file write and still
+    // return the success redirect. dns_write_result_to_response is the
+    // exact mapping both handlers apply via `?`, so pinning its Ok/Err
+    // behavior here covers that handler-level error mapping without needing
+    // a fully wired AppState (Docker/NATS/SQLite), which no other route test
+    // in this file constructs either.
     #[test]
     fn dns_write_result_to_response_reports_ok_on_success() {
         assert_eq!(dns_write_result_to_response(Ok(()), "write"), Ok(()));
