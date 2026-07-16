@@ -414,6 +414,27 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed `setup.sh update`'s post-update functional health gate
+  (`verify_stack_functional_health`) silently no-oping instead of failing
+  when its required probe tool was missing (#868). `dig` was never part of
+  setup.sh's own dependency bootstrap, so on the common default install
+  (`curl | bash`, no `dig` on the host) the DNS half of the gate silently
+  skipped itself and reported the update healthy regardless of whether DNS
+  actually worked; the HTTP `/healthz` half had the identical
+  `command -v curl` skip-shaped gap. Fixed the whole pattern, not just the
+  observed `dig` symptom: every probe now routes through a new
+  `require_functional_check_tool` helper that treats a missing tool as a
+  FAILED check, not a skipped one, so a missing dependency can never look
+  like "verified healthy". `perform_stack_update_flow` now also installs
+  `curl` and `dig` up front via `install_missing_tools` (extended with a new
+  `package_name_for_tool` mapping, since `dig` ships in the
+  `bind9-dnsutils`/`dnsutils` package, not a package literally named `dig`)
+  before anything else in the update is mutated, so the fail-closed branch
+  above stays the rare exception on a real run rather than the normal case.
+  See `tests/bats/setup_functional_health_gate.bats` for coverage proving
+  both the missing-tool fail-closed path and that the probes still
+  correctly fail on a real broken HTTP/DNS endpoint when the tool is
+  present.
 - Fixed recurring `Pool overlaps with other one on this address space` /
   `overlaps existing network state` failures in every full-setup validation
   path when two runs shared a self-hosted runner host (#820) -- eliminated
