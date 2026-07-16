@@ -441,6 +441,44 @@ is real, live, running code, not just work sitting in source control.
   gap is an instance of); a durable CI guard that keeps the filter in sync
   with actual bats dependencies going forward is tracked separately as
   follow-up #879 rather than built into this fix.
+- Fixed the Admin UI's `/logs` page silently ignoring any filter in syslog
+  mode (#848): `logs_page()` called `syslog_client::parse_syslog_tail(&log_root,
+  None, max_entries)` with a hardcoded `None` host argument regardless of
+  what was requested, even though `parse_syslog_tail` already accepted and
+  correctly handled a `host: Option<&str>` filter (existing test coverage in
+  `syslog_client.rs` proved the underlying capability worked -- only the
+  route never passed anything through). The nginx-log branch's existing
+  `?filter=` query parameter filters by `cache_status` (HIT/MISS/EXPIRED),
+  which has no meaning for syslog lines, so a new, separate `?host=` query
+  parameter was added instead of overloading `filter` with mode-dependent
+  semantics -- a bookmarked `?filter=HIT` URL would otherwise be silently
+  reinterpreted as a (nonexistent) host named "HIT" if syslog mode were
+  toggled on the same install. `logs.rs` now passes the parsed `host` straight
+  to `parse_syslog_tail`, and a new `syslog_client::list_syslog_hosts()`
+  helper lists every wired host currently under `SYSLOG_LOG_ROOT` so the
+  Admin UI can offer a real host dropdown instead of a text field the
+  operator has to guess values for; `logs.html`'s syslog-mode branch
+  previously had no filter UI at all (only the legacy nginx branch did), so
+  a `<select>` bound to `?host=` was added, mirroring the existing
+  `dhcp.html`/`setup.html` dropdown styling. Selecting "Alle Hosts" clears
+  the filter by navigating back to `/logs` with no query string.
+  Independent review caught that wiring a raw, caller-controlled `?host=`
+  straight into `parse_syslog_tail`'s `Path::new(log_root).join(h)` would
+  have been a path-traversal / arbitrary-file-read regression (e.g.
+  `?host=../../../data` reading the session secret) -- this was fixed
+  two ways: `logs_page()` now only ever honors a `?host=` value that is an
+  exact member of `list_syslog_hosts()`'s real result (an unrecognized or
+  traversal-shaped value silently falls back to "all hosts"), and
+  `parse_syslog_tail` itself independently rejects any `host` argument that
+  is not a single bare directory-name segment (empty, `.`, `..`, or
+  containing `/`/`\`), so every future caller is protected, not just this
+  one. Added `list_syslog_hosts_returns_sorted_host_directory_names`,
+  `list_syslog_hosts_returns_empty_for_missing_root`, and
+  `parse_syslog_tail_ignores_host_with_path_traversal` unit tests in
+  `syslog_client.rs`, plus a `logs_html_renders_syslog_host_filter_dropdown_with_selection`
+  test in `main.rs` that renders the real on-disk `logs.html` template
+  (not a throwaway inline one) to prove the dropdown reflects the selected
+  host correctly.
 - Fixed an intermittent `has active endpoints` teardown race that could poison
   a shared validation Docker network for whichever job ran next in
   `full-setup-deep-validate.yml` (#834) -- a distinct bug from the
