@@ -278,8 +278,14 @@ record changes, or subscribes to read cache/DNS metadata.
     of its own; only recognized by name so its own connection to answer
     `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to
     answer.
-  All eight of these role credentials are required at startup (`:?` guards) so
-  the bus never comes up unauthenticated.
+  The four role **usernames** are still required at compose-interpolation time
+  (`:?` guards). The four role **passwords** are no longer a hard compose
+  requirement (issue #858): an empty/placeholder `NATS_*_PASSWORD` now
+  self-heals through the shared-secrets volume the same way `PDNS_API_KEY`/
+  `KEA_CTRL_TOKEN`/`DDNS_TSIG_KEY` do, instead of failing at `docker compose up`.
+  The bus still never comes up unauthenticated: the nats/dns/ui entrypoints all
+  resolve the exact same generated value, or exit if the shared-secrets volume
+  is unwritable, before the affected process starts.
 - **Registered secondaries no longer share a credential (issue #583).** Each
   gets its own unique NATS username/password at registration time, issued via
   NATS's auth-callout mechanism (see `services/ui/src/nats_auth_callout.rs`):
