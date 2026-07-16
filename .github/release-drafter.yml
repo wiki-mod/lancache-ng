@@ -1,0 +1,53 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# release-drafter (https://github.com/release-drafter/release-drafter) config.
+# Drafts/updates a GitHub Release incrementally on every merge to master/v0.2.0
+# (see .github/workflows/release-drafter.yml), so release notes never need a
+# manual collection step (#899, decided on #894).
+#
+# change-template uses $NUMBER + $TITLE only (not $BODY): $BODY is a merged
+# PR's ENTIRE body (Summary, Scope Boundaries, Risk/Rollback, etc., not just
+# its `## Changelog` section), and reliably isolating just that section via
+# `replacers` regex across many concatenated per-PR blocks was tested against
+# real PR bodies from this repo and found genuinely fragile to ship without a
+# live release-drafter run to verify against (#899 tracks this as a
+# deliberate fast-follow, not done here).
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+change-template: '- #$NUMBER | $TITLE'
+change-title-escapes: '\<*_&' # escape markdown special characters in PR titles
+
+# Categories/labels below are matched against this repo's real, existing
+# label set only (verified via `gh api repos/wiki-mod/lancache-ng/labels`) --
+# no "fix"/"feature"/"major"/"minor"/"patch" labels exist here, so a config
+# referencing them would just silently never match.
+categories:
+  - title: '🐛 Fixed'
+    labels: ['bug']
+  - title: '🚀 Added'
+    labels: ['enhancement']
+  - title: '📚 Documentation'
+    labels: ['documentation']
+  - title: '🔧 Dependencies'
+    labels: ['dependencies']
+  - title: '🧰 Chore / CI'
+    labels: ['chore', 'ci']
+
+exclude-labels:
+  - 'skip-changelog' # new label, added alongside this config; opt out a PR from release notes by applying it
+
+version-resolver:
+  # No "major" label exists yet either -- add one and a labels: entry here
+  # when this project actually needs to signal a breaking-change release.
+  minor:
+    labels: ['enhancement']
+  patch:
+    labels: ['bug', 'chore', 'ci', 'documentation', 'dependencies']
+  default: patch
+
+sort-by: merged_at
+sort-direction: descending
+
+template: |
+  ## Changes
+
+  $CHANGES
