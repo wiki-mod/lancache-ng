@@ -265,7 +265,8 @@ jobs:
       # The pre-#703 approach here was a single fail-hard "Check for a
       # validation subnet collision" pre-flight followed by a plain
       # `docker compose up` -- with no host-local lock and no retry. Two
-      # concurrent runs deriving the same octet (only 252 buckets), or one
+      # concurrent runs deriving the same slot (only 252 buckets pre-#832, ~2,000
+      # since), or one
       # run losing the check-then-create race to another mid-flight, made
       # this job hard-fail with "Pool overlaps"/"overlaps existing network
       # state" and forced a manual re-run (real recurrence: run 29287590206).
@@ -274,7 +275,7 @@ jobs:
       # job now adopts the same pattern (issue #820). Unlike the simulation
       # jobs -- which reserve, run, and release within one script invocation
       # via scripts/lib/run-in-validation-subnet.sh -- this job holds the
-      # octet lock across SEPARATE steps (up here, then the health-check,
+      # slot lock across SEPARATE steps (up here, then the health-check,
       # client-simulation, and teardown steps below), so the holder PID is
       # threaded through $GITHUB_ENV and released in the teardown step.
       #
@@ -304,7 +305,7 @@ jobs:
 
           # Same host-local lock root the simulation wrapper and the manual
           # full-setup-validate.yml both use, so every concurrent run on this
-          # host coordinates on one shared per-octet lock namespace.
+          # host coordinates on one shared per-slot lock namespace.
           lock_root="/tmp/lancache-validation-locks"
           max_attempts=10
 
@@ -312,7 +313,7 @@ jobs:
           # interface Docker no longer tracks (a killed container's orphan, a
           # VPN, another NIC) still makes the kernel refuse an overlapping
           # bridge, so checking the live `ip addr` view lets the retry skip
-          # that octet cleanly. validation_subnet_conflicts (sourced above)
+          # that slot cleanly. validation_subnet_conflicts (sourced above)
           # is the single shared definition of this check -- issue #820
           # consolidated what used to be a copy-pasted python block per
           # caller (this step, the simulation wrapper, and now the DHCP
@@ -320,39 +321,38 @@ jobs:
 
           docker compose pull --quiet
 
-          reserved_octet=""
+          reserved_slot=""
           holder_pid=""
           next_attempt=1
 
-          while [[ -z "$reserved_octet" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
-              echo "::error::Could not lock a free validation subnet octet after $max_attempts attempts."
+          while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
+            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+              echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
               exit 1
             }
             attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-            octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
+            slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
             candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
 
-            # Export the full VALIDATION_* set for THIS candidate octet before
+            # Export the full VALIDATION_* set for THIS candidate slot before
             # anything reads it: validation_subnet_conflicts needs the
             # matching COMPOSE_PROJECT_NAME to recognise our own leftover
             # networks, and `docker compose up` below needs the whole
             # address set to place every service inside the reserved subnet.
-            validation_subnet_export_env "$octet"
-            target_subnet="172.30.${octet}.0/24"
+            validation_subnet_export_env "$slot"
 
-            conflict="$(validation_subnet_conflicts "$target_subnet" "$COMPOSE_PROJECT_NAME")"
+            conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
             if [[ -n "$conflict" ]]; then
-              echo "Octet $octet's subnet $target_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+              echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
               validation_subnet_release "$candidate_pid"
               next_attempt=$((attempt + 1))
               continue
             fi
 
-            echo "Attempting to start the validation stack on locked, pre-checked subnet $target_subnet (attempt $attempt)."
+            echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
             if up_output="$(docker compose up -d 2>&1)"; then
               echo "$up_output"
-              reserved_octet="$octet"
+              reserved_slot="$slot"
               holder_pid="$candidate_pid"
               break
             fi
@@ -369,14 +369,14 @@ jobs:
             next_attempt=$((attempt + 1))
           done
 
-          if [[ -z "$reserved_octet" ]]; then
+          if [[ -z "$reserved_slot" ]]; then
             echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
             exit 1
           fi
 
-          echo "Validation stack is up on subnet 172.30.${reserved_octet}.0/24 (lock held by PID $holder_pid)."
+          echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
 
-          # Persist the winning octet's whole env set (already exported into
+          # Persist the winning slot's whole env set (already exported into
           # this shell by validation_subnet_export_env above) plus the lock
           # holder PID, so every later step in this job -- health check,
           # client simulation, and the teardown step's release -- targets the
@@ -482,7 +482,7 @@ jobs:
           # validation_project_networks_teardown's own comment in
           # reserve-validation-subnet.sh) and silently leave this project's
           # network(s) non-empty, poisoning them for whichever job/run
-          # reserves this octet next. Wait for and force a real removal
+          # reserves this slot next. Wait for and force a real removal
           # instead of trusting `down`'s own exit code.
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
@@ -498,7 +498,7 @@ jobs:
           fi
 
           # Release the host-local subnet lock the reserve step acquired, so
-          # the octet frees up for the next run immediately instead of waiting
+          # the slot frees up for the next run immediately instead of waiting
           # for this whole job's process tree to exit. Only set if that step
           # actually reserved a lock before any later failure.
           if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
@@ -533,8 +533,8 @@ jobs:
       # VALIDATION_SUBNET/*_IP/GATEWAY block below is needed too, not just
       # the project name: scripts/ssl-mitm-cache-simulation.sh calls `docker
       # compose up` against deploy/full-setup/docker-compose.yml, whose
-      # network block falls back to the fixed 172.30.99.0/24 subnet
-      # (docker-compose.yml's own ${VALIDATION_SUBNET:-172.30.99.0/24}
+      # network block falls back to the fixed 172.30.99.0/27 subnet
+      # (docker-compose.yml's own ${VALIDATION_SUBNET:-172.30.99.0/27}
       # default) whenever these are unset -- a different project NAME alone
       # does not stop two concurrent runs' bridge networks from overlapping
       # on the same fixed subnet on a shared self-hosted host (Codex review
@@ -589,12 +589,12 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          # Reserve a collision-free 172.30.<octet>.0/24 subnet (flock + retry,
-          # issue #820) and run the sim inside it, instead of racing the single
+          # Reserve a collision-free /27 subnet within 172.30.0.0/16 (flock +
+          # retry, issue #820) and run the sim inside it, instead of racing the single
           # job-level VALIDATION_SUBNET against every other concurrent run on
           # this host. The wrapper exports the whole VALIDATION_* set (incl.
           # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
-          # standard-passthrough-shim this sim relies on) for the octet it wins.
+          # standard-passthrough-shim this sim relies on) for the slot it wins.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
 
   ui-nats-dns-integration-simulation:
@@ -990,7 +990,17 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/ui-reachability-crash-loop-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it, instead of racing the single job-level
+          # VALIDATION_SUBNET against every other concurrent run on this host.
+          # This job used to invoke its script directly, consuming
+          # compute-validation-network's raw output via the job-level env
+          # block above with no reservation in between -- confirmed for real:
+          # this exact job died on "Pool overlaps" for a concurrent run's
+          # _validation network, the same failure class
+          # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
+          # already guard against with this same wrapper.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-reachability-crash-loop-simulation.sh
 
   setup-reset-kea-config-simulation:
     # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
@@ -1045,7 +1055,15 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/setup-reset-kea-config-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it. This job used to invoke its script directly,
+          # consuming compute-validation-network's raw output via the
+          # job-level env block above with no reservation in between --
+          # confirmed for real: this exact job died on "Pool overlaps" for a
+          # concurrent run's _validation network, the same failure class
+          # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
+          # already guard against with this same wrapper.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
 
   syslog-forwarding-simulation:
     # Real end-to-end proof for #453's last two comments: not just "a log
@@ -1063,7 +1081,10 @@ jobs:
     # rather than chained after dns-zone-rollback-simulation while this job
     # is still being iterated on in CI: chaining last would mean waiting on
     # the entire existing ~10-job serial suite for every single iteration.
-    # TODO(#453): once this job is green, move it back to
+    # Originally tracked as a follow-up under #453 (now closed -- its
+    # closure covered #453's own core scope, not this narrow CI-ordering
+    # item, so the pending reordering below is still outstanding, not
+    # resolved by that closure): once this job is green, move it back to
     # `needs: [plan, ensure-pr-staging-images, dns-zone-rollback-simulation]`
     # to match every other simulation job's serial position ahead of the
     # aggregate.
@@ -1121,8 +1142,9 @@ jobs:
         # i.e. the same physical host, which is exactly what a per-host lock
         # file serializes. MUST be the SAME lock file setup-cli-simulation.sh
         # uses, not a separate one: this job's own `needs:` is deliberately
-        # hoisted to [plan, ensure-pr-staging-images] (see the TODO(#453)
-        # above) rather than chained after the existing serial sim sequence,
+        # hoisted to [plan, ensure-pr-staging-images] (see the pending
+        # reordering note on the job definition above) rather than chained
+        # after the existing serial sim sequence,
         # so within a single PR's own CI run this job can run genuinely
         # CONCURRENTLY with setup-cli-simulation -- and both drive the exact
         # same fixed container names from the exact same

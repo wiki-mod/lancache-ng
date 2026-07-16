@@ -30,10 +30,14 @@ setup() {
     [ -f "$install_dir/scripts/docker-socket-proxy.sh" ]
     [ -x "$install_dir/scripts/dhcp-probe.sh" ]
     [ -x "$install_dir/scripts/docker-socket-proxy.sh" ]
+    # #858: the shared-secret bootstrap helper the quickstart nats service
+    # bind-mounts (./scripts/shared-secret-bootstrap.sh) must be installed too.
+    [ -f "$install_dir/scripts/shared-secret-bootstrap.sh" ]
 
     # Content must match the real shipped sources, not a stub or partial copy.
     diff "$repo_root/services/ui/dhcp-probe.sh" "$install_dir/scripts/dhcp-probe.sh"
     diff "$repo_root/scripts/docker-socket-proxy.sh" "$install_dir/scripts/docker-socket-proxy.sh"
+    diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/shared-secret-bootstrap.sh"
 }
 
 # The exact scenario from the PR #539 review finding: an install that already
@@ -45,6 +49,7 @@ setup() {
 @test "recovers when the target paths already exist as stale directories" {
     mkdir -p "$install_dir/scripts/dhcp-probe.sh"
     mkdir -p "$install_dir/scripts/docker-socket-proxy.sh"
+    mkdir -p "$install_dir/scripts/shared-secret-bootstrap.sh"
 
     run install_quickstart_compose_assets "$install_dir"
     [ "$status" -eq 0 ]
@@ -53,14 +58,18 @@ setup() {
     [ ! -d "$install_dir/scripts/dhcp-probe.sh" ]
     [ -f "$install_dir/scripts/docker-socket-proxy.sh" ]
     [ ! -d "$install_dir/scripts/docker-socket-proxy.sh" ]
+    [ -f "$install_dir/scripts/shared-secret-bootstrap.sh" ]
+    [ ! -d "$install_dir/scripts/shared-secret-bootstrap.sh" ]
 
     # The bug this guards against would nest the real file one level deeper
     # instead of replacing the stale directory.
     [ ! -e "$install_dir/scripts/dhcp-probe.sh/dhcp-probe.sh" ]
     [ ! -e "$install_dir/scripts/docker-socket-proxy.sh/docker-socket-proxy.sh" ]
+    [ ! -e "$install_dir/scripts/shared-secret-bootstrap.sh/shared-secret-bootstrap.sh" ]
 
     diff "$repo_root/services/ui/dhcp-probe.sh" "$install_dir/scripts/dhcp-probe.sh"
     diff "$repo_root/scripts/docker-socket-proxy.sh" "$install_dir/scripts/docker-socket-proxy.sh"
+    diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/shared-secret-bootstrap.sh"
 }
 
 @test "running install twice on an already-correct install stays idempotent" {

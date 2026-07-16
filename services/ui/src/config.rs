@@ -12,6 +12,14 @@ use std::fs;
 const DEFAULT_UI_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_UI_SETTINGS_FILE: &str = "/data/lancache-ui-settings.env";
 
+// Upper bound for SYSLOG_MAX_GB, matching watchdog.sh's maybe_prune_syslog()
+// magnitude guard (`[ "$max_gb" -gt 1048576 ]`). Without a matching ceiling
+// here, an operator-set SYSLOG_MAX_GB above this value would display as its
+// literal (unclamped) size in the Admin UI while watchdog silently enforced
+// only this much lower budget -- the dashboard would show a far larger
+// number than what retention actually allows.
+const SYSLOG_MAX_GB_CEILING: u32 = 1_048_576;
+
 // Controls whether the Admin UI sends `Strict-Transport-Security` on a
 // response. `Auto` (the default) sends it only when the current request
 // itself arrived over HTTPS, so plain-HTTP deployments never get an HSTS
@@ -617,16 +625,21 @@ impl Config {
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
             // Mirrors watchdog.sh's maybe_prune_syslog() contract (PR3/#757)
             // exactly: same 4 env var names, same defaults (10 GB / 30
-            // days). env_u32_clamped's `n >= 1` floor is a deliberate, minor
-            // divergence from watchdog.sh's bash clamp (which lets a
-            // literal "0" through unchanged, since it is all-digits) --
-            // these two fields are display/reporting-only on the UI side
-            // (the UI never enforces the budget itself, watchdog does), so
-            // a clamped-to-default "0" here has no behavioral effect beyond
-            // what number is shown to the operator.
+            // days). env_u32_clamped's `n >= 1` floor used to be a documented
+            // divergence from watchdog.sh's bash clamp, which let a literal
+            // "0" through unchanged (it is all-digits) -- that was worse than
+            // a harmless display-only mismatch: a real SYSLOG_MAX_GB=0 made
+            // watchdog's size pass treat every file as over budget and delete
+            // everything it could. watchdog.sh now applies the same `n >= 1`
+            // floor (falling back to the default of 10 GB, exactly like this
+            // field does), and env_u32_clamped_with_max's ceiling below
+            // matches watchdog.sh's own upper magnitude guard, so the two
+            // are aligned in both directions. SYSLOG_ENABLED parsing is
+            // likewise shared in spirit with watchdog.sh's is_truthy()
+            // helper -- see env_bool()'s doc comment below.
             syslog_enabled: env_bool("SYSLOG_ENABLED", false),
             syslog_log_root: env_str("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
-            syslog_max_gb: env_u32_clamped("SYSLOG_MAX_GB", 10),
+            syslog_max_gb: env_u32_clamped_with_max("SYSLOG_MAX_GB", 10, SYSLOG_MAX_GB_CEILING),
             syslog_retention_days: env_u32_clamped("SYSLOG_RETENTION_DAYS", 30),
         })
     }
@@ -741,6 +754,37 @@ fn env_u32_clamped(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+// Same floor semantics as `env_u32_clamped` (a missing/non-numeric/zero
+// value falls back to `default`), plus an explicit ceiling. Used only for
+// SYSLOG_MAX_GB, which watchdog.sh's maybe_prune_syslog() also caps at
+// SYSLOG_MAX_GB_CEILING -- `env_u32_clamped` alone has no ceiling, so a
+// value that fits in a u32 but exceeds watchdog's own magnitude guard (e.g.
+// 2_000_000) previously passed through here unclamped while watchdog capped
+// its own budget at the ceiling, making the Admin UI display a budget far
+// larger than what was actually enforced. Parsing as u64 first (instead of
+// u32) matters too: a value large enough to overflow u32 (>= 4_294_967_296)
+// used to fail `parse::<u32>()` outright and fall back to `default` here,
+// while watchdog.sh's bash arithmetic (64-bit, so nowhere near overflowing
+// on any plausible operator input) clamped the same value to its ceiling --
+// parsing as u64 lets both an in-range-but-over-ceiling value and a
+// u32-overflowing value converge on the same ceiling result watchdog.sh
+// produces, instead of silently falling back to `default` only on this side.
+fn env_u32_clamped_with_max(key: &str, default: u32, max: u32) -> u32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|n| {
+            if n < 1 {
+                default
+            } else if n > u64::from(max) {
+                max
+            } else {
+                n as u32
+            }
+        })
+        .unwrap_or(default)
+}
+
 // The Admin UI /logs view is a bounded tail. A missing, non-numeric, or zero
 // value falls back to `default` rather than failing UI startup: this is a
 // display convenience knob, not a fail-closed security value, and zero would
@@ -754,6 +798,17 @@ fn env_usize_clamped(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+// Canonical truthy-parsing contract for boolean-style env vars in this
+// project. `SYSLOG_ENABLED` is also read by services/watchdog/watchdog.sh's
+// maybe_prune_syslog(), which implements the identical 1/true/yes/on
+// (case-insensitive, trimmed) rule via its own `is_truthy()` shell function
+// -- the two cannot literally share one function body across the Rust/Bash
+// boundary, but must not drift again the way they did before this file's
+// truthy parsing was unified with watchdog.sh's (watchdog used to only
+// accept the literal string "true"). See
+// `syslog_enabled_truthy_parsing_matches_watchdog_contract` below and
+// tests/bats/watchdog_truthy_parsing.bats for parity tests run against the
+// exact same input tables on both sides.
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
@@ -1231,6 +1286,55 @@ mod tests {
         }
     }
 
+    // Proves env_bool()'s SYSLOG_ENABLED parsing agrees with watchdog.sh's
+    // is_truthy() (services/watchdog/watchdog.sh) on the exact same input
+    // tables that tests/bats/watchdog_truthy_parsing.bats and
+    // tests/bats/watchdog_syslog_prune.bats exercise against the shell side.
+    // watchdog.sh previously only accepted the literal string "true" here,
+    // so "1"/"yes"/"on" showed as enabled in the Admin UI while watchdog's
+    // maybe_prune_syslog() silently never ran. If either side's accepted-value
+    // set is ever edited without updating the other, this test and its bats
+    // counterparts stop agreeing on at least one of these inputs.
+    #[test]
+    fn syslog_enabled_truthy_parsing_matches_watchdog_contract() {
+        let _guard = env_test_lock().lock().unwrap();
+        let key = "LANCACHE_TEST_UI_SYSLOG_ENABLED_WATCHDOG_PARITY";
+
+        for value in [
+            "1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On", " true ", "\ton\t",
+        ] {
+            env::set_var(key, value);
+            assert!(
+                env_bool(key, false),
+                "expected SYSLOG_ENABLED={value:?} to be truthy"
+            );
+        }
+
+        for value in [
+            "0",
+            "false",
+            "FALSE",
+            "no",
+            "NO",
+            "off",
+            "OFF",
+            "",
+            "   ",
+            "garbage",
+            "1x",
+            "truex",
+            "yesplease",
+        ] {
+            env::set_var(key, value);
+            assert!(
+                !env_bool(key, false),
+                "expected SYSLOG_ENABLED={value:?} to be falsy"
+            );
+        }
+
+        env::remove_var(key);
+    }
+
     #[test]
     fn env_u32_clamped_falls_back_to_default_for_invalid_or_non_positive_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1250,6 +1354,49 @@ mod tests {
 
         env::set_var(key, "7");
         assert_eq!(env_u32_clamped(key, 3), 7);
+
+        env::remove_var(key);
+    }
+
+    // Parity test for SYSLOG_MAX_GB's ceiling against watchdog.sh's own
+    // magnitude guard (`[ "$max_gb" -gt 1048576 ]` in maybe_prune_syslog()).
+    // tests/bats/watchdog_syslog_prune.bats exercises the same SYSLOG_MAX_GB
+    // values against the real shell function and asserts the same clamped
+    // budget appears in its log output, so both sides agree this value, not
+    // just "does not crash", is what each component actually enforces.
+    #[test]
+    fn syslog_max_gb_oversized_value_clamps_to_watchdog_ceiling() {
+        let _guard = env_test_lock().lock().unwrap();
+        let key = "LANCACHE_TEST_UI_SYSLOG_MAX_GB_CEILING";
+
+        // In-range for u32 but above watchdog.sh's ceiling: env_u32_clamped
+        // alone (no max) would have returned this value unclamped, while
+        // watchdog.sh's own guard already capped its budget at the ceiling.
+        env::set_var(key, "2000000");
+        assert_eq!(
+            env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING),
+            SYSLOG_MAX_GB_CEILING
+        );
+
+        // Overflows u32 (>= 4_294_967_296): plain `parse::<u32>()` fails
+        // outright here, but watchdog.sh's 64-bit bash arithmetic does not
+        // overflow at this magnitude and clamps to the same ceiling instead
+        // of falling back to its own default -- this must match, not fall
+        // back to `default` the way env_u32_clamped alone would.
+        env::set_var(key, "9999999999");
+        assert_eq!(
+            env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING),
+            SYSLOG_MAX_GB_CEILING
+        );
+
+        // A literal 0 still falls back to `default`, same floor as
+        // env_u32_clamped.
+        env::set_var(key, "0");
+        assert_eq!(env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING), 10);
+
+        // An in-range, under-ceiling value passes through unchanged.
+        env::set_var(key, "25");
+        assert_eq!(env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING), 25);
 
         env::remove_var(key);
     }

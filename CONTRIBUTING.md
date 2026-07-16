@@ -93,15 +93,22 @@ not by appending new comments each time something is fixed or added.
 lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
-When a release ships:
+As of #899, updating it is automatic and requires no manual collection step:
 
-1. Collect the accumulated `## Changelog` sections from all merged PRs since the
-   last release.
-2. Create a new version heading in `CHANGELOG.md` using the format
-   `## [X.Y.Z] - YYYY-MM-DD` with the release date.
-3. Organize the accumulated changes under standard subheadings: `Added`, `Changed`,
-   `Fixed`, `Deprecated`, `Removed`, `Security`.
-4. Include this changelog update as part of the release PR or tag commit.
+1. `.github/workflows/release-drafter.yml` drafts/updates a GitHub Release on
+   every push to `master`/`v0.2.0`, listing each merged PR as `#NUMBER | TITLE`
+   grouped by label (config: `.github/release-drafter.yml`).
+2. When that release is published (manually, or via a `workflow_dispatch` run
+   of the same workflow), `.github/workflows/update-changelog.yaml` fires and
+   writes the release's name and notes into `CHANGELOG.md`, committing the
+   result automatically.
+
+Applying the `skip-changelog` label to a PR excludes it from the drafted
+release notes (e.g. a pure internal refactor with no user-visible effect).
+
+`scripts/collect-changelog-entries.sh` (added in #890) remains as a manual
+fallback -- useful for reconstructing history or if the automated pipeline is
+ever disabled -- but is no longer the primary path.
 
 Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
 reflects user-visible behavior changes across all merged work for that release.

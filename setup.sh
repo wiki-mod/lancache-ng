@@ -23,6 +23,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
 DHCP_PROBE_SCRIPT="$SCRIPT_DIR/services/ui/dhcp-probe.sh"
+# Shared-secret bootstrap helper (#858): the quickstart nats service sources this
+# to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
+# Copied flat into $install_dir/scripts/ like the two scripts above, so the
+# quickstart compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
+SHARED_SECRET_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/scripts/lib/shared-secret-bootstrap.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -1425,10 +1430,11 @@ compose_file_args_for_install_dir() {
 # that force-removes a stale auto-vivified directory before reinstalling
 # dhcp-probe.sh/docker-socket-proxy.sh.
 install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target dhcp_probe_target
+    local install_dir="$1" socket_proxy_target dhcp_probe_target helper_target
 
     socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
     dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
+    helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
     # A prior install that hit the missing-copy bug (#538) left Docker's own
@@ -1451,6 +1457,17 @@ install_quickstart_compose_assets() {
         install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
     else
         chmod 0755 "$socket_proxy_target"
+    fi
+    # Shared-secret bootstrap helper (#858), same auto-vivified-directory guard
+    # as the two scripts above (#538): the nats service bind-mounts this to
+    # source resolve_shared_secret for the NATS_*_PASSWORD handshake secrets.
+    if [[ -d "$helper_target" ]]; then
+        rm -rf "$helper_target"
+    fi
+    if [[ "$(realpath -m "$SHARED_SECRET_BOOTSTRAP_SCRIPT")" != "$(realpath -m "$helper_target")" ]]; then
+        install -m 0644 "$SHARED_SECRET_BOOTSTRAP_SCRIPT" "$helper_target"
+    else
+        chmod 0644 "$helper_target"
     fi
 }
 
@@ -1525,6 +1542,13 @@ deploy_prod_repo_input_paths() {
     # silently omit the one file that defines which container names the
     # socket proxy allows the Admin UI/watchdog to act on.
     [[ -f "$repo_root/scripts/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/docker-socket-proxy.sh"
+    # Shared-secret bootstrap helper (issue #858) is likewise mounted read-only
+    # via ../../scripts/lib/shared-secret-bootstrap.sh into the nats service in
+    # deploy/prod/docker-compose.yml. Without it in the manifest, a config
+    # backup/restore taken before a bad git pull changes or removes this file
+    # would restore a compose tree whose nats service sources a missing/stale
+    # helper and exits before generating nats.conf.
+    [[ -f "$repo_root/scripts/lib/shared-secret-bootstrap.sh" ]] && printf '%s\n' "$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }
 
 # Resolves the config files cmd_update_ip must edit for a given install_dir.
@@ -2603,10 +2627,30 @@ migrate_env_for_update() {
     print_ok ".env is complete for the current quickstart template"
 }
 
+# The apt package that provides a binary sometimes has a different name than
+# the binary itself -- `dig` moved from the `dnsutils` metapackage to
+# `bind9-dnsutils` on modern Debian/Ubuntu, so `apt-get install dig` fails
+# outright. Falls back to the binary name for the common case (tar, rsync,
+# openssl, ...) where package and binary names match.
+package_name_for_tool() {
+    case "$1" in
+        dig)
+            if apt_package_available bind9-dnsutils; then
+                printf '%s\n' bind9-dnsutils
+            else
+                printf '%s\n' dnsutils
+            fi
+            ;;
+        *)
+            printf '%s\n' "$1"
+            ;;
+    esac
+}
+
 # Backup/restore may run on minimal hosts. Install only the missing tools needed
 # for the requested operation instead of expanding the base installer footprint.
 install_missing_tools() {
-    local -a missing=() tools=("$@")
+    local -a missing=() packages=() tools=("$@")
     local tool
     for tool in "${tools[@]}"; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
@@ -2614,9 +2658,16 @@ install_missing_tools() {
     (( ${#missing[@]} == 0 )) && return 0
     print_warn "Missing required tool(s): ${missing[*]} — installing now..."
     command -v apt-get >/dev/null 2>&1 || die "Cannot install missing tools automatically; install: ${missing[*]}"
+    for tool in "${missing[@]}"; do
+        packages+=("$(package_name_for_tool "$tool")")
+    done
     apt-get update -y
-    apt-get install -y --no-install-recommends "${missing[@]}" \
+    apt-get install -y --no-install-recommends "${packages[@]}" \
         || die "Failed to install required tool(s): ${missing[*]}"
+    for tool in "${missing[@]}"; do
+        command -v "$tool" >/dev/null 2>&1 \
+            || die "$tool is still missing after installing package(s): ${packages[*]}"
+    done
 }
 
 # Prints the newline-separated list of absolute host paths that a backup
@@ -3471,6 +3522,21 @@ service_container_is_healthy() {
     [[ "$status" = "running" ]]
 }
 
+# A missing tool must never look identical to "the thing it would have
+# probed is actually healthy" -- a functional check that silently skips when
+# its tool is absent is indistinguishable from a check that never ran at
+# all, so callers cannot tell "verified healthy" apart from "never verified".
+# Every tool-gated functional probe below routes through this instead of its
+# own ad hoc `command -v` skip so that shape can't recur one probe at a time.
+require_functional_check_tool() {
+    local tool="$1" probe_description="$2"
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        print_error "Functional check failed: $probe_description requires '$tool', which is not installed"
+        return 1
+    fi
+    return 0
+}
+
 # Functional confirmation on top of per-container health: a container
 # reporting "healthy" only proves ITS OWN internal check passed, not that it
 # actually serves what a real client needs. Reuses this project's own
@@ -3479,6 +3545,14 @@ service_container_is_healthy() {
 # dig-based DNS query in the same style scripts/dns-zone-rollback-simulation.sh
 # already uses. `ping`/`ss` are deliberately not used here -- neither proves
 # the service actually answers a real request.
+#
+# Every probe below fails closed (require_functional_check_tool) when curl or
+# dig is missing rather than silently skipping that half of the check: a
+# skipped check and a passed check must never produce the same "healthy"
+# verdict, or a broken update can sail through purely because a probe
+# dependency was never installed. perform_stack_update_flow installs both
+# tools up front specifically so this fail-closed path is the rare exception,
+# not the normal case, on a real update run.
 verify_stack_functional_health() {
     local ip_standard ip_ssl ssl_enabled test_fqdn resolved
 
@@ -3486,12 +3560,16 @@ verify_stack_functional_health() {
     ip_ssl=$(get_env_var IP_SSL "$_UPDATE_ENV_FILE")
     ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE")
 
-    if command -v curl >/dev/null 2>&1; then
-        if [[ -n "$ip_standard" ]] && ! curl -sf "http://$ip_standard/healthz" >/dev/null; then
+    if [[ -n "$ip_standard" ]]; then
+        require_functional_check_tool curl "the http://$ip_standard/healthz probe" || return 1
+        if ! curl -sf "http://$ip_standard/healthz" >/dev/null; then
             print_error "Functional check failed: http://$ip_standard/healthz"
             return 1
         fi
-        if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]] && ! curl -sf "http://$ip_ssl/healthz" >/dev/null; then
+    fi
+    if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]]; then
+        require_functional_check_tool curl "the http://$ip_ssl/healthz probe" || return 1
+        if ! curl -sf "http://$ip_ssl/healthz" >/dev/null; then
             print_error "Functional check failed: http://$ip_ssl/healthz"
             return 1
         fi
@@ -3501,7 +3579,8 @@ verify_stack_functional_health() {
     # container answers a real query at all (AGENTS.md requires a real
     # query/response probe here, not ping/ss), not that every domain resolves.
     test_fqdn="steamcontent.com"
-    if [[ -n "$ip_standard" ]] && command -v dig >/dev/null 2>&1; then
+    if [[ -n "$ip_standard" ]]; then
+        require_functional_check_tool dig "the DNS resolution probe" || return 1
         resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>/dev/null)
         if [[ -z "$resolved" ]]; then
             print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip_standard}"
@@ -3644,6 +3723,12 @@ perform_stack_update_flow() {
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die "No stack found in $install_dir. Run ./setup.sh first."
     assert_prebuilt_image_platform_supported
+    # Installed up front, before anything is mutated, so the post-update
+    # verify_stack_functional_health gate below actually runs its DNS/HTTP
+    # probes on a default install instead of silently no-oping because curl
+    # or dig was never present (verify_stack_functional_health still fails
+    # closed on its own if a tool ever goes missing again after this point).
+    install_missing_tools curl dig
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
     mapfile -t _UPDATE_COMPOSE_FILES < <(compose_file_args_for_install_dir "$install_dir" "$_UPDATE_ENV_FILE")
