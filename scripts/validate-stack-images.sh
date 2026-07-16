@@ -292,9 +292,12 @@ require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLA
 require_grep 'is missing required platform' \
   scripts/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-require_grep 'cache-dir: /var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}' \
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
-  'container scans must use platform-specific Trivy cache directories'
+  'container scans must use platform- and ref-specific Trivy cache directories (see #904 -- ref-parallel scans must never share a cache dir)'
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-\$\{sanitized_ref\}"' \
+  .github/workflows/build-push.yml \
+  'the pushed build-tools digest scan must use a ref-specific Trivy cache directory too (see #904)'
 require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'

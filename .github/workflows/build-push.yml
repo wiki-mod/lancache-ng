@@ -3847,10 +3847,44 @@ jobs:
             -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
             ${{ matrix.context }}
       - name: Prepare local Trivy cache
+        # Trivy's cache backend (BoltDB) only allows one process to hold a
+        # given cache directory open at a time. This directory used to be
+        # keyed only by service+platform, not by ref -- safe back when the
+        # top-level "publish" concurrency group serialized whole pipeline
+        # runs, but #892 narrowed cancellation to per-job groups keyed by
+        # (service, platform, ref), which made it genuinely possible for two
+        # different trusted refs (e.g. push to `master` and push to
+        # `v0.2.0`) to run this job for the *same* service+platform at the
+        # same time. Two such runs used to race on this exact directory,
+        # producing a cache-lock error or a corrupted/partially-written
+        # cache in one of them (#904). Folding the sanitized ref into the
+        # path makes each concurrency-group instance own a directory no
+        # other ref can ever write to, closing the race without touching
+        # #892's scheduling behavior. Reuses the same sanitization
+        # build-tools.yml already applies to its own per-ref mutable tag, so
+        # this doesn't invent a second ref-to-filesystem-name convention.
+        # Trade-off (see #904/PR body): a ref's first scan after a fresh
+        # push, or a brand-new release tag, no longer benefits from another
+        # ref's warm cache the way the single shared directory used to
+        # allow -- each ref (and, over time, each immutable release tag)
+        # gets its own persistent directory on the self-hosted runner, so
+        # disk usage grows with the number of distinct refs ever scanned
+        # instead of staying flat; tracked as a follow-up retention item
+        # rather than solved here, matching this PR's narrow race-fix scope.
+        id: trivy-cache
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          mkdir -p "/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}"
+          sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$REF_NAME'."
+            exit 1
+          fi
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}-${{ matrix.platform_tag }}-${sanitized_ref}"
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
       - name: Scan image with Trivy
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -3863,7 +3897,7 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}-${{ matrix.platform_tag }}
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
       - name: Remove scan image
@@ -4448,15 +4482,32 @@ jobs:
           ) 9>"$lock_file"
 
       - name: Prepare pushed build-tools Trivy cache
+        # Same shared-cache-directory race as container-scan's own Trivy step
+        # above (#904): this job's own concurrency group (see top of `build`)
+        # is keyed by service+ref, so two different trusted refs building
+        # `build-tools` can now run this step concurrently, and a static
+        # `build-tools-pushed` directory would let them race on the same
+        # BoltDB cache file. Fold in the sanitized ref for the same reason
+        # and with the same disk-growth trade-off documented on that step.
+        id: trivy-cache
         if: >-
           ${{
             github.event_name != 'pull_request' &&
             matrix.service == 'build-tools' &&
             steps.build.outcome == 'success'
           }}
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$REF_NAME'."
+            exit 1
+          fi
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-${sanitized_ref}"
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
       - name: Scan pushed build-tools digest with Trivy
         # Build-tools influences every downstream validation job, so the exact
@@ -4478,7 +4529,7 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
 
