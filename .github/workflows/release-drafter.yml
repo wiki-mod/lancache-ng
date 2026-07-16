@@ -1,0 +1,53 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Drafts/updates a GitHub Release incrementally on every push to master/v0.2.0,
+# using .github/release-drafter.yml's config (#899, decided on #894). Replaces
+# the manual "collect merged PRs by hand at release time" step -- see
+# CONTRIBUTING.md's "Releasing Changes to CHANGELOG.md" section, which now
+# treats scripts/collect-changelog-entries.sh as a fallback, not the primary
+# path.
+name: Release Drafter
+
+on:
+  push:
+    branches: [master, v0.2.0]
+  workflow_dispatch:
+
+permissions:
+  # Workflow-level floor: a job's own `permissions:` block can only NARROW
+  # this, never widen it -- both scopes below are needed here because the
+  # job actually needs them (see the job's own permissions comment), not
+  # just cosmetic. Found live (2026-07-16) while root-causing a related
+  # instance of this same mistake in build-push.yml's pr-template-check job.
+  contents: write
+  pull-requests: read
+
+jobs:
+  update_release_draft:
+    name: draft/update release notes
+    runs-on: ubuntu-latest
+    permissions:
+      # release-drafter needs to create/update a draft release and resolve
+      # merged-PR labels; contents:write is release-drafter's own documented
+      # minimum. pull-requests:read lets it read PR metadata without needing
+      # the PAT for that part -- only publish:true (below) needs the PAT.
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Run release-drafter
+        uses: release-drafter/release-drafter@4d75298e00d9e34c483e5ff8c68d0ea1c1940c1e # v7.5.1
+        with:
+          # Lets an on-demand run (workflow_dispatch, e.g. "I need a fresh
+          # CHANGELOG.md update now") immediately publish instead of just
+          # drafting -- publishing is what fires the `release: released`
+          # event .github/workflows/update-changelog.yaml listens for.
+          publish: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          # A real PAT (repo secret RELEASE_DRAFTER_PAT), NOT the default
+          # GITHUB_TOKEN: GitHub does not let a workflow run authenticated
+          # with the default GITHUB_TOKEN trigger OTHER workflows via events
+          # like `release: released` (its own loop-prevention behavior) --
+          # documented directly in stefanzweifel/changelog-updater-action's
+          # README as the exact gotcha this pairing hits. Without this PAT,
+          # publish:true here would create the release but
+          # update-changelog.yaml would never fire.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_DRAFTER_PAT }}
