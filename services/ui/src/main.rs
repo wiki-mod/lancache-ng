@@ -1262,6 +1262,56 @@ mod tests {
         std::env::remove_var("LANCACHE_IMAGE_TAG");
     }
 
+    // Regression test for #848: load_templates() parses the *real* on-disk
+    // templates (unlike lancache_image_template_functions_render_runtime_config
+    // above, which adds a throwaway inline template), so this both proves
+    // logs.html still parses after the host-filter dropdown was added and
+    // that the dropdown actually reflects a selected host and the full host
+    // list passed in the render context.
+    #[test]
+    fn logs_html_renders_syslog_host_filter_dropdown_with_selection() {
+        let _guard = config::env_test_lock().lock().unwrap();
+
+        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        std::env::set_var(
+            "TEMPLATE_DIR",
+            format!("{}/src/templates", env!("CARGO_MANIFEST_DIR")),
+        );
+
+        let cfg = config::Config::from_env().unwrap();
+        let templates = load_templates(&cfg);
+
+        let mut ctx = tera::Context::new();
+        ctx.insert("active_page", "logs");
+        ctx.insert("syslog_mode", &true);
+        ctx.insert("syslog_logs", &Vec::<syslog_client::SyslogEntry>::new());
+        ctx.insert(
+            "syslog_hosts",
+            &vec!["dns-ssl".to_string(), "watchdog".to_string()],
+        );
+        ctx.insert("selected_host", &Some("watchdog".to_string()));
+        ctx.insert("logs", &Vec::<nginx_client::LogEntry>::new());
+
+        let rendered = templates.render("logs.html", &ctx).unwrap();
+        assert!(
+            rendered.contains(r#"<option value="watchdog" selected>watchdog</option>"#),
+            "expected the watchdog <option> to carry `selected`, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"<option value="dns-ssl" >dns-ssl</option>"#),
+            "expected the non-selected dns-ssl <option> to be present without `selected`, got:\n{rendered}"
+        );
+
+        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        std::env::remove_var("LANCACHE_IMAGE_TAG");
+        std::env::remove_var("TEMPLATE_DIR");
+    }
+
     #[test]
     fn session_cookie_helper_matches_the_session_header() {
         let empty_headers = HeaderMap::new();

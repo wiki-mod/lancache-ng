@@ -17,7 +17,17 @@ use tera::Context;
 
 #[derive(Deserialize)]
 pub struct LogFilter {
+    // Cache-status filter (HIT/MISS/EXPIRED/...), consumed only by the
+    // nginx-log branch below. Left as a distinct field from `host` (rather
+    // than reusing one name for both modes' filters) because the two mean
+    // different things -- a bookmarked/shared `?filter=HIT` URL would be
+    // silently reinterpreted as a (nonexistent) host named "HIT" if syslog
+    // mode were later enabled on the same install, and vice versa.
     pub filter: Option<String>,
+    // Host filter, consumed only by the syslog-mode branch below (#848):
+    // restricts parse_syslog_tail to one wired host's subdirectory instead
+    // of merging every host under SYSLOG_LOG_ROOT.
+    pub host: Option<String>,
 }
 
 pub async fn logs_page(
@@ -31,17 +41,37 @@ pub async fn logs_page(
 
     if state.config.syslog_enabled {
         let log_root = state.config.syslog_log_root.clone();
-        let mut syslog_logs = tokio::task::spawn_blocking(move || {
-            syslog_client::parse_syslog_tail(&log_root, None, max_entries)
-        })
-        .await
-        .unwrap_or_default();
+        let requested_host = params.host.filter(|h| !h.is_empty());
+        let (mut syslog_logs, syslog_hosts, selected_host) = {
+            let log_root = log_root.clone();
+            tokio::task::spawn_blocking(move || {
+                // Always list every wired host (not just the selected one),
+                // otherwise the dropdown below would shrink to a single
+                // option after the first filtered request.
+                let hosts = syslog_client::list_syslog_hosts(&log_root);
+                // `?host=` is caller-controlled (HTTP query parameter), so
+                // only ever honor a value that is actually one of the real,
+                // known host directories -- parse_syslog_tail itself also
+                // rejects a traversal-shaped host defensively, but this
+                // allowlist check is what keeps an unrecognized/typo'd host
+                // silently falling back to "all hosts" instead of a
+                // confusing empty result.
+                let selected = requested_host.filter(|h| hosts.contains(h));
+                let entries =
+                    syslog_client::parse_syslog_tail(&log_root, selected.as_deref(), max_entries);
+                (entries, hosts, selected)
+            })
+            .await
+            .unwrap_or_default()
+        };
 
         // Show most recent first, matching the nginx branch below.
         syslog_logs.reverse();
 
         ctx.insert("syslog_mode", &true);
         ctx.insert("syslog_logs", &syslog_logs);
+        ctx.insert("syslog_hosts", &syslog_hosts);
+        ctx.insert("selected_host", &selected_host);
         // Tera errors on an undefined variable, so both branches must
         // populate every key the template reads regardless of which one
         // renders -- `logs` is only read by the nginx branch of logs.html,
