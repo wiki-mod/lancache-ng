@@ -894,6 +894,80 @@ mod tests {
         assert!(!is_valid_domain(&format!("{}.example.com", "a".repeat(64))));
     }
 
+    // Cross-language parity guard (issue #822 pattern audit): this
+    // validator's bash counterpart (_is_valid_domain in
+    // scripts/lib/domain-validation.sh, embedded byte-identically into
+    // services/proxy/entrypoint.sh and services/dns/entrypoint.sh) is a
+    // fully independent implementation, with nothing enforcing the two
+    // agree. Both this test and
+    // tests/bats/domain_validation_parity.bats's "bash _is_valid_domain
+    // agrees with the shared parity fixture on every case" iterate the same
+    // shared fixture file, so a change to either validator that silently
+    // starts disagreeing with the other fails one of the two test suites
+    // instead of shipping unnoticed.
+    //
+    // Dynamically generated length-boundary cases (a 64-char label, a
+    // >253-char total domain) are intentionally not in the shared fixture --
+    // they can't be expressed as static fixture lines -- and stay covered
+    // separately by accepts_domain_entries_with_optional_wildcard_marker
+    // above and the bash side's tests/bats/proxy_cert_generation.bats.
+    #[test]
+    fn is_valid_domain_matches_shared_parity_fixture() {
+        // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's
+        // own established pattern, see main.rs's TEMPLATE_DIR test setup),
+        // not include_str!: the fixture lives outside this crate's source
+        // tree (tests/fixtures/ at the repo root, shared with the bash
+        // side), so a compile-time embed would bake an out-of-crate path
+        // into the build; a runtime read gives a clear "fixture missing"
+        // failure instead.
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/domain-validation-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+
+        for line in contents.lines() {
+            // Same skip rule as the bash reader's
+            // `[[ -z "$line" || "$line" == \#* ]]`: blank lines and comment
+            // lines are not cases. This must match the bash side's skip
+            // logic exactly, or the two readers would silently disagree on
+            // which lines even count as fixture cases.
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((expect, domain)) = line.split_once(' ') else {
+                panic!("malformed shared parity fixture line (expected \"valid|invalid <domain>\"): {line:?}");
+            };
+            total += 1;
+
+            let actual = if is_valid_domain(domain) {
+                "valid"
+            } else {
+                "invalid"
+            };
+            if actual != expect {
+                mismatches.push(format!("'{domain}' expected={expect} actual={actual}"));
+            }
+        }
+
+        // Fail closed if the fixture itself is empty/unreadable-but-present
+        // (e.g. header-only) -- a vacuous loop would make this test pass
+        // without checking anything.
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} shared parity fixture case(s) disagreed with the Rust validator:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
     fn domain_spec(domain: &str, wildcard_only: bool) -> DomainSpec {
         DomainSpec {
             wildcard_only,

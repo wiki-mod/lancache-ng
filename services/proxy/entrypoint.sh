@@ -264,18 +264,18 @@ _normalize_resolver_token() {
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# Domain validation: Mirrors the label-strict rules from Admin UI (domains.rs)
-# to prevent invalid domains from being used in nginx maps, cert generation,
-# and stream targets. Validation follows RFC 1035 and DNS best practices:
+# Domain validation library (scripts/lib/domain-validation.sh)
 #
-#   - Max 253 chars total length
-#   - Min 2 labels (no single-label domains like "localhost")
-#   - Each label: 1-63 chars, start/end with alphanumeric, contain only a-z/0-9/-
-#   - Leading dot is stripped (optional in file notation)
-#   - Input is trimmed and lowercased before validation
-#   - Control characters and special chars are rejected
+# Mirrors the label-strict rules from Admin UI (domains.rs) to prevent
+# invalid domains from being used in nginx maps, cert generation, and stream
+# targets. This block is a byte-identical copy of
+# scripts/lib/domain-validation.sh's function definitions (verified by
+# tests/bats/domain_validation_sync.bats) rather than a sourced file, because
+# this Dockerfile builds from services/proxy/ alone with no shared-file
+# build context wired up for it -- see that file for the full rule
+# documentation and rationale.
 # ────────────────────────────────────────────────────────────────────────────
-
+# BEGIN domain-validation library (scripts/lib/domain-validation.sh)
 _is_valid_domain_label() {
     local label="$1"
 
@@ -348,6 +348,7 @@ _is_valid_domain() {
 
     return 0
 }
+# END domain-validation library
 
 # ────────────────────────────────────────────────────────────────────────────
 # Public-suffix-aware root domain derivation
