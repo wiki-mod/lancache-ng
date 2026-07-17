@@ -179,7 +179,16 @@ jobs:
       # repository default.
       actions: read
     steps:
+      # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so
+      # scripts/ensure-pr-staging-images.sh can prove real git ancestry
+      # (`git merge-base --is-ancestor`) between this PR's base.sha and a
+      # base-channel image's build-commit label before backfilling an
+      # untouched service from it. Same requirement, and same fix, as the
+      # `plan` job's own fetch-depth: 0 checkout above (needed for
+      # detect-full-setup-changes.sh's merge-base diff).
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -202,6 +211,12 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs.plan.outputs.watchdog }}
           UI_TOUCHED: ${{ needs.plan.outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          # #808: this PR's own base commit, needed to prove a base-channel
+          # image was actually built from a commit at or after it before
+          # backfilling an untouched service from that channel. Always
+          # present here: this job only runs on a pull_request event (see
+          # this job's own `if:` above, gated on pr_staging_available).
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # #895: github.sha on a pull_request event is the same synthetic
           # merge commit build-push.yml built and tagged (see this workflow's
           # own BUILD_SHA comment in the "plan" job) -- the congestion probe

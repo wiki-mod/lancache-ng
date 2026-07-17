@@ -30,6 +30,22 @@
 # guard mirror build-push.yml's "validate full-setup image" job (untouched
 # per #715 clarification). Keep in sync by hand.
 #
+# #808: step 2's back-fill no longer blindly trusts "whatever the base
+# channel resolves to RIGHT NOW" -- a base-channel tag can be moved by
+# `promote` well before that push's own build+scan+promote pipeline for a
+# NEWER commit finishes, so "resolves right now" previously meant "resolves
+# to whatever was there before this run's own PR's base commit was even
+# merged" if the timing was unlucky (confirmed live: PRs #911/#914 each
+# validated a `dns` image ~41 minutes stale relative to their own base.sha).
+# Before backfilling, scripts/lib/staging-image-freshness.sh's
+# sif_wait_for_fresh_base_image() now confirms the base-channel image's own
+# org.opencontainers.image.revision label is at or after this PR's
+# `base.sha`, polling (bounded) if it isn't yet, and failing closed --
+# mirroring step 1's existing fail-closed guard for touched services -- if it
+# never catches up. See that file's own header for the full mechanism and the
+# documented judgment call on why this wait is shaped differently from
+# wait_for_touched_image()'s congestion probe below.
+#
 # #895: a fixed poll timeout does not "scale with runner congestion" -- under
 # heavy concurrent load on the self-hosted fleet, build-push's own pipeline
 # for a single service can legitimately take longer than any single fixed
@@ -54,10 +70,20 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/validation-image-tag.sh"
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/staging-image-freshness.sh
+source "$script_dir/lib/staging-image-freshness.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
 : "${PR_TAG:?PR_TAG (pr-<N>-sha-<short>) is required}"
 : "${BASE_CHANNEL_TAG:?BASE_CHANNEL_TAG is required}"
+# #808: the PR's own base commit (github.event.pull_request.base.sha) --
+# required unconditionally (unlike BUILD_SHA below, which only feeds a
+# best-effort probe): every real caller of this script only ever runs on a
+# pull_request event (see full-setup-deep-validate.yml's `ensure-pr-staging-
+# images` job `if:`), where this is always present, and the freshness check
+# below has no meaningful fallback if it's missing -- backfilling an
+# untouched service without it would silently regress to the pre-#808 bug.
+: "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
 workflow_changed="${WORKFLOW_CHANGED:-false}"
 # The commit build-push.yml built and tagged for this PR (github.sha on a
@@ -99,6 +125,22 @@ fi
 # budget, so a long extension doesn't hammer the GitHub API once per
 # poll_interval_seconds tick.
 congestion_check_interval_seconds="${STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS:-60}"
+
+# #808: bounded wait for the base channel itself to become fresh enough (see
+# scripts/lib/staging-image-freshness.sh for the mechanism). Same 5400s hard
+# ceiling default as the touched-image wait above -- backfilling depends on
+# that same base-branch build+scan+promote pipeline finishing, so there is no
+# reason to expect a different worst case. The normal budget is shorter
+# (900s/15min): in the common case the base channel is already fresh (no
+# other PR merged recently) and this check resolves on the first poll, so
+# 900s is purely the "start logging that we're still waiting" threshold, not
+# a tuned estimate of typical wait time.
+base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
+base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
+if (( base_freshness_hard_ceiling_seconds < base_freshness_timeout_seconds )); then
+    base_freshness_hard_ceiling_seconds=$base_freshness_timeout_seconds
+fi
+base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15}"
 
 # The services deploy/full-setup/docker-compose.yml references, plus
 # build-tools (used by the client-simulation steps, not the compose file
@@ -223,7 +265,16 @@ for service in "${full_setup_services[@]}"; do
     fi
 
     base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
-    echo "::notice::$service is untouched by this PR; (re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
+    echo "::notice::$service is untouched by this PR; verifying $BASE_CHANNEL_TAG ($base_image) was built from a commit at or after this PR's base commit ($BASE_SHA) before backfilling..."
+    # #808: never back-fill from a base-channel image without first proving
+    # it was actually built from base.sha or later -- see this script's own
+    # #808 header note and scripts/lib/staging-image-freshness.sh for why.
+    if ! sif_wait_for_fresh_base_image "$base_image" "$BASE_SHA" "$service" \
+        "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$base_freshness_poll_interval_seconds" >/dev/null; then
+        echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
+        exit 1
+    fi
+    echo "::notice::(re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
     backfill_from_base "$pr_image" "$base_image"
 done
 
