@@ -1415,7 +1415,7 @@ services:
       - nats
     restart: unless-stopped
 
-  # ── Netdata (system metrics backend, kein externer Port) ──────────────────
+  # ── Netdata (system metrics backend, no external port) ─────────────────────
   netdata:
     container_name: lancache-netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
