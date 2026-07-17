@@ -163,29 +163,36 @@ echo "Admin UI's /health endpoint answered a real HTTP request while proxy was s
 # Reconfirm proxy is STILL crash-looping at the end, not that it happened to
 # recover on its own during the wait above (which would make this whole run
 # moot -- the point is that the UI stays reachable THROUGHOUT, not before an
-# eventual recovery). `ps -aq` (not `ps -q`), and a short retry loop: `docker
-# compose ps` without `-a` only lists containers it considers "up", which can
-# transiently omit a container in the split-second between one crash-loop
-# exit and the daemon relaunching it under `restart: unless-stopped` --
-# confirmed for real (a first version of this script using plain `ps -q`
-# here flaked on exactly that window: RestartCount=5 moments earlier, then an
-# empty ps -q result at this single unretried check).
-proxy_cid_final=""
-proxy_status_final="unknown"
-proxy_restarts_final=0
-final_check_deadline=$((SECONDS + 15))
-while (( SECONDS < final_check_deadline )); do
-    proxy_cid_final="$("${compose[@]}" ps -aq proxy || true)"
-    if [[ -n "$proxy_cid_final" ]]; then
-        proxy_status_final="$(docker inspect --format '{{.State.Status}}' "$proxy_cid_final" 2>/dev/null || echo unknown)"
-        proxy_restarts_final="$(docker inspect --format '{{.RestartCount}}' "$proxy_cid_final" 2>/dev/null || echo 0)"
-        [[ "$proxy_status_final" == "restarting" || "$proxy_status_final" == "running" ]] && break
-    fi
-    sleep 1
-done
-echo "proxy's final state: status=$proxy_status_final, RestartCount=$proxy_restarts_final (still crash-looping throughout the test)."
-if [[ "$proxy_status_final" != "restarting" && "$proxy_status_final" != "running" ]]; then
-    echo "::error::proxy's final container status is '$proxy_status_final', neither 'restarting' nor a just-relaunched 'running' -- the crash loop did not stay active for the duration of this test." >&2
+# eventual recovery).
+#
+# This deliberately does NOT try to catch a live `restarting`/`running`
+# transition within a fixed polling window (an earlier version of this
+# check did exactly that). Docker's `restart: unless-stopped` backoff
+# grows without bound as RestartCount increases, so any fixed-size window
+# becomes less and less likely to land during a live transition the longer
+# the crash loop has been running -- confirmed for real in #910: a run
+# whose RestartCount climbed 5 -> 7 (direct proof the loop never stopped)
+# still failed a 15-second final check because the container legitimately
+# sat in `exited`, between backoff-delayed restart attempts, for the whole
+# window. Instead, prove the crash loop stayed active with two signals
+# that don't depend on observing an instantaneous state at all: RestartCount
+# strictly increased since the earlier check (can only happen via an actual
+# restart), and the restart policy is still `unless-stopped` (so Docker will
+# keep retrying regardless of what this one snapshot happens to catch).
+proxy_cid_final="$("${compose[@]}" ps -aq proxy || true)"
+if [[ -z "$proxy_cid_final" ]]; then
+    echo "::error::proxy container no longer exists at the final check -- the crash loop stopped entirely (container removed)." >&2
+    exit 1
+fi
+proxy_restarts_final="$(docker inspect --format '{{.RestartCount}}' "$proxy_cid_final" 2>/dev/null || echo 0)"
+proxy_restart_policy_final="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$proxy_cid_final" 2>/dev/null || echo unknown)"
+echo "proxy's final state: RestartCount=$proxy_restarts_final (was $proxy_restarts earlier), restart policy=$proxy_restart_policy_final."
+if (( proxy_restarts_final <= proxy_restarts )); then
+    echo "::error::proxy's RestartCount did not increase ($proxy_restarts -> $proxy_restarts_final) during the test -- the crash loop did not stay active for the duration of this test." >&2
+    exit 1
+fi
+if [[ "$proxy_restart_policy_final" != "unless-stopped" ]]; then
+    echo "::error::proxy's restart policy is '$proxy_restart_policy_final', not 'unless-stopped' -- it may have stopped crash-looping for good instead of continuing to retry." >&2
     exit 1
 fi
 
