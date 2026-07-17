@@ -3600,6 +3600,10 @@ mod tests {
         ));
     }
 
+    // The mode-switch form is the only writer of DHCP_MODE from the Admin UI,
+    // so every supported DhcpMode variant must parse back to its enum, and
+    // unrecognized input must be rejected outright rather than silently
+    // coerced to a default mode the operator never chose.
     #[test]
     fn parse_dhcp_mode_input_round_trips_supported_modes() {
         use crate::config::DhcpMode;
@@ -3643,6 +3647,10 @@ mod tests {
         assert_eq!(lease_time.unwrap(), 86400);
     }
 
+    // Unlike the pool and gateway, DNS servers are explicitly allowed to sit
+    // outside the configured subnet -- an operator's DNS server doesn't have
+    // to live on this LAN segment, so the containment check must not reject
+    // this case the way it would for an out-of-subnet pool or gateway.
     #[test]
     fn accepts_routed_dns_servers_outside_subnet() {
         let lease_time = validate_test_dhcp_form!(
@@ -3681,6 +3689,10 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // Both pool endpoints individually lie inside the subnet here -- only
+    // their order is flipped (end before start) -- pinning that the range
+    // check compares start<=end rather than merely checking each endpoint's
+    // subnet membership independently.
     #[test]
     fn rejects_reversed_pool_range() {
         let lease_time = validate_test_dhcp_form!(
@@ -3717,6 +3729,10 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // Flips only the gateway out of the subnet (pool and DNS stay valid) --
+    // confirms the gateway has its own containment check enforced
+    // independently of the DNS-outside-subnet allowance above, rather than
+    // sharing a single relaxed geometry check with DNS servers.
     #[test]
     fn rejects_gateway_outside_subnet() {
         let lease_time = validate_test_dhcp_form!(
@@ -3733,6 +3749,10 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // "198.51.100.5/24" has host bits set, so it is not itself a network
+    // address even though it parses as a valid CIDR -- pins that the subnet
+    // field must be the network address exactly, not silently normalized to
+    // one or accepted as an arbitrary host address within the /24.
     #[test]
     fn rejects_non_network_cidr() {
         let lease_time = validate_test_dhcp_form!(
@@ -3770,6 +3790,9 @@ mod tests {
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
     }
 
+    // 59 is one below MIN_LEASE_TIME (60), distinct from rejects_zero_lease_time
+    // above -- pins that the lower bound sits exactly at 60 and not looser,
+    // rather than only proving that a degenerate 0 is invalid.
     #[test]
     fn rejects_lease_time_below_minimum() {
         let lease_time = validate_test_dhcp_form!(
@@ -3805,6 +3828,9 @@ mod tests {
         assert_eq!(lease_time.unwrap(), 60);
     }
 
+    // Mirrors accepts_lease_time_at_minimum for the upper bound: 604800 (7
+    // days) is MAX_LEASE_TIME itself, and must be accepted because the bound
+    // is inclusive, not just values safely below it.
     #[test]
     fn accepts_lease_time_at_maximum() {
         let lease_time = validate_test_dhcp_form!(
@@ -3821,6 +3847,9 @@ mod tests {
         assert_eq!(lease_time.unwrap(), 604800);
     }
 
+    // 604801 is exactly one second past MAX_LEASE_TIME -- paired with
+    // accepts_lease_time_at_maximum above to confirm the upper bound is
+    // exact, not off-by-one in either direction.
     #[test]
     fn rejects_lease_time_above_maximum() {
         let lease_time = validate_test_dhcp_form!(
@@ -5057,6 +5086,11 @@ mod tests {
     // gate (see entrypoint.sh), but these validators exist so the Admin UI
     // gives immediate feedback instead of a config-write failure much later.
 
+    // Dots and underscores must be accepted (VLAN sub-interfaces like
+    // "br-lan.100", predictable names like "eno1_2"), while a shell
+    // metacharacter, an embedded space, or exceeding the 64-byte cap must be
+    // rejected -- those are exactly the inputs that could otherwise corrupt
+    // or extend the generated dnsmasq interface directive.
     #[test]
     fn interface_name_validator_accepts_typical_names_and_rejects_junk() {
         assert!(is_valid_interface_name("eth0"));
@@ -5068,6 +5102,10 @@ mod tests {
         assert!(!is_valid_interface_name(&"a".repeat(65)));
     }
 
+    // Exercises is_valid_domain_name's per-label delegation to
+    // is_valid_dns_label: a leading hyphen, a trailing hyphen, and an empty
+    // label from a doubled dot must each be caught individually, not left to
+    // a whole-string character check that wouldn't distinguish them.
     #[test]
     fn domain_name_validator_accepts_typical_domains_and_rejects_junk() {
         assert!(is_valid_domain_name("lan.local"));
@@ -5080,6 +5118,10 @@ mod tests {
         assert!(!is_valid_domain_name("lan local"));
     }
 
+    // A forward-slash path (e.g. "efi/bootx64.efi") is a legitimate boot
+    // filename and must be accepted, while whitespace or a comma must be
+    // rejected -- those are exactly the characters that would break or
+    // extend the generated dnsmasq dhcp-boot directive.
     #[test]
     fn boot_filename_validator_accepts_paths_and_rejects_whitespace_or_commas() {
         assert!(is_valid_boot_filename("pxelinux.0"));
@@ -5107,6 +5149,11 @@ mod tests {
         assert_eq!(form, "60:PXEClient\n93:0");
     }
 
+    // Each malformed-line shape (a managed code, a missing colon, a
+    // non-numeric code, empty data, an embedded ';') is a distinct way an
+    // operator-typed textarea line could otherwise corrupt the ';'-joined
+    // storage format or silently collide with a dedicated field -- confirms
+    // every one is rejected independently, not just the obvious cases.
     #[test]
     fn custom_options_form_rejects_managed_codes_and_malformed_lines() {
         assert!(
@@ -5385,6 +5432,10 @@ mod tests {
         assert!(global_reservation_identifiers_include_hw_address(&config));
     }
 
+    // The case where an operator explicitly lists hw-address alongside other
+    // identifiers -- confirms the check reads the list's contents, not just
+    // whether the key is present, so an explicit include isn't confused with
+    // the narrowed-list rejection below.
     #[test]
     fn global_reservation_identifiers_include_hw_address_when_explicitly_listed() {
         let config = json!({
@@ -5393,6 +5444,10 @@ mod tests {
         assert!(global_reservation_identifiers_include_hw_address(&config));
     }
 
+    // The narrowed case: hw-address deliberately dropped from an explicit
+    // list -- the counterpart to the two accept cases above, pinning that the
+    // helper returns false when hw-address is missing from a non-empty
+    // explicit list, not only when the key itself is absent entirely.
     #[test]
     fn global_reservation_identifiers_exclude_hw_address_when_narrowed() {
         let config = json!({
