@@ -535,6 +535,15 @@ jobs:
           format('{0}-shellcheck-{1}', github.workflow, github.ref)
         }}
       cancel-in-progress: true
+    # pull-requests: read is required for the "Run governance guardrails" step
+    # below to fetch the PR title/body live via `gh pr view` (issue #805).
+    # contents: read is restated here too, matching the pr-template-check
+    # convention (#903) -- job-level permissions replace rather than extend
+    # the workflow-level defaults, and this job still needs contents: read
+    # for actions/checkout.
+    permissions:
+      contents: read
+      pull-requests: read
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
@@ -555,9 +564,9 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GOVERNANCE_PR_TITLE: ${{ github.event.pull_request.title }}
-          GOVERNANCE_PR_BODY: ${{ github.event.pull_request.body }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
@@ -569,13 +578,27 @@ jobs:
           git cat-file -e "${GITHUB_SHA}^{commit}"
           git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
 
+          # github.event.pull_request.title/.body are webhook-payload
+          # snapshots taken when the triggering event fired, not the PR's
+          # current title/body (issue #805): editing either after a failed
+          # check and re-running with a plain `gh run rerun` replayed the
+          # stale snapshot and failed identically, even once the content was
+          # actually fixed. Fetched live instead, via the same `gh pr view`
+          # pattern #903/#905 already established (and proved working in
+          # this repo's own CI) for pr-template-check's PR-body fetch.
+          governance_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
+          governance_pr_body="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
+
+          # Passed to check-governance-guards.sh only as `-e KEY=VALUE`
+          # docker arguments below -- never interpolated into a run: string
+          # -- so PR title/body content can never be executed as shell code.
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
             -e GITHUB_REPOSITORY \
-            -e GOVERNANCE_PR_TITLE \
-            -e GOVERNANCE_PR_BODY \
+            -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
+            -e GOVERNANCE_PR_BODY="$governance_pr_body" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
