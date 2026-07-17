@@ -6364,7 +6364,20 @@ jobs:
           # refs/tags/v* -- GITHUB_TOKEN-authored pushes are deliberately not
           # re-triggered by GitHub (anti-recursion), which would otherwise
           # leave this tag published but its own release job never run.
-          git push "https://x-access-token:${PROJECT_AUTOMATION_PAT}@github.com/${REPOSITORY}.git" "refs/tags/${next_tag}"
+          #
+          # The token is passed as an HTTP Basic-Auth header via
+          # `-c http.extraheader`, not embedded in the remote URL: an
+          # embedded `https://x-access-token:TOKEN@...` URL is a plain-argv
+          # secret (visible to anything reading this process's argv/`ps`
+          # output for its lifetime) and, worse, git itself echoes the full
+          # URL -- credentials included -- into its own error/verbose output
+          # on a failed push (e.g. an auth or "repository not found" error),
+          # which would leak the PAT straight into this step's own log.
+          # `http.extraheader` is only ever passed via `-c` for this single
+          # invocation (never written to `.git/config`), and git does not
+          # echo header values back in its own diagnostic output.
+          git -c http.extraheader="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
+            push "https://github.com/${REPOSITORY}.git" "refs/tags/${next_tag}"
           echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
       - name: Attest stack pointer provenance

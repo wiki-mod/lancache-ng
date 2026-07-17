@@ -4512,9 +4512,17 @@ kea_ctrl_post() {
     local response_file http_status response result_code result_text
 
     response_file=$(mktemp)
-    if ! http_status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST \
+    # The Basic-Auth credential is passed to curl via -K (config read from
+    # stdin), not -u/--user on the command line: a -u value is a plain argv
+    # secret, visible to any other process on the host for curl's whole
+    # lifetime (e.g. `ps aux`, /proc/<pid>/cmdline). KEA_CTRL_TOKEN is
+    # generated as a hex string by default (see ensure_secret_env_key's
+    # hex32 kind), so it never contains the '"' that would break the quoted
+    # config value below; this is unchanged from the previous -u form, which
+    # had no such validation either.
+    if ! http_status=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token" | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
-        -u "admin:${kea_ctrl_token}" \
+        -K - \
         -d "$body" \
         "$kea_ctrl_url"); then
         rm -f -- "$response_file"
