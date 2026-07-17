@@ -986,6 +986,11 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    // Proves migrate_secondaries_table_for_auth_callout actually adds
+    // nats_user/nats_password_hash via ALTER TABLE when a table predates
+    // the auth-callout columns, and that the new columns are immediately
+    // writable/readable afterwards -- not just that the SQL statement runs
+    // without error.
     #[test]
     fn migration_adds_auth_callout_columns_to_a_fresh_table() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1019,6 +1024,10 @@ mod tests {
         assert_eq!(stored, "somehash");
     }
 
+    // A container restart re-runs this migration against an already-migrated
+    // database, so it must tolerate being applied twice without erroring on
+    // "duplicate column name" and must never touch a pre-existing row's
+    // original columns (nats_token, registered_at) in the process.
     #[test]
     fn migration_preserves_existing_rows_and_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1055,6 +1064,11 @@ mod tests {
         assert_eq!(registered_at, 42);
     }
 
+    // X-Forwarded-Proto can carry a comma-separated chain when multiple
+    // proxies each append their own value; only the first (leftmost, i.e.
+    // closest to the original client) entry reflects what the client
+    // actually used. Reading a later entry instead could flip HSTS
+    // on/off incorrectly for a request that traversed more than one hop.
     #[test]
     fn forwarded_proto_https_detection_uses_first_proxy_value() {
         let mut headers = axum::http::HeaderMap::new();
@@ -1070,6 +1084,11 @@ mod tests {
         assert!(!forwarded_proto_is_https(&headers));
     }
 
+    // Locks in the specific external hosts and directives that must never
+    // reappear in ADMIN_UI_CSP: a future change that adds a script tag
+    // pulling from a CDN (as earlier revisions of this UI did) must not be
+    // "fixed" by loosening the CSP to allow it, since that would reopen the
+    // page to third-party script injection.
     #[test]
     fn csp_keeps_scripts_self_hosted_without_external_cdn_allowances() {
         assert!(ADMIN_UI_CSP.contains("script-src 'self' 'unsafe-inline'"));
@@ -1078,6 +1097,10 @@ mod tests {
         assert!(!ADMIN_UI_CSP.contains("'unsafe-eval'"));
     }
 
+    // Baseline correctness for basic_auth_is_valid across its three states:
+    // no Authorization header, a header with the wrong password, and the
+    // matching credentials -- proving the constant-time comparison logic
+    // still rejects/accepts the same way plain string equality would.
     #[test]
     fn basic_auth_rejects_wrong_credentials_and_accepts_correct_ones() {
         fn auth_header(user: &str, pass: &str) -> HeaderValue {
@@ -1102,6 +1125,10 @@ mod tests {
         assert!(basic_auth_is_valid(&headers, "admin", "secret"));
     }
 
+    // Security invariant: possessing a valid, unexpired session cookie must
+    // never be treated as equivalent to presenting valid Basic auth
+    // credentials -- see the inline comment below for why a copied/replayed
+    // cookie or a rotated password would otherwise silently bypass auth.
     #[test]
     fn a_valid_session_cookie_never_substitutes_for_required_basic_auth() {
         // A session cookie only ever carries CSRF state, never authentication:
@@ -1121,6 +1148,12 @@ mod tests {
         ));
     }
 
+    // resolve_admin_ui_auth_mode must fail closed by default: no credentials
+    // and no explicit ALLOW_INSECURE_UI opt-in is an error, not a silent
+    // unauthenticated start. It must also reject a *partial*
+    // configuration (only one of UI_AUTH_USER/UI_AUTH_PASSWORD set) even when
+    // ALLOW_INSECURE_UI is true, since that combination is almost certainly a
+    // misconfiguration rather than an intentional insecure deployment.
     #[test]
     fn admin_ui_auth_requires_explicit_opt_in_for_insecure_mode() {
         assert_eq!(
@@ -1133,6 +1166,12 @@ mod tests {
         assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
     }
 
+    // Every placeholder string actually checked into this repo's deploy
+    // templates and README (not just deploy/prod/.env's literal) must be
+    // rejected -- a manual deployer who copies one of these public,
+    // guessable values verbatim would otherwise let anyone register a
+    // secondary DNS node against their primary. A real generated secret
+    // must still pass.
     #[test]
     fn secondary_registration_token_rejects_empty_and_known_placeholders() {
         assert!(validate_secondary_registration_token("").is_err());
@@ -1158,6 +1197,14 @@ mod tests {
         .is_ok());
     }
 
+    // Covers the three states load_or_create_secondary_registration_token
+    // must distinguish: a real operator-supplied value passes through
+    // untouched without ever touching disk; an unset/empty value generates
+    // and persists a fresh random hex32 token; and a later start with a
+    // placeholder value reuses the already-persisted token rather than
+    // generating a new one. That last case is the one that matters most --
+    // rotating the token on every restart would invalidate every already
+    // registered secondary's stored credentials.
     #[test]
     fn load_or_create_secondary_registration_token_generates_persists_and_preserves() {
         // A real operator-supplied value is returned unchanged and no file is
@@ -1201,6 +1248,12 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    // Zero would issue sessions that expire the instant they are created,
+    // and an unbounded value (up to u64::MAX) risks overflow once a session's
+    // expiry is computed as `now + ttl` (see session::issue_session_at's
+    // checked_add). Pinning both the exact 1-year ceiling and the rejection
+    // of pathologically large input keeps that arithmetic safe even if a
+    // future change stops going through Duration::from_secs first.
     #[test]
     fn ui_session_ttl_rejects_zero_and_overflow_prone_values() {
         assert!(validate_ui_session_ttl_seconds(0).is_err());
@@ -1210,6 +1263,13 @@ mod tests {
         assert!(validate_ui_session_ttl_seconds(u64::MAX).is_err());
     }
 
+    // preflight_startup_config runs several independent validations via `?`,
+    // so their order determines which single error message an operator with
+    // *multiple* misconfigured values actually sees. This sets both the TTL
+    // and the NATS credentials to invalid values at once and asserts the TTL
+    // error wins -- pinning the current check order so a future reordering
+    // doesn't silently swap which error surfaces first without anyone
+    // noticing.
     #[test]
     fn startup_preflight_rejects_invalid_ttl_before_other_static_checks() {
         // `Config::from_env()` reads process-global env vars (CACHE_DIR,
@@ -1229,6 +1289,13 @@ mod tests {
         );
     }
 
+    // Tera validates function calls at template-parse time (see
+    // load_templates), so a template referencing lancache_image_registry()
+    // etc. would fail to load entirely if registration were missing, wired to
+    // the wrong config field, or registered after templates were added --
+    // this proves the four functions are actually registered and each
+    // returns its own configured value, not a copy-pasted mix-up between
+    // registry/prefix/channel/tag.
     #[test]
     fn lancache_image_template_functions_render_runtime_config() {
         let _guard = config::env_test_lock().lock().unwrap();
@@ -1312,6 +1379,14 @@ mod tests {
         std::env::remove_var("TEMPLATE_DIR");
     }
 
+    // This crate has two similarly-named CSRF header helpers: main.rs's own
+    // csrf_header_value reads the client-facing X-CSRF-Token header, while
+    // session::csrf_header_value reads INTERNAL_CSRF_HEADER_NAME, the
+    // separate internal header the basic_auth middleware injects with the
+    // real session's CSRF token before a request reaches its handler. This
+    // pins that the session-module helper reads back exactly that internal
+    // header and not the client-facing one, guarding against the two being
+    // mixed up.
     #[test]
     fn session_cookie_helper_matches_the_session_header() {
         let empty_headers = HeaderMap::new();

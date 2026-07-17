@@ -1036,12 +1036,20 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 mod tests {
     use super::*;
 
+    // Auto mode's entire purpose is to gate HSTS on the request's actual
+    // scheme -- a plain-HTTP deployment must never receive
+    // Strict-Transport-Security, or browsers would start requiring HTTPS for
+    // a site that doesn't actually terminate TLS here.
     #[test]
     fn hsts_auto_only_sends_for_https_requests() {
         assert!(HstsMode::Auto.should_send(true));
         assert!(!HstsMode::Auto.should_send(false));
     }
 
+    // Always/Never exist for setups where TLS terminates elsewhere (a
+    // reverse proxy) and this process's own view of the request scheme is
+    // unreliable or irrelevant -- both overrides must ignore is_https
+    // entirely rather than only mostly ignoring it.
     #[test]
     fn hsts_always_and_never_ignore_request_scheme() {
         assert!(HstsMode::Always.should_send(true));
@@ -1050,6 +1058,10 @@ mod tests {
         assert!(!HstsMode::Never.should_send(false));
     }
 
+    // Pins the three canonical documented UI_HSTS_MODE strings, and that an
+    // unrecognized value falls back to the caller-supplied default rather
+    // than silently coercing to one specific mode (e.g. always defaulting to
+    // Auto regardless of what the caller asked for).
     #[test]
     fn hsts_mode_parser_accepts_documented_values() {
         let key = "LANCACHE_TEST_UI_HSTS_MODE_DOCUMENTED";
@@ -1069,6 +1081,10 @@ mod tests {
         env::remove_var(key);
     }
 
+    // Pins env_bool's alias handling for the UI_SECURITY_HEADERS toggle: both
+    // "off" and "no" must disable it (not just the canonical "false"/"0"),
+    // and an unrecognized value must fall back to the given default instead
+    // of being misread as true or false by a naive string comparison.
     #[test]
     fn security_header_toggle_parser_accepts_documented_values() {
         let key = "LANCACHE_TEST_UI_SECURITY_HEADERS_DOCUMENTED";
@@ -1088,6 +1104,11 @@ mod tests {
         env::remove_var(key);
     }
 
+    // Broad smoke test for the whole proxy/cache default surface when nothing
+    // is configured -- in particular that proxy_ssl_url/proxy_ssl_service
+    // derive from proxy_standard_url/PROXY_SERVICE rather than a separate
+    // hardcoded string, so the two modes stay pointed at the same proxy by
+    // default instead of silently diverging.
     #[test]
     fn cache_dir_fallbacks_match_current_runtime_layout() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1119,6 +1140,11 @@ mod tests {
         assert_eq!(cfg.cache_max_gb, 50.0);
     }
 
+    // Confirms CACHE_DIR alone drives cache_dir on the current runtime
+    // layout. resolve_cache_dir() deliberately does not accept the
+    // pre-v0.2.0 split keys as a fallback here -- setup.sh's migration folds
+    // them into CACHE_DIR before the UI ever starts, so re-adding that
+    // fallback would just mask a broken migration instead of catching it.
     #[test]
     fn cache_dir_is_read_directly_with_no_legacy_split_key_fallback() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1131,6 +1157,11 @@ mod tests {
         env::remove_var("CACHE_DIR");
     }
 
+    // Old installs that never set the newer explicit
+    // PROXY_STANDARD_URL/PROXY_SSL_URL/PROXY_SSL_SERVICE vars must still get
+    // working defaults derived from the legacy PROXY_SERVICE alone --
+    // dropping this fallback would silently break every install that hasn't
+    // migrated its .env yet.
     #[test]
     fn legacy_proxy_service_env_still_drives_runtime_fallbacks() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1148,6 +1179,10 @@ mod tests {
         env::remove_var("PROXY_SERVICE");
     }
 
+    // ssl_enabled defaults to true when unset, and both the "0" and "false"
+    // aliases must be honored to disable it, not just one particular
+    // spelling -- a narrower parser here would silently leave SSL mode
+    // enabled for an operator who used the "wrong" alias.
     #[test]
     fn ssl_enabled_accepts_disabled_env_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1162,6 +1197,11 @@ mod tests {
         assert!(Config::from_env().unwrap().ssl_enabled);
     }
 
+    // The canonical CACHE_MAX_GB must short-circuit the legacy split-value
+    // reconciliation entirely -- even mismatched STANDARD_CACHE_MAX_GB/
+    // SSL_CACHE_MAX_GB values (which would otherwise panic, see
+    // mismatched_legacy_cache_limits_fail_closed below) must not block
+    // startup once the canonical key is present.
     #[test]
     fn cache_max_gb_wins_over_legacy_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1178,6 +1218,11 @@ mod tests {
         env::remove_var("SSL_CACHE_MAX_GB");
     }
 
+    // For pre-canonical-key installs, matching STANDARD_CACHE_MAX_GB and
+    // SSL_CACHE_MAX_GB values must still be accepted as the shared cache-size
+    // fallback when CACHE_MAX_GB is absent, rather than requiring an operator
+    // to add the new canonical key just to keep an already-consistent old
+    // config working.
     #[test]
     fn matching_legacy_cache_limits_can_drive_shared_fallback() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1193,6 +1238,10 @@ mod tests {
         env::remove_var("SSL_CACHE_MAX_GB");
     }
 
+    // Locks the documented 50 GB default that applies when no cache-size env
+    // var (canonical or legacy) is set at all -- a change to this fallback
+    // would silently resize the cache for every fresh install that never
+    // touches CACHE_MAX_GB.
     #[test]
     fn shared_cache_limit_default_is_50_gb() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1205,6 +1254,10 @@ mod tests {
         assert_eq!(cfg.cache_max_gb, 50.0);
     }
 
+    // Guards the deliberate fail-closed design: when the two legacy
+    // STANDARD_CACHE_MAX_GB/SSL_CACHE_MAX_GB values disagree and no canonical
+    // CACHE_MAX_GB resolves the ambiguity, resolve_cache_max_gb() must panic
+    // rather than silently picking one of the two conflicting sizes.
     #[test]
     fn mismatched_legacy_cache_limits_fail_closed() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1221,6 +1274,11 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Unlike the other numeric env parsers in this file (env_u32_clamped,
+    // env_usize_clamped), UI_SESSION_TTL_SECONDS must fail startup with a
+    // specific error message on a malformed value instead of silently
+    // falling back to the default -- a bad session lifetime is a security
+    // setting, not a display convenience, so it must not degrade quietly.
     #[test]
     fn ui_session_ttl_defaults_when_unset_and_rejects_invalid_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1248,6 +1306,11 @@ mod tests {
         env::remove_var("UI_SESSION_TTL_SECONDS");
     }
 
+    // Locks the precedence between an explicit LANCACHE_IMAGE_CHANNEL and the
+    // tag-derived fallback (derive_lancache_image_channel): the channel must
+    // be derived from the tag only when LANCACHE_IMAGE_CHANNEL is unset, and
+    // an explicit channel value must win even when it disagrees with what
+    // the tag alone would suggest.
     #[test]
     fn lancache_image_tag_defaults_to_latest_and_accepts_release_tag() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1283,6 +1346,12 @@ mod tests {
         env::remove_var("LANCACHE_IMAGE_TAG");
     }
 
+    // An explicit DHCP_MODE must always win over the legacy DHCP_ENABLED
+    // interpretation, including when its value is unrecognized -- an invalid
+    // DHCP_MODE must fail closed to Disabled rather than falling through to
+    // the legacy flag's Kea-implying behavior, since both Kea and
+    // DnsmasqProxy bind the same DHCP port and silently picking the wrong one
+    // would conflict with whatever the operator actually intended.
     #[test]
     fn dhcp_mode_prefers_explicit_config_when_present() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1315,6 +1384,10 @@ mod tests {
         env::remove_var("DHCP_MODE");
     }
 
+    // Locks the pre-split legacy interpretation for installs that never set
+    // DHCP_MODE: DHCP_ENABLED implied Kea back when Kea was the only DHCP
+    // mode this project had, so that mapping must be preserved exactly for
+    // old configs rather than defaulting an unmigrated install to Disabled.
     #[test]
     fn dhcp_mode_defaults_from_legacy_enabled_flag() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1335,6 +1408,10 @@ mod tests {
         env::remove_var("DHCP_ENABLED");
     }
 
+    // dhcp_api_url must stay independent of dhcp_mode: changing the mode via
+    // env, or via the persisted Admin UI override that effective_dhcp_mode()
+    // reads, must never implicitly change which DHCP API endpoint the UI
+    // talks to -- the two are configured separately on purpose.
     #[test]
     fn dhcp_api_url_is_loaded_from_env_and_mode_can_be_overridden() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1365,6 +1442,11 @@ mod tests {
         let _ = fs::remove_file(settings_path);
     }
 
+    // Pins the documented default snapshot directory and retention count,
+    // and confirms both are independently overridable -- kea_keep_known_good_configs
+    // feeds env_u32_clamped's silent-fallback parsing, so a wrong default
+    // here would silently change snapshot retention for every Kea install
+    // that never sets KEEP_KNOWN_GOOD_CONFIGS explicitly.
     #[test]
     fn kea_config_snapshot_settings_load_from_env_with_documented_defaults() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1385,6 +1467,11 @@ mod tests {
         env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
     }
 
+    // Confirms both the default values and env overrides for all four syslog
+    // settings, since a drift between this Rust side and watchdog.sh's own
+    // reading of the same four env vars would make the Admin UI display a
+    // retention/enabled state that does not match what watchdog actually
+    // enforces.
     #[test]
     fn syslog_settings_load_from_env_with_documented_defaults_matching_watchdog_contract() {
         // Defaults here must match watchdog.sh's maybe_prune_syslog() (PR3/#757)
@@ -1475,6 +1562,11 @@ mod tests {
         env::remove_var(key);
     }
 
+    // A literal "0" parses fine as a u32 but is semantically wrong for a
+    // retention count (e.g. KEEP_KNOWN_GOOD_CONFIGS=0), so it must fall back
+    // to the default the same as a non-numeric value -- matching the shell
+    // side's kgs_snapshot_prune clamping instead of silently accepting "keep
+    // zero snapshots".
     #[test]
     fn env_u32_clamped_falls_back_to_default_for_invalid_or_non_positive_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1541,6 +1633,10 @@ mod tests {
         env::remove_var(key);
     }
 
+    // A "0" value for UI_LOGS_MAX_ENTRIES must fall back to the default
+    // rather than being accepted literally -- an actual zero-entry limit
+    // would silently blank the Admin UI's /logs tail view instead of showing
+    // the intended bounded history.
     #[test]
     fn env_usize_clamped_falls_back_to_default_for_invalid_or_non_positive_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1564,6 +1660,11 @@ mod tests {
         env::remove_var(key);
     }
 
+    // Verifies the optional dnsmasq relay/proxy fields follow the same
+    // env-then-UI-override precedence as the older DHCP_SUBNET_START/
+    // UPSTREAM_DHCP_IP fields, including that a partial override file (only
+    // some keys present) still falls back to env for the fields it omits
+    // rather than clearing them.
     #[test]
     fn dhcp_proxy_optional_fields_load_from_env_and_ui_override_wins() {
         // Issue #450: the new optional dnsmasq relay/proxy fields follow the
@@ -1624,6 +1725,10 @@ mod tests {
         let _ = fs::remove_file(&settings_path);
     }
 
+    // Guards that leaving the optional proxy fields unset produces true
+    // empty strings, not some other placeholder value -- ui_override_lines's
+    // "omit the line when empty" logic (see below) depends on exactly this
+    // empty-string default to detect an unconfigured field.
     #[test]
     fn dhcp_proxy_optional_fields_default_empty() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1648,6 +1753,11 @@ mod tests {
         assert_eq!(cfg.dhcp_proxy_custom_options, "");
     }
 
+    // An unset optional proxy field must not be persisted as a literal
+    // "KEY=" line in ui_settings_file: writing an empty override would pin
+    // an empty string instead of correctly falling back to the env default
+    // on the next read, silently breaking any env value set after the
+    // override file was written.
     #[test]
     fn ui_override_lines_omit_empty_optional_dhcp_proxy_fields() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1692,6 +1802,11 @@ mod tests {
         let _ = fs::remove_file(&settings_path);
     }
 
+    // Pins the full decision table for guessing a channel from an image tag
+    // when LANCACHE_IMAGE_CHANNEL isn't set explicitly -- in particular that
+    // any release/SHA-pinned tag reports "pinned" rather than a wrong guess
+    // of "latest", and that an unrecognized tag shape never panics, only
+    // defaults to "latest".
     #[test]
     fn derive_lancache_image_channel_resolves_semantic_tags() {
         // Test mutable channel tags: "dev", "edge", and "latest"
