@@ -201,44 +201,92 @@ runs:
     # surfaces success/failure to the calling job, and is the only step that
     # inspects all four outcomes to find whichever attempt (if any) produced
     # real outputs.
+    #
+    # All attempt outcomes/outputs are passed via `env:` rather than spliced
+    # directly into the script body as `${{ ... }}`. `nodes` is a multi-line
+    # JSON blob containing double quotes (buildx node metadata, e.g. a
+    # `"buildkitd-flags": "--allow-insecure-entitlement ..."` field) -- GitHub
+    # Actions substitutes `${{ }}` expressions into the script as raw text
+    # before bash ever parses it, so embedding that value inside a
+    # double-quoted shell assignment (`nodes="${{ ... }}"`) let its own
+    # embedded quotes break out of the shell string, turning fragments of the
+    # JSON into separate, unintended commands (confirmed for real: this
+    # produced `security.insecure: command not found`, exit 127, in CI on the
+    # very first attempt-1-succeeds path -- not just a retry edge case).
+    # `env:` values are passed through the runner's environment, not spliced
+    # into the script source, so this class of injection cannot happen
+    # regardless of what characters an attempt's outputs contain.
     - name: Resolve outcome across all attempts
       id: resolve
       if: always()
       shell: bash
+      env:
+        ATTEMPT1_OUTCOME: ${{ steps.attempt1.outcome }}
+        ATTEMPT1_NAME: ${{ steps.attempt1.outputs.name }}
+        ATTEMPT1_DRIVER: ${{ steps.attempt1.outputs.driver }}
+        ATTEMPT1_PLATFORMS: ${{ steps.attempt1.outputs.platforms }}
+        ATTEMPT1_NODES: ${{ steps.attempt1.outputs.nodes }}
+        ATTEMPT1_ENDPOINT: ${{ steps.attempt1.outputs.endpoint }}
+        ATTEMPT1_STATUS: ${{ steps.attempt1.outputs.status }}
+        ATTEMPT1_FLAGS: ${{ steps.attempt1.outputs.flags }}
+        ATTEMPT2_OUTCOME: ${{ steps.attempt2.outcome }}
+        ATTEMPT2_NAME: ${{ steps.attempt2.outputs.name }}
+        ATTEMPT2_DRIVER: ${{ steps.attempt2.outputs.driver }}
+        ATTEMPT2_PLATFORMS: ${{ steps.attempt2.outputs.platforms }}
+        ATTEMPT2_NODES: ${{ steps.attempt2.outputs.nodes }}
+        ATTEMPT2_ENDPOINT: ${{ steps.attempt2.outputs.endpoint }}
+        ATTEMPT2_STATUS: ${{ steps.attempt2.outputs.status }}
+        ATTEMPT2_FLAGS: ${{ steps.attempt2.outputs.flags }}
+        ATTEMPT3_OUTCOME: ${{ steps.attempt3.outcome }}
+        ATTEMPT3_NAME: ${{ steps.attempt3.outputs.name }}
+        ATTEMPT3_DRIVER: ${{ steps.attempt3.outputs.driver }}
+        ATTEMPT3_PLATFORMS: ${{ steps.attempt3.outputs.platforms }}
+        ATTEMPT3_NODES: ${{ steps.attempt3.outputs.nodes }}
+        ATTEMPT3_ENDPOINT: ${{ steps.attempt3.outputs.endpoint }}
+        ATTEMPT3_STATUS: ${{ steps.attempt3.outputs.status }}
+        ATTEMPT3_FLAGS: ${{ steps.attempt3.outputs.flags }}
+        ATTEMPT4_OUTCOME: ${{ steps.attempt4.outcome }}
+        ATTEMPT4_NAME: ${{ steps.attempt4.outputs.name }}
+        ATTEMPT4_DRIVER: ${{ steps.attempt4.outputs.driver }}
+        ATTEMPT4_PLATFORMS: ${{ steps.attempt4.outputs.platforms }}
+        ATTEMPT4_NODES: ${{ steps.attempt4.outputs.nodes }}
+        ATTEMPT4_ENDPOINT: ${{ steps.attempt4.outputs.endpoint }}
+        ATTEMPT4_STATUS: ${{ steps.attempt4.outputs.status }}
+        ATTEMPT4_FLAGS: ${{ steps.attempt4.outputs.flags }}
       run: |
         set -euo pipefail
-        if [[ "${{ steps.attempt1.outcome }}" == "success" ]]; then
-          name="${{ steps.attempt1.outputs.name }}"
-          driver="${{ steps.attempt1.outputs.driver }}"
-          platforms="${{ steps.attempt1.outputs.platforms }}"
-          nodes="${{ steps.attempt1.outputs.nodes }}"
-          endpoint="${{ steps.attempt1.outputs.endpoint }}"
-          status="${{ steps.attempt1.outputs.status }}"
-          flags="${{ steps.attempt1.outputs.flags }}"
-        elif [[ "${{ steps.attempt2.outcome }}" == "success" ]]; then
-          name="${{ steps.attempt2.outputs.name }}"
-          driver="${{ steps.attempt2.outputs.driver }}"
-          platforms="${{ steps.attempt2.outputs.platforms }}"
-          nodes="${{ steps.attempt2.outputs.nodes }}"
-          endpoint="${{ steps.attempt2.outputs.endpoint }}"
-          status="${{ steps.attempt2.outputs.status }}"
-          flags="${{ steps.attempt2.outputs.flags }}"
-        elif [[ "${{ steps.attempt3.outcome }}" == "success" ]]; then
-          name="${{ steps.attempt3.outputs.name }}"
-          driver="${{ steps.attempt3.outputs.driver }}"
-          platforms="${{ steps.attempt3.outputs.platforms }}"
-          nodes="${{ steps.attempt3.outputs.nodes }}"
-          endpoint="${{ steps.attempt3.outputs.endpoint }}"
-          status="${{ steps.attempt3.outputs.status }}"
-          flags="${{ steps.attempt3.outputs.flags }}"
-        elif [[ "${{ steps.attempt4.outcome }}" == "success" ]]; then
-          name="${{ steps.attempt4.outputs.name }}"
-          driver="${{ steps.attempt4.outputs.driver }}"
-          platforms="${{ steps.attempt4.outputs.platforms }}"
-          nodes="${{ steps.attempt4.outputs.nodes }}"
-          endpoint="${{ steps.attempt4.outputs.endpoint }}"
-          status="${{ steps.attempt4.outputs.status }}"
-          flags="${{ steps.attempt4.outputs.flags }}"
+        if [[ "$ATTEMPT1_OUTCOME" == "success" ]]; then
+          name="$ATTEMPT1_NAME"
+          driver="$ATTEMPT1_DRIVER"
+          platforms="$ATTEMPT1_PLATFORMS"
+          nodes="$ATTEMPT1_NODES"
+          endpoint="$ATTEMPT1_ENDPOINT"
+          status="$ATTEMPT1_STATUS"
+          flags="$ATTEMPT1_FLAGS"
+        elif [[ "$ATTEMPT2_OUTCOME" == "success" ]]; then
+          name="$ATTEMPT2_NAME"
+          driver="$ATTEMPT2_DRIVER"
+          platforms="$ATTEMPT2_PLATFORMS"
+          nodes="$ATTEMPT2_NODES"
+          endpoint="$ATTEMPT2_ENDPOINT"
+          status="$ATTEMPT2_STATUS"
+          flags="$ATTEMPT2_FLAGS"
+        elif [[ "$ATTEMPT3_OUTCOME" == "success" ]]; then
+          name="$ATTEMPT3_NAME"
+          driver="$ATTEMPT3_DRIVER"
+          platforms="$ATTEMPT3_PLATFORMS"
+          nodes="$ATTEMPT3_NODES"
+          endpoint="$ATTEMPT3_ENDPOINT"
+          status="$ATTEMPT3_STATUS"
+          flags="$ATTEMPT3_FLAGS"
+        elif [[ "$ATTEMPT4_OUTCOME" == "success" ]]; then
+          name="$ATTEMPT4_NAME"
+          driver="$ATTEMPT4_DRIVER"
+          platforms="$ATTEMPT4_PLATFORMS"
+          nodes="$ATTEMPT4_NODES"
+          endpoint="$ATTEMPT4_ENDPOINT"
+          status="$ATTEMPT4_STATUS"
+          flags="$ATTEMPT4_FLAGS"
         else
           echo "::error::All Docker Buildx setup attempts failed." >&2
           exit 1
