@@ -241,9 +241,9 @@ write_matrix_source_with_services() {
     [ "$status" -eq 0 ]
 }
 
-# The subset relationship still validates membership: a service backfill-
-# stack-latest.yml lists that isn't in the canonical set at all must fail,
-# same as full_setup_services's non-canonical-member check.
+# backfill-stack-latest.yml's services=(...) must equal EXACTLY
+# canonical-minus-{build-tools}, not just "no phantom members" -- a phantom
+# member (a service the matrix doesn't build at all) must still fail.
 @test "multi-file: fails when backfill-stack-latest.yml's services=() contains a non-canonical service" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
@@ -251,7 +251,25 @@ write_matrix_source_with_services() {
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"not a known build-matrix service"* ]]
+    [[ "$output" == *"diverges from the expected set"* ]]
+    [[ "$output" == *"$backfill_fixture"* ]]
+}
+
+# The actual #822 failure mode for a subset-checked file: a real service
+# silently DROPPED (here, watchdog -- missing on top of the documented
+# build-tools exclusion) must fail. A membership-only "no phantom members"
+# check would wrongly pass this, since a shorter list is still a valid
+# subset by that weaker definition -- this is exactly the gap an exact
+# canonical-minus-exclusions equality check exists to close.
+@test "multi-file: fails when backfill-stack-latest.yml's services=() silently drops a real service" {
+    write_matrix_source_with_services > "$fixture"
+    write_good_extra_fixtures
+    echo '          services=(proxy dns dhcp dhcp-proxy ui)' > "$backfill_fixture"
+
+    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"diverges from the expected set"* ]]
+    [[ "$output" == *"$backfill_fixture"* ]]
 }
 
 # ensure-pr-staging-images.sh declares full_setup_services=(...) at column 0
@@ -267,7 +285,24 @@ write_matrix_source_with_services() {
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"not a known build-matrix service"* ]]
+    [[ "$output" == *"diverges from the expected set"* ]]
+    [[ "$output" == *"$ensure_fixture"* ]]
+}
+
+# Same silent-drop failure mode as backfill-stack-latest.yml above, but for
+# ensure-pr-staging-images.sh's full_setup_services=(...): dropping a real
+# service (here, ui -- beyond the documented dhcp/dhcp-proxy exclusion) must
+# fail. This is the specific gap that scoping this file into
+# FULL_SETUP_EXACT_EXCLUSIONS (exact-equality) rather than leaving it on the
+# original membership-only check exists to close.
+@test "multi-file: fails when ensure-pr-staging-images.sh's full_setup_services=() silently drops a real service" {
+    write_matrix_source_with_services > "$fixture"
+    write_good_extra_fixtures
+    echo 'full_setup_services=(proxy dns watchdog build-tools)' > "$ensure_fixture"
+
+    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"diverges from the expected set"* ]]
     [[ "$output" == *"$ensure_fixture"* ]]
 }
 

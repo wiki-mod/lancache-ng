@@ -35,10 +35,21 @@
 #     semantically the same subset relationship -- see
 #     SUBSET_SERVICES_FILES below.
 #   - scripts/ensure-pr-staging-images.sh: a `full_setup_services=(...)`
-#     copy, checked the same subset way as build-push.yml's own copy.
+#     copy -- see FULL_SETUP_EXACT_EXCLUSIONS below.
 # All three are checked against the SAME canonical set derived from
 # build-push.yml's build matrix below, since none of them has a build matrix
 # of their own -- build-push.yml is the one place a service is actually built.
+#
+# For these two new subset-checked arrays specifically, "subset" means EXACT
+# equality to canonical-minus-a-known-exclusion-set, not just "no phantom
+# members": a membership-only check would silently accept a real service
+# being DROPPED from the array (a shorter list is still a valid subset by
+# that weaker definition), which is exactly the #822 failure mode this whole
+# guard exists to catch. build-push.yml's own pre-existing
+# `full_setup_services=(...)` check (used by the original 8 bats fixtures)
+# intentionally keeps its original, looser membership-only semantics --
+# tightening that one too is a separate, pre-existing-design decision outside
+# this 3-file extension's scope.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -115,35 +126,50 @@ array_elements() {
     sed -E 's/^[^(]*\(//; s/\).*$//' <<<"$1" | tr ' ' '\n' | sed '/^$/d' | sort -u
 }
 
+# Set-difference helper: canonical minus a given exclusion list (both must be
+# newline-separated; canonical is already sorted+unique, and this sorts+dedupes
+# $1 too, since `comm` requires sorted input on both sides).
+canonical_minus() {
+    comm -23 <(printf '%s\n' "$canonical") <(printf '%s\n' "$1" | sort -u)
+}
+
 # Files where a `services=(...)` array is a deliberate, documented SUBSET of
 # the canonical set rather than the full build matrix -- unlike every
 # `services=(...)` copy inside build-push.yml itself (and inside
 # gc-pr-staging-images.yml), which must always equal the full set. Keyed by
-# basename so this stays readable regardless of a file's full path. Each
-# entry here must be backed by that file's own inline comment explaining the
-# intentional exclusion (see backfill-stack-latest.yml's "Product stack
-# latest backfill intentionally excludes build-tools" comment) -- this list
-# is not a place to silently paper over a real drift, only to acknowledge an
-# already-documented, deliberate one.
+# basename so this stays readable regardless of a file's full path. The value
+# is the EXACT, documented exclusion set (newline-separated), not just a
+# boolean flag: checking only "no phantom members" would accept a real
+# service silently being DROPPED from the array too, which is exactly the
+# #822 failure mode this whole guard exists to catch -- a subset check must
+# still assert equality against the one specific expected subset, not "any
+# subset at all." Each entry here must be backed by that file's own inline
+# comment explaining the intentional exclusion (see backfill-stack-latest.yml's
+# "Product stack latest backfill intentionally excludes build-tools" comment).
 declare -A SUBSET_SERVICES_FILES=(
-    ["backfill-stack-latest.yml"]=1
+    ["backfill-stack-latest.yml"]="build-tools"
 )
 
 # Checks every `services=(...)` array in $1. Equal-to-canonical by default;
-# treated as subset-of-canonical for files listed in SUBSET_SERVICES_FILES
-# above. $2 ("required" or "optional") controls whether finding zero arrays
-# in this file is itself a failure: "required" for files where a
-# `services=(...)` array is known to always exist (build-push.yml,
+# equal-to-(canonical-minus-exclusions) for files listed in
+# SUBSET_SERVICES_FILES above. $2 ("required" or "optional") controls whether
+# finding zero arrays in this file is itself a failure: "required" for files
+# where a `services=(...)` array is known to always exist (build-push.yml,
 # gc-pr-staging-images.yml, backfill-stack-latest.yml) so a rename/refactor
 # that silently removes it is caught; "optional" for files that legitimately
 # never declare one (e.g. ensure-pr-staging-images.sh only has
 # full_setup_services=(...), checked separately below).
 check_services_arrays() {
-    local file="$1" requirement="$2" file_basename subset lineno content elements entry
+    local file="$1" requirement="$2" file_basename lineno content elements entry
     local -a entries
+    local expected expected_oneline
     file_basename=$(basename "$file")
-    subset=0
-    [[ -n "${SUBSET_SERVICES_FILES[$file_basename]:-}" ]] && subset=1
+    if [[ -n "${SUBSET_SERVICES_FILES[$file_basename]:-}" ]]; then
+        expected=$(canonical_minus "${SUBSET_SERVICES_FILES[$file_basename]}")
+    else
+        expected="$canonical"
+    fi
+    expected_oneline=$(printf '%s' "$expected" | tr '\n' ' ')
 
     # `[[:space:]]*` (zero or more), not `+`: build-push.yml's copies are
     # indented (embedded in a YAML `run:` block), but a plain shell script
@@ -166,30 +192,43 @@ check_services_arrays() {
         lineno=${entry%%:*}
         content=${entry#*:}
         elements=$(array_elements "$content")
-        if [[ "$subset" -eq 1 ]]; then
-            while IFS= read -r elem; do
-                [[ -z "$elem" ]] && continue
-                if ! grep -qxF "$elem" <<<"$canonical"; then
-                    fail "services=(...) at $file:$lineno contains '$elem', which is not a known build-matrix service."
-                fi
-            done <<<"$elements"
-        elif [[ "$elements" != "$canonical" ]]; then
-            fail "services=(...) at $file:$lineno diverges from the build-matrix canonical set."
-            printf "    expected: %s\n" "$canonical_oneline" >&2
+        if [[ "$elements" != "$expected" ]]; then
+            fail "services=(...) at $file:$lineno diverges from the expected set."
+            printf "    expected: %s\n" "$expected_oneline" >&2
             printf "    found:    %s\n" "$(printf '%s' "$elements" | tr '\n' ' ')" >&2
         fi
     done
 }
 
-# Checks every `full_setup_services=(...)` array in $1: must be a subset of
-# the canonical set (these deliberately omit some services, e.g. dhcp/
-# dhcp-proxy). Flags only elements NOT in canonical. $2 ("required" or
-# "optional") mirrors check_services_arrays's requirement parameter, for the
-# same reason: a file known to always declare one (build-push.yml,
-# ensure-pr-staging-images.sh) must fail closed if that array vanishes.
+# Files where full_setup_services=(...) must equal canonical minus a KNOWN,
+# EXACT exclusion set (not just "no phantom members") -- same reasoning as
+# SUBSET_SERVICES_FILES above: membership-only checking would silently accept
+# a real service being dropped. Scoped to ensure-pr-staging-images.sh, since
+# its full_setup_services=(...) is meant to mirror build-push.yml's own
+# full_setup_services=(...) exactly (both represent the same full-setup
+# validation scope). build-push.yml's own copy intentionally keeps the
+# original, looser membership-only check below -- it has an established bats
+# test (further up this file) exercising an arbitrary smaller subset as a
+# valid case, so tightening it to exact-equality is a separate, pre-existing-
+# design decision outside the scope of this 3-file extension.
+declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
+    ["ensure-pr-staging-images.sh"]="dhcp
+dhcp-proxy"
+)
+
+# Checks every `full_setup_services=(...)` array in $1. For files listed in
+# FULL_SETUP_EXACT_EXCLUSIONS, must equal canonical minus that exact
+# exclusion set. Otherwise (build-push.yml's own copy), the original,
+# looser "subset of canonical" check: flags only elements NOT in canonical,
+# accepting any smaller subset. $2 ("required" or "optional") mirrors
+# check_services_arrays's requirement parameter, for the same reason: a file
+# known to always declare one (build-push.yml, ensure-pr-staging-images.sh)
+# must fail closed if that array vanishes.
 check_full_setup_arrays() {
-    local file="$1" requirement="$2" lineno content entry
+    local file="$1" requirement="$2" file_basename lineno content entry elements
     local -a entries
+    local expected expected_oneline
+    file_basename=$(basename "$file")
     # Same `[[:space:]]*` reasoning as check_services_arrays above:
     # ensure-pr-staging-images.sh declares full_setup_services=(...) at
     # column 0, not indented inside a YAML `run:` block.
@@ -198,6 +237,23 @@ check_full_setup_arrays() {
         fail "no 'full_setup_services=(...)' array found in $file -- was it renamed or refactored? Update this guard deliberately."
         return
     fi
+
+    if [[ -n "${FULL_SETUP_EXACT_EXCLUSIONS[$file_basename]:-}" ]]; then
+        expected=$(canonical_minus "${FULL_SETUP_EXACT_EXCLUSIONS[$file_basename]}")
+        expected_oneline=$(printf '%s' "$expected" | tr '\n' ' ')
+        for entry in "${entries[@]}"; do
+            lineno=${entry%%:*}
+            content=${entry#*:}
+            elements=$(array_elements "$content")
+            if [[ "$elements" != "$expected" ]]; then
+                fail "full_setup_services=(...) at $file:$lineno diverges from the expected set."
+                printf "    expected: %s\n" "$expected_oneline" >&2
+                printf "    found:    %s\n" "$(printf '%s' "$elements" | tr '\n' ' ')" >&2
+            fi
+        done
+        return
+    fi
+
     for entry in "${entries[@]}"; do
         lineno=${entry%%:*}
         content=${entry#*:}
