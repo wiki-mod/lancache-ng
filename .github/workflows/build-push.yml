@@ -1954,10 +1954,16 @@ jobs:
 
       - name: Check workflow service lists stay in sync (issue #822)
         # Guards against a service silently dropping out of manifest merge,
-        # channel promotion, or release when a new one is added to the build
-        # matrix but one of build-push.yml's several hardcoded `services=(...)`
-        # copies is missed. Runs in the build-tools container because it needs
-        # GNU grep -P, same as the naming-consistency guard above.
+        # channel promotion, release, PR-staging-tag garbage collection, or
+        # latest-channel backfill when a new one is added to the build matrix
+        # but one of the several hardcoded `services=(...)`/
+        # `full_setup_services=(...)` copies is missed. With no arguments,
+        # the script checks build-push.yml's own 4 copies (this file) PLUS
+        # gc-pr-staging-images.yml, backfill-stack-latest.yml, and
+        # scripts/ensure-pr-staging-images.sh -- all real files found to
+        # duplicate this same #822 recurrence shape. Runs in the build-tools
+        # container because it needs GNU grep -P, same as the
+        # naming-consistency guard above.
         run: |
           set -euo pipefail
 
