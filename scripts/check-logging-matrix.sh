@@ -48,13 +48,60 @@ fail() {
 # name: a backtick-quoted override wins if present (it's the deliberate
 # "the real name is different from the prose label" case), otherwise a
 # trailing " (...)" parenthetical is stripped as pure human-readable gloss.
-canonical_services=$(awk '
+#
+# This whole extraction runs as a single awk process rather than the
+# previous "awk | sed | cut | sed | while read (grep|sed per row)" chain.
+# That chain forked roughly 3 short-lived processes per table row. CI on
+# this project's shared self-hosted runners hit a real flake traced to this
+# script: two back-to-back v0.2.0 CI runs against byte-identical
+# docs/architecture-ng.md and scripts/check-logging-matrix.sh content
+# (commits c4e7ac9d then 9eef5d46, ~18 minutes apart, same build-tools
+# image digest) produced "OK" and then a false "syslog-ng has no row"
+# failure respectively, with no code change in between; re-running the
+# second (failing) job against the same unmodified commit later passed
+# with no changes at all, confirming it was a flake rather than a
+# deterministic defect (see issue #633's comment history for the full
+# reproduction). The leading hypothesis -- not proven, since the flake did
+# not recur under direct local reproduction -- is a fork/exec hiccup
+# silently dropping one row's output inside the old "while read" loop
+# body, which `set -e`/`pipefail` cannot catch because the loop's own exit
+# status is unaffected by an internal command failing partway through one
+# iteration. Doing the whole per-row normalization inside one awk program
+# removes that fork storm outright, and turns a failure of the awk process
+# itself into a loud, `set -e`-triggered abort instead of a silently short
+# result. The row-count assertion in the END block below additionally
+# catches a distinct, narrower failure mode: two differently-worded rows
+# that normalize to the same canonical name (a genuine duplicate/collapsed
+# row). It does not, by itself, prove every possible silent-row-loss cause
+# (e.g. a truncated read of $ARCHITECTURE_DOC would still show matching
+# data-row and unique-name counts) -- it is defense in depth for one
+# specific class of drift, not a guarantee against this exact flake
+# recurring.
+canonical_raw=$(awk '
   /\*\*Logging matrix\*\*/ { seen_marker = 1; next }
   seen_marker && /^\|/ {
     rows_seen = 1
     if ($0 ~ /^\|[[:space:]]*Service[[:space:]]*\|/) next
     if ($0 ~ /^\|[[:space:]]*-+[[:space:]]*\|/) next
-    print
+
+    line = $0
+    sub(/^\|[[:space:]]*/, "", line)
+    n = split(line, parts, "|")
+    cell = (n >= 1) ? parts[1] : ""
+    sub(/[[:space:]]+$/, "", cell)
+
+    name = cell
+    if (match(cell, /`[a-z0-9-]+`/)) {
+      name = substr(cell, RSTART + 1, RLENGTH - 2)
+    } else {
+      sub(/[[:space:]]*\([^)]*\)[[:space:]]*$/, "", name)
+    }
+
+    data_rows++
+    if (!(name in seen)) {
+      seen[name] = 1
+      print name
+    }
     next
   }
   # The marker line and the table itself are separated by a blank line in
@@ -62,21 +109,22 @@ canonical_services=$(awk '
   # actual "|"-prefixed rows have been seen, so that blank line does not
   # prematurely end the scan before a single row was read.
   seen_marker && rows_seen && !/^\|/ { exit }
-' "$ARCHITECTURE_DOC" \
-  | sed -E 's/^\|[[:space:]]*//' \
-  | cut -d'|' -f1 \
-  | sed -E 's/[[:space:]]+$//' \
-  | while IFS= read -r cell; do
-      if printf '%s' "$cell" | grep -qE '`[a-z0-9-]+`'; then
-        printf '%s\n' "$cell" | grep -oE '`[a-z0-9-]+`' | tr -d '`'
-      else
-        printf '%s\n' "$cell" | sed -E 's/[[:space:]]*\([^)]*\)[[:space:]]*$//'
-      fi
-    done \
-  | sort -u)
+  END {
+    unique_count = 0
+    for (k in seen) unique_count++
+    print "##ROWS## " data_rows " " unique_count
+  }
+' "$ARCHITECTURE_DOC")
+
+row_summary=$(printf '%s\n' "$canonical_raw" | grep -E '^##ROWS## ' || true)
+canonical_services=$(printf '%s\n' "$canonical_raw" | grep -vE '^##ROWS## ' | sort -u)
+raw_row_count=$(printf '%s\n' "$row_summary" | awk '{print $2}')
+unique_row_count=$(printf '%s\n' "$row_summary" | awk '{print $3}')
 
 if [ -z "$canonical_services" ]; then
   fail "Could not parse any rows out of $ARCHITECTURE_DOC's logging matrix table (expected a '**Logging matrix**' marker followed by a Markdown table)."
+elif [ -n "$raw_row_count" ] && [ -n "$unique_row_count" ] && [ "$unique_row_count" -lt "$raw_row_count" ]; then
+  fail "Parsed only $unique_row_count unique service name(s) out of $raw_row_count row(s) in $ARCHITECTURE_DOC's logging matrix table -- a row was silently dropped or collapsed during parsing (this can also happen transiently under CI resource pressure; re-run first, and if it persists, check for a genuine duplicate row before assuming the parser itself regressed)."
 fi
 
 service_in_canonical() {
