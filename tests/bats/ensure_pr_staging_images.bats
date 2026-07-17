@@ -19,6 +19,17 @@
 # proves the pre-#895 tests still get the original fail-at-baseline
 # behavior unchanged (build_push_run_active() short-circuits on an empty
 # BUILD_SHA without needing `gh` to be installed at all).
+#
+# #808 base-channel freshness coverage: every real backfill now first calls
+# scripts/lib/staging-image-freshness.sh's sif_wait_for_fresh_base_image().
+# The default setup() below makes that check pass immediately for every
+# pre-#808 test (a disposable one-commit git repo, BASE_SHA set to that
+# commit, and a revision stub that always echoes it back -- "equal" is
+# "fresh") so their existing touched/untouched back-fill-count assertions
+# stay meaningful without being coupled to the freshness mechanism itself.
+# Dedicated staleness/failure coverage for that mechanism lives in
+# staging_image_freshness.bats; the tests further down in THIS file only add
+# the integration point (a stale base image blocks the back-fill here too).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -44,11 +55,37 @@ printf '%s\t%s\n' "\$1" "\$2" >> "$backfill_log"
 STUB
     chmod +x "$backfill_stub"
 
+    # #808: disposable two-commit repo (older_sha -> base_sha) + a revision
+    # stub that always echoes base_sha back, so sif_is_ancestor_or_equal sees
+    # "candidate == base" (fresh) for every test that doesn't override it
+    # below. older_sha exists so staleness tests have a real, genuinely
+    # older commit to report instead of needing to fabricate one.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m older
+    older_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+echo "$base_sha"
+STUB
+    chmod +x "$revision_stub"
+
     export STAGING_IMAGE_EXISTS_CMD="$exists_stub"
     export STAGING_BACKFILL_CMD="$backfill_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+    export STAGING_FRESHNESS_GIT_DIR="$git_dir"
+    export BASE_SHA="$base_sha"
     # Keep the fail path fast: no real waiting in tests.
     export STAGING_POLL_TIMEOUT_SECONDS=0
     export STAGING_POLL_INTERVAL_SECONDS=0
+    export BASE_FRESHNESS_POLL_TIMEOUT_SECONDS=0
+    export BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS=0
+    export BASE_FRESHNESS_POLL_INTERVAL_SECONDS=0
     export REPOSITORY="wiki-mod/lancache-ng"
     export PR_TAG="pr-715-sha-abcdef0"
     export BASE_CHANNEL_TAG="edge"
@@ -204,4 +241,51 @@ STUB
     run bash "$script"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "hard 1s ceiling"
+}
+
+@test "#808: an untouched service is NOT back-filled from a base-channel image that is stale relative to BASE_SHA" {
+    # Overrides setup()'s default "always fresh" revision stub with one that
+    # always reports older_sha -- a real commit that predates BASE_SHA
+    # (base_sha) in the disposable repo's own history. Proves the freshness
+    # gate actually blocks the back-fill end-to-end, not just in isolation.
+    stale_stub="$BATS_TEST_TMPDIR/stale_revision.sh"
+    cat > "$stale_stub" <<STUB
+#!/usr/bin/env bash
+echo "$older_sha"
+STUB
+    chmod +x "$stale_stub"
+    export STAGING_IMAGE_REVISION_CMD="$stale_stub"
+
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "#808"
+    # No service was actually back-filled: the freshness gate blocked all of
+    # them before backfill_from_base ever ran (fail-fast on the first one).
+    [ "$(wc -l < "$backfill_log")" -eq 0 ]
+}
+
+@test "#808: an untouched service IS back-filled once the base-channel image is fresh (equal to BASE_SHA)" {
+    # setup()'s default stub already returns BASE_SHA itself (equal ->
+    # fresh) -- this test just asserts the previously-existing behavior
+    # (back-fill happens) still holds now that the freshness gate sits in
+    # front of it, i.e. the gate does not accidentally block the good case.
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$backfill_log")" -eq 5 ]
+}
+
+@test "#808: BASE_SHA is required -- an omitted BASE_SHA fails closed instead of silently skipping the freshness check" {
+    unset BASE_SHA
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "BASE_SHA"
 }

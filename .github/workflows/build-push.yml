@@ -2183,7 +2183,15 @@ jobs:
     # in every later step, silently overriding whatever a retry inside that
     # step writes via $GITHUB_ENV -- exactly why none of these are set here.
     steps:
+      # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so the
+      # "Ensure PR staging tags exist for full-setup services" step below can
+      # prove real git ancestry (`git merge-base --is-ancestor`) between this
+      # PR's base.sha and a base-channel image's build-commit label. Same
+      # requirement, and same fix, as the `detect-changes` job's own
+      # fetch-depth: 0 checkout (needed for its own merge-base-based diff).
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       # `latest` is contractually a stable-release-only channel (see
       # docs/release-versioning.md) -- it is never moved by a v0.2.0 (or any
@@ -2310,6 +2318,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
           BASE_CHANNEL_TAG: ${{ steps.channel.outputs.base-channel-tag }}
+          # #808: this PR's own base commit, needed to prove a base-channel
+          # image was actually built from a commit at or after it before
+          # backfilling an untouched service from that channel. Always
+          # present here: this step only runs when pr-staging-available is
+          # true, which requires a pull_request event (see "Determine
+          # validation image channel" above).
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
@@ -2323,6 +2338,10 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/staging-image-freshness.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh"
+
+          : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
           # Mirrors build/build-arm64's "Determine whether this service
           # needs building" should-build override exactly: a workflow/CI-
@@ -2386,7 +2405,22 @@ jobs:
             fi
 
             base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
-            echo "::notice::$service is untouched by this PR; (re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
+            echo "::notice::$service is untouched by this PR; verifying $BASE_CHANNEL_TAG ($base_image) was built from a commit at or after this PR's base commit ($BASE_SHA) before backfilling..."
+            # #808: never back-fill from a base-channel image without first
+            # proving it was actually built from base.sha or later -- see
+            # scripts/lib/staging-image-freshness.sh for the mechanism and
+            # the "validate full-setup image" job's own checkout step
+            # (fetch-depth: 0) for why full git history is available here.
+            # 900/5400/15 (normal budget / hard ceiling / poll interval, in
+            # seconds) intentionally match scripts/ensure-pr-staging-images.sh's
+            # own BASE_FRESHNESS_POLL_* defaults exactly -- keep in sync by
+            # hand if those defaults ever change, same as the rest of this
+            # step's touched-vs-untouched logic already must be.
+            if ! sif_wait_for_fresh_base_image "$base_image" "$BASE_SHA" "$service" 900 5400 15 >/dev/null; then
+              echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
+              exit 1
+            fi
+            echo "::notice::(re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
