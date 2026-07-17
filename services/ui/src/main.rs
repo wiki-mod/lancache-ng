@@ -1328,4 +1328,244 @@ mod tests {
             Some("session-token-a")
         );
     }
+
+    // ─── basic_auth full-chain integration tests ───
+    //
+    // The tests above exercise basic_auth's own leaf functions
+    // (basic_auth_is_valid, forwarded_proto_is_https, ...) in isolation.
+    // These four instead drive real axum::extract::Request values through
+    // the actual Router + `from_fn_with_state(state, basic_auth)` layer via
+    // tower::ServiceExt::oneshot, the same way a real HTTP request would
+    // reach it -- so a bug in how the pieces are wired together (not just a
+    // bug in one leaf function) would actually be caught.
+    use tower::ServiceExt;
+
+    // Builds a real AppState so the full middleware (which is hardwired to
+    // `State<Arc<AppState>>`, not a trimmed-down test double) can run
+    // unmodified. `docker`/`nats` are real client objects but never make a
+    // network call in these tests: bollard's connect_with_http only builds
+    // an HTTP client (no handshake at construction time), and async-nats's
+    // `retry_on_initial_connect` makes `connect()` return immediately,
+    // retrying the actual TCP handshake in a background task -- fine here
+    // because basic_auth itself never touches state.docker or state.nats.
+    async fn test_app_state(
+        auth_user: Option<&str>,
+        auth_password: Option<&str>,
+        secret: [u8; 32],
+        ttl: Duration,
+    ) -> Arc<AppState> {
+        // Scoped tightly around the synchronous env read only: clippy (and
+        // real deadlock risk under multi-threaded tokio::test) both reject
+        // holding a std::sync::MutexGuard across the .await points below.
+        let mut cfg = {
+            let _guard = config::env_test_lock().lock().unwrap();
+            config::Config::from_env().unwrap()
+        };
+        cfg.auth_user = auth_user.map(str::to_string);
+        cfg.auth_password = auth_password.map(str::to_string);
+
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:1", 120, bollard::API_DEFAULT_VERSION)
+                .unwrap();
+        let nats = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:14222")
+            .await
+            .unwrap();
+
+        Arc::new(AppState {
+            templates: Tera::default(),
+            config: cfg,
+            docker,
+            http_client: reqwest::Client::new(),
+            file_lock: std::sync::Mutex::new(()),
+            kea_config_lock: tokio::sync::Mutex::new(()),
+            dhcp_probe_lock: tokio::sync::Mutex::new(()),
+            nats,
+            db: Mutex::new(Connection::open_in_memory().unwrap()),
+            ui_session_secret: secret,
+            ui_session_ttl: ttl,
+            nats_issuer_public_key: String::new(),
+        })
+    }
+
+    // A single trivial route standing in for every real protected route --
+    // what matters for these tests is only what basic_auth itself does
+    // before the request ever reaches a handler, not any specific handler's
+    // own behavior.
+    fn test_protected_router(state: Arc<AppState>) -> Router {
+        async fn dummy_ok() -> &'static str {
+            "ok"
+        }
+        Router::new()
+            .route("/protected", get(dummy_ok).post(dummy_ok))
+            .layer(axum::middleware::from_fn_with_state(state, basic_auth))
+    }
+
+    // A mutating request with no CSRF token anywhere (no header, no form
+    // field, no cookie at all) must be rejected outright -- this is the
+    // baseline CSRF gate every mutating route relies on, exercised here
+    // through the real middleware rather than just its `verify_csrf_token`
+    // helper. Basic Auth is left unconfigured so this test isolates the
+    // CSRF branch from the separate 401 gate already covered by
+    // `basic_auth_rejects_wrong_credentials_and_accepts_correct_ones`.
+    #[tokio::test]
+    async fn basic_auth_middleware_rejects_mutating_request_without_csrf_token() {
+        let secret = [0xAA; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(None, None, secret, ttl).await;
+        let router = test_protected_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from("some=data"))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // A mutating request whose body exceeds MAX_CSRF_BODY_BYTES must be
+    // rejected with 400 before the CSRF field is ever parsed out of it --
+    // this is the fail-closed guard against buffering an unbounded body
+    // into memory on every mutating request (axum::body::to_bytes's own
+    // cap), not a CSRF-specific check, but it lives in the same code path
+    // and was previously only reachable by inspection, not a real request.
+    #[tokio::test]
+    async fn basic_auth_middleware_rejects_oversized_body_on_mutating_request() {
+        let secret = [0xBB; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(None, None, secret, ttl).await;
+        let router = test_protected_router(state);
+
+        let oversized = vec![b'a'; MAX_CSRF_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .body(Body::from(oversized))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // The middleware accepts a submitted CSRF token from either of two
+    // places (see basic_auth's `csrf_header_value(...).or_else(...
+    // form_urlencoded...))`): the X-CSRF-Token header (used by this app's
+    // own JSON `fetch()` calls, e.g. secondaries.html) or a `csrf_token`
+    // form field (used by every plain HTML <form> submit in this app's
+    // templates). Both must independently pass through the real request
+    // pipeline, not just the leaf comparison function.
+    #[tokio::test]
+    async fn basic_auth_middleware_accepts_csrf_token_via_header_or_form_field() {
+        let secret = [0xCC; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(None, None, secret, ttl).await;
+        let session = session::issue_session(&secret, ttl);
+        let cookie = format!("{}={}", session::SESSION_COOKIE_NAME, session.cookie_value);
+
+        let router = test_protected_router(Arc::clone(&state));
+        let header_request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(axum::http::header::COOKIE, cookie.clone())
+            .header(CSRF_HEADER_NAME, session.csrf_token.clone())
+            .body(Body::empty())
+            .unwrap();
+        let header_response = router.oneshot(header_request).await.unwrap();
+        assert_eq!(header_response.status(), StatusCode::OK);
+
+        let router = test_protected_router(state);
+        let form_request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(axum::http::header::COOKIE, cookie)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from(format!("csrf_token={}", session.csrf_token)))
+            .unwrap();
+        let form_response = router.oneshot(form_request).await.unwrap();
+        assert_eq!(form_response.status(), StatusCode::OK);
+    }
+
+    // The full chain, end to end: an unauthenticated request is rejected
+    // (the Basic Auth gate runs unconditionally, even for a plain GET with
+    // no CSRF involved at all); a first authenticated GET has no session
+    // cookie yet, so the middleware issues one via Set-Cookie -- the same
+    // thing a real browser's first page load does; and only a follow-up
+    // mutating request presenting both correct Basic Auth *and* that real
+    // session's own CSRF token reaches the downstream handler.
+    #[tokio::test]
+    async fn basic_auth_middleware_full_accept_path_with_basic_auth_and_csrf() {
+        let secret = [0xDD; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(Some("admin"), Some("secret"), secret, ttl).await;
+        let auth_header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("admin:secret")
+        );
+
+        let router = test_protected_router(Arc::clone(&state));
+        let unauthenticated = Request::builder()
+            .method("GET")
+            .uri("/protected")
+            .body(Body::empty())
+            .unwrap();
+        let unauthenticated_response = router.oneshot(unauthenticated).await.unwrap();
+        assert_eq!(unauthenticated_response.status(), StatusCode::UNAUTHORIZED);
+
+        let router = test_protected_router(Arc::clone(&state));
+        let first_get = Request::builder()
+            .method("GET")
+            .uri("/protected")
+            .header(axum::http::header::AUTHORIZATION, auth_header.clone())
+            .body(Body::empty())
+            .unwrap();
+        let first_response = router.oneshot(first_get).await.unwrap();
+        assert_eq!(first_response.status(), StatusCode::OK);
+
+        let set_cookie = first_response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("a fresh session must set a cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // Set-Cookie carries attributes (Path=/, SameSite=..., Max-Age=...)
+        // after the first `;` -- strip those down to the bare `name=value`
+        // pair a request's own Cookie header uses.
+        let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+        let cookie_value = cookie_pair
+            .strip_prefix(&format!("{}=", session::SESSION_COOKIE_NAME))
+            .expect("Set-Cookie must carry the session cookie")
+            .to_string();
+        let issued_session =
+            session::validate_session_cookie(&cookie_value, &secret, SystemTime::now())
+                .expect("the issued cookie must itself validate");
+
+        let router = test_protected_router(state);
+        let accepted_post = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(axum::http::header::AUTHORIZATION, auth_header)
+            .header(axum::http::header::COOKIE, cookie_pair)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from(format!(
+                "csrf_token={}",
+                issued_session.csrf_token
+            )))
+            .unwrap();
+        let accepted_response = router.oneshot(accepted_post).await.unwrap();
+        assert_eq!(accepted_response.status(), StatusCode::OK);
+    }
 }

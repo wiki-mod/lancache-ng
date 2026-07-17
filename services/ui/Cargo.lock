@@ -1033,6 +1033,7 @@ dependencies = [
  "subtle",
  "tera",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "zstd",
