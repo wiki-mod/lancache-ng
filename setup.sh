@@ -2318,6 +2318,8 @@ migrate_env_for_update() {
     # whatever the channel (e.g. edge/latest) currently points to -- which,
     # right after a bad release, is likely still the same bad tag.
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
+    local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
+    local dhcp_proxy_boot_filename dhcp_proxy_boot_server _dhcp_ntp_check _dhcp_ntp_ip
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
@@ -4780,6 +4782,7 @@ cmd_secondary() {
     local explicit_lancache_image_tag keep_known_good_configs
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
+    local missing_fields secondary_env_file
 
     usage_secondary() {
         cat <<EOF
