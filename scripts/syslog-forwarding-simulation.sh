@@ -267,8 +267,18 @@ echo "== Phase 3: bringing the stack up (ssl + logging profiles; dhcp disabled t
 # a permanent exclusion -- see setup-cli-simulation.sh's matching list, which
 # needed the same update once its own compose target (quickstart) gained
 # real healthchecks.
-services_with_healthcheck="proxy dns-standard dns-ssl nats ui netdata"
-all_services="docker-socket-proxy watchdog syslog syslog-ng $services_with_healthcheck"
+# watchdog joins this list too (issue #822 pattern audit, 2026-07-17):
+# deploy/quickstart/docker-compose.yml's watchdog service has always defined
+# a real, freshness-based (mtime, not just existence) Docker HEALTHCHECK --
+# unlike docker-socket-proxy/syslog/syslog-ng below, which genuinely have
+# none. Leaving watchdog out of services_with_healthcheck silently
+# downgraded it to the weaker "running + restart-count ceiling" check this
+# script uses for services with no healthcheck at all, meaning a watchdog
+# that never reaches "healthy" (e.g. main loop stalled, status.json stale)
+# would never fail this job. Matches build-push.yml/full-setup-validate.yml/
+# full-setup-deep-validate.yml's canonical list, which already included it.
+services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
+all_services="docker-socket-proxy syslog syslog-ng $services_with_healthcheck"
 
 deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do
