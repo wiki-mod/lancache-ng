@@ -4087,15 +4087,29 @@ jobs:
         # Trade-off (see #904/PR body): a ref's first ordinary-push scan, or
         # a brand-new release tag, no longer benefits from another ref's
         # warm cache the way the single shared directory used to allow --
-        # each ref (and, over time, each immutable release tag) gets its own
-        # persistent directory on the self-hosted runner, so disk usage
-        # grows with the number of distinct refs ever scanned instead of
-        # staying flat; tracked as a follow-up retention item (#912) rather
-        # than solved here, matching this PR's narrow race-fix scope. A
-        # `workflow_dispatch` run or a rerun additionally always starts with
-        # a cold cache (its own isolated, run_id-suffixed directory) rather
-        # than reusing anything -- an intentional, matching consequence of
-        # giving it the same isolation its concurrency group already has.
+        # each ref gets its own directory on the self-hosted runner.
+        # Retention (#912, investigated live on the runner hosts): a
+        # populated cache dir is >99.9% redundant copies of the two global
+        # Trivy DBs (~1.2 GB trivy.db + ~1.5 GB trivy-java.db apparent
+        # size); the actually image-specific fanal cache is ~100 KB. Only
+        # dirs a future run can reuse are worth keeping, so dirs that are
+        # cold-by-design are marked `ephemeral=true` here and deleted again
+        # by the "Remove ephemeral Trivy cache" step below the scan:
+        #   - `workflow_dispatch` runs and reruns (`run_attempt != 1`) get
+        #     their own isolated, run_id-suffixed directory (an intentional,
+        #     matching consequence of the same isolation their concurrency
+        #     group already has) -- no later run ever reads it back.
+        #   - tag refs (`refs/tags/*`): release tags are immutable and
+        #     pushed exactly once, so a tag's cache dir can never be reused
+        #     by a later run either; without cleanup, one dir per release
+        #     would accumulate per runner host forever. Tag refs take the
+        #     run_id suffix too -- strictly finer than their concurrency
+        #     group key (allowed by the invariant above) -- so the delete
+        #     below can never touch a directory any other concurrency-group
+        #     instance could be using.
+        # What remains persistent is exactly the reusable population:
+        # branch refs (`master`, `v[0-9]*`), which are bounded (one dir per
+        # service+platform per active branch, reused on every push).
         id: trivy-cache
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         run: |
@@ -4106,8 +4120,12 @@ jobs:
             exit 1
           fi
           cache_dir="/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}-${{ matrix.platform_tag }}-${sanitized_ref}"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ] \
+            || [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
             cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
           fi
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
@@ -4126,6 +4144,31 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+      - name: Remove ephemeral Trivy cache
+        # Ephemeral dirs (dispatch/rerun/tag -- see the prepare step's own
+        # comment) are cold-by-design and never read by any later run, so
+        # keeping them would only leak one ~1-2.5 GB directory per run onto
+        # the runner host (#912). `always()` so a failed or cancelled scan
+        # still cleans up; when the prepare step was skipped its output is
+        # empty and this step skips too. The case guard fails closed rather
+        # than trusting the interpolated path blindly: `rm -rf` on a
+        # step-output-derived path must never be able to escape the
+        # dedicated cache root, even after a future refactor of the prepare
+        # step's output wiring.
+        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+        run: |
+          set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*)
+              rm -rf -- "$TRIVY_CACHE_DIR"
+              ;;
+            *)
+              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
       - name: Remove scan image
         if: >-
           ${{
@@ -4720,7 +4763,10 @@ jobs:
         # container-scan's equivalent step above for the full invariant this
         # has to satisfy (cache-dir key must be at least as fine as the
         # concurrency-group key, not merely finer than the old static path)
-        # and the same disk-growth trade-off, tracked as #912.
+        # and the same ephemeral-dir classification and cleanup rationale
+        # (#912): dispatch/rerun and tag-ref dirs are cold-by-design, never
+        # reused by a later run, and are deleted again by the "Remove
+        # ephemeral pushed build-tools Trivy cache" step below the scan.
         id: trivy-cache
         if: >-
           ${{
@@ -4736,8 +4782,12 @@ jobs:
             exit 1
           fi
           cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-${sanitized_ref}"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ] \
+            || [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
             cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
           fi
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
@@ -4765,6 +4815,28 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+
+      - name: Remove ephemeral pushed build-tools Trivy cache
+        # Same rationale and fail-closed path guard as container-scan's
+        # "Remove ephemeral Trivy cache" step above: ephemeral dirs
+        # (dispatch/rerun/tag) are never read by any later run, so they are
+        # deleted at job end instead of leaking ~1-2.5 GB per run onto the
+        # runner host (#912). `always()` covers a failed/cancelled scan; a
+        # skipped prepare step leaves the output empty, skipping this too.
+        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+        run: |
+          set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*)
+              rm -rf -- "$TRIVY_CACHE_DIR"
+              ;;
+            *)
+              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
 
       # No separate "Log in to GHCR for provenance attestation" step: the
       # ghcr-attest-retry composite action re-authenticates itself before
