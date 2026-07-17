@@ -412,9 +412,83 @@ jobs:
             bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
 
       - name: Prepare local Trivy cache
+        # Was a fixed /var/tmp/lancache-ng-trivy-cache/build-tools directory
+        # shared by every run of this job regardless of ref (#912, flagged as
+        # a deferred follow-up when #913/#925 closed the equivalent race in
+        # build-push.yml's container-scan). Real, narrower-but-live
+        # reachability here: this workflow's own top-level `concurrency:`
+        # block (see above) only serializes runs *within* one group --
+        # pull_request runs are grouped per-PR-ref, and every
+        # push/schedule/workflow_dispatch run instead shares one single
+        # `<workflow>-publish` group. Two different PRs' build-tools jobs
+        # (different groups, hence genuinely concurrent with each other), or
+        # a PR run overlapping the publish-group's run, both land on the
+        # `[self-hosted, linux, lancache, lancache-heavy]` pool and, if
+        # scheduled onto the same host, used to race on this exact directory
+        # -- Trivy's BoltDB cache backend only tolerates one writer.
+        #
+        # Fix: key the directory by sanitized ref (the same sanitization
+        # this file's own "Promote mutable tags" step already applies to its
+        # branch tag, and the same one build-push.yml's container-scan
+        # Trivy-cache fix uses for the identical race class), which is at
+        # least as fine as the concurrency-group key above, so two runs that
+        # could ever execute concurrently never share a directory.
+        #
+        # Retention (#912: a populated dir is >99.9% redundant copies of the
+        # two global Trivy vulnerability/Java DBs, ~1.3 GB on-disk; the
+        # actually image-specific part is ~100 KB) -- only directories a
+        # *future* run can legitimately reuse are worth keeping:
+        #   - Push to master/v0.2.0, and the weekly schedule (which always
+        #     runs against the default branch): the ref persists and is
+        #     reused on every subsequent run, exactly like build-push.yml's
+        #     branch dirs -- bounded at one directory per persistent branch,
+        #     safe to leave for the fleet's standing 3-day /var/tmp aging to
+        #     evict only if a branch ever goes idle (aging is a backstop for
+        #     an orphaned/abandoned branch here, not the primary bound).
+        #   - pull_request runs: unlike build-push.yml's container-scan
+        #     (gated `if: github.event_name != 'pull_request'`, so it never
+        #     creates a PR-ref directory at all), this step is ungated and
+        #     runs on every PR touching this workflow's path filter. A PR
+        #     ref (`refs/pull/N/merge`) is reused only while that PR stays
+        #     open -- once it closes or merges, the ref is never triggered
+        #     again and the directory is permanently cold. Left unmanaged,
+        #     that is the same "one directory per one-time-use ref,
+        #     accumulating without bound as PRs accumulate" class as
+        #     build-push.yml's release-tag directories, not the bounded
+        #     branch case -- relying on host-level aging to bound an
+        #     unbounded-by-PR-count population is exactly what "must not
+        #     rely on host-level time-based cleanup" rules out. So PR runs
+        #     are marked ephemeral and self-cleaned below immediately,
+        #     rather than left to expire on the host's clock.
+        #   - workflow_dispatch and reruns (`run_attempt != '1'`): also
+        #     marked ephemeral, mirroring build-push.yml's identical
+        #     carve-out -- a manual dispatch or a rerun is a one-off, not a
+        #     routine part of a ref's push cadence, so it gets its own
+        #     run_id-suffixed, self-cleaned directory instead of colliding
+        #     with (or permanently occupying) that ref's normal persistent
+        #     slot. This is unrelated to concurrency-race-safety (the
+        #     top-level `-publish` group already fully serializes these
+        #     events against each other) -- run_id here exists purely so
+        #     the directory is uniquely identifiable for the self-clean step
+        #     below, not to prevent a race.
+        id: trivy-cache-local
         run: |
           set -euo pipefail
-          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
+            exit 1
+          fi
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] \
+            || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
       - name: Scan local build-tools amd64 image with Trivy
         timeout-minutes: 20
@@ -428,9 +502,35 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools
+          cache-dir: ${{ steps.trivy-cache-local.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+
+      - name: Remove ephemeral local Trivy cache
+        # PR/dispatch/rerun directories are cold-by-design (see the prepare
+        # step's own comment above) -- self-clean immediately instead of
+        # leaving an unbounded, one-per-PR population for host-level aging
+        # to eventually catch up on. `always()` so a failed or cancelled
+        # scan still cleans up: a later step in this same job failing must
+        # not skip this cleanup (the exact `always()` omission mistake found
+        # and fixed elsewhere tonight in build-push.yml's equivalent step).
+        # Fails closed on an unexpected path rather than trusting an
+        # interpolated step output blindly, same guard as build-push.yml's
+        # "Remove ephemeral Trivy cache" step.
+        if: ${{ always() && steps.trivy-cache-local.outputs.ephemeral == 'true' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache-local.outputs.dir }}
+        run: |
+          set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*)
+              rm -rf -- "$TRIVY_CACHE_DIR"
+              ;;
+            *)
+              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
 
       # Trusted refs publish only an immutable sha-*-amd64 source tag first.
       # merge-build-tools-manifests combines this with build-tools-arm64's tag
@@ -467,10 +567,33 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
 
       - name: Prepare pushed build-tools Trivy cache
+        # Same fixed-shared-directory race and fix as "Prepare local Trivy
+        # cache" above -- see that step's comment for the full reasoning.
+        # This step's own `if:` already excludes pull_request (the pushed
+        # digest only exists on trusted-ref publish runs, since PRs never
+        # push to GHCR), so the PR arm of that reasoning does not apply
+        # here: only workflow_dispatch and reruns need the ephemeral,
+        # self-cleaned treatment. Ordinary push/schedule runs against
+        # master/v0.2.0 persist and reuse their directory exactly like the
+        # local-scan cache does.
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        id: trivy-cache-pushed
         run: |
           set -euo pipefail
-          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
+            exit 1
+          fi
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -485,9 +608,30 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          cache-dir: ${{ steps.trivy-cache-pushed.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+
+      - name: Remove ephemeral pushed Trivy cache
+        # Same self-clean reasoning as "Remove ephemeral local Trivy cache"
+        # above. `always()` so a failed pushed-digest scan still cleans up;
+        # when the prepare step above was skipped (pull_request, or
+        # should-publish false) its output is empty and this step correctly
+        # skips too.
+        if: ${{ always() && steps.trivy-cache-pushed.outputs.ephemeral == 'true' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache-pushed.outputs.dir }}
+        run: |
+          set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*)
+              rm -rf -- "$TRIVY_CACHE_DIR"
+              ;;
+            *)
+              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
 
       - name: Attest amd64 build-tools image provenance
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
