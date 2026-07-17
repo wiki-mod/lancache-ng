@@ -582,7 +582,12 @@ async function checkDhcpConflict() {
   conflictDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
-    const res = await fetch('/api/dhcp/check');
+    const res = await fetch('/api/dhcp/check', {
+      method: 'POST',
+      headers: {
+        'X-CSRF-Token': '{{ csrf_token }}'
+      }
+    });
     const data = await res.json();
     if (data.status === 'verified') {
       statusEl.className = 'text-sm text-green-400';

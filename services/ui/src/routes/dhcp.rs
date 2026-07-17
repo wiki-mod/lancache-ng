@@ -139,7 +139,7 @@ fn html_escape(s: &str) -> String {
 
 // ─── Data Structures ───
 
-// These two enums are the exact response shape of GET /api/dhcp/check (see
+// These two enums are the exact response shape of POST /api/dhcp/check (see
 // check_dhcp_conflict below): the `tag = "status"` serde attribute means each
 // variant serializes as e.g. `{"status": "found", "output": "..."}`, so the
 // frontend can discriminate on one flat "status" string instead of
@@ -1205,6 +1205,7 @@ pub async fn add_subnet(
         dns_secondary: &form.dns_secondary,
         ntp_servers: &form.ntp_servers,
         lease_time: &form.lease_time,
+        domain: &form.domain,
     })
     .map_err(DhcpError::from)?;
     // Resolved here, before the sync kea_config_modify closure below (which
@@ -1281,6 +1282,7 @@ pub async fn update_subnet(
         dns_secondary: &form.dns_secondary,
         ntp_servers: &form.ntp_servers,
         lease_time: &form.lease_time,
+        domain: &form.domain,
     })
     .map_err(DhcpError::from)?;
     let subnet_id = form.id;
@@ -1443,6 +1445,17 @@ pub async fn add_reservation(
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
+    // Issue #947: form.hostname used to flow straight into the Kea
+    // reservation JSON with zero validation. Only validated when non-empty
+    // -- an empty hostname is an existing, already-supported state on the
+    // read side (fetch_all_reservations already tolerates a missing/blank
+    // hostname), so this must not turn that into a rejection.
+    if !form.hostname.trim().is_empty() && !is_valid_domain_name(&form.hostname) {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid hostname: use a plain DNS domain name (letters, digits, '-', '.').",
+        ));
+    }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         // If an operator has hand-edited the *global*
@@ -1504,6 +1517,15 @@ pub async fn remove_reservation(
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    // Issue #947: mirrors add_reservation/release_lease, which both validate
+    // their own identifier field before use. Harmless as a no-op today (a
+    // malformed MAC simply matches nothing in remove_reservation_entry's
+    // filter), but rejecting it early is consistent with every other
+    // mutating route in this file and gives the operator an immediate,
+    // specific error instead of a silent no-op redirect.
+    if !is_valid_mac(&form.mac) {
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+    }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
@@ -1601,13 +1623,27 @@ fn kea_lease_del_result(resp: &Value) -> LeaseDelOutcome {
     }
 }
 
-pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
+// Issue #947: this route starts/stops the DHCP conflict-probe container
+// (check_dhcp_probe below has a real, non-idempotent side effect), but it
+// used to be wired as GET in main.rs -- and this app's CSRF protection (the
+// `basic_auth` middleware's `is_mutating_method` check) only covers
+// POST/PUT/PATCH/DELETE, so a GET route is completely CSRF-exempt no matter
+// what it does. Now POST-only, with the same explicit header-only CSRF check
+// (`verify_csrf_header`) secondaries::remove_secondary/rotate_token already
+// use for their own header-only, no-form-body routes -- this handler has no
+// form body to carry a `csrf_token` field, only the `X-CSRF-Token` header
+// dhcp.html's `fetch()` call now sends.
+pub async fn check_dhcp_conflict(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&headers)?;
     let report = check_dhcp_probe(&state).await;
-    Json(json!({
+    Ok(Json(json!({
         "status": report.overall_status(),
         "conflict": report.conflict,
         "client": report.client,
-    }))
+    })))
 }
 
 // Rolls the live DHCPv4 config back to an operator-selected known-good
@@ -2508,6 +2544,11 @@ struct DhcpFormValidation<'a> {
     dns_secondary: &'a str,
     ntp_servers: &'a str,
     lease_time: &'a str,
+    // Optional, same as update_dhcp_proxy's own `dhcp_proxy_domain` field:
+    // an empty value means Kea's subnet4 entry gets no domain-name/
+    // domain-search option at all, which is a valid, already-supported
+    // state, not a form error.
+    domain: &'a str,
 }
 
 // Returns the parsed lease_time on success (the one field the caller still
@@ -2539,6 +2580,16 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     }
 
     if !input.ntp_servers.trim().is_empty() && parse_ntp_server_list(input.ntp_servers).is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Issue #947: add_subnet/update_subnet used to pass form.domain straight
+    // into build_subnet_value/apply_subnet_value with zero validation, even
+    // though update_dhcp_proxy already validates its own analogous
+    // dhcp_proxy_domain field with this exact check. Only validated when
+    // non-empty (see the field's doc comment above) -- an empty domain is an
+    // existing, already-supported state, not a rejection case.
+    if !input.domain.trim().is_empty() && !is_valid_domain_name(input.domain) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -3322,9 +3373,13 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
-    // Wraps validate_dhcp_form's 8-field DhcpFormValidation struct literal
+    // Wraps validate_dhcp_form's 9-field DhcpFormValidation struct literal
     // so individual tests below can call it with plain positional
     // arguments instead of repeating every field name at each call site.
+    // The 8-argument form (every pre-#947 call site) defaults domain to ""
+    // -- an empty domain is always valid, so every existing test's baseline
+    // behavior is unchanged; the 9-argument form lets the domain-specific
+    // tests below pass an explicit value.
     macro_rules! validate_test_dhcp_form {
         (
             $subnet:expr,
@@ -3336,6 +3391,29 @@ mod tests {
             $ntp_servers:expr,
             $lease_time:expr $(,)?
         ) => {
+            validate_test_dhcp_form!(
+                $subnet,
+                $pool_start,
+                $pool_end,
+                $gateway,
+                $dns_primary,
+                $dns_secondary,
+                $ntp_servers,
+                $lease_time,
+                ""
+            )
+        };
+        (
+            $subnet:expr,
+            $pool_start:expr,
+            $pool_end:expr,
+            $gateway:expr,
+            $dns_primary:expr,
+            $dns_secondary:expr,
+            $ntp_servers:expr,
+            $lease_time:expr,
+            $domain:expr $(,)?
+        ) => {
             validate_dhcp_form(DhcpFormValidation {
                 subnet: $subnet,
                 pool_start: $pool_start,
@@ -3345,6 +3423,7 @@ mod tests {
                 dns_secondary: $dns_secondary,
                 ntp_servers: $ntp_servers,
                 lease_time: $lease_time,
+                domain: $domain,
             })
         };
     }
@@ -3886,6 +3965,66 @@ mod tests {
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    // Issue #947: add_subnet/update_subnet used to pass form.domain straight
+    // into Kea's domain-name/domain-search subnet options with zero
+    // validation, unlike update_dhcp_proxy's analogous dhcp_proxy_domain
+    // field. These three tests pin the fix at the validate_dhcp_form level
+    // (both add_subnet and update_subnet delegate all field validation to
+    // it): a syntactically valid non-empty domain is accepted, an invalid
+    // one is rejected with 400, and an empty domain -- the default every
+    // test above already exercises via the 8-argument macro form -- stays
+    // valid rather than becoming a newly-required field.
+    #[test]
+    fn accepts_valid_non_empty_domain() {
+        let lease_time = validate_test_dhcp_form!(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
+            "86400",
+            "lan.example",
+        );
+
+        assert_eq!(lease_time.unwrap(), 86400);
+    }
+
+    #[test]
+    fn rejects_invalid_non_empty_domain() {
+        let lease_time = validate_test_dhcp_form!(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
+            "86400",
+            "-invalid..domain",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn accepts_empty_domain() {
+        let lease_time = validate_test_dhcp_form!(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
+            "86400",
+            "",
+        );
+
+        assert_eq!(lease_time.unwrap(), 86400);
     }
 
     // #670: classify_ntp_entry is the pure decision resolve_ntp_servers
@@ -5116,6 +5255,24 @@ mod tests {
         assert!(!is_valid_domain_name("lan-.local"));
         assert!(!is_valid_domain_name("lan..local"));
         assert!(!is_valid_domain_name("lan local"));
+    }
+
+    // Issue #947: remove_reservation now gates on is_valid_mac before use
+    // (mirroring add_reservation/release_lease, which already validate their
+    // own identifier fields), so this pure predicate needs its own direct
+    // coverage rather than only being exercised indirectly through
+    // add_reservation's existing checks. Covers both accepted separator
+    // styles (colon and hyphen, the common copy-paste forms an operator
+    // might paste in) and rejects wrong-length/non-hex junk.
+    #[test]
+    fn mac_validator_accepts_colon_and_hyphen_forms_and_rejects_junk() {
+        assert!(is_valid_mac("AA:BB:CC:DD:EE:FF"));
+        assert!(is_valid_mac("aa-bb-cc-dd-ee-ff"));
+        assert!(!is_valid_mac(""));
+        assert!(!is_valid_mac("AA:BB:CC:DD:EE"));
+        assert!(!is_valid_mac("AA:BB:CC:DD:EE:FF:00"));
+        assert!(!is_valid_mac("GG:BB:CC:DD:EE:FF"));
+        assert!(!is_valid_mac("not-a-mac-address"));
     }
 
     // A forward-slash path (e.g. "efi/bootx64.efi") is a legitimate boot
