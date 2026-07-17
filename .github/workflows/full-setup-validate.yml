@@ -280,6 +280,51 @@ jobs:
             # deriving them per-run was meant to prevent in the first place.
             validation_subnet_export_env "$slot"
 
+            # Persist THIS ATTEMPT's identifiers to $GITHUB_ENV right away,
+            # every time through the loop -- not only once after the whole
+            # retry loop succeeds below. Issue #932 (CI run 29569378100, job
+            # 87852874801 -- build-push.yml's equivalent "validate full-setup
+            # image" job, same reserve-and-start shape as this step) confirmed
+            # a real production case where `docker compose up -d` a few lines
+            # down failed for a reason classified as non-retryable (Docker's
+            # own "has active endpoints" race while recreating a leftover
+            # network from a stale prior run that reused this same slot
+            # number -- see validation_network_teardown in
+            # reserve-validation-subnet.sh) and the step exited via `exit 1`
+            # below. The write that used to sit only after this whole loop
+            # never ran on that path, so COMPOSE_PROJECT_NAME was still unset
+            # in $GITHUB_ENV when the "Tear down full-setup validation stack"
+            # step ran (it DOES have `if: always()` and DID run) -- its own
+            # fail-closed `[[ -n "${COMPOSE_PROJECT_NAME:-}" ]]` guard, meant
+            # only for the case where no slot was ever derived at all, saw it
+            # empty and silently skipped `validation_project_networks_teardown`,
+            # leaving that attempt's network behind to poison a later run
+            # that reuses the same slot. $GITHUB_ENV takes the last value
+            # written for a repeated key, so writing here on every attempt
+            # keeps this a no-op correctness fix for the common, successful
+            # case (the final attempt's write is simply the last one and
+            # still lands before the "up" call) while covering every failure
+            # exit out of this step (a non-retryable `docker compose up`
+            # failure, or exhausting every retry) with the last attempted
+            # slot's real project name, subnet, and lock-holder PID instead
+            # of nothing at all.
+            {
+              echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+              echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
+              echo "VALIDATION_LOCK_HOLDER_PID=$candidate_pid"
+              echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
+              echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
+              echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
+              echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
+              echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
+              echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
+              echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
+              echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
+              echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
+              echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
+              echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
+            } >> "$GITHUB_ENV"
+
             conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
             if [[ -n "$conflict" ]]; then
               echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
@@ -314,31 +359,6 @@ jobs:
           fi
 
           echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
-
-          # Persist the SAME VALIDATION_*/COMPOSE_PROJECT_NAME/
-          # VALIDATION_UI_PORT set the winning attempt above already
-          # exported (via validation_subnet_export_env) for its own
-          # `docker compose up`, so every later step in this job (the
-          # health-check step, the client-simulation step, and the teardown
-          # step's own `docker compose down`) keeps targeting the
-          # actually-running stack instead of falling back to whatever a
-          # stale job-level env would have held on a retry.
-          {
-            echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
-            echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
-            echo "VALIDATION_LOCK_HOLDER_PID=$holder_pid"
-            echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
-            echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
-            echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
-            echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
-            echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
-            echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
-            echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
-            echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
-            echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
-            echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
-            echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
-          } >> "$GITHUB_ENV"
 
       - name: Wait for the stack to stabilize and check container health
         working-directory: deploy/full-setup
