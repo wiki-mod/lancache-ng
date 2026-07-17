@@ -292,9 +292,24 @@ require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLA
 require_grep 'is missing required platform' \
   scripts/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-require_grep 'cache-dir: /var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}' \
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
-  'container scans must use platform-specific Trivy cache directories'
+  'container scans must use platform- and ref-specific Trivy cache directories (see #904 -- ref-parallel scans must never share a cache dir)'
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-\$\{sanitized_ref\}"' \
+  .github/workflows/build-push.yml \
+  'the pushed build-tools digest scan must use a ref-specific Trivy cache directory too (see #904)'
+# #904 follow-through: a cache-dir key only needs to be as fine as its job's
+# own concurrency-group key, but must be at least that fine -- container-scan
+# and build's build-tools-pushed step both suffix run_id onto the cache dir
+# in exactly the workflow_dispatch/rerun condition their own concurrency
+# groups already use that suffix for (see those groups' `group:` expressions
+# a few checks up). An earlier revision of the #904 fix keyed the cache dir
+# on ref alone, which was still coarser than the concurrency-group key for
+# the dispatch/rerun case and left that race open; this guard exists so that
+# specific regression can't come back silently.
+require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
+  .github/workflows/build-push.yml \
+  'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
 require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
