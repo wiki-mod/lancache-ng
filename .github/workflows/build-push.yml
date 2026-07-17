@@ -3496,7 +3496,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          grep -n "Set up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
+          # The "- name:" prefix and the [S] character class are both load-bearing:
+          # this grep's own command text lives inside the very file it searches, so
+          # a plain literal pattern always matches this line itself and the guard
+          # could never fail, even with validate-compose's Buildx step removed or
+          # renamed. [S] matches only a literal "S", while this line spells the
+          # bracketed class, so the only possible hit is the real step definition.
+          grep -n -- "- name: [S]et up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
             echo "::error::validate-compose must set up Buildx before resolving digest-qualified build-tools images."
             exit 1
           }
