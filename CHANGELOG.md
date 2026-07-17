@@ -517,6 +517,25 @@ is real, live, running code, not just work sitting in source control.
   is not enough on its own: the `nats` service itself still needs
   `docker-compose.nats-secondary.yml` included (and the stack recreated with
   it) to actually publish port 4222 on that address.
+  Further review fixes: `advertised_nats_url()` now strips a bracketed IPv6
+  wildcard (`NATS_BIND_IP=[::]`, Compose's own documented bracketed form)
+  before parsing, so it is rejected the same as the bare `::` form instead
+  of falling through to the hostname branch as `nats://[::]:4222`; loopback
+  `NATS_BIND_IP` values (`127.0.0.1`/`::1`) and hostname `NATS_BIND_IP`
+  values (anything that is not a parsable IP literal at all) are now
+  rejected too, since a remote secondary can never dial loopback on the
+  primary and `NATS_BIND_IP` feeds Compose's IP/port `HOST` field, not a
+  resolvable name -- both cases now require an explicit
+  `NATS_ADVERTISE_URL` instead of returning a URL that looks valid but
+  isn't reachable. Updated `docs/architecture-ng.md`'s "Remote secondary
+  NATS access" section and `docs/threat-model.md` (T5, T14) to describe the
+  full precedence/rejection rules and the fact that the security-relevant
+  advertised address is whatever `NATS_ADVERTISE_URL` actually names, not
+  only the `NATS_BIND_IP` bind interface. Added a `README.md` "Secondary
+  DNS" prerequisite note pointing at that section, and fixed
+  `setup.sh secondary`'s HTTP 503 message: its `.env.local` recreate example
+  was missing `--env-file .env.local` (Compose only auto-loads the default
+  `.env`), which would have left the override unset if followed literally.
 - Fixed the PowerDNS zone/record rollback listener's post-rollback
   recursor cache-flush being silently denied by NATS permissions (#867):
   `rollback_listener.rs::rollback_handler` publishes `lancache.dns.flush`

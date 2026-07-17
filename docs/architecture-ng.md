@@ -123,28 +123,42 @@ already required by the host-binding override above, so a primary that has
 that override active for the `nats` service gets a working registration
 response for free. An IPv6 `NATS_BIND_IP` literal is bracketed automatically
 (`nats://[2001:db8::5]:4222`), since an unbracketed IPv6 literal is not a
-parsable NATS URL. If `NATS_BIND_IP` is a wildcard listen address (`0.0.0.0`
-or `::`) -- the "external firewall/VPN" case described above -- it is
-**not** echoed back as the advertised address, since a wildcard is only
-meaningful as a bind address, never as something a remote secondary could
-dial; that case falls through to the same refusal described below, and needs
-the explicit `NATS_ADVERTISE_URL` override with the real routable
-LAN/VPN address or hostname instead.
-Setups that need something `NATS_BIND_IP` alone can't express (a
-non-default port, a `tls://` scheme, a VPN hostname, or the wildcard-bind
-case just described) can set the explicit
-`NATS_ADVERTISE_URL` override instead, which always takes precedence and is
-never reformatted or validated as an IP literal.
-Neither variable has a default. If a primary has configured **neither**
-(or only a wildcard `NATS_BIND_IP` with no `NATS_ADVERTISE_URL`),
-registration now refuses the request outright with HTTP 503 instead of
-falling back to the unreachable `nats_url` -- `setup.sh secondary` reports
-this clearly (rather than its generic "verify the token/name" message) and
-names the exact variable to set. This endpoint has no other legitimate
-caller: every real invocation is a genuine remote-secondary registration, so
-there is no "install that doesn't use remote secondaries" case that could be
-broken by refusing here -- an install that never runs `setup.sh secondary`
-never reaches this code path at all.
+parsable NATS URL; the same bracketing applies whether `NATS_BIND_IP` itself
+was written bracketed (`[2001:db8::5]`, Compose's own documented form for an
+IPv6 host-port field) or bare.
+`NATS_BIND_IP` is only ever echoed back when it is itself a routable IP
+literal. It is rejected (falls through to the HTTP 503 refusal described
+below, the same as leaving it unset) in every other case:
+- **Wildcard listen addresses** (`0.0.0.0` or `::`, bracketed or not) -- the
+  "external firewall/VPN" case described above -- are never echoed back,
+  since a wildcard is only meaningful as a bind address, never as something
+  a remote secondary could dial.
+- **Loopback addresses** (`127.0.0.1` or `::1`) are rejected the same way: a
+  genuinely remote secondary can never dial loopback on the primary, so
+  advertising it would silently reproduce the original #866 failure under a
+  configuration that merely looks valid.
+- **Hostnames** (anything that does not parse as an IP literal at all) are
+  also rejected: `NATS_BIND_IP` feeds Compose's port `HOST` field, which is
+  an IP/port bind, not a resolvable name, so there is no guarantee a
+  hostname value is reachable at the address `nats` actually publishes on.
+All three cases need the explicit `NATS_ADVERTISE_URL` override instead, with
+the real routable LAN/VPN address, reverse-proxy hostname, non-default
+port, or `tls://` scheme that `NATS_BIND_IP` alone cannot express.
+`NATS_ADVERTISE_URL` always takes precedence over `NATS_BIND_IP` and is
+never reformatted or validated as an IP literal -- an operator who sets it
+explicitly is asserting the value is already correct and reachable.
+Neither variable has a default. If a primary has configured **neither** (or
+only a `NATS_BIND_IP` that falls into one of the three rejected cases above
+with no `NATS_ADVERTISE_URL`), registration now refuses the request outright
+with HTTP 503 instead of falling back to the unreachable `nats_url` --
+`setup.sh secondary` reports this clearly (rather than its generic "verify
+the token/name" message) and names the exact variable to set. This endpoint
+has no other legitimate caller: every real invocation is a genuine
+remote-secondary registration, so there is no "install that doesn't use
+remote secondaries" case that could be broken by refusing here -- an
+install that never runs `setup.sh secondary` never reaches this code path at
+all. See `services/ui/src/config.rs`'s `advertised_nats_url()` and its unit
+tests for the exact precedence and rejection rules.
 
 Note that setting `NATS_BIND_IP`/`NATS_ADVERTISE_URL` on the primary and
 restarting only the `ui` container is not, on its own, enough to make a

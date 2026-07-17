@@ -437,12 +437,39 @@ impl Config {
         if bind_ip.is_empty() {
             return None;
         }
-        match bind_ip.parse::<std::net::IpAddr>() {
+        // Docker Compose documents both the bare (`::`) and the
+        // square-bracketed (`[::]`) form for an IPv6 host-port bind address.
+        // Strip a single matching bracket pair before parsing so `[::]`
+        // parses to the same unspecified address as `::`, rather than
+        // failing IpAddr::parse (which never accepts brackets) and silently
+        // falling through to the hostname branch as an unrejected opaque
+        // string.
+        let unbracketed = bind_ip
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .unwrap_or(bind_ip);
+        match unbracketed.parse::<std::net::IpAddr>() {
+            // 0.0.0.0 / :: (bracketed or not) are listen wildcards, not a
+            // routable address a remote secondary could dial.
             Ok(std::net::IpAddr::V4(v4)) if v4.is_unspecified() => None,
             Ok(std::net::IpAddr::V6(v6)) if v6.is_unspecified() => None,
+            // A remote secondary is, by definition, not the primary host
+            // itself -- it can never dial 127.0.0.1/::1 there, even though
+            // the literal parses fine and "looks like" a real bind address.
+            // Reject it the same way as a wildcard rather than handing out
+            // an address that is guaranteed unreachable from anywhere else.
+            Ok(std::net::IpAddr::V4(v4)) if v4.is_loopback() => None,
+            Ok(std::net::IpAddr::V6(v6)) if v6.is_loopback() => None,
             Ok(std::net::IpAddr::V6(v6)) => Some(format!("nats://[{v6}]:4222")),
             Ok(std::net::IpAddr::V4(v4)) => Some(format!("nats://{v4}:4222")),
-            Err(_) => Some(format!("nats://{bind_ip}:4222")),
+            // NATS_BIND_IP feeds Compose's port `HOST` field, which is an
+            // IP/port bind, not a resolvable hostname -- a value that is not
+            // a parsable IP literal (a hostname, a reverse-proxy name, ...)
+            // cannot be assumed reachable at the same address `nats`
+            // actually publishes on. Require the operator to set
+            // NATS_ADVERTISE_URL explicitly for that case instead of
+            // guessing a URL that looks valid but may not be reachable.
+            Err(_) => None,
         }
     }
 
@@ -1811,6 +1838,29 @@ mod tests {
         env::remove_var("NATS_BIND_IP");
     }
 
+    // The happy-path counterpart to the bracketed-wildcard-rejection test
+    // below: a bracketed IPv6 *literal* (not a wildcard) NATS_BIND_IP must
+    // still resolve to a working, bracketed advertised URL after the
+    // bracket-stripping fix, not accidentally get treated as an opaque
+    // hostname or double-bracketed.
+    #[test]
+    fn advertised_nats_url_brackets_bracketed_ipv6_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "[2001:db8::5]");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            Some("nats://[2001:db8::5]:4222".to_string()),
+            "a NATS_BIND_IP already written in Compose's bracketed IPv6 \
+             form must resolve the same as the bare form, not be treated \
+             as an opaque hostname"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
     // An explicit NATS_ADVERTISE_URL is never IP-parsed or reformatted --
     // an operator who set it explicitly may legitimately want a bracketed
     // IPv6 literal, a hostname, or a non-default scheme/port, and is
@@ -1876,12 +1926,14 @@ mod tests {
         env::remove_var("NATS_BIND_IP");
     }
 
-    // A NATS_BIND_IP that is a hostname (not an IP literal at all) must
-    // pass through unchanged -- it is neither bracketed (bracketing only
-    // applies to IPv6 literals) nor rejected as a wildcard (is_unspecified
-    // only applies to parsed IP addresses).
+    // A NATS_BIND_IP that is a hostname (not an IP literal at all) must be
+    // rejected, not passed through: NATS_BIND_IP feeds Compose's port `HOST`
+    // field, which is an IP/port bind, not a resolvable name -- there is no
+    // guarantee a hostname value is actually reachable at the address `nats`
+    // publishes on. The operator must set NATS_ADVERTISE_URL explicitly for
+    // a hostname/reverse-proxy case instead.
     #[test]
-    fn advertised_nats_url_passes_through_hostname_nats_bind_ip() {
+    fn advertised_nats_url_rejects_hostname_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
         env::remove_var("NATS_ADVERTISE_URL");
         env::set_var("NATS_BIND_IP", "nats.vpn.example");
@@ -1889,9 +1941,76 @@ mod tests {
         let cfg = Config::from_env().unwrap();
         assert_eq!(
             cfg.advertised_nats_url(),
-            Some("nats://nats.vpn.example:4222".to_string()),
-            "a hostname NATS_BIND_IP must be passed through unchanged, \
-             same as before this IP-literal-aware handling was added"
+            None,
+            "a hostname NATS_BIND_IP is not a parsable IP literal and cannot \
+             be assumed reachable at whatever address 'nats' actually \
+             publishes on -- it must fail closed to None, requiring an \
+             explicit NATS_ADVERTISE_URL instead"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // Docker Compose documents the square-bracketed IPv6 wildcard form
+    // (`[::]`) as valid for a port `HOST` field alongside the bare `::`.
+    // Before the bracket-stripping fix, `"[::]".parse::<IpAddr>()` failed
+    // (IpAddr::parse never accepts brackets) and fell through to the
+    // hostname branch, producing `nats://[::]:4222` instead of the intended
+    // fail-closed rejection -- reproducing the exact wildcard-advertised bug
+    // the plain `::` test above already guards against, just spelled with
+    // brackets.
+    #[test]
+    fn advertised_nats_url_rejects_bracketed_ipv6_wildcard_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "[::]");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            "the bracketed IPv6 wildcard form [::] must be recognized as \
+             the same unspecified address as bare :: and rejected, not \
+             treated as an opaque hostname"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // A remote secondary cannot dial loopback on the primary -- accepting
+    // 127.0.0.1 here would report the fail-closed check as satisfied while
+    // reproducing the original #866 silent-sync-failure under a config that
+    // merely looks valid.
+    #[test]
+    fn advertised_nats_url_rejects_ipv4_loopback_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "127.0.0.1");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            "127.0.0.1 can never be dialed by a genuinely remote secondary \
+             -- it must not be advertised, the same as a wildcard bind"
+        );
+
+        env::remove_var("NATS_BIND_IP");
+    }
+
+    // Same as the IPv4 loopback case above, for `::1`.
+    #[test]
+    fn advertised_nats_url_rejects_ipv6_loopback_nats_bind_ip() {
+        let _guard = env_test_lock().lock().unwrap();
+        env::remove_var("NATS_ADVERTISE_URL");
+        env::set_var("NATS_BIND_IP", "::1");
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url(),
+            None,
+            "::1 can never be dialed by a genuinely remote secondary -- it \
+             must not be advertised, the same as a wildcard bind"
         );
 
         env::remove_var("NATS_BIND_IP");

@@ -97,3 +97,16 @@ setup() {
     grep -q 'nats-secondary\.yml' "$repo_root/setup.sh" \
         || fail "the 503 die message no longer tells the operator to recreate the nats service with the nats-secondary.yml override"
 }
+
+@test "cmd_secondary's 503 recreate example includes --env-file .env.local for the .env.local case" {
+    # Codex review on PR #881: Docker Compose only auto-loads the project
+    # directory's default .env, never .env.local, so an operator who set
+    # NATS_BIND_IP/NATS_ADVERTISE_URL in .env.local and then copies a
+    # recreate command missing --env-file .env.local would still leave
+    # docker-compose.nats-secondary.yml's ${NATS_BIND_IP:?...} guard unset --
+    # NATS never actually gets recreated with the override applied. Guards
+    # against the example regressing back to a bare `docker compose -f ...`
+    # command that silently assumes .env only.
+    grep -q -- '--env-file \.env\.local' "$repo_root/setup.sh" \
+        || fail "the 503 die message's recreate example no longer shows --env-file .env.local for the .env.local case"
+}
