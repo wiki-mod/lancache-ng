@@ -170,6 +170,14 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # #895: scripts/ensure-pr-staging-images.sh's congestion probe reads
+      # build-push.yml's own run status for this commit via `gh api
+      # repos/{repo}/actions/workflows/build-push.yml/runs` once the normal
+      # poll budget is exceeded, to tell a still-building run apart from a
+      # confirmed-finished one. Reading workflow run status needs this scope
+      # explicitly since the job already narrows permissions below the
+      # repository default.
+      actions: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -194,6 +202,16 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs.plan.outputs.watchdog }}
           UI_TOUCHED: ${{ needs.plan.outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          # #895: github.sha on a pull_request event is the same synthetic
+          # merge commit build-push.yml built and tagged (see this workflow's
+          # own BUILD_SHA comment in the "plan" job) -- the congestion probe
+          # uses it to find build-push's matching run via `gh api`.
+          BUILD_SHA: ${{ github.sha }}
+          # #895: authenticates the congestion probe's `gh api` call (list
+          # workflow runs). Same default token already used for the GHCR
+          # login above, scoped down to actions:read/contents:read/
+          # packages:write by this job's `permissions:` block.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # #822: lets backfill_from_base's real imagetools create (the exact
           # operation that failed live 3x on 2026-07-14) retry with a fresh
           # login instead of the single bare attempt it had before.

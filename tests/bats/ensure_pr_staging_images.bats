@@ -9,6 +9,16 @@
 # fail-closed behaviour are exercised without a real daemon or registry. This
 # is the safety property that keeps the deep gate from ever silently
 # validating stale base-channel content behind a PR-looking tag.
+#
+# #895 congestion-probe coverage: the tests below stub
+# STAGING_BUILD_RUN_STATUS_CMD (build_push_run_active()'s indirection) the
+# same way the tests above stub the registry probe, so the extend-past-
+# baseline / fail-fast-when-confirmed-dead / hard-ceiling behavior is
+# exercised without a real `gh` CLI, network access, or a real build-push
+# run. The default setup() below deliberately leaves BUILD_SHA unset, which
+# proves the pre-#895 tests still get the original fail-at-baseline
+# behavior unchanged (build_push_run_active() short-circuits on an empty
+# BUILD_SHA without needing `gh` to be installed at all).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -101,4 +111,97 @@ STUB
     # Only build-tools is back-filled.
     [ "$(wc -l < "$backfill_log")" -eq 1 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
+}
+
+@test "#895: past the normal budget, a still-active build-push run extends the wait until the tag appears" {
+    # A counter-backed exists stub: the tag is "missing" for the first two
+    # probes, then "appears" -- simulating a slow-but-healthy build finishing
+    # while the congestion probe reports build-push's run as still active.
+    # Proves the extension is real (the script keeps polling instead of
+    # failing at the normal budget), not just a no-op past baseline.
+    counter_file="$BATS_TEST_TMPDIR/exists_calls"
+    : > "$counter_file"
+    exists_slow_stub="$BATS_TEST_TMPDIR/exists_slow.sh"
+    cat > "$exists_slow_stub" <<STUB
+#!/usr/bin/env bash
+calls=\$(wc -l < "$counter_file")
+printf 'x\n' >> "$counter_file"
+[ "\$calls" -ge 2 ]
+STUB
+    chmod +x "$exists_slow_stub"
+
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+
+    export STAGING_IMAGE_EXISTS_CMD="$exists_slow_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=5
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "extending the wait"
+    printf '%s\n' "$output" | grep -q "staging image is present"
+}
+
+@test "#895: a confirmed-finished build-push run fails immediately instead of waiting for the hard ceiling" {
+    # The hard ceiling is set generously large (100s); a passing test that
+    # completes quickly proves the script did NOT idle out that ceiling once
+    # the congestion probe confirmed build-push's run already finished.
+    inactive_stub="$BATS_TEST_TMPDIR/inactive.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+
+    export STAGING_BUILD_RUN_STATUS_CMD="$inactive_stub"
+    export BUILD_SHA="deadbeef0123"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=100
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+
+    start_epoch="$(date +%s)"
+    run bash "$script"
+    end_epoch="$(date +%s)"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "already finished"
+    printf '%s\n' "$output" | grep -q "never appeared"
+    # Must not have waited anywhere near the 100s hard ceiling.
+    [ "$((end_epoch - start_epoch))" -lt 10 ]
+}
+
+@test "#895: the hard ceiling still fails closed even while the congestion probe keeps reporting an active run" {
+    # Proves the extension is bounded: even a build-push run that never stops
+    # reporting "active" must not be allowed to wait forever.
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "hard 1s ceiling"
 }
