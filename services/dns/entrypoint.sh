@@ -538,6 +538,97 @@ kgs_snapshot_apply() {
 }
 # END known-good-snapshot library
 
+# ────────────────────────────────────────────────────────────────────────────
+# Domain validation library (scripts/lib/domain-validation.sh)
+#
+# Mirrors the label-strict rules from Admin UI (domains.rs) and
+# services/proxy/entrypoint.sh's own embedded copy, so a malformed or
+# overly-broad cdn-domains.txt entry (e.g. a bare TLD, a single label like
+# "localhost", or "*") is rejected here too, not just in the UI that writes
+# the file. Before this, section 7's RPZ zone generation below had zero
+# validation: a bad entry would generate an RPZ wildcard rule that could
+# redirect far more DNS traffic than intended. This block is a
+# byte-identical copy of scripts/lib/domain-validation.sh's function
+# definitions (verified by tests/bats/domain_validation_sync.bats) rather
+# than a sourced file, for the same reason as the libraries above: this
+# image builds from services/dns/ alone with no shared-file build context
+# wired up for it.
+# ────────────────────────────────────────────────────────────────────────────
+# BEGIN domain-validation library (scripts/lib/domain-validation.sh)
+_is_valid_domain_label() {
+    local label="$1"
+
+    # Label must not be empty
+    [ -n "$label" ] || return 1
+
+    # Label must be <= 63 chars
+    [ ${#label} -le 63 ] || return 1
+
+    # Label must not start or end with hyphen
+    [[ "$label" != -* ]] && [[ "$label" != *- ]] || return 1
+
+    # Label must only contain lowercase ASCII a-z, digits 0-9, or hyphen
+    [[ "$label" =~ ^[a-z0-9-]+$ ]] || return 1
+
+    return 0
+}
+
+# Prints the normalized form (trimmed, lowercased, leading dot stripped) of a
+# domain to stdout. Callers must capture this and use it instead of the raw
+# input for anything written to disk/config — _is_valid_domain() only reports
+# whether a value validates, it does not mutate the caller's variable.
+_normalize_domain() {
+    local domain="$1"
+    # Trim whitespace via pure parameter expansion, not xargs — xargs applies
+    # shell-style unquoting/escaping first, which would let malformed manual
+    # entries like a quoted "Example.COM" slip through as a clean example.com.
+    domain="${domain#"${domain%%[![:space:]]*}"}"
+    domain="${domain%"${domain##*[![:space:]]}"}"
+    domain="${domain,,}"
+    domain="${domain#.}"
+    printf '%s' "$domain"
+}
+
+_is_valid_domain() {
+    local domain
+    domain="$(_normalize_domain "$1")"
+
+    # Must not be empty after normalization
+    [ -n "$domain" ] || return 1
+
+    # Must be <= 253 chars total
+    [ ${#domain} -le 253 ] || return 1
+
+    # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)
+    [[ "$domain" != *. ]] || return 1
+
+    # Validate each label using a loop to properly handle empty labels
+    # (bash word splitting would silently drop trailing empty labels,
+    # but we want to reject domains like "example.com." explicitly)
+    local label
+    local remaining="$domain"
+
+    while [ -n "$remaining" ]; do
+        # Extract label up to next dot
+        if [[ "$remaining" == *.* ]]; then
+            label="${remaining%%.*}"
+            remaining="${remaining#*.}"
+        else
+            label="$remaining"
+            remaining=""
+        fi
+
+        _is_valid_domain_label "$label" || return 1
+    done
+
+    # Must have at least 2 labels (so the loop must execute at least twice)
+    # We can check this by ensuring the domain contains at least one dot
+    [[ "$domain" == *.* ]] || return 1
+
+    return 0
+}
+# END domain-validation library
+
 LAN_ZONES=(
     lan.
     local.lan.
@@ -870,6 +961,19 @@ fi
             is_wildcard_only=1
             domain="${domain#.}"
         fi
+        [[ -z "$domain" ]] && continue
+        # Reject a malformed or overly-broad entry (bare TLD, single label
+        # like "localhost", "*", control/special characters) before it ever
+        # becomes an RPZ rule: an unvalidated entry here could redirect far
+        # more DNS traffic than intended (e.g. a bare "com" would generate
+        # "*.com", matching almost every .com domain). Mirrors
+        # services/proxy/entrypoint.sh's _collect_domain_rows validation of
+        # the same cdn-domains.txt file.
+        if ! _is_valid_domain "$domain"; then
+            echo "[lancache-dns] WARNING: skipping invalid domain entry in RPZ zone: $domain" >&2
+            continue
+        fi
+        domain="$(_normalize_domain "$domain")"
         [[ -z "$domain" ]] && continue
         if [ "$is_wildcard_only" -eq 0 ]; then
             printf "%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
