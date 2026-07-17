@@ -20,6 +20,15 @@
 # behavior unchanged (build_push_run_active() short-circuits on an empty
 # BUILD_SHA without needing `gh` to be installed at all).
 #
+# #975 congestion-probe SHA-key coverage: the #895 tests above all stub
+# STAGING_BUILD_RUN_STATUS_CMD, which bypasses build_push_run_active()'s real
+# `gh api` query entirely -- exactly why the #975 bug (querying by BUILD_SHA,
+# the synthetic merge commit, instead of PR_HEAD_SHA, the PR's real branch
+# head that the Actions API's `head_sha` field actually means) shipped
+# untested. The tests further down instead leave STAGING_BUILD_RUN_STATUS_CMD
+# unset and put a fake `gh` executable on PATH, so the real query construction
+# is exercised and would fail against the pre-#975 implementation.
+#
 # #808 base-channel freshness coverage: every real backfill now first calls
 # scripts/lib/staging-image-freshness.sh's sif_wait_for_fresh_base_image().
 # The default setup() below makes that check pass immediately for every
@@ -241,6 +250,121 @@ STUB
     run bash "$script"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "hard 1s ceiling"
+}
+
+# Fake `gh` used by the #975 tests below: emulates `gh api <url> --jq <expr>`
+# by logging the requested URL (so a test can assert exactly which SHA was
+# queried) and rendering a per-head_sha JSON fixture through the real `jq`
+# binary, the same way the real `gh api --jq` flag renders its response.
+# Returns an empty workflow_runs list for any head_sha with no fixture file,
+# mirroring what the real API returns for a SHA it has never seen.
+install_fake_gh() {
+    fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin_dir"
+    fake_gh_call_log="$BATS_TEST_TMPDIR/gh_calls.log"
+    : > "$fake_gh_call_log"
+    fake_gh_runs_dir="$BATS_TEST_TMPDIR/gh_runs_fixtures"
+    mkdir -p "$fake_gh_runs_dir"
+    cat > "$fake_bin_dir/gh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "api" ]]; then
+    exit 1
+fi
+url="$2"
+shift 2
+jq_expr=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --jq) jq_expr="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "$GH_FAKE_CALL_LOG"
+head_sha="${url#*head_sha=}"
+head_sha="${head_sha%%&*}"
+fixture="$GH_FAKE_RUNS_DIR/$head_sha.json"
+if [[ -f "$fixture" ]]; then
+    jq -r "$jq_expr" "$fixture"
+else
+    printf '{"workflow_runs":[]}' | jq -r "$jq_expr"
+fi
+STUB
+    chmod +x "$fake_bin_dir/gh"
+    export PATH="$fake_bin_dir:$PATH"
+    export GH_FAKE_CALL_LOG="$fake_gh_call_log"
+    export GH_FAKE_RUNS_DIR="$fake_gh_runs_dir"
+}
+
+@test "#975: the congestion probe queries build-push runs by the PR's real head SHA, checking every returned run" {
+    install_fake_gh
+    real_head_sha="realhead1234567890"
+    merge_sha="mergecommit0987654321"
+
+    # The NEWEST run (workflow_runs[0], as the real API returns it) is already
+    # completed, but an OLDER run for the same head_sha is still in_progress.
+    # A query keyed on the wrong SHA (the pre-#975 bug) would never find this
+    # fixture at all; a fix that only inspected workflow_runs[0] would still
+    # wrongly report "not active" and fail this test.
+    cat > "$fake_gh_runs_dir/$real_head_sha.json" <<JSON
+{"workflow_runs":[{"status":"completed"},{"status":"in_progress"}]}
+JSON
+
+    counter_file="$BATS_TEST_TMPDIR/exists_calls"
+    : > "$counter_file"
+    exists_slow_stub="$BATS_TEST_TMPDIR/exists_slow.sh"
+    cat > "$exists_slow_stub" <<STUB
+#!/usr/bin/env bash
+calls=\$(wc -l < "$counter_file")
+printf 'x\n' >> "$counter_file"
+[ "\$calls" -ge 2 ]
+STUB
+    chmod +x "$exists_slow_stub"
+
+    unset STAGING_BUILD_RUN_STATUS_CMD
+    export STAGING_IMAGE_EXISTS_CMD="$exists_slow_stub"
+    export BUILD_SHA="$merge_sha"
+    export PR_HEAD_SHA="$real_head_sha"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=5
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "extending the wait"
+    printf '%s\n' "$output" | grep -q "staging image is present"
+    # The query used PR_HEAD_SHA, never the merge-commit BUILD_SHA.
+    grep -qF "head_sha=$real_head_sha" "$fake_gh_call_log"
+    ! grep -qF "head_sha=$merge_sha" "$fake_gh_call_log"
+}
+
+@test "#975: a head_sha with only completed runs is correctly reported as not active" {
+    install_fake_gh
+    real_head_sha="realhead1234567890"
+    cat > "$fake_gh_runs_dir/$real_head_sha.json" <<JSON
+{"workflow_runs":[{"status":"completed"},{"status":"completed"}]}
+JSON
+
+    unset STAGING_BUILD_RUN_STATUS_CMD
+    export BUILD_SHA="mergecommit0987654321"
+    export PR_HEAD_SHA="$real_head_sha"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=100
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+
+    start_epoch="$(date +%s)"
+    run bash "$script"
+    end_epoch="$(date +%s)"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "already finished"
+    printf '%s\n' "$output" | grep -q "never appeared"
+    [ "$((end_epoch - start_epoch))" -lt 10 ]
 }
 
 @test "#808: an untouched service is NOT back-filled from a base-channel image that is stale relative to BASE_SHA" {
