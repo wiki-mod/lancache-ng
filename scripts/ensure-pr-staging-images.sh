@@ -63,6 +63,32 @@
 # that run has already finished without producing the tag, no amount of
 # further waiting will help, so this fails immediately instead of idling out
 # the rest of the budget. See build_push_run_active() below.
+#
+# #975: the question above was answered against the WRONG commit from the
+# day #895 shipped, which made it always answer "not active" regardless of
+# reality. build_push_run_active() queried the GitHub Actions "list workflow
+# runs" API with `head_sha=<BUILD_SHA>`, where BUILD_SHA is `github.sha` --
+# for a pull_request event that is the synthetic base+head merge commit (see
+# full-setup-deep-validate.yml's own BUILD_SHA comment), which IS the correct
+# key for the staging TAG itself, but is NOT what the Actions API's
+# `head_sha` field/filter means for a pull_request-triggered run: that field
+# always reports the PR's real branch head commit, never the merge commit.
+# Querying by the merge commit therefore matched zero runs, always, so the
+# probe always concluded "not active" -- confirmed live on PRs
+# #948/#949/#960/#962: `ensure-pr-staging-images` failed at the ~1500s normal
+# budget every time, and in #960's case build-push's real matching run for
+# the exact same push (verified via its own checkout log: same merge commit)
+# was still `in_progress` and finished successfully 12 minutes later. This
+# was real congestion -- precisely the case #895 was written to tolerate --
+# not a stuck build; the probe just could never see it. The fix: query by
+# PR_HEAD_SHA (github.event.pull_request.head.sha, the PR's real branch head,
+# passed in alongside BUILD_SHA) instead, and check every run the query
+# returns rather than only the newest one (`workflow_runs[0]`) -- a single
+# push can produce more than one build-push run for the same head_sha (e.g.
+# `synchronize` and `labeled` firing close together both trigger it;
+# confirmed live: PR #960's push produced 5 separate build-push runs for the
+# same head commit), and the newest one finishing quickly (or being
+# cancelled) must not hide an older one that is still genuinely building.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,12 +115,24 @@ workflow_changed="${WORKFLOW_CHANGED:-false}"
 # The commit build-push.yml built and tagged for this PR (github.sha on a
 # pull_request event -- see full-setup-deep-validate.yml's own BUILD_SHA
 # comment in the "plan" job for why this must be the synthetic merge commit,
-# not the PR head). Intentionally optional, not `:?`-required: this only
-# feeds the best-effort congestion probe below, and a caller that omits it
-# (e.g. an older invocation, or a test) must still get the pre-#895
-# fail-at-baseline behavior, not a hard error for a var it never needed
-# before.
+# not the PR head). Only used in the congestion probe's log/error text below
+# (the exact commit PR_TAG's suffix is keyed on) -- NOT for the probe's `gh
+# api` query itself, see pr_head_sha and #975 below. Intentionally optional,
+# not `:?`-required: a caller that omits it (e.g. an older invocation, or a
+# test) must still get the pre-#895 fail-at-baseline behavior, not a hard
+# error for a var it never needed before.
 build_sha="${BUILD_SHA:-}"
+# #975: the PR's real head branch commit (github.event.pull_request.head.sha
+# -- see full-setup-deep-validate.yml's own PR_HEAD_SHA comment), used for the
+# congestion probe's `gh api` query. Deliberately a separate variable from
+# build_sha above: the Actions "list workflow runs" API's `head_sha` filter
+# for a pull_request-triggered run is always the PR's real branch head, never
+# the synthetic merge commit build_sha holds, so conflating the two (the
+# pre-#975 bug) makes the query permanently match zero runs. Same
+# intentionally-optional contract as build_sha: an omitted value just falls
+# back to the pre-#895 fail-at-baseline behavior via the empty check in
+# build_push_run_active() below.
+pr_head_sha="${PR_HEAD_SHA:-}"
 
 # Bounded wait for build-push to finish pushing this PR's touched-service
 # staging tags. build/build-arm64 run on the scarce lancache-heavy tier
@@ -187,28 +225,39 @@ backfill_from_base() {
     fi
 }
 
-# #895 congestion probe: reports whether build-push.yml's own run for
-# $build_sha is still active (any status other than "completed" -- verified
-# live against this repo's real Actions API that an in-flight run can report
-# "pending", not only "queued"/"in_progress", so this deliberately checks
-# for the one terminal state rather than enumerating non-terminal ones).
-# Indirection so tests can stub the GitHub API call. Intentionally
-# fail-safe: if BUILD_SHA is unset, `gh` isn't available, or the API call
-# fails for any reason, this returns non-zero (treated as "not active") so
-# the caller falls back to the original pre-#895 fail-at-baseline behavior
-# instead of ever hanging on a broken probe.
+# #895 congestion probe: reports whether build-push.yml's own run for this
+# PR's current push is still active (any status other than "completed" --
+# verified live against this repo's real Actions API that an in-flight run
+# can report "pending", not only "queued"/"in_progress", so this
+# deliberately checks for the one terminal state rather than enumerating
+# non-terminal ones). Indirection so tests can stub the GitHub API call.
+# Intentionally fail-safe: if PR_HEAD_SHA is unset, `gh` isn't available, or
+# the API call fails for any reason, this returns non-zero (treated as "not
+# active") so the caller falls back to the original pre-#895
+# fail-at-baseline behavior instead of ever hanging on a broken probe.
+#
+# #975: queries by pr_head_sha (the PR's real branch head), NOT build_sha
+# (the synthetic merge commit) -- the Actions "list workflow runs" API's
+# `head_sha` field/filter for a pull_request-triggered run is always the real
+# branch head, so querying by the merge commit (the pre-#975 bug) matched
+# zero runs, always, making this probe permanently report "not active"
+# regardless of whether build-push was genuinely still running. Also checks
+# EVERY run the query returns (`any(...)`), not just the newest one: a single
+# push can produce more than one build-push run for the same head_sha (e.g.
+# `synchronize` and `labeled` firing close together), and the newest one
+# completing or being cancelled must not hide an older one still building.
 build_push_run_active() {
     if [[ -n "${STAGING_BUILD_RUN_STATUS_CMD:-}" ]]; then
         "$STAGING_BUILD_RUN_STATUS_CMD"
         return $?
     fi
-    if [[ -z "$build_sha" ]] || ! command -v gh >/dev/null 2>&1; then
+    if [[ -z "$pr_head_sha" ]] || ! command -v gh >/dev/null 2>&1; then
         return 1
     fi
-    local status
-    status="$(gh api "repos/${REPOSITORY}/actions/workflows/build-push.yml/runs?head_sha=${build_sha}&event=pull_request&per_page=1" \
-        --jq '.workflow_runs[0].status // empty' 2>/dev/null)" || return 1
-    [[ -n "$status" && "$status" != "completed" ]]
+    local any_active
+    any_active="$(gh api "repos/${REPOSITORY}/actions/workflows/build-push.yml/runs?head_sha=${pr_head_sha}&event=pull_request&per_page=20" \
+        --jq 'any(.workflow_runs[]?; .status != "completed")' 2>/dev/null)" || return 1
+    [[ "$any_active" == "true" ]]
 }
 
 wait_for_touched_image() {
@@ -230,7 +279,7 @@ wait_for_touched_image() {
         fi
 
         if (( SECONDS >= hard_deadline )); then
-            echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. Even if build-push's run for this commit is still active, this gate refuses to wait any longer -- a run this slow needs its own investigation rather than an ever-longer poll."
+            echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. Even if build-push's run for this PR's head ($pr_head_sha) is still active, this gate refuses to wait any longer -- a run this slow needs its own investigation rather than an ever-longer poll."
             return 1
         fi
 
@@ -238,11 +287,11 @@ wait_for_touched_image() {
             last_congestion_check=$SECONDS
             if build_push_run_active; then
                 if [[ "$warned_congestion" == false ]]; then
-                    echo "::warning::$service staging image ($pr_image) has not appeared within the normal ${poll_timeout_seconds}s budget, but build-push's own run for commit $build_sha is still active -- extending the wait (up to ${poll_hard_ceiling_seconds}s total). This is expected under heavy self-hosted runner congestion (#895), not evidence of a stuck build."
+                    echo "::warning::$service staging image ($pr_image, tag commit $build_sha) has not appeared within the normal ${poll_timeout_seconds}s budget, but build-push's own run for this PR's head ($pr_head_sha) is still active -- extending the wait (up to ${poll_hard_ceiling_seconds}s total). This is expected under heavy self-hosted runner congestion (#895), not evidence of a stuck build."
                     warned_congestion=true
                 fi
             else
-                echo "::notice::build-push's run for commit $build_sha has already finished (or could not be found) and $service's staging tag still hasn't appeared -- further waiting cannot help, so treating this as a real failure now instead of idling until the ${poll_hard_ceiling_seconds}s hard ceiling."
+                echo "::notice::build-push's run for this PR's head ($pr_head_sha, tag commit $build_sha) has already finished (or could not be found) and $service's staging tag still hasn't appeared -- further waiting cannot help, so treating this as a real failure now instead of idling until the ${poll_hard_ceiling_seconds}s hard ceiling."
                 return 1
             fi
         fi

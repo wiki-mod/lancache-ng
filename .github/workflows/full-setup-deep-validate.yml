@@ -219,9 +219,23 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # #895: github.sha on a pull_request event is the same synthetic
           # merge commit build-push.yml built and tagged (see this workflow's
-          # own BUILD_SHA comment in the "plan" job) -- the congestion probe
-          # uses it to find build-push's matching run via `gh api`.
+          # own BUILD_SHA comment in the "plan" job) -- kept here purely for
+          # the congestion probe's log/error text (it names the exact commit
+          # PR_TAG's suffix is keyed on), NOT for the `gh api` query itself
+          # anymore -- see PR_HEAD_SHA below and #975.
           BUILD_SHA: ${{ github.sha }}
+          # #975: the PR's real head branch commit, NOT the synthetic merge
+          # commit above. The GitHub Actions "list workflow runs" API's
+          # `head_sha` filter/field for a pull_request-triggered run always
+          # reports the PR's real branch head, never the merge commit --
+          # confirmed live (PRs #948/#949/#960/#962): the pre-#975 congestion
+          # probe queried `runs?head_sha=<BUILD_SHA>` (the merge commit),
+          # which can never match any real run, so it unconditionally
+          # reported build-push's run as "not active" and failed this gate at
+          # the normal budget even while build-push's matching run for the
+          # very same push was still healthily building. The congestion probe
+          # now queries by this value instead.
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # #895: authenticates the congestion probe's `gh api` call (list
           # workflow runs). Same default token already used for the GHCR
           # login above, scoped down to actions:read/contents:read/
