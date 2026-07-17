@@ -13,18 +13,18 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
 ## Key Constraints
 
-- The user is not a programmer. Make all technical decisions independently; only ask when a choice has real operational impact (hardware, cost, network topology).
-- Chat language: German. Code language: English.
+- **[AG-CC-001]** The user is not a programmer. Make all technical decisions independently; only ask when a choice has real operational impact (hardware, cost, network topology).
+- **[AG-CC-002]** Chat language: German. Code language: English.
 
 ## Governance
 
-**Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
+**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
 
 See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
-- **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
-- **Project language**: Rust (and shell for scripts) for code *we write*. This is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool (e.g. `actionlint`) that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib with known CVEs baked into its upstream prebuilt release binary). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, every time, not just once.
-- **No direct pushes to master**: all changes go through pull requests.
+- **[AG-GOV-002]** **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
+- **[AG-GOV-003]** **Project language**: Rust (and shell for scripts) for code *we write*. This is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool (e.g. `actionlint`) that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib with known CVEs baked into its upstream prebuilt release binary). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, every time, not just once.
+- **[AG-GOV-004]** **No direct pushes to master**: all changes go through pull requests.
 
 ## Architecture
 
@@ -83,7 +83,7 @@ by configuring which DNS server IP they point to:
   per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA. nginx selects
   the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
-- **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`),
+- **[AG-KD-001]** **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
   not our PowerDNS recursor. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
   back to the proxy → infinite loop.
 - **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
@@ -95,23 +95,30 @@ by configuring which DNS server IP they point to:
 - **`libnginx-mod-stream`**: The unified proxy uses nginx's stream module for standard-mode SNI passthrough.
   This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
   at the top of `nginx.conf` (before the `events {}` block).
-- **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
+- **[AG-KD-002]** **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
   serial file is always written to `/tmp/lancache-ca.srl` rather than the certs directory,
   and passed with `-CAserial`.
-- **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
+- **[AG-KD-003]** **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
   concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
   prebuilt release binaries — they're Rust, so there's no behavioral difference from building
-  them ourselves, just wasted build time. `actionlint` is the one exception, built from source
-  against `golang:latest`: Go statically embeds its entire standard library into every compiled
-  binary, so a stale upstream release binary permanently carries whatever stdlib CVEs existed
-  when *its* maintainers last cut a release — confirmed for real (2026-07-09): actionlint's
-  latest release (v1.7.12, published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings
-  (crypto/x509, crypto/tls, net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building
-  the same version from source with `golang:latest` picks up a current Go toolchain (1.26.5 as
-  of this writing) and scores 0. This is a narrow, justified exception to the "Rust and shell
-  only" project-language rule (see above), not a general license to add other language
-  toolchains — re-justify it the same way (a real Trivy/CVE finding, not a hypothetical one)
-  before reaching for a compiled-from-source dependency in another language again.
+  them ourselves, just wasted build time. `actionlint`, the Docker CLI, and `docker-compose`
+  are the exceptions, all built from source against `golang:latest` for the same reason: Go
+  statically embeds its entire standard library into every compiled binary, so a stale upstream
+  release binary permanently carries whatever stdlib CVEs existed when *its* maintainers last
+  cut a release. Confirmed for real (2026-07-09): actionlint's latest release (v1.7.12,
+  published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings (crypto/x509, crypto/tls,
+  net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building the same version from
+  source with `golang:latest` picks up a current Go toolchain (1.26.5 as of this writing) and
+  scores 0. Confirmed again (2026-07-10, CVE-2026-39822): the official static release binaries
+  for Docker CLI v29.6.1 and docker-compose v5.2.0 carry the same class of embedded-stdlib
+  vulnerability, with no patched upstream release available yet — building both from source
+  (`docker/cli`'s own `scripts/build/binary`, and a local `go build ./cmd` for
+  `docker/compose`, since neither project supports a plain `go install pkg@version`) against a
+  current Go toolchain is the only way to get a current, patched stdlib into them. This is a
+  narrow, justified exception to the "Rust and shell only" project-language rule (see above),
+  not a general license to add other language toolchains — re-justify it the same way (a real
+  Trivy/CVE finding, not a hypothetical one) before reaching for a compiled-from-source
+  dependency in another language again.
 
 ## Dev vs Prod Split
 
@@ -132,7 +139,7 @@ by configuring which DNS server IP they point to:
 docker compose -f deploy/dev/docker-compose.yml up --build
 
 # Production
-docker compose -f deploy/prod/docker-compose.yml up -d --build
+docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
 ## First-time Setup
@@ -141,7 +148,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
    Copy `certs/ca.crt` to clients and install it (see `docs/install-ca-cert.md`).
    DNS ports are offset (5300/5353) to avoid the Windows DNS client conflict.
 
-2. **Prod**: two LAN IPs are required. Add the second:
+2. **[AG-SETUP-001]** **Prod**: two LAN IPs are required. Add the second:
    ```
    ip addr add 192.168.1.11/24 dev eth0
    ```
@@ -152,12 +159,38 @@ docker compose -f deploy/prod/docker-compose.yml up -d --build
 
 ## Adding More CDN Domains
 
-- **DNS**: add the hostname to `services/dns/cdn-domains.txt`
-- **SSL cert**: add the root domain to `services/proxy/cdn-ssl-domains.txt`
-  (if the root domain is already listed, subdomains are already covered)
-- Rebuild and restart the containers
+- **[AG-CDN-001]** Add the hostname to `services/dns/cdn-domains.txt` (or via the Admin UI) — this is the only file to maintain.
+- The proxy derives each entry's registrable root domain automatically at
+  startup (using the vendored Mozilla Public Suffix List, see
+  `services/proxy/entrypoint.sh`) and generates a wildcard cert for it.
+- Restart the containers (or wait for the Admin UI to trigger it) so the proxy picks up the new domain.
 
 ## IPv6 Notes
 
-Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
+**[AG-IPV6-001]** Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
 fully. The Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` on the host.
+
+## Rule Enforcement Matrix
+
+This matrix maps CLAUDE.md's normative rules to how they are currently enforced, mirroring the
+format of the Rule Enforcement Matrix in `AGENTS.md`. CLAUDE.md's IDs use their own category
+prefixes (`AG-CC`, `AG-GOV`, `AG-KD`, `AG-CDN`, `AG-SETUP`, `AG-IPV6`) rather than being appended
+to `AGENTS.md`'s existing categories — see the PR that introduced this matrix for the judgment
+call and reasoning. Several rules below restate, in CLAUDE.md's own words, a rule already tracked
+under a distinct ID in `AGENTS.md`; the "Mirrors" column names that ID as a Rule-Ref-style
+cross-reference rather than treating the two IDs as one and the same rule.
+
+| Rule ID | Rule Name | Mirrors (AGENTS.md) | Current Enforcement |
+|---------|-----------|----------------------|----------------------|
+| AG-CC-001 | User is not a programmer; decide independently, ask only on real operational impact | AG-WF-015 | Manual review (decision log in PR) |
+| AG-CC-002 | Chat language German, code language English | — | Manual review (session transcript / code review) |
+| AG-GOV-001 | Mandatory to read `AGENTS.md` + `.github/AGENTS.md` in full at session start; re-read on change | — | Manual review (cannot be technically enforced on an agent session) |
+| AG-GOV-002 | GitHub content language: English | AG-GH-001 | Manual review (PR description language scan, commit message review) |
+| AG-GOV-003 | Project language Rust/shell for code we write; other-language toolchain use needs explicit user approval every time | AG-REL-001 | Manual review (new file type / import / Dockerfile toolchain detection) |
+| AG-GOV-004 | No direct pushes to master | AG-WF-004 / AG-WF-014 | GitHub branch protection (`master` branch requires PR) |
+| AG-KD-001 | Upstream nginx resolver must be real DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | AG-OP-002 | Code review (nginx resolver config inspection) |
+| AG-KD-002 | OpenSSL serial file always written to `/tmp/lancache-ca.srl`, never the certs directory | — | Code review (`entrypoint.sh` cert-generation inspection) |
+| AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | — | Manual review (`tools/build-tools/Dockerfile` inspection) |
+| AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | — | Manual review (repo inspection — no second domain file exists) |
+| AG-SETUP-001 | Prod deployment requires two LAN IPs | — | Manual review (documentation only; no CI check for external LAN IP provisioning) |
+| AG-IPV6-001 | Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` | — | Manual review (documentation only; no CI check) |
