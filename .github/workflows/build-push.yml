@@ -4255,6 +4255,67 @@ jobs:
           fi
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
+      - name: Enforce Trivy cache generation retention
+        # Persistent per-branch cache dirs (ephemeral=false above, e.g.
+        # `proxy-amd64-refs-heads-v0.2.0`) are reused on every push and are
+        # never touched by the ephemeral cleanup step below or by host-level
+        # `systemd-tmpfiles` aging -- both only apply to dirs that go idle,
+        # and these are touched on every push/schedule run, so they never
+        # idle long enough (#928, same reasoning already established for the
+        # ephemeral case in #925/#927). Left alone they persist and grow
+        # without bound.
+        #
+        # Trivy's local cache is a pure re-downloadable cache of the public
+        # vulnerability DB (never a source of truth), so a periodic wholesale
+        # reset is safe: this stamps each persistent dir's last full-reset
+        # time in a sentinel file and wipes+recreates the whole dir once that
+        # generation exceeds TRIVY_CACHE_MAX_AGE_DAYS, forcing a full, fresh
+        # DB re-download on this run for that cell.
+        #
+        # Deliberately NOT keyed off the directory's own mtime: every push
+        # refreshes mtime on files the scan step touches, so an mtime-based
+        # check would never fire for these continuously-reused dirs -- the
+        # exact reason host-level tmpfiles aging cannot solve this either.
+        # The sentinel file is only ever written by this step, so its age
+        # tracks "time since last forced reset", not "time since last use".
+        #
+        # Runs before the scan (not after) so the run that crosses the age
+        # threshold pays the one-time re-download cost itself, rather than
+        # leaving the next run to discover an already-wiped, cold directory.
+        #
+        # Scoped to build-push.yml's container-scan job only: build-tools.yml
+        # still writes its persistent Trivy cache dirs to unscoped fixed
+        # paths as of this change (PR #927, scoping + ephemeral cleanup for
+        # that workflow, is open but not yet merged) -- retention there is
+        # deliberately deferred to a follow-up once #927 lands, so this step
+        # isn't built against a cache-dir shape that's about to change under
+        # it.
+        if: ${{ steps.trivy-cache.outputs.ephemeral == 'false' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+          TRIVY_CACHE_MAX_AGE_DAYS: "14"
+        run: |
+          set -euo pipefail
+          # Fail closed the same way "Remove ephemeral Trivy cache" below
+          # does: a step-output-derived path must never be trusted blindly
+          # before an `rm -rf`, even after a future refactor of the prepare
+          # step's output wiring.
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*) ;;
+            *)
+              echo "::error::Refusing to touch unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
+          stamp="$TRIVY_CACHE_DIR/.generation-stamp"
+          if [ -f "$stamp" ] && [ -z "$(find "$stamp" -mtime "+${TRIVY_CACHE_MAX_AGE_DAYS}" -print -quit)" ]; then
+            echo "Trivy cache generation for $TRIVY_CACHE_DIR is within ${TRIVY_CACHE_MAX_AGE_DAYS}d, keeping it."
+            exit 0
+          fi
+          echo "Resetting Trivy cache generation for $TRIVY_CACHE_DIR (stamp missing or older than ${TRIVY_CACHE_MAX_AGE_DAYS}d)."
+          rm -rf -- "$TRIVY_CACHE_DIR"
+          mkdir -p -- "$TRIVY_CACHE_DIR"
+          touch -- "$stamp"
       - name: Scan image with Trivy
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -4917,6 +4978,37 @@ jobs:
           fi
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce pushed build-tools Trivy cache generation retention
+        # Same rationale, sentinel-file mechanism, and #927 build-tools.yml
+        # deferral as container-scan's "Enforce Trivy cache generation
+        # retention" step above -- see that step's comment for the full
+        # reasoning. This is the `build-tools-pushed-<ref>` persistent dir's
+        # equivalent: reused on every non-PR push/schedule run, never
+        # touched by the ephemeral cleanup step below or by host-level
+        # tmpfiles aging (#928).
+        if: ${{ steps.trivy-cache.outputs.ephemeral == 'false' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+          TRIVY_CACHE_MAX_AGE_DAYS: "14"
+        run: |
+          set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*) ;;
+            *)
+              echo "::error::Refusing to touch unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
+          stamp="$TRIVY_CACHE_DIR/.generation-stamp"
+          if [ -f "$stamp" ] && [ -z "$(find "$stamp" -mtime "+${TRIVY_CACHE_MAX_AGE_DAYS}" -print -quit)" ]; then
+            echo "Trivy cache generation for $TRIVY_CACHE_DIR is within ${TRIVY_CACHE_MAX_AGE_DAYS}d, keeping it."
+            exit 0
+          fi
+          echo "Resetting Trivy cache generation for $TRIVY_CACHE_DIR (stamp missing or older than ${TRIVY_CACHE_MAX_AGE_DAYS}d)."
+          rm -rf -- "$TRIVY_CACHE_DIR"
+          mkdir -p -- "$TRIVY_CACHE_DIR"
+          touch -- "$stamp"
 
       - name: Scan pushed build-tools digest with Trivy
         # Build-tools influences every downstream validation job, so the exact
