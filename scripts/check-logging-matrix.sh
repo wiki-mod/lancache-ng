@@ -51,22 +51,32 @@ fail() {
 #
 # This whole extraction runs as a single awk process rather than the
 # previous "awk | sed | cut | sed | while read (grep|sed per row)" chain.
-# That chain forked roughly 3 short-lived processes per table row, and CI
-# on this project's shared self-hosted runners has hit a real transient-flake
-# pattern traced back to exactly that: two back-to-back v0.2.0 CI runs
-# against byte-identical docs/architecture-ng.md and
-# scripts/check-logging-matrix.sh content (commits c4e7ac9d then 9eef5d46,
-# ~18 minutes apart, same build-tools image digest) produced "OK" and then a
-# false "syslog-ng has no row" failure respectively, with no code change in
-# between (see issue #633's comment history for the full reproduction). The
-# leading theory is a fork/exec hiccup silently dropping one row's output
-# inside the old "while read" loop body, which `set -e`/`pipefail` cannot
-# catch because the loop's own exit status is unaffected by an internal
-# command failing partway through one iteration. Doing the whole per-row
-# normalization inside one awk program removes that fork storm, and the
-# row-count assertion in the END block below turns any future silent row
-# loss -- from this or any other cause -- into a loud, clearly-labeled
-# failure instead of a confusing "no row" false positive.
+# That chain forked roughly 3 short-lived processes per table row. CI on
+# this project's shared self-hosted runners hit a real flake traced to this
+# script: two back-to-back v0.2.0 CI runs against byte-identical
+# docs/architecture-ng.md and scripts/check-logging-matrix.sh content
+# (commits c4e7ac9d then 9eef5d46, ~18 minutes apart, same build-tools
+# image digest) produced "OK" and then a false "syslog-ng has no row"
+# failure respectively, with no code change in between; re-running the
+# second (failing) job against the same unmodified commit later passed
+# with no changes at all, confirming it was a flake rather than a
+# deterministic defect (see issue #633's comment history for the full
+# reproduction). The leading hypothesis -- not proven, since the flake did
+# not recur under direct local reproduction -- is a fork/exec hiccup
+# silently dropping one row's output inside the old "while read" loop
+# body, which `set -e`/`pipefail` cannot catch because the loop's own exit
+# status is unaffected by an internal command failing partway through one
+# iteration. Doing the whole per-row normalization inside one awk program
+# removes that fork storm outright, and turns a failure of the awk process
+# itself into a loud, `set -e`-triggered abort instead of a silently short
+# result. The row-count assertion in the END block below additionally
+# catches a distinct, narrower failure mode: two differently-worded rows
+# that normalize to the same canonical name (a genuine duplicate/collapsed
+# row). It does not, by itself, prove every possible silent-row-loss cause
+# (e.g. a truncated read of $ARCHITECTURE_DOC would still show matching
+# data-row and unique-name counts) -- it is defense in depth for one
+# specific class of drift, not a guarantee against this exact flake
+# recurring.
 canonical_raw=$(awk '
   /\*\*Logging matrix\*\*/ { seen_marker = 1; next }
   seen_marker && /^\|/ {
