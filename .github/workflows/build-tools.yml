@@ -705,8 +705,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        # Issue #930: retried via .github/actions/buildx-setup-retry -- this
+        # GitHub-hosted arm64 runner is a fresh VM every run and has hit
+        # Docker Hub's anonymous-pull rate limit (surfacing as
+        # "unauthorized: authentication required") while bootstrapping
+        # moby/buildkit:buildx-stable-1. Confirmed transient in build-push.yml's
+        # equivalent build-arm64 job: a rerun with zero code changes
+        # succeeded. build-tools above (self-hosted amd64) keeps the plain,
+        # unretried action -- it persists its local Buildx cache/image pulls
+        # across runs and has never shown this symptom.
         id: buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: ./.github/actions/buildx-setup-retry
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'

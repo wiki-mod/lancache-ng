@@ -4105,7 +4105,7 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: ${{ matrix.platform }}
 
-      - name: Set up Docker Buildx for scan build
+      - name: Set up Docker Buildx for scan build (amd64)
         # A docker-container builder is required for --allow network.host to
         # actually take effect: that entitlement is enabled by default for
         # container-driver builders since buildx v0.13 (docker/buildx#2266),
@@ -4115,8 +4115,29 @@ jobs:
         # --allow-insecure-entitlement network.host -- an infrastructure-level
         # flag this workflow can't set. Using an explicit container-driver
         # builder here avoids that dependency entirely.
-        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        #
+        # Split from the arm64 row below (issue #930): this self-hosted
+        # amd64 row persists its local Buildx cache/image pulls across runs
+        # and has never hit the arm64 row's Docker Hub anonymous-pull rate
+        # limit, so it keeps the plain, unretried setup step.
+        if: >-
+          matrix.platform_tag == 'amd64' &&
+          (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Set up Docker Buildx for scan build (arm64, retried)
+        # Issue #930: this row runs on a GitHub-hosted arm64 runner, a fresh
+        # VM every run with no local image cache, which has hit Docker Hub's
+        # anonymous-pull rate limit (surfacing as "unauthorized:
+        # authentication required") while bootstrapping
+        # moby/buildkit:buildx-stable-1. Confirmed transient: a rerun with
+        # zero code changes succeeded. Retried via
+        # .github/actions/buildx-setup-retry instead of the plain action used
+        # by the amd64 row above.
+        if: >-
+          matrix.platform_tag == 'arm64' &&
+          (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+        uses: ./.github/actions/buildx-setup-retry
 
       - name: Build local scan image
         if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
@@ -5133,9 +5154,18 @@ jobs:
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
+        # Issue #930: retried via .github/actions/buildx-setup-retry -- this
+        # GitHub-hosted arm64 runner is a fresh VM every run and has hit
+        # Docker Hub's anonymous-pull rate limit (surfacing as
+        # "unauthorized: authentication required") while bootstrapping
+        # moby/buildkit:buildx-stable-1. Confirmed transient: a rerun with
+        # zero code changes succeeded. The self-hosted amd64 `build` job's
+        # equivalent step keeps the plain, unretried action -- it persists
+        # its local Buildx cache/image pulls across runs and has never shown
+        # this symptom.
         if: steps.should-build.outputs.should-build == 'true'
         id: buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: ./.github/actions/buildx-setup-retry
 
       - name: Log in to GHCR
         # Same fork-safety and Dependabot-safety reasoning as build's own

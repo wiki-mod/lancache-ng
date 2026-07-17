@@ -1,0 +1,258 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Docker Buildx setup with retry
+description: >-
+  Wraps docker/setup-buildx-action with a retry policy for GitHub-hosted
+  arm64 runners (issue #930): set up once, and on failure wait and retry the
+  identical setup -- up to 4 total attempts (1 initial + 3 retries).
+
+# GitHub Actions composite steps cannot loop, and `uses:` cannot be
+# parameterized by an input (the action reference must be static YAML), so
+# the "at least 3 retries" attempt count below is 4 explicit, chained
+# docker/setup-buildx-action steps -- same constraint and same shape as
+# .github/actions/ghcr-build-push-retry and .github/actions/ghcr-attest-retry.
+#
+# Unlike those two actions, there is no re-authentication step between
+# attempts here: the failure this wraps (issue #930) is
+# `docker buildx create --use`'s implicit bootstrap pull of
+# `moby/buildkit:buildx-stable-1` from Docker Hub failing with
+# "unauthorized: authentication required" -- Docker Hub's anonymous-pull
+# rate limit surfacing as an auth error, hit because a GitHub-hosted arm64
+# runner is a fresh VM every run (no local image cache) pulling that image
+# unauthenticated. There is no credential to re-supply before a retry: the
+# pull is anonymous by design (see issue #930's option 2 -- provisioning
+# Docker Hub auth for this pull needs a maintainer-approved new secret and
+# is explicitly out of scope for this action). Waiting out the momentary
+# rate-limit window and retrying the identical, still-anonymous pull is
+# sufficient, since the failure has been confirmed transient (a rerun with
+# zero code changes succeeds).
+#
+# Scope: only wrap the Buildx bootstrap on GitHub-hosted arm64 runners with
+# this action. Self-hosted amd64 runners persist their local Buildx
+# cache/image pulls across runs and have never shown this symptom -- do not
+# switch their plain `docker/setup-buildx-action` step to this action.
+inputs:
+  version:
+    required: false
+    default: ""
+  driver:
+    required: false
+    default: "docker-container"
+  driver-opts:
+    required: false
+    default: ""
+  buildkitd-flags:
+    required: false
+    default: ""
+  buildkitd-config:
+    required: false
+    default: ""
+  buildkitd-config-inline:
+    required: false
+    default: ""
+  use:
+    required: false
+    default: "true"
+  name:
+    required: false
+    default: ""
+  endpoint:
+    required: false
+    default: ""
+  platforms:
+    required: false
+    default: ""
+  append:
+    required: false
+    default: ""
+  keep-state:
+    required: false
+    default: "false"
+  cache-binary:
+    required: false
+    default: "true"
+  cleanup:
+    required: false
+    default: "true"
+  backoff-seconds:
+    description: Seconds to wait before each retry.
+    required: false
+    default: "30"
+outputs:
+  name:
+    description: Builder name from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.name }}
+  driver:
+    description: Builder driver from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.driver }}
+  platforms:
+    description: Builder node platforms from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.platforms }}
+  nodes:
+    description: Builder nodes metadata from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.nodes }}
+  endpoint:
+    description: Builder node endpoint (deprecated) from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.endpoint }}
+  status:
+    description: Builder node status (deprecated) from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.status }}
+  flags:
+    description: Builder node flags (deprecated) from whichever attempt succeeded.
+    value: ${{ steps.resolve.outputs.flags }}
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      continue-on-error: true
+      with:
+        version: ${{ inputs.version }}
+        driver: ${{ inputs.driver }}
+        driver-opts: ${{ inputs.driver-opts }}
+        buildkitd-flags: ${{ inputs.buildkitd-flags }}
+        buildkitd-config: ${{ inputs.buildkitd-config }}
+        buildkitd-config-inline: ${{ inputs.buildkitd-config-inline }}
+        use: ${{ inputs.use }}
+        name: ${{ inputs.name }}
+        endpoint: ${{ inputs.endpoint }}
+        platforms: ${{ inputs.platforms }}
+        append: ${{ inputs.append }}
+        keep-state: ${{ inputs.keep-state }}
+        cache-binary: ${{ inputs.cache-binary }}
+        cleanup: ${{ inputs.cleanup }}
+
+    - name: Wait before retry 1
+      if: steps.attempt1.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure'
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      continue-on-error: true
+      with:
+        version: ${{ inputs.version }}
+        driver: ${{ inputs.driver }}
+        driver-opts: ${{ inputs.driver-opts }}
+        buildkitd-flags: ${{ inputs.buildkitd-flags }}
+        buildkitd-config: ${{ inputs.buildkitd-config }}
+        buildkitd-config-inline: ${{ inputs.buildkitd-config-inline }}
+        use: ${{ inputs.use }}
+        name: ${{ inputs.name }}
+        endpoint: ${{ inputs.endpoint }}
+        platforms: ${{ inputs.platforms }}
+        append: ${{ inputs.append }}
+        keep-state: ${{ inputs.keep-state }}
+        cache-binary: ${{ inputs.cache-binary }}
+        cleanup: ${{ inputs.cleanup }}
+
+    - name: Wait before retry 2
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - id: attempt3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      continue-on-error: true
+      with:
+        version: ${{ inputs.version }}
+        driver: ${{ inputs.driver }}
+        driver-opts: ${{ inputs.driver-opts }}
+        buildkitd-flags: ${{ inputs.buildkitd-flags }}
+        buildkitd-config: ${{ inputs.buildkitd-config }}
+        buildkitd-config-inline: ${{ inputs.buildkitd-config-inline }}
+        use: ${{ inputs.use }}
+        name: ${{ inputs.name }}
+        endpoint: ${{ inputs.endpoint }}
+        platforms: ${{ inputs.platforms }}
+        append: ${{ inputs.append }}
+        keep-state: ${{ inputs.keep-state }}
+        cache-binary: ${{ inputs.cache-binary }}
+        cleanup: ${{ inputs.cleanup }}
+
+    - name: Wait before retry 3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - id: attempt4
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      continue-on-error: true
+      with:
+        version: ${{ inputs.version }}
+        driver: ${{ inputs.driver }}
+        driver-opts: ${{ inputs.driver-opts }}
+        buildkitd-flags: ${{ inputs.buildkitd-flags }}
+        buildkitd-config: ${{ inputs.buildkitd-config }}
+        buildkitd-config-inline: ${{ inputs.buildkitd-config-inline }}
+        use: ${{ inputs.use }}
+        name: ${{ inputs.name }}
+        endpoint: ${{ inputs.endpoint }}
+        platforms: ${{ inputs.platforms }}
+        append: ${{ inputs.append }}
+        keep-state: ${{ inputs.keep-state }}
+        cache-binary: ${{ inputs.cache-binary }}
+        cleanup: ${{ inputs.cleanup }}
+
+    # continue-on-error on every attempt above means none of their failures
+    # fail this composite action by itself -- this step is what actually
+    # surfaces success/failure to the calling job, and is the only step that
+    # inspects all four outcomes to find whichever attempt (if any) produced
+    # real outputs.
+    - name: Resolve outcome across all attempts
+      id: resolve
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${{ steps.attempt1.outcome }}" == "success" ]]; then
+          name="${{ steps.attempt1.outputs.name }}"
+          driver="${{ steps.attempt1.outputs.driver }}"
+          platforms="${{ steps.attempt1.outputs.platforms }}"
+          nodes="${{ steps.attempt1.outputs.nodes }}"
+          endpoint="${{ steps.attempt1.outputs.endpoint }}"
+          status="${{ steps.attempt1.outputs.status }}"
+          flags="${{ steps.attempt1.outputs.flags }}"
+        elif [[ "${{ steps.attempt2.outcome }}" == "success" ]]; then
+          name="${{ steps.attempt2.outputs.name }}"
+          driver="${{ steps.attempt2.outputs.driver }}"
+          platforms="${{ steps.attempt2.outputs.platforms }}"
+          nodes="${{ steps.attempt2.outputs.nodes }}"
+          endpoint="${{ steps.attempt2.outputs.endpoint }}"
+          status="${{ steps.attempt2.outputs.status }}"
+          flags="${{ steps.attempt2.outputs.flags }}"
+        elif [[ "${{ steps.attempt3.outcome }}" == "success" ]]; then
+          name="${{ steps.attempt3.outputs.name }}"
+          driver="${{ steps.attempt3.outputs.driver }}"
+          platforms="${{ steps.attempt3.outputs.platforms }}"
+          nodes="${{ steps.attempt3.outputs.nodes }}"
+          endpoint="${{ steps.attempt3.outputs.endpoint }}"
+          status="${{ steps.attempt3.outputs.status }}"
+          flags="${{ steps.attempt3.outputs.flags }}"
+        elif [[ "${{ steps.attempt4.outcome }}" == "success" ]]; then
+          name="${{ steps.attempt4.outputs.name }}"
+          driver="${{ steps.attempt4.outputs.driver }}"
+          platforms="${{ steps.attempt4.outputs.platforms }}"
+          nodes="${{ steps.attempt4.outputs.nodes }}"
+          endpoint="${{ steps.attempt4.outputs.endpoint }}"
+          status="${{ steps.attempt4.outputs.status }}"
+          flags="${{ steps.attempt4.outputs.flags }}"
+        else
+          echo "::error::All Docker Buildx setup attempts failed." >&2
+          exit 1
+        fi
+        {
+          echo "name=$name"
+          echo "driver=$driver"
+          echo "platforms=$platforms"
+          echo "endpoint=$endpoint"
+          echo "status=$status"
+          echo "flags=$flags"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "nodes<<BUILDX_NODES"
+          printf '%s\n' "$nodes"
+          echo "BUILDX_NODES"
+        } >> "$GITHUB_OUTPUT"
