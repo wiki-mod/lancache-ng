@@ -1205,6 +1205,7 @@ pub async fn add_subnet(
         dns_secondary: &form.dns_secondary,
         ntp_servers: &form.ntp_servers,
         lease_time: &form.lease_time,
+        domain: &form.domain,
     })
     .map_err(DhcpError::from)?;
     // Resolved here, before the sync kea_config_modify closure below (which
@@ -1281,6 +1282,7 @@ pub async fn update_subnet(
         dns_secondary: &form.dns_secondary,
         ntp_servers: &form.ntp_servers,
         lease_time: &form.lease_time,
+        domain: &form.domain,
     })
     .map_err(DhcpError::from)?;
     let subnet_id = form.id;
@@ -1443,6 +1445,21 @@ pub async fn add_reservation(
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
+    // An empty hostname is a legitimate, already-supported state (see the
+    // read-side handling in fetch_reservations_from_config, which renders a
+    // missing/empty hostname as ""), so only a *non-empty* value is checked
+    // here. Before this check existed, form.hostname flowed straight into
+    // Kea's reservation JSON with no validation at all -- reusing
+    // is_valid_domain_name (rather than inventing a separate hostname
+    // validator) is deliberate: Kea's own "hostname" reservation parameter
+    // accepts either a bare label or a dotted FQDN, exactly what that
+    // validator already checks.
+    if !form.hostname.trim().is_empty() && !is_valid_domain_name(&form.hostname) {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid hostname: use a plain DNS hostname (letters, digits, '-', '.').",
+        ));
+    }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         // If an operator has hand-edited the *global*
@@ -1504,6 +1521,15 @@ pub async fn remove_reservation(
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    // Not a security gap (a malformed MAC would simply match nothing in
+    // remove_reservation_entry's retain-by-normalized-MAC filter below, a
+    // harmless no-op), but every sibling handler that takes a MAC
+    // (add_reservation, and normalize_mac's own callers) validates shape
+    // first -- checking here too keeps this handler consistent and gives an
+    // operator a clear 400 instead of a silent no-op on a typo'd MAC.
+    if !is_valid_mac(&form.mac) {
+        return Err(DhcpError::from(StatusCode::BAD_REQUEST));
+    }
     let mac = normalize_mac(&form.mac);
     kea_config_modify(&state, move |config| {
         let subnets = dhcp4_subnets_mut(config)?;
@@ -1601,13 +1627,27 @@ fn kea_lease_del_result(resp: &Value) -> LeaseDelOutcome {
     }
 }
 
-pub async fn check_dhcp_conflict(State(state): State<Arc<AppState>>) -> Json<Value> {
+// This has a real side effect (starts/stops the DHCP conflict-probe
+// container, see check_dhcp_probe), so it must be a mutating-method route
+// with CSRF coverage like every other state-changing handler in this file --
+// it was previously wired as a CSRF-exempt GET (CSRF in this app only
+// applies to mutating methods), letting any page that could induce a GET to
+// this origin trigger the probe. It takes no form body (this is a plain
+// `fetch()` call from dhcp.html, not a form submit), so it checks the
+// X-CSRF-Token header directly via verify_csrf_header, the same pattern
+// secondaries::remove_secondary/rotate_token use for their own header-only,
+// no-form-body mutating routes.
+pub async fn check_dhcp_conflict(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&headers)?;
     let report = check_dhcp_probe(&state).await;
-    Json(json!({
+    Ok(Json(json!({
         "status": report.overall_status(),
         "conflict": report.conflict,
         "client": report.client,
-    }))
+    })))
 }
 
 // Rolls the live DHCPv4 config back to an operator-selected known-good
@@ -2508,6 +2548,7 @@ struct DhcpFormValidation<'a> {
     dns_secondary: &'a str,
     ntp_servers: &'a str,
     lease_time: &'a str,
+    domain: &'a str,
 }
 
 // Returns the parsed lease_time on success (the one field the caller still
@@ -2539,6 +2580,17 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     }
 
     if !input.ntp_servers.trim().is_empty() && parse_ntp_server_list(input.ntp_servers).is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Same optional-field convention as update_dhcp_proxy's own
+    // dhcp_proxy_domain check above: an empty domain is a legitimate "don't
+    // set one" choice (the template ships a non-empty "lan" default, but
+    // nothing enforces that at the HTTP layer), so only a *non-empty*,
+    // syntactically invalid value is rejected here. Without this check, an
+    // arbitrary string flowed straight into Kea's domain-name/domain-search
+    // options unvalidated.
+    if !input.domain.trim().is_empty() && !is_valid_domain_name(input.domain) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -3322,9 +3374,14 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
-    // Wraps validate_dhcp_form's 8-field DhcpFormValidation struct literal
+    // Wraps validate_dhcp_form's 9-field DhcpFormValidation struct literal
     // so individual tests below can call it with plain positional
     // arguments instead of repeating every field name at each call site.
+    // `domain` is optional on the real form (see validate_dhcp_form's own
+    // comment), so every existing 8-arg call site below was updated to pass
+    // a fixed valid `"lan"` domain rather than leaving the field
+    // unspecified -- that keeps this macro's arity change from silently
+    // masking the new domain check in tests that aren't about domain at all.
     macro_rules! validate_test_dhcp_form {
         (
             $subnet:expr,
@@ -3334,7 +3391,8 @@ mod tests {
             $dns_primary:expr,
             $dns_secondary:expr,
             $ntp_servers:expr,
-            $lease_time:expr $(,)?
+            $lease_time:expr,
+            $domain:expr $(,)?
         ) => {
             validate_dhcp_form(DhcpFormValidation {
                 subnet: $subnet,
@@ -3345,6 +3403,7 @@ mod tests {
                 dns_secondary: $dns_secondary,
                 ntp_servers: $ntp_servers,
                 lease_time: $lease_time,
+                domain: $domain,
             })
         };
     }
@@ -3638,6 +3697,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "86400",
+            "lan",
         );
 
         assert_eq!(lease_time.unwrap(), 86400);
@@ -3654,6 +3714,7 @@ mod tests {
             "203.0.113.53",
             "198.51.100.4",
             "86400",
+            "lan",
         );
 
         assert_eq!(lease_time.unwrap(), 86400);
@@ -3676,6 +3737,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "86400",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3692,6 +3754,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "86400",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3712,6 +3775,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "not-a-number",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3728,6 +3792,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "86400",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3744,6 +3809,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "86400",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3765,6 +3831,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "0",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3781,6 +3848,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "59",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3800,6 +3868,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "60",
+            "lan",
         );
 
         assert_eq!(lease_time.unwrap(), 60);
@@ -3816,6 +3885,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "604800",
+            "lan",
         );
 
         assert_eq!(lease_time.unwrap(), 604800);
@@ -3832,6 +3902,7 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "604801",
+            "lan",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
@@ -3854,6 +3925,50 @@ mod tests {
             "198.51.100.3",
             "198.51.100.4",
             "999999999",
+            "lan",
+        );
+
+        assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));
+    }
+
+    // The domain field is optional (see validate_dhcp_form's comment on the
+    // check itself), so a form that never sets one at all must still pass --
+    // this is the regression case for the domain check silently becoming a
+    // de-facto "domain is required" gate for every existing subnet.
+    #[test]
+    fn accepts_empty_domain() {
+        let lease_time = validate_test_dhcp_form!(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
+            "86400",
+            "",
+        );
+
+        assert_eq!(lease_time.unwrap(), 86400);
+    }
+
+    // Before this check existed, add_subnet/update_subnet's `domain` field
+    // flowed straight into Kea's domain-name/domain-search options with no
+    // validation at all -- this pins that a non-empty value still has to
+    // pass is_valid_domain_name, the same rule update_dhcp_proxy already
+    // applies to its own dhcp_proxy_domain field.
+    #[test]
+    fn rejects_invalid_domain() {
+        let lease_time = validate_test_dhcp_form!(
+            "198.51.100.0/24",
+            "198.51.100.100",
+            "198.51.100.200",
+            "198.51.100.1",
+            "198.51.100.2",
+            "198.51.100.3",
+            "198.51.100.4",
+            "86400",
+            "-not valid-",
         );
 
         assert_eq!(lease_time, Err(StatusCode::BAD_REQUEST));

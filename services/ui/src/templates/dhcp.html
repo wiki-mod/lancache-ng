@@ -582,7 +582,16 @@ async function checkDhcpConflict() {
   conflictDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
-    const res = await fetch('/api/dhcp/check');
+    // POST with an explicit CSRF header, not a plain GET: this endpoint has
+    // a real side effect (starts/stops the DHCP conflict-probe container on
+    // the server), and this app's CSRF protection only covers mutating
+    // methods -- see check_dhcp_conflict's own comment in dhcp.rs.
+    const res = await fetch('/api/dhcp/check', {
+      method: 'POST',
+      headers: {
+        'X-CSRF-Token': '{{ csrf_token }}'
+      }
+    });
     const data = await res.json();
     if (data.status === 'verified') {
       statusEl.className = 'text-sm text-green-400';
