@@ -41,6 +41,36 @@ teardown() {
     [ "$seed" = "123456-1" ]
 }
 
+# #822 pattern audit: .github/actions/derive-validation-network/action.yml
+# used to reimplement this same octet/subblock/slot derivation formula
+# inline a second time, kept in sync with this file only by a code comment
+# demanding "byte-for-byte identical" -- nothing structurally prevented the
+# two from silently drifting. The action now sources this script and calls
+# its functions directly instead, making the two AGREE by construction.
+# This guards against that duplication silently coming back: the action
+# must still source this script and call validation_subnet_export_env, and
+# must NOT contain its own copy of the derivation arithmetic.
+@test "derive-validation-network/action.yml calls this script instead of reimplementing its formula" {
+    action_file="$repo_root/.github/actions/derive-validation-network/action.yml"
+    [ -f "$action_file" ] || fail "derive-validation-network/action.yml not found"
+
+    grep -q 'source "\$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"' "$action_file" \
+        || fail "action.yml no longer sources scripts/lib/reserve-validation-subnet.sh"
+    grep -q 'validation_subnet_export_env' "$action_file" \
+        || fail "action.yml no longer calls validation_subnet_export_env"
+    grep -q 'validation_subnet_derive_slot' "$action_file" \
+        || fail "action.yml no longer calls validation_subnet_derive_slot"
+
+    # Regression guard: none of these signature fragments of the OLD inline
+    # formula (sha256sum digest slicing, the "% 252) + 2" octet modulus, or
+    # the "% 8" subblock modulus) should ever reappear in action.yml -- their
+    # presence would mean the duplication came back.
+    ! grep -q 'sha256sum' "$action_file" \
+        || fail "action.yml appears to reimplement the sha256sum-based derivation again"
+    ! grep -q '% 252' "$action_file" \
+        || fail "action.yml appears to reimplement the octet modulus arithmetic again"
+}
+
 @test "retry attempts salt the seed so they never re-derive attempt 1's seed" {
     seed1="$(validation_subnet_seed_for_attempt 123456 1 1)"
     seed2="$(validation_subnet_seed_for_attempt 123456 1 2)"
