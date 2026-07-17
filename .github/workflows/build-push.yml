@@ -2239,27 +2239,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "$BASE_REF" == "master" ]]; then
-            base_channel_tag=edge
-          elif [[ "$BASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            base_channel_tag=dev
-          else
-            base_channel_tag=latest
-          fi
+          # Calls scripts/lib/validation-image-tag.sh's own functions
+          # instead of reimplementing the same channel/pr-staging-available/
+          # tag decisions inline a second time (issue #822 pattern audit,
+          # 2026-07-17: that file's own header used to document this job as
+          # "deliberately left untouched... keep the two in sync by hand",
+          # which is exactly the no-guard-against-drift shape #822 exists to
+          # catch). This job already sources other scripts/lib/*.sh files
+          # from $GITHUB_WORKSPACE below (ghcr-retry.sh,
+          # staging-image-freshness.sh), so this is not a new pattern for it.
+          # shellcheck source=scripts/lib/validation-image-tag.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
+
+          base_channel_tag="$(vit_base_channel_tag "$BASE_REF")"
           echo "base-channel-tag=$base_channel_tag" >> "$GITHUB_OUTPUT"
 
-          pr_staging_available=false
-          if [[ "$EVENT_NAME" == "pull_request" && "$ACTOR" != "dependabot[bot]" && "$HEAD_REPO" == "$REPOSITORY" ]]; then
-            pr_staging_available=true
-          fi
+          pr_staging_available="$(vit_pr_staging_available "$EVENT_NAME" "$ACTOR" "$HEAD_REPO" "$REPOSITORY")"
           echo "pr-staging-available=$pr_staging_available" >> "$GITHUB_OUTPUT"
 
+          # vit_resolve_tag's workflow_dispatch branch never applies here --
+          # this job only ever runs from push/pull_request -- so the empty
+          # dispatch_tag argument is never read.
+          tag="$(vit_resolve_tag "$EVENT_NAME" "$BASE_REF" "$PR_NUMBER" "$BUILD_SHA" "$ACTOR" "$HEAD_REPO" "$REPOSITORY" "")"
+
           if [[ "$pr_staging_available" == "true" ]]; then
-            short_sha="${BUILD_SHA::7}"
-            tag="pr-${PR_NUMBER}-sha-${short_sha}"
             echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; base-channel fallback for untouched services: '$base_channel_tag')."
           else
-            tag="$base_channel_tag"
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
               echo "::notice::$ACTOR's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
             fi
@@ -2340,21 +2345,20 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/staging-image-freshness.sh
           source "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh"
+          # shellcheck source=scripts/lib/validation-image-tag.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # Mirrors build/build-arm64's "Determine whether this service
-          # needs building" should-build override exactly: a workflow/CI-
-          # contract change forces every service except build-tools to be
-          # treated as touched, because build-tools' own detect-changes
-          # scoping (tools/build-tools/** only) is intentionally narrower.
+          # Calls vit_service_should_have_staging_tag directly instead of
+          # reimplementing the same "workflow/CI-contract change forces
+          # every service except build-tools to be treated as touched"
+          # override inline a second time (issue #822 pattern audit,
+          # 2026-07-17) -- see this step's earlier "Determine validation
+          # image channel"-sourced functions for the matching fix to the
+          # other two decisions this job used to duplicate.
           service_should_have_staging_tag() {
-            local service="$1" touched="$2"
-            if [[ "$WORKFLOW_CHANGED" == "true" && "$service" != "build-tools" ]]; then
-              echo true
-            else
-              echo "$touched"
-            fi
+            vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
 
           declare -A touched_map=(

@@ -105,3 +105,25 @@ setup() {
     run vit_service_should_have_staging_tag "build-tools" "false" "true"
     [ "$output" = "false" ]
 }
+
+@test "build-push.yml calls this file's functions instead of reimplementing them (#822 pattern)" {
+    workflow_file="$repo_root/.github/workflows/build-push.yml"
+    [ -f "$workflow_file" ] || fail "build-push.yml not found"
+
+    grep -q 'source "\$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"' "$workflow_file" \
+        || fail "build-push.yml no longer sources scripts/lib/validation-image-tag.sh"
+    grep -q 'vit_base_channel_tag' "$workflow_file" \
+        || fail "build-push.yml no longer calls vit_base_channel_tag"
+    grep -q 'vit_pr_staging_available' "$workflow_file" \
+        || fail "build-push.yml no longer calls vit_pr_staging_available"
+    grep -q 'vit_resolve_tag' "$workflow_file" \
+        || fail "build-push.yml no longer calls vit_resolve_tag"
+    grep -q 'vit_service_should_have_staging_tag' "$workflow_file" \
+        || fail "build-push.yml no longer calls vit_service_should_have_staging_tag"
+
+    # The old inline reimplementation used this exact conditional shape for
+    # the base-channel mapping -- if it reappears, someone re-duplicated the
+    # logic instead of calling vit_base_channel_tag.
+    ! grep -qF 'base_channel_tag=edge' "$workflow_file" \
+        || fail "build-push.yml appears to reimplement the base-channel mapping inline again"
+}
