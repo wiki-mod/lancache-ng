@@ -50,7 +50,7 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"consistent"* ]]
 }
@@ -69,7 +69,7 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"diverges"* ]]
 }
@@ -85,7 +85,7 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"diverges"* ]]
 }
@@ -103,7 +103,7 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -eq 0 ]
 }
 
@@ -120,7 +120,7 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not a known build-matrix service"* ]]
 }
@@ -136,7 +136,7 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"vacuous"* ]]
 }
@@ -147,7 +147,7 @@ EOF
 @test "fails closed when no services=() arrays are present at all" {
     write_canonical_matrix > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"renamed or refactored"* ]]
 }
@@ -163,6 +163,6 @@ EOF
         echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)'
     } > "$fixture"
 
-    run "$script" "$fixture"
+    run bash "$script" "$fixture"
     [ "$status" -eq 0 ]
 }

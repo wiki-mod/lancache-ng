@@ -59,7 +59,18 @@ fi
 # Canonical set: every distinct service the build matrix declares. Fail closed
 # if extraction yields nothing -- an empty canonical set would make every
 # comparison below vacuously pass, defeating the guard.
-canonical=$(grep -oP '^\s+- service:\s*\K[a-z0-9-]+' "$workflow" | sort -u)
+#
+# The `|| true` is required, not decorative: `grep -oP` exits 1 (its normal,
+# documented "no lines matched" status, not an error) when the matrix can't
+# be parsed at all -- exactly the case this guard must fail closed on. Under
+# `set -euo pipefail`, an unguarded `canonical=$(grep ... | sort -u)` would
+# let that non-zero pipeline status kill the script right here via errexit,
+# silently (no message, no diagnostic) before the `-z "$canonical"` check
+# below ever runs -- defeating the very fail-closed path this comment block
+# describes. `sort -u` never fails on empty input, so the only realistic
+# non-zero pipeline outcome here is the intentional zero-match case, which is
+# exactly what the next `if` is meant to catch and report.
+canonical=$(grep -oP '^\s+- service:\s*\K[a-z0-9-]+' "$workflow" | sort -u || true)
 if [[ -z "$canonical" ]]; then
     printf "%b[SERVICE LISTS]%b could not extract any '- service:' matrix entries from %s; refusing to run a vacuous check.\n" "$RED" "$NC" "$workflow" >&2
     exit 1
