@@ -928,7 +928,7 @@ async fn main() -> Result<()> {
             "/dhcp/snapshot/rollback",
             post(routes::dhcp::rollback_kea_snapshot),
         )
-        .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
+        .route("/api/dhcp/check", post(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
