@@ -58,13 +58,19 @@ concurrency:
   # contended for the same single pending slot even though they are
   # unrelated -- also fixed by moving to a run-scoped key). That whole-run
   # serialization was the ONLY thing standing between a rapid burst of
-  # pushes and `promote` being torn down mid-write: `promote` has its own
-  # job-level concurrency group (`Build & Push-promote`, added by #793),
-  # but that group only serializes `promote` against OTHER users of that
-  # exact same group name (e.g. backfill-stack-latest.yml) -- it does NOT
-  # protect `promote` from being killed mid-execution if THIS group's own
-  # cancel-in-progress were true and cancelled the whole run out from
-  # under it. Confirmed against GitHub's own docs: workflow-level
+  # pushes and `promote` being torn down mid-write: `promote` used to have
+  # its own job-level concurrency group (`Build & Push-promote`, added by
+  # #793) shared with backfill-stack-latest.yml, but that group only
+  # serialized `promote` against OTHER users of that exact same group name
+  # -- it did NOT protect `promote` from being killed mid-execution if THIS
+  # (top-level) group's own cancel-in-progress were true and cancelled the
+  # whole run out from under it. #897 replaced that job-level group with
+  # scripts/lib/promote-lock.sh's git-ref lock (see the `promote` job's own
+  # comments), for an unrelated reason (the group could also silently drop
+  # an older still-queued `promote` run entirely) -- the reasoning below
+  # about why THIS top-level group's cancel-in-progress must stay false is
+  # independent of that change and still applies exactly as written.
+  # Confirmed against GitHub's own docs: workflow-level
   # `cancel-in-progress: true` cancels the entire previous run, including
   # every job already in progress, not just still-queued ones -- a job's
   # own separate concurrency group offers no immunity from that. Rather
@@ -5275,15 +5281,43 @@ jobs:
     # rather than by this group's cancel-in-progress setting, which stays
     # false here for the backfill-serialization reason above, not as a
     # second line of defense against the top-level group.
-    # backfill-stack-latest.yml deliberately joins this exact same group
+    # backfill-stack-latest.yml deliberately joined this exact same group
     # name (not "Build & Push-publish") so the two tag-moving workflows
-    # still serialize against each other; keep both in sync if this name
-    # ever changes.
-    concurrency:
-      group: ${{ github.workflow }}-promote
-      cancel-in-progress: false
+    # still serialized against each other.
+    #
+    # REMOVED (#897): this job-level `concurrency:` group is exactly what let
+    # a *newer* pending `promote` run silently CANCEL an *older* one that was
+    # still queued, before the older run's very first step had executed.
+    # GitHub Actions' concurrency-group primitive holds at most one PENDING
+    # request per group; a job that is merely queued (not yet running) is not
+    # protected by anything this job's own steps could do, because those
+    # steps never get to run for the cancelled instance. #892 (narrowing
+    # cancellation to `build`/`container-scan` instead of the whole run) made
+    # this practically reachable: multiple tag pushes/dispatches can now
+    # build in parallel and reach this point at nearly the same time. Real
+    # mutual exclusion (still GLOBAL, not per-ref -- re-scoping per-ref would
+    # reintroduce #777, a promotion racing backfill-stack-latest.yml's own
+    # tag move for a *different* ref) now comes from
+    # scripts/lib/promote-lock.sh's "Acquire the cross-workflow promote lock"
+    # step below instead: every `promote`/`backfill-latest` run is now
+    # admitted immediately (no GitHub-side queueing to be dropped from) and
+    # self-serializes via a git-ref-backed lock that is atomic on GitHub's
+    # remote regardless of which self-hosted host picks up the job (checked
+    # for real via `gh api .../actions/runners`: `lancache-heavy` spans
+    # several distinct physical hosts, so a host-local flock -- this
+    # project's usual mutex idiom, see scripts/lib/reserve-validation-subnet.sh --
+    # would not have provided real exclusion here). backfill-stack-latest.yml
+    # was updated to use the exact same lock so the #777 property (no
+    # promote-vs-backfill tag-move race) still holds.
     permissions:
-      contents: read
+      # Widened from `contents: read` (#897): the promote-lock mechanism
+      # above needs to push/delete a dedicated, non-branch/non-tag ref
+      # (refs/promote-lock/global) on this repo to implement its
+      # compare-and-swap acquire/release. This does not grant any ability to
+      # write to master/v0.2.0/tags -- branch protection rulesets only match
+      # refs/heads/* ref-name conditions, and this lock ref lives outside
+      # both refs/heads/* and refs/tags/* entirely.
+      contents: write
       packages: write
       id-token: write
       attestations: write
@@ -5297,6 +5331,39 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      # Real, cross-host mutual exclusion for the tag-moving work below
+      # (issue #897 -- see this job's own `permissions:`/removed
+      # `concurrency:` comments for the full reasoning). Runs immediately
+      # after checkout, before any image work starts, so a run that cannot
+      # get the lock never touches GHCR at all. Fails closed: if every
+      # attempt is exhausted, promote_lock_acquire_with_retry prints
+      # ::error:: and returns 1, which -- under `set -euo pipefail` --
+      # stops this step (and therefore the job) before any tag is moved.
+      - name: Acquire the cross-workflow promote lock
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/promote-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
+
+          # Budget: up to 40 attempts, 15s backoff on a held-but-not-stale
+          # lock (~10 minutes total) -- generous relative to promote's own
+          # typical runtime (a handful of digest lookups and tag moves, not
+          # a rebuild), so a realistic queue of a few waiting promotions
+          # drains well within budget. stale_after=900s (15 minutes) is
+          # comfortably longer than any legitimate promote/backfill run, so
+          # a crashed or killed holder's abandoned lock is recovered
+          # reasonably promptly without risking a takeover of a run that is
+          # still legitimately working.
+          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -5653,6 +5720,36 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ steps.promote-stack.outputs.stack-pointer-subject }}
           subject-digest: ${{ steps.promote-stack.outputs.stack-pointer-digest }}
+
+      # `if: always()` (issue #897): the lock must be released whether the
+      # steps above succeeded or failed, otherwise a real promotion failure
+      # would ALSO wedge every other queued promote/backfill run behind this
+      # job's own stale_after timeout for no reason. Safe to run even if the
+      # acquire step itself never succeeded (promote_lock_release is a
+      # verified-ownership no-op when this job never held the lock).
+      - name: Release the cross-workflow promote lock
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/promote-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          # `|| true` here is the documented, narrow exception AG-VAL-004
+          # allows: promote_lock_release already prints its own ::warning::
+          # for every non-fatal outcome (already released, no longer ours,
+          # or a failed delete push), and this whole design's stale_after
+          # takeover exists specifically so a genuinely failed/skipped
+          # release here is recovered by the next waiter rather than
+          # wedging the lock forever -- release is best-effort cleanup, not
+          # a correctness-critical step, so it must never flip an otherwise
+          # successful promotion to a failed job status.
+          promote_lock_release origin "$holder_note" || true
 
   release:
     # Release source archives must match the same commit that produced the
