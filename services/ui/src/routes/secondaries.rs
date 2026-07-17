@@ -139,6 +139,38 @@ pub async fn register_secondary(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Issue #866: resolve the address this secondary will actually be told
+    // to connect to *before* generating a credential or touching the
+    // database, so a primary that isn't configured for remote secondaries
+    // fails this request with zero side effects rather than half-registering
+    // a secondary it then can't hand a reachable NATS URL to.
+    //
+    // advertised_nats_url() returning None means neither NATS_ADVERTISE_URL
+    // nor NATS_BIND_IP is set on this primary -- there is no address to give
+    // out here that could ever resolve from outside this primary's own
+    // Docker network (state.config.nats_url is exactly that unreachable
+    // internal value; see its own doc comment for why this must not fall
+    // back to it). Refusing loudly here, at the one moment the primary
+    // actually knows it can't fulfill the request, is the fix: the prior
+    // behavior silently handed out nats_url anyway, `setup.sh secondary`
+    // wrote it into the new secondary's .env, started the container, and
+    // printed an unconditional "is running" with no signal the sync would
+    // never work. 503, not 4xx: the request itself (token, name) is valid --
+    // it's this primary's own configuration that isn't ready for it yet.
+    let Some(nats_url) = state.config.advertised_nats_url() else {
+        tracing::error!(
+            secondary_name = %form.name,
+            "refusing secondary registration: neither NATS_ADVERTISE_URL nor \
+             NATS_BIND_IP is configured on this primary, so there is no \
+             NATS URL reachable from a remote secondary to hand out (issue \
+             #866). Set NATS_BIND_IP to the trusted LAN/VPN interface \
+             remote secondaries use (see docs/architecture-ng.md's \
+             \"Remote secondary NATS access\"), or NATS_ADVERTISE_URL for a \
+             non-default port/scheme/hostname, then retry."
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
     // Issue #583: each secondary gets its own NATS identity now, not the old
     // shared DNS-reader credential. `name` doubles as the NATS username --
     // it already passed the same alphanumeric+dash charset check NATS
@@ -174,7 +206,15 @@ pub async fn register_secondary(
     }
 
     Ok(Json(RegisterResponse {
-        nats_url: state.config.nats_url.clone(),
+        // Resolved above, before any credential/DB write: an explicit
+        // NATS_ADVERTISE_URL override, or one derived from NATS_BIND_IP
+        // (the same trusted LAN/VPN IP docker-compose.nats-secondary.yml
+        // already publishes NATS on for remote secondaries). Never
+        // state.config.nats_url directly -- that's the Docker-internal
+        // address this container's own connection and dns-standard/dns-ssl
+        // use, unreachable from the remote secondary that's the sole
+        // consumer of this field (issue #866).
+        nats_url,
         nats_user,
         nats_password,
         consumer_name,

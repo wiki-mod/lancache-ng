@@ -4941,7 +4941,35 @@ EOF
     SECONDARY_RESPONSE_FILE=""
     trap - EXIT
 
-    if [[ ! "$http_status" =~ ^2 ]]; then
+    if [[ "$http_status" = "503" ]]; then
+        # Issue #866: the primary's register_secondary refuses with 503,
+        # specifically (not a generic 4xx), when it has no genuinely
+        # reachable NATS URL to hand out -- neither NATS_BIND_IP nor
+        # NATS_ADVERTISE_URL is configured on the primary. This is not a
+        # problem with this command's own arguments, so give the operator
+        # the actual fix instead of the generic "verify token/name" message
+        # below, which would send them looking in the wrong place.
+        #
+        # Setting NATS_BIND_IP/NATS_ADVERTISE_URL and restarting only the
+        # `ui` container is NOT sufficient on its own: `ui` only reads the
+        # value to compute what to advertise, but the `nats` service itself
+        # still needs `docker-compose.nats-secondary.yml` included (and the
+        # stack recreated with it) to actually publish port 4222 on that
+        # address -- see that file's own `NATS_BIND_IP:?...` host-port
+        # binding. Telling the operator to restart only `ui` here would let
+        # registration "succeed" while `nats` still has no host-port
+        # publish, reproducing the exact silent-sync-failure this change
+        # exists to prevent.
+        #
+        # The recreate example must include `--env-file .env.local` when
+        # that is where the operator set the variable: Docker Compose only
+        # auto-loads the project directory's default `.env`, never
+        # `.env.local`, so a recreate command copied verbatim without
+        # `--env-file .env.local` would leave `NATS_BIND_IP`'s
+        # `${NATS_BIND_IP:?...}` guard in docker-compose.nats-secondary.yml
+        # unset and the override would not actually apply.
+        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'nats' service recreated with the docker-compose.nats-secondary.yml override included -- e.g. docker compose -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d if the variable is in .env, or docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d if it is in .env.local (Compose does not auto-load .env.local) -- so NATS actually publishes that address; restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
+    elif [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi
     [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"

@@ -379,6 +379,16 @@ services:
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=validation-pdns-key
       - NATS_URL=nats://nats:4222
+      # Issue #866: register_secondary now refuses registration (HTTP 503)
+      # unless NATS_BIND_IP or NATS_ADVERTISE_URL is set -- see the identical
+      # comment in deploy/prod/docker-compose.yml for the full rationale.
+      # scripts/nats-secondary-auth-callout-simulation.sh registers
+      # "secondaries" that are actually client containers on this same
+      # validation Docker network, so `nats://nats:4222` genuinely IS
+      # reachable for them (unlike a real remote secondary on a separate
+      # host/network) -- NATS_ADVERTISE_URL states that explicitly rather
+      # than relying on a bare-NATS_URL fallback that no longer exists.
+      - NATS_ADVERTISE_URL=nats://nats:4222
       - NATS_UI_USER=validation-ui
       - NATS_UI_PASSWORD=validation-ui-password
       - NATS_DNS_WRITER_USER=validation-dns-writer

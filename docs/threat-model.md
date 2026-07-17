@@ -317,10 +317,27 @@ record changes, or subscribes to read cache/DNS metadata.
 - Remote/secondary access is opt-in only via
   `deploy/prod/docker-compose.nats-secondary.yml` with `NATS_BIND_IP` bound to a
   trusted LAN/VPN interface, and must be firewalled to that scope.
+- **Issue #866/#881**: registration (`POST /api/secondary/register`) hands a
+  new secondary the address it will actually dial, computed by
+  `Config::advertised_nats_url()`. By default that is derived from the same
+  `NATS_BIND_IP` trusted-interface binding above, but an operator can instead
+  set the explicit `NATS_ADVERTISE_URL` override to advertise a different
+  hostname, reverse proxy, or non-default port/scheme reachable over that
+  same trusted network. The security boundary is therefore whatever address
+  is actually advertised, not literally `NATS_BIND_IP` itself — firewalling
+  must cover the real reachability path `NATS_ADVERTISE_URL` names (e.g. a
+  proxy's own listener), not just the primary's raw bind interface, when that
+  override is used. `advertised_nats_url()` fails closed to `None` (HTTP 503)
+  for a wildcard (`0.0.0.0`/`::`, bracketed or not), loopback
+  (`127.0.0.1`/`::1`), or hostname `NATS_BIND_IP` with no explicit
+  `NATS_ADVERTISE_URL` set, since none of those are addresses a genuinely
+  remote secondary could dial — see `services/ui/src/config.rs`'s
+  `advertised_nats_url()` and its unit tests for the exact rejected cases.
 
 **Residual risk**: Medium — correct firewalling of the optional secondary
-binding is the operator's responsibility, and the role split limits but does not
-eliminate what a compromised *writer* credential could do (forge DNS records).
+binding (and, when `NATS_ADVERTISE_URL` is used, of whatever address it
+actually names) is the operator's responsibility, and the role split limits
+but does not eliminate what a compromised *writer* credential could do (forge DNS records).
 A compromised *secondary* credential is scoped to exactly that one secondary's
 consume-only JetStream permissions (same scope the old shared reader role
 had) and can be individually revoked without touching any other secondary.
@@ -571,8 +588,10 @@ foothold in the sync mesh)
   if it is empty (an empty token would match any registration attempt).
 - Since issue #583, each secondary receives its own individually-revocable
   NATS credential at registration time (T5) instead of a role shared across
-  every registered secondary, and reaches NATS only over the operator's
-  trusted LAN/VPN interface (`NATS_BIND_IP`).
+  every registered secondary, and reaches NATS only over whatever address the
+  primary advertises during registration — by default the operator's trusted
+  LAN/VPN interface (`NATS_BIND_IP`), or an explicit, separately-firewalled
+  `NATS_ADVERTISE_URL` when one is configured (see T5).
 - A forged registration only grants the consume-only DNS-sync permission
   scope (T5); it cannot publish DNS records, and can be revoked on its own
   (`DELETE /api/secondary/{name}`) without affecting any legitimately

@@ -607,6 +607,18 @@ This is useful if:
 
 Secondary DNS nodes sync with the primary through NATS.
 
+**Prerequisite**: the primary must be configured with a NATS address a remote
+secondary can actually reach before you register one. By default NATS is not
+published on the host at all, so registration fails closed with HTTP 503
+until the primary has `NATS_BIND_IP` (reusing the same trusted LAN/VPN
+interface `docker-compose.nats-secondary.yml` binds NATS to) or, for a
+non-default port/scheme/hostname, the more specific `NATS_ADVERTISE_URL`
+set in its `.env`/`.env.local`, and the `nats` service recreated with the
+`docker-compose.nats-secondary.yml` override included so it actually
+publishes that address. See
+[docs/architecture-ng.md's "Remote secondary NATS access"](docs/architecture-ng.md#remote-secondary-nats-access)
+section for the full setup and the exact failure modes it fail-closes.
+
 Setup example:
 
 ```bash

@@ -1424,6 +1424,26 @@ services:
       - DNS_ROLLBACK_URL=http://dns-standard:8083
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
+      # Issue #866: NATS_URL above is only ever correct for this container's
+      # own internal connection (main.rs) -- routes/secondaries.rs's
+      # register_secondary hands a *different* value to remote secondary DNS
+      # nodes, computed by Config::advertised_nats_url from these two vars
+      # (neither has a default). Leaving BOTH unset does not fall back to
+      # NATS_URL: register_secondary refuses the registration outright
+      # (HTTP 503) rather than silently handing out an address that could
+      # never resolve from outside this Docker network -- see that
+      # function's doc comment. Set at least one before running
+      # `setup.sh secondary` against this primary:
+      # - NATS_BIND_IP: same trusted LAN/VPN IP already required by
+      #   docker-compose.nats-secondary.yml's host-port publish for remote
+      #   secondaries (see docs/architecture-ng.md's "Remote secondary NATS
+      #   access") -- set it once and both that override and registration
+      #   agree on the reachable address.
+      # - NATS_ADVERTISE_URL: explicit override for anything NATS_BIND_IP
+      #   alone can't express (non-default port, tls:// scheme, VPN
+      #   hostname); always wins when set.
+      - NATS_BIND_IP=${NATS_BIND_IP:-}
+      - NATS_ADVERTISE_URL=${NATS_ADVERTISE_URL:-}
       - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
       - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}

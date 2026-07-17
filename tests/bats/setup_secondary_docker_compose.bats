@@ -69,3 +69,44 @@ setup() {
     [[ "$healthcheck_line" -lt "$restart_line" ]] \
         || fail "healthcheck block must come before restart block"
 }
+
+@test "cmd_secondary gives an actionable message for the issue #866 HTTP 503 refusal" {
+    # Issue #866: register_secondary now refuses (HTTP 503) when the primary
+    # has neither NATS_BIND_IP nor NATS_ADVERTISE_URL configured, instead of
+    # silently handing out an unreachable NATS URL. Before this fix,
+    # cmd_secondary's only non-2xx handling was one generic
+    # "verify the registration token, secondary name, and primary server
+    # logs" message -- accurate for a bad token/name (4xx), but actively
+    # misleading for this 503 case, which is a primary-side configuration
+    # gap the operator can't fix by re-checking their own command-line
+    # arguments. Guards against that specific, more helpful branch
+    # regressing back into the generic one on a future refactor.
+    grep -q 'http_status" = "503"' "$repo_root/setup.sh" \
+        || fail "cmd_secondary no longer special-cases HTTP 503"
+
+    grep -q 'NATS_BIND_IP.*NATS_ADVERTISE_URL' "$repo_root/setup.sh" \
+        || fail "the 503 die message no longer names NATS_BIND_IP/NATS_ADVERTISE_URL as the fix"
+
+    # Setting NATS_BIND_IP/NATS_ADVERTISE_URL and restarting only the `ui`
+    # container is not sufficient: the `nats` service itself still needs
+    # docker-compose.nats-secondary.yml included (and to be recreated with
+    # it) to actually publish port 4222 on that address. Guards against the
+    # message regressing to only mention restarting `ui`, which would leave
+    # an operator who follows it literally with the same silent
+    # never-syncs failure mode issue #866 reports, just one step later.
+    grep -q 'nats-secondary\.yml' "$repo_root/setup.sh" \
+        || fail "the 503 die message no longer tells the operator to recreate the nats service with the nats-secondary.yml override"
+}
+
+@test "cmd_secondary's 503 recreate example includes --env-file .env.local for the .env.local case" {
+    # Codex review on PR #881: Docker Compose only auto-loads the project
+    # directory's default .env, never .env.local, so an operator who set
+    # NATS_BIND_IP/NATS_ADVERTISE_URL in .env.local and then copies a
+    # recreate command missing --env-file .env.local would still leave
+    # docker-compose.nats-secondary.yml's ${NATS_BIND_IP:?...} guard unset --
+    # NATS never actually gets recreated with the override applied. Guards
+    # against the example regressing back to a bare `docker compose -f ...`
+    # command that silently assumes .env only.
+    grep -q -- '--env-file \.env\.local' "$repo_root/setup.sh" \
+        || fail "the 503 die message's recreate example no longer shows --env-file .env.local for the .env.local case"
+}

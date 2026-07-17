@@ -472,6 +472,70 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed remote secondary DNS node registration handing out a NATS URL that
+  can never be reached from outside the primary's own Docker network (#866).
+  `routes/secondaries.rs::register_secondary`'s JSON response always
+  returned `state.config.nats_url` verbatim -- correct for the primary's own
+  internal NATS clients (this container's own connection, the co-located
+  `dns-standard`/`dns-ssl` subscribers), all hardcoded to the same literal
+  `nats://nats:4222` across every compose file, but never overridable and
+  never reachable by a genuinely remote host. `setup.sh secondary` wrote that
+  unreachable value straight into the new secondary's `.env`, started the
+  container successfully, and printed an unconditional "is running" success
+  message with no connectivity check at all -- meanwhile `nats-subscriber`'s
+  indefinite reconnect backoff meant the container never crashed, it just
+  silently never synced a single DNS record while PowerDNS's own healthcheck
+  stayed green, leaving the operator with no signal anything was wrong. Added
+  `Config::advertised_nats_url()` (`services/ui/src/config.rs`): registration
+  now prefers a new explicit `NATS_ADVERTISE_URL` override, then a URL
+  derived from `NATS_BIND_IP` (the same trusted LAN/VPN IP
+  `docker-compose.nats-secondary.yml` already requires to publish NATS's
+  host port for remote secondaries -- reusing it needs no new configuration
+  for installs that already have that override active). When **neither** is
+  configured, `register_secondary` now refuses the request outright (HTTP
+  503, before any credential is generated or written to the database)
+  instead of silently falling back to the unreachable `nats_url` -- this
+  endpoint has no legitimate caller other than a genuine remote-secondary
+  registration (`setup.sh secondary`), so there is no "install that doesn't
+  use remote secondaries" case a fail-closed check here could break.
+  `setup.sh secondary` reports the 503 with a specific, actionable message
+  naming the exact variable to set on the primary, instead of its generic
+  "verify the token/name" fallback message. Audited the rest of the
+  registration response (`RegisterResponse`) for the same
+  internal-only-value class of bug: no other field has it -- `proxy_ip`
+  (`standard_ip`) is the LAN IP every client already uses directly by
+  design, and `pdns_api_key` is a shared secret, not an address.
+  Follow-up review fixes: `advertised_nats_url()` now brackets an IPv6
+  `NATS_BIND_IP` literal (`nats://[2001:db8::5]:4222`, not the unparsable
+  `nats://2001:db8::5:4222`) and refuses to derive an advertised URL from a
+  wildcard `NATS_BIND_IP` (`0.0.0.0`/`::`) -- a wildcard is only meaningful
+  as a bind address, never as something a remote secondary could dial, so
+  that case now falls through to the same HTTP 503 refusal and requires an
+  explicit, routable `NATS_ADVERTISE_URL` instead. The 503 error message
+  from `setup.sh secondary` now also makes clear that setting
+  `NATS_BIND_IP`/`NATS_ADVERTISE_URL` and restarting only the `ui` container
+  is not enough on its own: the `nats` service itself still needs
+  `docker-compose.nats-secondary.yml` included (and the stack recreated with
+  it) to actually publish port 4222 on that address.
+  Further review fixes: `advertised_nats_url()` now strips a bracketed IPv6
+  wildcard (`NATS_BIND_IP=[::]`, Compose's own documented bracketed form)
+  before parsing, so it is rejected the same as the bare `::` form instead
+  of falling through to the hostname branch as `nats://[::]:4222`; loopback
+  `NATS_BIND_IP` values (`127.0.0.1`/`::1`) and hostname `NATS_BIND_IP`
+  values (anything that is not a parsable IP literal at all) are now
+  rejected too, since a remote secondary can never dial loopback on the
+  primary and `NATS_BIND_IP` feeds Compose's IP/port `HOST` field, not a
+  resolvable name -- both cases now require an explicit
+  `NATS_ADVERTISE_URL` instead of returning a URL that looks valid but
+  isn't reachable. Updated `docs/architecture-ng.md`'s "Remote secondary
+  NATS access" section and `docs/threat-model.md` (T5, T14) to describe the
+  full precedence/rejection rules and the fact that the security-relevant
+  advertised address is whatever `NATS_ADVERTISE_URL` actually names, not
+  only the `NATS_BIND_IP` bind interface. Added a `README.md` "Secondary
+  DNS" prerequisite note pointing at that section, and fixed
+  `setup.sh secondary`'s HTTP 503 message: its `.env.local` recreate example
+  was missing `--env-file .env.local` (Compose only auto-loads the default
+  `.env`), which would have left the override unset if followed literally.
 - Fixed the PowerDNS zone/record rollback listener's post-rollback
   recursor cache-flush being silently denied by NATS permissions (#867):
   `rollback_listener.rs::rollback_handler` publishes `lancache.dns.flush`
