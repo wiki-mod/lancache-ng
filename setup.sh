@@ -3109,6 +3109,21 @@ EOF
 # recovery instead of being silently lost. Idempotent: a second restore of
 # the same archive against the same target finds no .env.local left to move
 # and is a no-op.
+# Rejects a path that cannot be safely used as a literal in the restore-time
+# `sed` path rewrite below. `#` is that s-command's delimiter, and `&`/`\` are
+# sed replacement-side metacharacters -- any of them in the archived-install or
+# install-dir path would corrupt the command or the value it writes into the
+# restored .env. Kept as its own function so it is unit-testable. Regex
+# metacharacters such as `.` are deliberately NOT rejected: they cannot corrupt
+# the command (only, in theory, widen a match), and realpath-normalized install
+# paths legitimately contain them.
+restore_path_is_sed_safe() {
+    case "$1" in
+        *'#'* | *'&'* | *'\'* | *$'\n'*) return 1 ;;
+    esac
+    return 0
+}
+
 restore_clear_stale_env_local_if_unarchived() {
     local archived_install_root="$1" install_dir="$2" stale_target
 
@@ -3216,9 +3231,21 @@ cmd_restore() {
         # rewritten in place as if it were part of the restored config.
         restore_clear_stale_env_local_if_unarchived "$root/$rel_install" "$install_dir"
         if [[ "$archived_install" != "$install_dir" ]]; then
+            # Validate both operator-controlled paths before feeding them to
+            # sed, and fail closed on the substitution itself: a silently
+            # failed rewrite would leave .env/.env.local pointing at the old
+            # archived path and let the restore continue with a broken install
+            # location (the structurally identical rewrite in cmd_update_ip
+            # stays safe by only ever operating on is_valid_ipv4-validated
+            # values).
+            restore_path_is_sed_safe "$archived_install" \
+                || die "Cannot rewrite restored config: archived install path '$archived_install' contains a character unsafe for path substitution (#, &, or \\)."
+            restore_path_is_sed_safe "$install_dir" \
+                || die "Cannot rewrite restored config: install path '$install_dir' contains a character unsafe for path substitution (#, &, or \\)."
             for path in "$install_dir/.env" "$install_dir/.env.local"; do
                 [[ -f "$path" ]] || continue
-                sed -i "s#${archived_install}#${install_dir}#g" "$path"
+                sed -i "s#${archived_install}#${install_dir}#g" "$path" \
+                    || die "Failed to rewrite the install path in $path during restore."
             done
         fi
     fi
