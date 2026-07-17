@@ -686,6 +686,28 @@ jobs:
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Job-level concurrency (#891 follow-up, extending #888/#892/#915's
+    # proven pattern): validate-compose is a shared `needs:` root for
+    # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit (and,
+    # via their soft `if:` gates, rust_coverage/build/build-arm64 too), so
+    # reclaiming a superseded commit's run here matters more than for most
+    # lancache-light jobs. Safe to cancel mid-flight: every consumer either
+    # uses a soft `if:`-gate that cleanly skips on a non-success result
+    # (`build`/`build-arm64`/`rust_coverage`, or the automatic
+    # `needs:`-skip default for `shellcheck`/`file-headers`/`line-endings`/
+    # `pr-tracking-metadata-check`) or is `ci_scope_policy`, whose push-branch
+    # checks on the jobs this cascades through
+    # (dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit) were
+    # updated in the same change to tolerate that cascade -- see
+    # ci_scope_policy's own comment.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-validate-compose-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-validate-compose-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
@@ -2790,6 +2812,26 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency (#891 follow-up, extending #888/#892/#915's
+    # proven pattern): dns_test is on the scarce self-hosted lancache-heavy
+    # pool, so reclaiming a superseded commit's run matters for real
+    # capacity. Safe to cancel mid-flight: it is one of ci_scope_policy's
+    # `needs`, but that job's push-branch check on this job's result now
+    # uses require_success_or_intentional_cancellation() (tolerates
+    # success/skipped/cancelled) specifically because of this group -- see
+    # ci_scope_policy's own comment for the full reasoning. Its only other
+    # consumer, rust_coverage, already gates with
+    # `needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped'`,
+    # which cleanly skips coverage rather than erroring; a cancelled result
+    # makes that gate false the same way a skipped one does.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-dns-test-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-dns-test-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -2840,6 +2882,20 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
+    # above for the same reason): scarce lancache-heavy capacity, safe to
+    # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
+    # result now uses require_success_or_intentional_cancellation(), and
+    # rust_coverage's own `success`/`skipped` gate on ui_test already treats
+    # a non-matching result as a clean skip.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-ui-test-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-ui-test-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -3296,6 +3352,18 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency (#891 follow-up, same pattern/reasoning as
+    # dns_test above): scarce lancache-heavy capacity, no other consumer
+    # besides ci_scope_policy, whose push-branch check on this job's result
+    # now uses require_success_or_intentional_cancellation().
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-dns-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-dns-cargo-audit-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
@@ -3340,6 +3408,18 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Job-level concurrency (#891 follow-up, same pattern/reasoning as
+    # dns_cargo_audit above): scarce lancache-heavy capacity, no other
+    # consumer besides ci_scope_policy, whose push-branch check on this
+    # job's result now uses require_success_or_intentional_cancellation().
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-ui-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-ui-cargo-audit-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
@@ -3373,73 +3453,79 @@ jobs:
     # skip for speed, but this job verifies that every required check really ran
     # for the files touched by the PR.
     #
-    # #891 scope note: this job itself is safe to give a job-level
-    # cancel-in-progress group (below), same as build/container-scan/
-    # build-arm64 -- nothing else in this workflow hard-asserts
-    # ci_scope_policy's own result via `needs:`, only build/build-arm64's soft
-    # `if:` gate (`needs.ci_scope_policy.result == 'success'`), which cleanly
-    # skips rather than errors when this job shows cancelled.
+    # #891 scope note: this job itself has its own job-level cancel-in-progress
+    # group (below), same as build/container-scan/build-arm64 -- nothing else
+    # in this workflow hard-asserts ci_scope_policy's own result via `needs:`,
+    # only build/build-arm64's soft `if:` gate
+    # (`needs.ci_scope_policy.result == 'success'`), which cleanly skips
+    # rather than errors when this job shows cancelled.
     #
-    # #891 deliberately did NOT add the same pattern to this job's own inputs
-    # above (detect-changes, dns_rust_quality, ui_rust_quality, dns_test,
-    # ui_test, watchdog_test, dns_cargo_audit, ui_cargo_audit) or to
-    # validate-compose, even though several were named as candidates in #891.
+    # #915 gave rust_coverage/shellcheck/file-headers/line-endings/
+    # ci_scope_policy their own groups first. This revision (#891 follow-up)
+    # extends the same pattern to validate-compose, dns_test, ui_test,
+    # dns_cargo_audit, and ui_cargo_audit -- the remaining named candidates
+    # from #891's own issue body/comments -- and teaches this job's push-event
+    # checks to tolerate the resulting legitimate supersession outcomes
+    # instead of hard-failing on them. See the per-job comments on
+    # validate-compose/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit for the
+    # concurrency-group side of this change.
     #
-    # The hazard is PUSH-event parallelism, not the PR-metadata storm. This
-    # workflow's top-level concurrency group (top of file) already fully
-    # serializes pull_request-triggered runs for the same ref
+    # The hazard this addresses is PUSH-event parallelism, not the PR-metadata
+    # storm. This workflow's top-level concurrency group (top of file)
+    # already fully serializes pull_request-triggered runs for the same ref
     # (`{workflow}-{ref}`, cancel-in-progress: false): a burst of opened +
     # labeled + milestoned events for one PR queues each run behind the
     # previous one rather than running them concurrently, so two PR runs for
     # the same ref can never have an in-progress job for the same job-level
-    # group at the same time -- confirmed live on this PR (#915): a 3-event
-    # opened/labeled/milestoned burst produced one run that executed every
-    # job to completion, one run bumped from the queue with zero jobs ever
-    # started (pre-existing top-level queue behavior, unrelated to this PR),
-    # and one run that queued cleanly behind the first and ran clean once it
-    # finished -- no job anywhere showed `cancelled`. That serialization is
-    # exactly what already makes this PR's five included jobs (rust_coverage,
-    # shellcheck, file-headers, line-endings, ci_scope_policy itself) safe on
-    # `pull_request` events, and it would make detect-changes/dns_test/
-    # ui_test/dns_cargo_audit/ui_cargo_audit/validate-compose equally
-    # collision-free there too.
+    # group at the same time -- confirmed live on #915, and re-confirmed live
+    # for this revision's five newly-scoped jobs the same way. That
+    # serialization is why the PR-event branch of the script below is left
+    # untouched and stays strict (see below).
     #
     # push/tag events are different: the top-level group's key for those is
     # `{workflow}-publish-{run_id}` (unique per run, deliberately never
     # collides -- see that group's own comment), so rapid pushes to
     # master/v0.2.0 genuinely run fully in parallel with no top-level
     # throttle at all. THAT is where a job-level cancel-in-progress group on
-    # detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit/
-    # validate-compose would let a newer push cancel an older, still
-    # in-progress push's copy of that job mid-flight. This job's own
-    # require_success()/require_success_or_intentional_skip() helpers below
-    # only tolerate a `success` (and, for the _or_intentional_skip variant,
-    # `skipped`) result for each of those jobs -- neither tolerates
-    # `cancelled` -- so that cancelled/skipped-cascade result would make
-    # THIS job (`if: always()`, running in that same now-superseded push's
-    # run) hard-fail with a spurious "must succeed, got 'cancelled'" error
-    # instead of cleanly skipping. validate-compose is an especially sharp
-    # case: cancelling IT (not detect-changes/dns_test/etc. directly) would
-    # force dns_test/ui_test/dns_cargo_audit/ui_cargo_audit to skip via their
-    # own `needs['validate-compose'].result == 'success'` guard, which then
-    # trips this job's push-branch `require_success` on THEIR results.
+    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit/validate-compose lets a
+    # newer push cancel an older, still in-progress push's copy of that job
+    # mid-flight -- validate-compose is an especially sharp case: cancelling
+    # IT (not dns_test/etc. directly) forces dns_test/ui_test/watchdog_test/
+    # dns_cargo_audit/ui_cargo_audit to `skipped` via their own
+    # `needs['validate-compose'].result == 'success'` guard, since a job
+    # whose `if:` evaluates false is marked `skipped`, not `cancelled`.
     #
-    # detect-changes itself is not actually at risk either way: it only runs
+    # Fix: on the push-event branch below, dns_test/ui_test/dns_cargo_audit/
+    # ui_cargo_audit (each now has its own group, so they can show either a
+    # direct `cancelled` from their own group or a `skipped` cascade from
+    # validate-compose) use the new require_success_or_intentional_cancellation()
+    # helper (success|skipped|cancelled). watchdog_test also needs
+    # validate-compose but does NOT get its own group -- nothing forces one,
+    # and #891 never named it as a candidate -- so it can only ever show the
+    # `skipped` cascade, never a direct `cancelled`; it keeps using the
+    # existing require_success_or_intentional_skip() helper instead, which is
+    # the precise (not over-broad) tolerance for what it can actually produce.
+    #
+    # dns_rust_quality/ui_rust_quality are deliberately left on strict
+    # require_success(): they are not in #891's enumerated candidate list
+    # (PR #915 explicitly flagged them, and watchdog_test, as out of scope so
+    # they would not be silently mistaken for "already considered and
+    # rejected"), and they do not depend on validate-compose at all -- only on
+    # detect-changes, which never runs on push -- so nothing in this change
+    # gives them a legitimate way to show anything but `success` on a push
+    # event. A `cancelled` there would mean a real anomaly (e.g. a manual
+    # workflow cancellation), not a supersession, and should keep failing
+    # loudly. Extending the pattern to this pair is a clean, separate,
+    # mechanically identical follow-up if ever wanted -- not folded in here.
+    #
+    # detect-changes stays excluded from concurrency scoping for the same
+    # reason #915 already found: it only runs
     # `if: github.event_name == 'pull_request'` (never on push, so the push
     # hazard above does not apply to it), and on pull_request it is already
-    # serialization-protected by the top-level group exactly like this PR's
-    # five included jobs. Adding a cancel-in-progress group to it would just
-    # be a no-op (nothing left for it to ever collide with) -- it is left out
-    # here because it gains nothing, not because it is unsafe.
-    #
-    # Fixing the real (push-only) hazard for dns_test/ui_test/
-    # dns_cargo_audit/ui_cargo_audit/validate-compose properly means teaching
-    # require_success()/require_success_or_intentional_skip() to treat a
-    # supersession-`cancelled` (or the skip cascade it causes) as tolerable
-    # (the same soft-skip semantics build/build-arm64's own `if:` gates
-    # already use) -- a policy change to what this job enforces, not a
-    # mechanical copy of the build/container-scan concurrency pattern, so it
-    # is intentionally left out of this PR. See #891 for tracking.
+    # serialization-protected by the top-level group. A group would be a
+    # pure no-op there, so it is left out because it gains nothing, not
+    # because it is unsafe. Its own require_success() check below (PR-branch
+    # only) is therefore also left strict, unchanged.
     name: CI scope policy
     needs:
       - detect-changes
@@ -3539,14 +3625,45 @@ jobs:
             esac
           }
 
+          # #891 follow-up: dns_test/ui_test/dns_cargo_audit/ui_cargo_audit
+          # each now carry their own job-level cancel-in-progress group (see
+          # their own job blocks), and validate-compose (a shared `needs:` of
+          # all of them, plus watchdog_test) does too. On a push event this
+          # means a newer push can legitimately leave an older, superseded
+          # run showing either a direct `cancelled` (the job's own group lost
+          # the race) or a `skipped` cascade (validate-compose was cancelled,
+          # so this job's own `needs['validate-compose'].result == 'success'`
+          # guard evaluated false). Both are a clean supersession outcome,
+          # not a real failure, so this dedicated helper (mirroring the
+          # existing require_success_or_intentional_skip() naming) tolerates
+          # all three: success, skipped, or cancelled. It is intentionally
+          # NOT used for dns_rust_quality/ui_rust_quality (no group, no
+          # validate-compose dependency -- see the job-level comment above
+          # for why those two stay on strict require_success()) or for
+          # watchdog_test (no group of its own, so it can only ever show the
+          # validate-compose skip cascade, never a direct cancelled --
+          # require_success_or_intentional_skip() below is the precise tool
+          # for that, not this one).
+          require_success_or_intentional_cancellation() {
+            local name="$1" value="$2"
+            case "$value" in
+              success|skipped|cancelled)
+                ;;
+              *)
+                echo "::error::$name must succeed for this change set, or show a clean supersession outcome (skipped/cancelled) from a newer push superseding it, got '$value'."
+                exit 1
+                ;;
+            esac
+          }
+
           if [ "$EVENT_NAME" != "pull_request" ]; then
             require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
             require_success "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
-            require_success "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success "test (ui)" "$UI_TEST_RESULT"
-            require_success "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
-            require_success "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
+            require_success_or_intentional_cancellation "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
+            require_success_or_intentional_cancellation "test (ui)" "$UI_TEST_RESULT"
+            require_success_or_intentional_skip "test (watchdog)" "$WATCHDOG_TEST_RESULT"
+            require_success_or_intentional_cancellation "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
+            require_success_or_intentional_cancellation "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
             exit 0
           fi
 
