@@ -95,9 +95,10 @@ by configuring which DNS server IP they point to:
 - **`libnginx-mod-stream`**: The unified proxy uses nginx's stream module for standard-mode SNI passthrough.
   This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
   at the top of `nginx.conf` (before the `events {}` block).
-- **[AG-KD-002]** **Serial file in `/tmp`**: To avoid permission errors when generating certs, OpenSSL's
-  serial file is always written to `/tmp/lancache-ca.srl` rather than the certs directory,
-  and passed with `-CAserial`.
+- **[AG-KD-002]** **Serial file**: OpenSSL's certificate serial file (`ca.srl`) is stored alongside the CA
+  certificate and key in the certs directory (e.g., `/opt/lancache-ng/certs/ca.srl` in production)
+  and passed to OpenSSL with `-CAserial`. The file tracks certificate serial numbers to ensure
+  uniqueness across regenerated wildcard certs.
 - **[AG-KD-003]** **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
   concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
   prebuilt release binaries — they're Rust, so there's no behavioral difference from building
