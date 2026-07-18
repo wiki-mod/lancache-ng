@@ -1,0 +1,126 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Shared parity fixture for secret/token placeholder detection (issue #967).
+# There are THREE independently-maintained "is this value still a checked-in
+# placeholder" implementations in this repo, deliberately kept separate
+# (maintainer decision: Option B in #967, not a merge into one canonical
+# implementation):
+#
+#   1. scripts/lib/shared-secret-bootstrap.sh's secret_is_placeholder() --
+#      canonical for shared/handshake secrets, embedded byte-identically into
+#      services/dns/entrypoint.sh, services/dhcp/entrypoint.sh, and
+#      services/ui/docker-entrypoint.sh (guarded against drift between those
+#      three copies by tests/bats/shared_secret_bootstrap_sync.bats). This is
+#      a READ path: it decides whether an already-configured value should be
+#      trusted at container boot.
+#   2. setup.sh's own secret_value_is_placeholder() -- a separate WRITE path:
+#      it decides whether setup.sh must generate a fresh secret instead of
+#      preserving an existing .env value.
+#   3. services/ui/src/main.rs's secondary_registration_token_is_placeholder()
+#      -- a third, independent Rust implementation scoped to
+#      SECONDARY_REGISTRATION_TOKEN specifically.
+#
+# All three now normalize the same way before matching (lowercase, and "-"/"_"
+# treated as equivalent -- issue #967's explicit fail-safe hardening: this can
+# only make MORE values match as a placeholder, never fewer), but each keeps
+# its own pattern SET, so they legitimately disagree on some inputs. This
+# fixture pins down every case this project currently knows about, including
+# the disagreements, so a future edit to any one implementation that silently
+# starts disagreeing on an already-covered case fails a test instead of
+# drifting unnoticed.
+#
+# Read by:
+#   - tests/bats/placeholder_detection_parity.bats, which checks the "shared"
+#     and "setup" columns against secret_is_placeholder() (from
+#     scripts/lib/shared-secret-bootstrap.sh) and secret_value_is_placeholder()
+#     (extracted from setup.sh), respectively.
+#   - services/ui/src/main.rs's own
+#     secondary_registration_token_is_placeholder_matches_shared_parity_fixture
+#     test, which checks the "rust" column against
+#     secondary_registration_token_is_placeholder().
+#
+# Format: one case per line, whitespace-separated:
+#   <value> <shared:placeholder|real> <setup:placeholder|real> <rust:placeholder|real>
+# Blank lines and lines starting with "#" are ignored by all readers. <value>
+# never contains whitespace in this fixture, so simple whitespace-splitting is
+# sufficient -- no quoting/escaping support is implemented or needed.
+#
+# NOT covered here: the empty-string case. All three implementations agree
+# empty is always a placeholder, but an empty <value> can't be expressed as a
+# fixture field using this format's plain whitespace-splitting. Each
+# implementation already asserts the empty case directly in its own existing
+# tests (shared_secret_bootstrap.bats's "matches empty and universal
+# placeholders" test, main.rs's secondary_registration_token_rejects_empty_and_known_placeholders
+# test, and the new setup.sh-specific case added alongside this fixture).
+
+# --- Universal placeholders: all three implementations agree (placeholder) ---
+CHANGE_ME_TOKEN placeholder placeholder placeholder
+CHANGE-ME-TOKEN placeholder placeholder placeholder
+change_me_token placeholder placeholder placeholder
+Change_Me_Token placeholder placeholder placeholder
+changeme placeholder placeholder placeholder
+CHANGEME123 placeholder placeholder placeholder
+changeme-thing placeholder placeholder placeholder
+YOUR_TOKEN_HERE placeholder placeholder placeholder
+your-token-here placeholder placeholder placeholder
+YOUR_SECONDARY_REGISTRATION_TOKEN_HERE placeholder placeholder placeholder
+CHANGE_ME placeholder placeholder placeholder
+CHANGE_MEXYZ placeholder placeholder placeholder
+
+# --- Documented divergence: implementation 1 (shared lib) accepts bare
+# YOUR_* as a placeholder even without a trailing _HERE suffix; setup.sh and
+# the Rust implementation both require the _HERE suffix too. This is a real,
+# pre-existing gap (not something this fixture papers over) -- see the code
+# comments next to each implementation for why it is being kept, not unified.
+YOUR_API_TOKEN placeholder real real
+your-token placeholder real real
+
+# --- Documented divergence: implementation 1 (shared lib) also has a generic
+# "*_HERE" wildcard that matches ANY value ending in _HERE, not just
+# YOUR_*_HERE; setup.sh and the Rust implementation both require the leading
+# YOUR_ prefix as well as the _HERE suffix, so a bare "..._HERE" value that
+# isn't also YOUR_-prefixed is only caught by the shared library.
+anything_HERE placeholder real real
+anything-HERE placeholder real real
+
+# --- Documented divergence: setup.sh and Rust both additionally recognize
+# the legacy "lancache-*-secret" template-default shape (setup.sh's write
+# path must never mistake a stale template default for a real secret it
+# should preserve; the Rust check protects a single security-sensitive
+# token). The shared read-path library deliberately does NOT include this
+# pattern, because deploy/dev/docker-compose.yml and deploy/dev/.env ship
+# real, working dev-mode secrets in exactly this shape (e.g.
+# lancache-nats-ui-dev-secret, lancache-pdns-dev-secret) that the dns/dhcp/ui
+# entrypoints must accept as configured values, not silently regenerate.
+lancache-nats-ui-dev-secret real placeholder placeholder
+lancache-pdns-dev-secret real placeholder placeholder
+LANCACHE-NATS-UI-DEV-SECRET real placeholder placeholder
+
+# --- Documented divergence: setup.sh and Rust both additionally recognize a
+# "change-me" infix anywhere in the value (not just as a prefix), so a
+# manually-typed placeholder like "please-change-me-now" is still caught by
+# the write path and the token check. The shared read-path library does not
+# have this infix rule.
+please-change-me-now real placeholder placeholder
+PLEASE-CHANGE-ME-NOW real placeholder placeholder
+
+# --- Documented divergence: only the Rust implementation recognizes the
+# README.md-style "<generate-a-secret>" bracket placeholder (added in PR #743
+# because that exact string is pasteable verbatim from README.md's own
+# SECONDARY_REGISTRATION_TOKEN example; setup.sh's detector does not
+# recognize it, a pre-existing doc/script inconsistency out of scope here).
+<generate-a-secret> real real placeholder
+<REPLACE_ME> real real placeholder
+
+# --- Real, valid-looking secret values: must be "real" for all three. These
+# guard against the normalization (lowercasing, "-"/"_" folding) becoming
+# overly broad and swallowing real generated secrets.
+8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d real real real
+V1StGXR8_Z5jdHi6B-myT real real real
+validation-ui-password real real real
+a-real-64-hex-value real real real
+example_service_51H8xyzAbCdEfGhIjKlMnOpQrStUv real real real
+R6f3+9dK/2s== real real real
+please-review-me-later real real real
+changeset-abc123 real real real
+acme-service-token real real real

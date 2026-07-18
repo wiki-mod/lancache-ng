@@ -932,10 +932,35 @@ env_key_has_value() {
 # tell "operator has not configured a real secret yet" apart from "operator
 # configured this on purpose" and knows when it must generate a real value
 # instead of trusting the placeholder as configured.
+#
+# Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
+# e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
+# normalize first, then match against lowercase/underscore patterns. This is a
+# deliberate fail-safe widening: it can only make MORE values match as a
+# placeholder, never fewer, so a real randomly-generated hex/base64 secret is
+# not realistically affected.
+#
+# This is one of three independently-maintained placeholder detectors in this
+# repo (the others: scripts/lib/shared-secret-bootstrap.sh's
+# secret_is_placeholder, embedded into the dns/dhcp/ui entrypoints, and
+# services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
+# deliberately separate per the maintainer decision recorded in issue #967
+# (Option B: cross-validate, don't unify) rather than sourcing the shared
+# library directly. Known, intentional divergence: this write path
+# additionally recognizes the legacy "lancache-*-secret" template-default
+# shape and a bare "change-me"/"change_me" infix, wider than the shared
+# library, because setup.sh must never mistake a stale template default for a
+# real secret it should preserve -- but it requires a full YOUR_*_HERE suffix
+# match rather than the shared library's bare YOUR_* prefix. See
+# tests/fixtures/placeholder-detection-cases.txt and
+# tests/bats/placeholder_detection_parity.bats for the full cross-validated
+# case list, including every documented divergence.
 secret_value_is_placeholder() {
     local value="$1"
-    case "$value" in
-        ""|CHANGE_ME_*|YOUR_*_HERE|changeme*|*change-me*|lancache-*-secret)
+    local normalized="${value,,}"
+    normalized="${normalized//-/_}"
+    case "$normalized" in
+        ""|change_me_*|your_*_here|changeme*|*change_me*|lancache_*_secret)
             return 0
             ;;
     esac

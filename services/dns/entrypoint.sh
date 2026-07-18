@@ -58,9 +58,33 @@ lancache_gen_base64_32() {
 # so routing their placeholder decision through this one definition keeps them in
 # lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
 # dev tokens) match those in addition to this.
+#
+# Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
+# e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
+# normalize first, then match against lowercase/underscore patterns. This is a
+# deliberate fail-safe widening: it can only make MORE values match as a
+# placeholder, never fewer, so a real randomly-generated hex/base64 secret is
+# not realistically affected.
+#
+# This is one of three independently-maintained placeholder detectors in this
+# repo (the others: setup.sh's secret_value_is_placeholder, and
+# services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
+# deliberately separate per the maintainer decision recorded in issue #967
+# (Option B: cross-validate, don't unify). Known, intentional divergences from
+# the other two -- this function does NOT recognize the legacy
+# "lancache-*-secret" template-default shape (deploy/dev/docker-compose.yml
+# and deploy/dev/.env ship real, working dev secrets in exactly that shape,
+# e.g. lancache-nats-ui-dev-secret, that this read path must accept, not
+# regenerate) or a bare "change-me"/"change_me" infix without a CHANGE_ME/
+# changeme prefix, but it DOES recognize a bare YOUR_* prefix without a
+# trailing _HERE suffix, wider than the other two. See
+# tests/fixtures/placeholder-detection-cases.txt and
+# tests/bats/placeholder_detection_parity.bats for the full cross-validated
+# case list, including every documented divergence.
 secret_is_placeholder() {
-    case "${1:-}" in
-        "" | CHANGE_ME* | changeme* | YOUR_* | *_HERE) return 0 ;;
+    _sip_norm=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+    case "$_sip_norm" in
+        "" | change_me* | changeme* | your_* | *_here) return 0 ;;
     esac
     return 1
 }
