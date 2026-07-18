@@ -812,6 +812,10 @@ jobs:
         # chain onto ui-nats-dns-integration-simulation above only serializes
         # jobs *within this one workflow run*; it does nothing for two
         # different PRs' runs overlapping, which is what actually happened.
+        # The lock itself now comes from scripts/lib/quickstart-compose-lock.sh
+        # (issue #838) -- see that file's header for why it must be `source`d
+        # rather than executed, and why its lock path is a single shared
+        # constant rather than a per-caller argument.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           # Which images setup.sh installs (see setup-cli-simulation.sh for the
@@ -825,8 +829,11 @@ jobs:
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
         run: |
           set -euo pipefail
-          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
-          flock "$lock_fd"
+
+          # shellcheck source=scripts/lib/quickstart-compose-lock.sh
+          source "scripts/lib/quickstart-compose-lock.sh"
+          quickstart_compose_lock_acquire
+
           docker run --rm \
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -1224,15 +1231,23 @@ jobs:
         # cause of a repeat `nats did not become healthy` failure even after
         # that first fix landed (docker-socket-proxy's own access log showed
         # a `POST /containers/lancache-nats/restart` mid-run, i.e. two
-        # simulations fighting over the same container).
+        # simulations fighting over the same container). The lock itself now
+        # comes from scripts/lib/quickstart-compose-lock.sh (issue #838),
+        # sharing that ONE file's single hardcoded lock path -- see its
+        # header for why the path must stay a shared constant rather than a
+        # per-caller argument (a caller-supplied path is exactly the mistake
+        # this job's own first fix attempt made, described above).
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
         run: |
           set -euo pipefail
-          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
-          flock "$lock_fd"
+
+          # shellcheck source=scripts/lib/quickstart-compose-lock.sh
+          source "scripts/lib/quickstart-compose-lock.sh"
+          quickstart_compose_lock_acquire
+
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \

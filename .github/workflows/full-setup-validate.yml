@@ -700,13 +700,20 @@ jobs:
         # around the whole simulation is sufficient (not a distributed lock):
         # the collision can only happen between two runs sharing the same
         # Docker daemon, i.e. the same physical host, which is exactly what a
-        # per-host lock file serializes.
+        # per-host lock file serializes. The lock itself now comes from
+        # scripts/lib/quickstart-compose-lock.sh (issue #838) instead of a
+        # hand-rolled `exec {fd}>...; flock` inline here -- see that file's
+        # header for why it must be `source`d (not executed as a subprocess)
+        # and why its lock path is a single shared constant.
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
-          flock "$lock_fd"
+
+          # shellcheck source=scripts/lib/quickstart-compose-lock.sh
+          source "scripts/lib/quickstart-compose-lock.sh"
+          quickstart_compose_lock_acquire
+
           docker run --rm \
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
