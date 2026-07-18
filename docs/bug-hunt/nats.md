@@ -26,12 +26,11 @@ networks (#835)"), fetched fresh for this pass.
 >   failures are surfaced in the response body as `flush_ok`/`flush_failed_names`).
 > - **Finding G** (INFO) — **FIXED** by PR #828 (now merged): `http_port: 8222`
 >   + a real `wget .../healthz` probe are present in all four stacks.
->
-> **Finding D** (MODERATE) is **still open**: the replica's publish list still
-> omits `$JS.API.STREAM.CREATE.LANCACHE_DNS` on `v0.2.0` (only the writer can
-> create the stream), so the cold-start race remains. Finding C was already
-> RESOLVED in this file; issue #845 is now CLOSED. Individual verdicts are
-> updated inline below.
+> - **Finding D** (MODERATE) — **FIXED** in this PR: the replica's publish list
+>   in `deploy/prod/`, `deploy/dev/`, and `deploy/quickstart/docker-compose.yml`
+>   now includes `$JS.API.STREAM.CREATE.LANCACHE_DNS`, closing the cold-start
+>   race. Finding C was already RESOLVED in this file; issue #845 is now
+>   CLOSED. Individual verdicts are updated inline below.
 
 ---
 
@@ -339,15 +338,35 @@ dns-standard's stream exists, the next retry succeeds. But it is a real,
 reproducible crash/restart window on every cold full-stack start, it is
 noisy in logs, and there is no test anywhere covering it (see Finding I).
 
-**Still OPEN as of 2026-07-18 (`origin/v0.2.0` @ `dc8d79c6`).** Verified
-directly: the replica's generated `nats.conf` publish list gained
-`lancache.dns.flush`, `lancache.dns.record`, and `$JS.API.STREAM.INFO.LANCACHE_DNS`
-(via PRs #882/#916), but still deliberately **omits**
-`$JS.API.STREAM.CREATE.LANCACHE_DNS` — only the writer can create the stream —
-so the cold-start race described here is unchanged. This matches the coupling
-noted for the Finding-C fix (issue #845, now CLOSED): making full-setup match
-the other stacks' explicit grants must also address this race, or it trades a
-cosmetic inconsistency for a real crash-loop window.
+**Was OPEN as of 2026-07-18 (`origin/v0.2.0` @ `dc8d79c6`)**, then fixed later
+the same day in this PR. Verified directly: the replica's generated
+`nats.conf` publish list gained `lancache.dns.flush`, `lancache.dns.record`,
+and `$JS.API.STREAM.INFO.LANCACHE_DNS` (via PRs #882/#916), but still
+deliberately omitted `$JS.API.STREAM.CREATE.LANCACHE_DNS` — only the writer
+could create the stream — so the cold-start race described here persisted
+until this fix. This matched the coupling noted for the Finding-C fix (issue
+#845, now CLOSED): making full-setup match the other stacks' explicit grants
+would also need to address this race, or it would trade a cosmetic
+inconsistency for a real crash-loop window.
+
+### Finding D — FIXED (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+Fixed in this PR: `$JS.API.STREAM.CREATE.LANCACHE_DNS` added to the
+DNS-replica identity's `publish` list in `deploy/prod/docker-compose.yml`,
+`deploy/dev/docker-compose.yml`, and `deploy/quickstart/docker-compose.yml`
+(same asymmetry existed in all three, verified against each file directly
+before editing). The replica identity now carries the same JetStream
+create/info/consumer permission set as the writer identity, so if the
+replica is ever the first `nats-subscriber` process to connect (before
+`LANCACHE_DNS` exists), its own `create_stream` call succeeds instead of
+being silently denied and `exit(1)`-ing the process. `deploy/full-setup/docker-compose.yml`
+is unaffected and intentionally left as-is: its `validation-dns-writer`/
+`-replica` users carry no `publish` block at all, which issue #845's live
+`nats-server` v2.14.3 test confirmed means allow-all in this NATS version,
+not implicit-deny — a separate, already-tracked least-privilege
+inconsistency (see the Finding-C section above), not this permission gap.
+Verified `docker compose -f <file> config` exits 0 for all three edited
+files in the build-tools container.
 
 ---
 
@@ -526,7 +545,7 @@ everything noticed" rule, since it read as suspicious before verification.
 1. **Finding A** (unreachable/unconfigurable secondary NATS URL) — CRITICAL, confirmed, novel. **FIXED 2026-07-18 by #866/#881.**
 2. **Finding B** (rollback flush permission gap) — HIGH, confirmed, novel. **FIXED 2026-07-18 by #867/#882.**
 3. **Finding C** (full-setup publish-omitted semantics) — **RESOLVED by live nats-server v2.14.3 test (runner .240): omitted `publish` = allow-all, so the "silently denied/crash-loop" reading is REFUTED.** Downgraded to a least-privilege / stack-consistency note; settles issue #845. See the "Finding C — RESOLVED by live test" subsection above.
-4. **Finding D** (dns-replica stream-create startup race) — MODERATE, confirmed, self-healing. **Still OPEN 2026-07-18** (replica still lacks `$JS.API.STREAM.CREATE.LANCACHE_DNS`).
+4. **Finding D** (dns-replica stream-create startup race) — MODERATE, confirmed, self-healing. **FIXED 2026-07-18 in this PR** (replica now carries `$JS.API.STREAM.CREATE.LANCACHE_DNS` in `deploy/prod/`, `deploy/dev/`, and `deploy/quickstart/docker-compose.yml`).
 5. **Finding E** (reload_nats_conf silent best-effort) — MODERATE, confirmed.
 6. **Finding F** (full-setup restart-by-name 404) — LOW, already documented/mitigated; broader pattern (six hardcoded names) worth a cross-component note.
 7. **Finding G** (no/weak nats healthcheck) — INFO, matches SoT. **FIXED 2026-07-18 by #828** (now merged; `http_port: 8222` + `wget .../healthz` in all four stacks).
