@@ -6409,19 +6409,33 @@ jobs:
           # re-triggered by GitHub (anti-recursion), which would otherwise
           # leave this tag published but its own release job never run.
           #
-          # The token is passed as an HTTP Basic-Auth header via
-          # `-c http.extraheader`, not embedded in the remote URL: an
-          # embedded `https://x-access-token:TOKEN@...` URL is a plain-argv
-          # secret (visible to anything reading this process's argv/`ps`
-          # output for its lifetime) and, worse, git itself echoes the full
-          # URL -- credentials included -- into its own error/verbose output
-          # on a failed push (e.g. an auth or "repository not found" error),
-          # which would leak the PAT straight into this step's own log.
-          # `http.extraheader` is only ever passed via `-c` for this single
-          # invocation (never written to `.git/config`), and git does not
-          # echo header values back in its own diagnostic output.
-          git -c http.extraheader="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
-            push "https://github.com/${REPOSITORY}.git" "refs/tags/${next_tag}"
+          # The token is passed as an HTTP Basic-Auth header, not embedded in
+          # the remote URL: an embedded `https://x-access-token:TOKEN@...`
+          # URL is a plain-argv secret (visible to anything reading this
+          # process's argv/`ps` output for its lifetime) and, worse, git
+          # itself echoes the full URL -- credentials included -- into its
+          # own error/verbose output on a failed push (e.g. an auth or
+          # "repository not found" error), which would leak the PAT straight
+          # into this step's own log.
+          #
+          # The header value is set via GIT_CONFIG_COUNT/KEY_0/VALUE_0
+          # (supported since Git 2.31), not `-c http.extraheader=...`: a `-c`
+          # value is still a plain-argv secret for this invocation's
+          # lifetime (visible via `ps`/`/proc/<pid>/cmdline`), it just avoids
+          # the URL-embedding and log-echo problems above. An environment
+          # variable is not readable via `ps` at all (only via
+          # `/proc/<pid>/environ`, which the standard Linux permission model
+          # restricts to the same user or root), so this closes that
+          # remaining exposure. The key is scoped to this exact push URL
+          # (`http.<url>.extraheader`, not a bare `http.extraheader`) so it
+          # cannot leak into unrelated git operations in this same shell,
+          # and -- like the `-c` form it replaces -- this is set only for
+          # this one command's environment, never written to `.git/config`.
+          push_url="https://github.com/${REPOSITORY}.git"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.${push_url}.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
+            git push "$push_url" "refs/tags/${next_tag}"
           echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
       - name: Attest stack pointer provenance

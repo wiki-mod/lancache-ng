@@ -164,3 +164,22 @@ extract_cmd_secondary_heredoc() {
 
     diff <(printf '%s\n' "$heredoc_body") <(printf '%s\n' "$reference_body")
 }
+
+@test "cmd_secondary's registration POST sends the token via stdin, not argv" {
+    # Regression guard, same exposure class as kea_ctrl_post's Basic-Auth fix
+    # (#955/#956): a literal `-d "{\"token\":\"${token}\", ...}"` argument
+    # puts the registration token in this process's argv for the whole
+    # request's lifetime (visible to anything reading `ps`/
+    # `/proc/<pid>/cmdline` on this host). The body must instead be piped
+    # into curl and read via `-d @-`, so the token never appears as a
+    # command-line argument at all.
+    grep -q 'curl -sS -o "\$response_file" -w "%{http_code}" -X POST \\' "$repo_root/setup.sh" \
+        || fail "cmd_secondary's registration curl invocation not found where expected"
+
+    grep -q -- '-d @-' "$repo_root/setup.sh" \
+        || fail "registration POST no longer reads its body from stdin (-d @-) -- token may have regressed back into argv"
+
+    if grep -qF '-d "{\"token\":\"${token}\"' "$repo_root/setup.sh"; then
+        fail "registration token has regressed back into curl's argv via a literal -d \"...\" argument"
+    fi
+}
