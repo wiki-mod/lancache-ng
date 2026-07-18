@@ -26,9 +26,40 @@ documentation-vs-code mismatches).
 All line numbers below reference `services/watchdog/watchdog.sh` at
 `origin/v0.2.0` (450 lines) unless stated otherwise.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). Two
+> merged PRs resolved most of this doc's findings:
+> - **PR #880** (`f3568279`) added `services/watchdog/**` to
+>   `build-tools.yml`'s bats-triggering path filters -- **FIXES finding #1**.
+> - **PR #885** (`0d6a6dcc`, "watchdog.sh hardening bundle") is a large
+>   bundle that **FIXES findings #2, #3, #4, #6, #10, N1, N2, N3, N4**, and
+>   as a side effect of finding #5's fail-loud fix, also closes the
+>   practical risk in **finding #9** (the code path that could reach
+>   `write_status()` with an unescaped operator-supplied container name now
+>   exits fatally at startup before that point, so the comment's claimed
+>   invariant is now actually enforced, not just asserted).
+> - **Finding #5** is **PARTIALLY FIXED**: watchdog now fails loudly at
+>   startup on a `CONTAINER_*` allowlist mismatch instead of silently
+>   returning "unreachable"/403 later, but real end-to-end container-rename
+>   support (updating the allowlist + Admin UI too) remains explicitly out
+>   of scope per PR #885's own commit message.
+> - **Findings #7, #8, #11, #12, #13, #14 remain open** -- no merged commit
+>   in this range touches `docs/architecture-ng.md`'s watchdog section, the
+>   single-threaded main-loop architecture, the test-harness's literal-text
+>   anchors, duplicate-`CONTAINER_*`-value validation, or
+>   docker-socket-proxy readiness ordering.
+> - Aside, not one of the original findings: PR #885 (bundled with the
+>   sibling SYSLOG_ENABLED fix, PR #877) left `services/watchdog/watchdog.sh`
+>   with two identical `is_truthy()` function definitions (lines 65 and 128
+>   in current code) -- harmless (Bash just uses the later one) but flagged
+>   here since it was noticed during this currency check, not independently
+>   re-investigated as a new finding.
+> All status updates are marked inline on the affected findings below;
+> original text is preserved for the historical record.
+
 ---
 
-## 1. CI: the watchdog bats test suite does not run for a watchdog.sh-only change
+## 1. CI: the watchdog bats test suite does not run for a watchdog.sh-only change — FIXED by PR #880 (2026-07-17)
 
 **Severity: critical.**
 
@@ -113,7 +144,7 @@ trigger sets.
 
 ---
 
-## 2. `disk_info()` can emit syntactically invalid JSON
+## 2. `disk_info()` can emit syntactically invalid JSON — FIXED by PR #885 (2026-07-16)
 
 **Severity: serious.**
 
@@ -157,7 +188,7 @@ never wraps (see finding 3), so this path is never exercised in CI.
 
 ---
 
-## 3. `disk_info()`'s `df`/`awk` parsing breaks on wrapped `df` output
+## 3. `disk_info()`'s `df`/`awk` parsing breaks on wrapped `df` output — FIXED by PR #885 (2026-07-16)
 
 **Severity: serious** (compounds finding 2).
 
@@ -192,7 +223,7 @@ falsely-green disk status -- precisely the alerting path `DISK_WARN_PCT`/
 
 ---
 
-## 4. `get_health()`/`restart_container()` curl calls have no timeout; nothing detects a hung watchdog
+## 4. `get_health()`/`restart_container()` curl calls have no timeout; nothing detects a hung watchdog — FIXED by PR #885 (2026-07-16)
 
 **Severity: serious.**
 
@@ -233,7 +264,7 @@ purge/prune -- with nothing in the stack positioned to notice or recover.
 
 ---
 
-## 5. Operator-configurable container-name env vars are silently incompatible with `docker-socket-proxy.sh`'s hardcoded allowlist
+## 5. Operator-configurable container-name env vars are silently incompatible with `docker-socket-proxy.sh`'s hardcoded allowlist — PARTIALLY FIXED by PR #885 (2026-07-16)
 
 **Severity: serious.**
 
@@ -276,7 +307,7 @@ advertise.
 
 ---
 
-## 6. `maybe_purge()` silently no-ops forever (with a false "success" stamp) if `CACHE_DIR` is missing or unreadable
+## 6. `maybe_purge()` silently no-ops forever (with a false "success" stamp) if `CACHE_DIR` is missing or unreadable — FIXED by PR #885 (2026-07-16)
 
 **Severity: serious.**
 
@@ -394,7 +425,7 @@ neither of which is true.
 
 ---
 
-## 9. `write_status()`'s "trusted input" comment overstates what's actually true
+## 9. `write_status()`'s "trusted input" comment overstates what's actually true — EFFECTIVELY FIXED as a side effect of PR #885 (2026-07-16)
 
 **Severity: minor.**
 
@@ -414,7 +445,7 @@ enforced by anything.
 
 ---
 
-## 10. No Docker `healthcheck:` for the watchdog container in any real deployment compose file
+## 10. No Docker `healthcheck:` for the watchdog container in any real deployment compose file — FIXED by PR #885 (2026-07-16)
 
 **Severity: minor** (context for finding 4).
 
@@ -585,7 +616,7 @@ A later independent pass re-verified all 15 findings above against the same
 `origin/v0.2.0` code (each re-confirmed) and surfaced four items the first
 pass did not. Numbered N1-N4 to keep them distinct from the findings above.
 
-### N1. `resolve_cache_dir()`'s fail-closed error message is invisible to the operator (new)
+### N1. `resolve_cache_dir()`'s fail-closed error message is invisible to the operator (new) — FIXED by PR #885 (2026-07-16)
 
 **Severity: moderate.**
 
@@ -621,7 +652,7 @@ should fail closed and be understandable to non-expert operators." Fix
 direction: route `log()` (or at least error logs) to stderr, or `>&2` this
 specific error before `exit 1`.
 
-### N2. Even the `full-setup` watchdog healthcheck cannot detect a stalled loop (new refinement of finding 10)
+### N2. Even the `full-setup` watchdog healthcheck cannot detect a stalled loop (new refinement of finding 10) — FIXED by PR #885 (2026-07-16)
 
 **Severity: minor.**
 
@@ -637,7 +668,7 @@ CI-validated in full-setup) should therefore be **freshness-based** (assert
 `status.json`'s mtime is within a few `CHECK_INTERVAL`s), not existence-based,
 to actually cover the failure mode finding 4 describes.
 
-### N3. `CHECK_INTERVAL` is unvalidated -- a bad value is a crash loop, unlike every other numeric knob (new)
+### N3. `CHECK_INTERVAL` is unvalidated -- a bad value is a crash loop, unlike every other numeric knob (new) — FIXED by PR #885 (2026-07-16)
 
 **Severity: minor.**
 
@@ -654,7 +685,7 @@ only appear inside `[ ... ]` test conditions, where a bad value degrades to a
 no-op rather than crashing, so `CHECK_INTERVAL` is the sharp edge.) Fix
 direction: validate `CHECK_INTERVAL` with the same digit-only idiom.
 
-### N4. `SSL_ENABLED` truthiness diverges from the Admin UI's parser -- watchdog can silently stop monitoring `dns-ssl` (new)
+### N4. `SSL_ENABLED` truthiness diverges from the Admin UI's parser -- watchdog can silently stop monitoring `dns-ssl` (new) — FIXED by PR #885 (2026-07-16)
 
 **Severity: minor.**
 
