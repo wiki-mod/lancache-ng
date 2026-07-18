@@ -574,6 +574,23 @@ jobs:
           trap 'rm -f "$changed_files"' EXIT
           git fetch --no-tags --depth=1 origin \
             "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}"
+          # GOVERNANCE_BASE_SHA is github.event.pull_request.base.sha -- a
+          # webhook-payload snapshot frozen when the triggering event fired,
+          # NOT necessarily the base branch's current tip. On a long-lived PR
+          # whose base branch has advanced past that snapshot (a busy v0.2.0
+          # merge cascade), the --depth=1 branch-tip fetch above does not
+          # include the snapshot commit, so the git cat-file -e below would
+          # hard-crash (fatal: Not a valid object name <sha>^{commit}, exit
+          # 128) instead of scanning the PR's own diff. Fetch the exact commit
+          # by SHA on demand: GitHub serves any commit reachable from a ref by
+          # exact SHA even once it is no longer a branch tip -- the same
+          # direct-SHA-fetch idiom build-tools.yml already uses to resolve its
+          # github.event.before push base. The two-dot `git diff base.sha
+          # GITHUB_SHA` below stays correct and shallow-safe: base.sha is this
+          # merge commit's base parent, so the diff is exactly the PR's own
+          # changes and needs only the two commit objects, never the connected
+          # history a merge-base/three-dot diff would require.
+          git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA"
           git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}"
           git cat-file -e "${GITHUB_SHA}^{commit}"
           git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
