@@ -29,6 +29,7 @@ on:
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "certs/**"
       - "tests/bats/**"
       - "tests/shellspec/**"
       - "setup.sh"
@@ -59,6 +60,7 @@ on:
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "certs/**"
       - "tests/bats/**"
       - "tests/shellspec/**"
       - "setup.sh"
