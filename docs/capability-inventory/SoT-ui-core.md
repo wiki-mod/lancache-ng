@@ -42,7 +42,7 @@ Exact per-file `#[test]` counts below were produced with
 
 ---
 
-## 1. `main.rs` (1751 lines, 15 tests) — process entry point, wiring, security middleware
+## 1. `main.rs` (1751 lines, 19 tests: 15 `#[test]` + 4 `#[tokio::test]`) — process entry point, wiring, security middleware
 
 **`AppState`** (shared, `Arc`-wrapped): `templates` (Tera), `config`, `docker`
 (bollard client), `http_client` (reqwest), `file_lock`/`kea_config_lock`/
@@ -129,7 +129,8 @@ browser's own Basic Auth prompt still gates the origin regardless.
 **Protected routes** (behind `basic_auth` middleware, ~30 routes): `/`,
 `/dhcp` + 12 DHCP mutation endpoints (mode, proxy, 3 subnet CRUD, 2 subnet
 option CRUD, 2 static-reservation CRUD, lease release, snapshot rollback, and
-`/api/dhcp/check`), `/domains` + 4 mutation endpoints + zone rollback,
+`/api/dhcp/check`), `/domains` + 5 mutation endpoints (DNS add/remove, LAN
+add/remove, `/domains/aaaa-filter` toggle) + zone rollback,
 `/stats`, `/logs`, `/setup` + update, `/api/metrics`, `/api/netdata/{*path}`,
 static CSS/JS, `/secondaries`, secondary delete/rotate. (Handler bodies for
 dhcp/domains/logs/secondaries/setup/stats/dashboard/netdata_proxy/
@@ -169,15 +170,21 @@ section 11.
   `deploy/quickstart/.env`'s distinct placeholder, and README.md's own
   code-block example is itself pasteable verbatim.
 
-**Tests in `main.rs`** (15 `#[test]` functions, all `#[cfg(test)]` — these
-**are** compiled and run automatically in CI via the `ui_test` job, see
-section 11): migration idempotence (2 tests), `x-forwarded-proto` HTTPS
-detection, CSP self-hosted-only assertion, Basic Auth accept/reject
-(including the full-chain integration tests added by #951), session-
-cookie-never-substitutes-for-auth, insecure-mode opt-in gate, placeholder-token
-rejection (now case-insensitive with hyphen/underscore normalization, plus a
-cross-implementation parity-fixture test — #988), TTL bounds, startup
-preflight ordering, template function rendering, session/CSRF header helper.
+**Tests in `main.rs`** (19 total: 15 `#[test]` functions, all `#[cfg(test)]`,
+plus 4 `#[tokio::test]` async integration tests — all 19 **are** compiled and
+run automatically in CI via the `ui_test` job, see section 11; the 15/4 split
+was previously collapsed into a single "15" figure here, undercounting the
+async tests since this document's counting methodology (line ~20,
+`grep -c '#\[test\]'`) doesn't match `#[tokio::test]`): migration idempotence
+(2 tests), `x-forwarded-proto` HTTPS detection, CSP self-hosted-only
+assertion, Basic Auth accept/reject, session-cookie-never-substitutes-for-auth,
+insecure-mode opt-in gate, placeholder-token rejection (now case-insensitive
+with hyphen/underscore normalization, plus a cross-implementation
+parity-fixture test — #988), TTL bounds, startup preflight ordering, template
+function rendering, session/CSRF header helper — plus the 4 `#[tokio::test]`
+full-chain Basic Auth middleware integration tests added by #951 (lines 1592,
+1619, 1644, 1685 as of this currency check), which exercise the real Axum
+router/middleware stack end-to-end rather than a unit-level assertion.
 
 ---
 
@@ -324,8 +331,15 @@ writer/DNS-replica/every secondary) lives in the implicit default account
   current justification is wrong).
 - `secondary_permissions() -> Value` — the fixed subject-level ACL every
   secondary gets: pub `$JS.API.STREAM.INFO.LANCACHE_DNS`,
-  `$JS.API.CONSUMER.*.LANCACHE_DNS.>`, `$JS.ACK.LANCACHE_DNS.>`; sub
-  `lancache.dns.>`, `_INBOX.>`. Test
+  `$JS.API.CONSUMER.INFO.LANCACHE_DNS.>`,
+  `$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>`,
+  `$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>`,
+  `$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>`, `$JS.ACK.LANCACHE_DNS.>`; sub
+  `lancache.dns.>`, `_INBOX.>`. (Enumerated explicitly rather than as a
+  `$JS.API.CONSUMER.*.LANCACHE_DNS.>` wildcard — that shorthand would make
+  the granted ACL look broader than what's actually enforced, since it would
+  also read as covering `CONSUMER.DELETE`/`CONSUMER.LIST`/`CONSUMER.PAUSE`
+  and other verbs the four listed subjects do not grant.) Test
   `secondary_permissions_scope_matches_dns_reader_role` explicitly asserts
   secondaries can **never** publish to `lancache.dns.record` (only the
   DNS-writer role may).
@@ -580,6 +594,16 @@ budget pruning — that pruning itself lives in `watchdog.sh`, not here).
   (compressed — zstd by default, gzip fallback if zstd couldn't be
   installed at container start with no network egress). Every reader here
   must transparently handle all three forms.
+- `list_syslog_hosts(log_root) -> Vec<String>` — sorted list of host
+  directory names under the syslog root (empty if the root is missing).
+  Called from `routes/logs.rs` for two purposes on every `/logs` render in
+  syslog mode: populating the host-filter dropdown, and allowlisting the
+  caller-controlled `?host=` query parameter before it reaches
+  `parse_syslog_tail` — an unrecognized/typo'd host falls back to "all
+  hosts" instead of a confusing empty result, and `parse_syslog_tail`'s own
+  `is_safe_host_component` check is a second, defensive layer rather than
+  the sole gate. This is the actual host-enumeration/allowlist control for
+  that query surface, not just a test-covered utility.
 - `SyslogEntry`/`SyslogHostStats`/`SyslogStats` (all `Serialize`) — parsed
   entry, per-host file/size/distinct-day aggregate, and store-wide totals.
   `SyslogHostStats` deliberately has **no line-count field** — removed per
@@ -769,14 +793,22 @@ history at the bottom of this document for the full account).
 
 - **`ui_test`** (job `test (ui)`) runs `cargo test --locked --manifest-path
   services/ui/Cargo.toml` via `./.github/actions/cargo-with-sccache-fallback`,
-  on `[self-hosted, linux, lancache, lancache-heavy]`. This is exactly the
-  ~130 `#[test]` functions across `main.rs` (15), `config.rs` (40),
-  `nats_auth_callout.rs` (15), `nats_config.rs` (27), `session.rs` (3),
-  `docker_client.rs` (0), `nginx_client.rs` (8), `syslog_client.rs` (18),
-  `routes/mod.rs` (4), plus `kea_snapshots.rs`'s own 8 (compiled from the
-  same crate, scoped to the other agent). (Original count at first writing
-  was ~91; the growth reflects 68 commits landed on `v0.2.0` since, per the
-  currency-check note at the top of this document, not a miscount.)
+  on `[self-hosted, linux, lancache, lancache-heavy]`. **This ~130 figure is
+  this document's core-file subset, not the job's full test count** — `cargo
+  test` runs the *entire* crate, so it also executes every test in the
+  route-handler modules this document deliberately scopes out to the other
+  agent's parallel pass (per the note at the top of this section): 55 in
+  `routes/dhcp.rs`, 21 in `routes/domains.rs`, and smaller counts in the
+  other `routes/*.rs` files (`routes/mod.rs`'s 4 are already included below).
+  The ~130 covers: `main.rs` (15 plain `#[test]` **plus 4 `#[tokio::test]`
+  middleware integration tests — 19 total**, previously undercounted here as
+  just 15), `config.rs` (40), `nats_auth_callout.rs` (15), `nats_config.rs`
+  (27), `session.rs` (3), `docker_client.rs` (0), `nginx_client.rs` (8),
+  `syslog_client.rs` (18), `routes/mod.rs` (4), plus `kea_snapshots.rs`'s own
+  8 (compiled from the same crate, scoped to the other agent). (Original
+  count at first writing was ~91; the growth reflects 68 commits landed on
+  `v0.2.0` since, per the currency-check note at the top of this document,
+  not a miscount.)
 - **`dns_test`** (job `test (dns/nats-subscriber)`) runs the identical
   pattern for `services/dns/nats-subscriber/Cargo.toml`.
 - Both are gated by `detect-changes` outputs (`ui`/`dns_rust`/`workflow` ==
@@ -901,3 +933,29 @@ retracted "no CI test coverage" claim above.
   host's file got *opened*, not that its lines survived the final truncate.
   Every other narrative/behavioral claim in this document was independently
   re-checked against current code and found accurate.
+- **Second review round (2026-07-18), five findings, all real and fixed**:
+  (1) the protected-routes summary said `/domains` had 4 mutation endpoints;
+  `POST /domains/aaaa-filter` (`main.rs`, mounted behind the same
+  `basic_auth`/CSRF layer) is a 5th and was missing from the count. (2) the
+  `ui_test` CI-job paragraph said the ~130-test figure was "exactly" what the
+  job runs; `cargo test` actually runs the whole crate, so it also executes
+  the route-handler tests this document deliberately scopes out (55 in
+  `routes/dhcp.rs`, 21 in `routes/domains.rs`, etc.) — reworded to say the
+  ~130 is this document's core-file subset, not the job's total. (3)
+  `secondary_permissions()`'s NATS ACL was documented as the wildcard
+  `$JS.API.CONSUMER.*.LANCACHE_DNS.>`; the actual code enumerates exactly
+  four subjects (`CONSUMER.INFO`/`CONSUMER.CREATE`/`CONSUMER.DURABLE.CREATE`/
+  `CONSUMER.MSG.NEXT`), and the wildcard shorthand made the enforced ACL look
+  broader than it is — replaced with the explicit list. (4)
+  `list_syslog_hosts()` was mentioned only in the Tests paragraph and in
+  passing elsewhere, never given its own function bullet, despite being the
+  actual host-enumeration/allowlist gate `routes/logs.rs` applies to the
+  caller-controlled `?host=` parameter before tailing — added as its own
+  bullet in section 8. (5) `main.rs`'s test count (15) counted only
+  `#[test]`, missing 4 `#[tokio::test]` full-chain Basic Auth middleware
+  integration tests added by #951 (19 total) — this document's own stated
+  counting methodology (line ~20, `grep -c '#\[test\]'`) does not match
+  `#[tokio::test]`, so this was a systematic gap for any file with async
+  tests; checked every other in-scope file for the same gap and found none
+  (only `main.rs` has `#[tokio::test]` functions). Corrected in the section 1
+  header, the section 1 Tests paragraph, and section 11's per-file count.
