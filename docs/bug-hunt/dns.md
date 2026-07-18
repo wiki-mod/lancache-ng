@@ -26,9 +26,29 @@ definitions (healthcheck, networking, ports, env), `config/{dev,prod}/dns-{stand
 `reset-to-last-known-good-config` DNS path, and `services/ui/src/routes/dns_snapshots.rs`
 (the thin Admin UI forwarder into this component's rollback listener).
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @ `dc8d79c6`
+> (68 commits merged since this doc's `3f53ac3b` base). Finding #1 (DNS healthcheck
+> governance-rule violations) is now **FIXED** by PR #876 (`9c31967a`, "fix: real
+> dig-based DNS healthcheck across all deploy profiles (#869)"), merged 2026-07-16 --
+> see the updated finding and the run-2 verdict note below. All other findings
+> (#2-#17, N1-N3) remain accurate; no other merged commit in that range touches this
+> component's code paths.
+
 ---
 
-## 1. [Healthcheck] DNS container healthchecks are inconsistent across deploy profiles and mostly violate this repo's own governance rules for DNS health checks
+## 1. [Healthcheck] DNS container healthchecks are inconsistent across deploy profiles and mostly violate this repo's own governance rules for DNS health checks — FIXED by PR #876 (2026-07-16)
+
+**Status update (2026-07-18): FIXED.** PR #876 (`9c31967a`, closing #869) replaced every
+non-compliant healthcheck with the same real `dig @127.0.0.1 steamcontent.com A +short
++time=2 +tries=1 | grep -q .` probe already used by `quickstart`, across **all** of
+`deploy/dev/docker-compose.yml`, `deploy/prod/docker-compose.yml`,
+`deploy/full-setup/docker-compose.yml`, **and** `deploy/secondary/docker-compose.yml`
+(confirmed directly against current `origin/v0.2.0`: all five profiles now share the
+identical dig-based `test:` line). The original finding below (kept for the historical
+record) no longer describes current code.
+
+<details>
+<summary>Original finding (as of 2026-07-15, now superseded)</summary>
 
 `AGENTS.md` explicitly states:
 
@@ -89,6 +109,8 @@ all (a hung/crash-looping `nats-subscriber` -- e.g. a NATS auth failure, or a st
 `services/ui/src/routes/secondaries.rs`); `git log -S "dig @127.0.0.1 steamcontent" --oneline -- deploy/quickstart/docker-compose.yml`
 → `5fecd6f`; `git log -S "rec_control ping 2>/dev/null || true" --oneline -- deploy/full-setup/docker-compose.yml`
 → `a316e5d`.
+
+</details>
 
 ---
 
@@ -484,7 +506,8 @@ between per-request timeout and per-tick zone count that neither the code nor
 Confirmed, previously-undocumented findings from this pass: the DNS healthcheck
 inconsistency/governance-violation across all four deploy profiles (#1, the most
 actionable and highest-confidence finding here, with a full paper trail via issues #44/
-PR #134/PR #769), the IPv6-listener gap contradicting this project's core dual-stack
+PR #134/PR #769 -- **now FIXED by PR #876/#869, merged 2026-07-16, see currency-check
+note above**), the IPv6-listener gap contradicting this project's core dual-stack
 claim (#2), the rollback-vs-live-write TOCTOU race (#5), the blanket `|| true` on zone
 creation (#6), the latent replace-without-ttl trap (#7), and the missing RPZ-helper
 drift guard (#8). Findings #3, #4, #9, #13 re-verify and extend doc-drift/gaps the
@@ -511,11 +534,12 @@ All 17 re-verified directly against the code at `3f53ac3` and **CONFIRMED**. The
 run-1 evidence above holds line-for-line; spot notes where re-verification added
 detail:
 
-- **#1 Healthcheck (serious):** confirmed. The `secondary` profile
-  (`deploy/secondary/docker-compose.yml:34`, not in the run-1 table) uses bare
-  `rec_control ping` — also non-compliant (no query/response). So it is 5
-  profiles / 4 distinct styles, only `quickstart` compliant. `dnsutils` (dig)
-  is present in the image, so the compliant probe is available everywhere.
+- **#1 Healthcheck (serious):** confirmed as of this run (5 profiles / 4 distinct
+  styles including bare `rec_control ping` on `secondary`,
+  `deploy/secondary/docker-compose.yml:34`, not in the run-1 table; only
+  `quickstart` compliant). **Currency check (2026-07-18): now FIXED** by PR #876
+  (`9c31967a`, closes #869), merged two days after this run -- all five profiles
+  now share the same dig-based probe. See the FIXED note on finding #1 above.
 - **#2 Recursor no IPv6 listener (serious):** confirmed; known/deferred as
   #851. Run-1 already noted the authoritative bind is IPv4-only too — see N2.
 - **#3 / #4 doc-drift (moderate):** confirmed by tree-wide grep. #3: of the 7
