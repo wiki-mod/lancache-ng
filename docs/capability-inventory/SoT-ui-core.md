@@ -24,7 +24,8 @@ Exact per-file `#[test]` counts below were produced with
 > `dc8d79c6`; see corrections below. Three files grew substantially since
 > this document was first written (68 commits landed on `v0.2.0` in the
 > interim, several touching this exact file list): `main.rs` (1156 → 1751
-> lines, 12 → 15 tests), `config.rs` (1393 → 2133 lines, 24 → 40 tests), and
+> lines, 12 → 19 tests: 15 `#[test]` + 4 `#[tokio::test]`), `config.rs`
+> (1393 → 2133 lines, 24 → 40 tests), and
 > `syslog_client.rs` (698 → 1046 lines, 12 → 18 tests) — driven by
 > `e7f2a06d` (AG-CODE-010 WHY-comments on ~52 test functions), `f29b3fe9`
 > (#951, basic_auth integration tests), `dc8d79c6` (#988, case-insensitive
@@ -793,17 +794,17 @@ history at the bottom of this document for the full account).
 
 - **`ui_test`** (job `test (ui)`) runs `cargo test --locked --manifest-path
   services/ui/Cargo.toml` via `./.github/actions/cargo-with-sccache-fallback`,
-  on `[self-hosted, linux, lancache, lancache-heavy]`. **This ~130 figure is
+  on `[self-hosted, linux, lancache, lancache-heavy]`. **This ~134 figure is
   this document's core-file subset, not the job's full test count** — `cargo
   test` runs the *entire* crate, so it also executes every test in the
   route-handler modules this document deliberately scopes out to the other
   agent's parallel pass (per the note at the top of this section): 55 in
   `routes/dhcp.rs`, 21 in `routes/domains.rs`, and smaller counts in the
   other `routes/*.rs` files (`routes/mod.rs`'s 4 are already included below).
-  The ~130 covers: `main.rs` (15 plain `#[test]` **plus 4 `#[tokio::test]`
-  middleware integration tests — 19 total**, previously undercounted here as
-  just 15), `config.rs` (40), `nats_auth_callout.rs` (15), `nats_config.rs`
-  (27), `session.rs` (3), `docker_client.rs` (0), `nginx_client.rs` (8),
+  The ~134 covers: `main.rs` (19: 15 plain `#[test]` plus 4 `#[tokio::test]`
+  middleware integration tests added by #951), `config.rs` (40),
+  `nats_auth_callout.rs` (15), `nats_config.rs` (27), `session.rs` (3),
+  `docker_client.rs` (0), `nginx_client.rs` (8),
   `syslog_client.rs` (18), `routes/mod.rs` (4), plus `kea_snapshots.rs`'s own
   8 (compiled from the same crate, scoped to the other agent). (Original
   count at first writing was ~91; the growth reflects 68 commits landed on
@@ -941,7 +942,8 @@ retracted "no CI test coverage" claim above.
   job runs; `cargo test` actually runs the whole crate, so it also executes
   the route-handler tests this document deliberately scopes out (55 in
   `routes/dhcp.rs`, 21 in `routes/domains.rs`, etc.) — reworded to say the
-  ~130 is this document's core-file subset, not the job's total. (3)
+  aggregate (now ~134, see finding 5 below) is this document's core-file
+  subset, not the job's total. (3)
   `secondary_permissions()`'s NATS ACL was documented as the wildcard
   `$JS.API.CONSUMER.*.LANCACHE_DNS.>`; the actual code enumerates exactly
   four subjects (`CONSUMER.INFO`/`CONSUMER.CREATE`/`CONSUMER.DURABLE.CREATE`/
@@ -958,4 +960,8 @@ retracted "no CI test coverage" claim above.
   `#[tokio::test]`, so this was a systematic gap for any file with async
   tests; checked every other in-scope file for the same gap and found none
   (only `main.rs` has `#[tokio::test]` functions). Corrected in the section 1
-  header, the section 1 Tests paragraph, and section 11's per-file count.
+  header, the section 1 Tests paragraph, the top currency-check note, and
+  section 11's per-file count and aggregate (the ~130 core-file sum was
+  itself stale once main.rs's component changed from 15 to 19 — it is now
+  ~134; fixing the leaf count without reconciling the aggregate would have
+  reproduced the exact same undercount class one level up).
