@@ -187,8 +187,20 @@ extract_issue_numbers() {
   done < <(grep -oE "$pattern" <<<"$text" || true)
 }
 
+strip_negated_partial_scope_phrases() {
+  # A PR body stating its scope is COMPLETE ("no follow-up required", "not
+  # deferred", "no TODO items left") must not be misread as declaring itself
+  # partial -- the raw keyword match below has no negation awareness, so
+  # explicit negations of each keyword are stripped first. Up to three filler
+  # words are tolerated between the negation and the keyword (e.g. "no
+  # further follow-up work required").
+  local text="$1"
+  sed -E 's/\b(no|not|none|nothing|without)\b([[:space:]]+[[:alnum:]-]+){0,3}[[:space:]]+(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)\b//Ig' <<<"$text"
+}
+
 contains_partial_scope_language() {
   local text="$1"
+  text="$(strip_negated_partial_scope_phrases "$text")"
   grep -Eiq '(^|[^[:alnum:]])(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)([^[:alnum:]]|$)' <<<"$text"
 }
 

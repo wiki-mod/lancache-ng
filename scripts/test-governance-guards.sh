@@ -159,4 +159,63 @@ make_fixture "$repo" \
   --body '@/tmp/PR_BODY.txt'
 expect_failure "literal tmp upload body" run_checker "$repo"
 
+# #1023: a negated partial-scope claim ("no follow-up required") must not be
+# misread as an unresolved partial-scope claim requiring an open Refs #.
+repo="$tmp_root/repo-negated-followup"
+mkdir -p "$repo"
+: > "$repo/changed-files.txt"
+: > "$repo/issue-state.txt"
+: > "$repo/pr-title.txt"
+: > "$repo/pr-body.txt"
+make_fixture "$repo" \
+  --title "fix: some real fix" \
+  --body $'Fixes #123\nNo follow-up work required for this scope. No follow-up required.'
+expect_success "negated follow-up required (#1015 regression)" run_checker "$repo"
+
+repo="$tmp_root/repo-negated-deferred"
+mkdir -p "$repo"
+: > "$repo/changed-files.txt"
+: > "$repo/issue-state.txt"
+: > "$repo/pr-title.txt"
+: > "$repo/pr-body.txt"
+make_fixture "$repo" \
+  --title "fix: some real fix" \
+  --body $'Fixes #123\nThis is not deferred, it is fully implemented.'
+expect_success "negated deferred" run_checker "$repo"
+
+repo="$tmp_root/repo-negated-todo"
+mkdir -p "$repo"
+: > "$repo/changed-files.txt"
+: > "$repo/issue-state.txt"
+: > "$repo/pr-title.txt"
+: > "$repo/pr-body.txt"
+make_fixture "$repo" \
+  --title "fix: some real fix" \
+  --body $'Fixes #123\nNo TODO items remain.'
+expect_success "negated TODO" run_checker "$repo"
+
+repo="$tmp_root/repo-negated-partial-with-filler"
+mkdir -p "$repo"
+: > "$repo/changed-files.txt"
+: > "$repo/issue-state.txt"
+: > "$repo/pr-title.txt"
+: > "$repo/pr-body.txt"
+make_fixture "$repo" \
+  --title "fix: some real fix" \
+  --body $'Fixes #123\nThis is definitely not a partial scaffold at all.'
+expect_success "negated scaffold with filler words" run_checker "$repo"
+
+# Negation-stripping must not blind the guard to a genuine, non-negated claim
+# sitting right next to a negated one in the same body.
+repo="$tmp_root/repo-negated-plus-genuine-partial"
+mkdir -p "$repo"
+: > "$repo/changed-files.txt"
+: > "$repo/issue-state.txt"
+: > "$repo/pr-title.txt"
+: > "$repo/pr-body.txt"
+make_fixture "$repo" \
+  --title "fix: some real fix" \
+  --body $'Fixes #123\nNo follow-up required for the main fix, but a separate part is deferred.'
+expect_failure "negated phrase alongside a genuine unresolved partial-scope claim" run_checker "$repo"
+
 printf 'governance guard fixtures passed\n'
