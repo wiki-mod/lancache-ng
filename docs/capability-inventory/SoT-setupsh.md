@@ -14,6 +14,30 @@ every `tests/bats/setup_*.bats` file, and `gh issue` lookups for the issues
 named in code comments (#639, #665, #669, #762, #763, #819, #665, #666, #628,
 #652, #785, #836, #456).
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6`; see corrections below. Two substantive updates since this file
+> was written against `3f53ac3`:
+> - **`secondary`'s generated healthcheck changed** from `rec_control ping` to
+>   a real dig-based query/response probe (issue #946 / PRs #976/#916), matching
+>   AG-VAL-018. Corrected inline in the `secondary` section below.
+> - **The post-update functional health gate now fails closed on a missing
+>   probe tool.** `verify_stack_functional_health` was hardened by PR #883 so a
+>   missing `dig` no longer silently skips the DNS probe — it calls
+>   `require_functional_check_tool dig … || return 1` and `install_missing_tools
+>   curl dig` runs before the gate. The `update` section's description of this
+>   gate (step 8) is therefore now *more* accurate than when written, not less;
+>   noted here for completeness.
+>
+> Everything else re-verified as still accurate against current code, with one
+> caveat: **absolute line numbers have drifted.** `setup.sh` grew from ~6084 to
+> 6291 lines since `3f53ac3` (merged `setup.sh`-touching PRs: #869/#876, #883,
+> #916/#976, #939, #941, #943, #956, #982, #984, #988), so the specific
+> `line N` references throughout this file are offset (roughly +100…+200 in the
+> file's latter half). The function names, behaviors, dispatch order,
+> test-coverage matrix, and referenced-issue states (#639/#669 CLOSED;
+> #785/#836/#456 OPEN — all re-confirmed) remain correct; only the numeric line
+> citations are stale.
+
 ## Dispatcher / full command list
 
 `case "${1:-install}" in` near the end of the file. Full set, in dispatch order:
@@ -535,7 +559,12 @@ primary's response → hardcoded default) and re-verifies platform support
 unless the early preflight above already covered these exact values.
 Generates the secondary's own `docker-compose.yml` (a single `dns-secondary`
 service, PowerDNS-based, with the #615 known-good-snapshot volume and a real
-healthcheck — `rec_control ping`) and `.env`, then `docker compose up -d`.
+healthcheck) and `.env`, then `docker compose up -d`. (Corrected 2026-07-18:
+this generated healthcheck was `rec_control ping` when this file was written;
+issue #946 / PRs #976/#916 replaced it with a real dig-based query/response
+probe — `dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q .`
+— explicitly per AG-VAL-018, since `rec_control ping` only proves the process
+is up, not that it actually resolves.)
 
 **Idempotence**: `--rotate` explicitly preserves anything not being rotated
 (`KEEP_KNOWN_GOOD_CONFIGS` from existing `.env` if not overridden); a
