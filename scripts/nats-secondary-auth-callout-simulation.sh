@@ -69,7 +69,16 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy dns-standard dns-ssl ui; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
+        # check aborts the whole script silently the instant `cmd` fails --
+        # errexit fires right at this assignment, before any diagnostic ever
+        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
+        # project name, daemon down) reports its own cause instead of a bare
+        # "Process completed with exit code 1".
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -77,7 +86,10 @@ while (( SECONDS < deadline )); do
     sleep 5
 done
 for service in proxy dns-standard dns-ssl ui; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
     if [[ "$status" != "healthy" ]]; then
         echo "::error::$service did not become healthy (status: $status)" >&2
@@ -96,12 +108,25 @@ run_client() {
 echo "== UI: establishing a session and extracting its CSRF token =="
 
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://$ui_ip:8080/secondaries'"
-cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at the assignment, before the `[[ -z ... ]]` check on the following
+# line ever runs. Wrap each so a failing awk/cut invocation reports its own
+# cause instead of a bare "Process completed with exit code 1"; the existing
+# `[[ -z ]]` checks stay as-is below, they still catch the separate case of
+# the command succeeding but producing empty output.
+if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
+    echo "::error::Failed to read the session cookiejar at $work_dir/shared/cookiejar." >&2
+    exit 1
+fi
 if [[ -z "$cookie_value" ]]; then
     echo "::error::No lancache_ui_session cookie was set by GET /secondaries." >&2
     exit 1
 fi
-csrf_token="$(cut -d. -f3 <<<"$cookie_value")"
+if ! csrf_token="$(cut -d. -f3 <<<"$cookie_value")"; then
+    echo "::error::Failed to extract a CSRF token from the session cookie value." >&2
+    exit 1
+fi
 if [[ -z "$csrf_token" ]]; then
     echo "::error::Could not extract a CSRF token from the session cookie." >&2
     exit 1
@@ -119,7 +144,13 @@ register_secondary() {
         -d '{\"token\":\"$registration_token\",\"name\":\"$name\"}' \
         'http://$ui_ip:8080/api/secondary/register'" > "$work_dir/shared/register-${name}.status"
     local http_code
-    http_code="$(cat "$work_dir/shared/register-${name}.status")"
+    # Same errexit hazard as elsewhere in this file: a bare `var="$(cmd)"`
+    # with no adjacent check would abort silently here if the status file
+    # somehow couldn't be read back, before the HTTP-code check below ever ran.
+    if ! http_code="$(cat "$work_dir/shared/register-${name}.status")"; then
+        echo "::error::Could not read back the HTTP status code written for secondary '$name' registration." >&2
+        exit 1
+    fi
     if [[ "$http_code" != "200" ]]; then
         echo "::error::Registering secondary '$name' returned HTTP $http_code" >&2
         cat "$response_file" >&2 || true
@@ -155,6 +186,11 @@ attempt_nats_connect() {
 assert_connects() {
     local label="$1" nats_url="$2" nats_user="$3" nats_password="$4" consumer="$5"
     local ok
+    # Unlike the other bare `var="$(cmd)"` assignments hardened elsewhere in
+    # this file, this one is not wrapped in an `if !` guard: attempt_nats_connect's
+    # own last statement is always an unconditional `echo "1"` or `echo "0"`
+    # (its one genuinely fallible step, the `docker run`, is already followed
+    # by its own `|| true`), so it cannot itself return non-zero here.
     ok="$(attempt_nats_connect "$label" "$nats_url" "$nats_user" "$nats_password" "$consumer")"
     if [[ "$ok" != "1" ]]; then
         echo "::error::Expected '$label' to connect to NATS successfully but it did not. Log:" >&2
@@ -176,6 +212,15 @@ assert_rejected() {
     echo "$label: rejected, as expected."
 }
 
+# Extracts a single string field's value from a JSON response file via a
+# plain regex instead of a proper JSON parser -- the responses here are
+# small, flat, and fully controlled by this project's own Admin UI, so a
+# regex is enough and avoids adding a jq dependency to the build-tools image
+# just for this. `\K` resets the match start so grep's own -o output is only
+# the captured value, not the whole `"field":"value"` match. Its exit status
+# is grep's own: 1 if the field genuinely isn't present in the file (e.g. an
+# error response body instead of the expected success JSON), 2 if the file
+# itself can't be read -- both real failure modes callers must handle.
 json_field() {
     local file="$1" field="$2"
     grep -oP "\"$field\"\s*:\s*\"\K[^\"]*" "$file"
@@ -187,14 +232,44 @@ register_secondary "authcallout-b"
 
 a_file="$work_dir/shared/register-authcallout-a.json"
 b_file="$work_dir/shared/register-authcallout-b.json"
-a_url="$(json_field "$a_file" nats_url)"
-a_user="$(json_field "$a_file" nats_user)"
-a_pass="$(json_field "$a_file" nats_password)"
-a_consumer="$(json_field "$a_file" consumer_name)"
-b_url="$(json_field "$b_file" nats_url)"
-b_user="$(json_field "$b_file" nats_user)"
-b_pass="$(json_field "$b_file" nats_password)"
-b_consumer="$(json_field "$b_file" consumer_name)"
+# Under `set -euo pipefail`, a bare `var="$(json_field ...)"` with no
+# adjacent check would abort silently right here the instant json_field's
+# grep fails (see its own comment above), before the "Missing expected
+# field" loop further below ever gets a chance to report which field and
+# file were actually at fault -- wrap each call so a failure names itself
+# immediately instead of dying with no explanation.
+if ! a_url="$(json_field "$a_file" nats_url)"; then
+    echo "::error::Failed to read field 'nats_url' from $a_file." >&2
+    exit 1
+fi
+if ! a_user="$(json_field "$a_file" nats_user)"; then
+    echo "::error::Failed to read field 'nats_user' from $a_file." >&2
+    exit 1
+fi
+if ! a_pass="$(json_field "$a_file" nats_password)"; then
+    echo "::error::Failed to read field 'nats_password' from $a_file." >&2
+    exit 1
+fi
+if ! a_consumer="$(json_field "$a_file" consumer_name)"; then
+    echo "::error::Failed to read field 'consumer_name' from $a_file." >&2
+    exit 1
+fi
+if ! b_url="$(json_field "$b_file" nats_url)"; then
+    echo "::error::Failed to read field 'nats_url' from $b_file." >&2
+    exit 1
+fi
+if ! b_user="$(json_field "$b_file" nats_user)"; then
+    echo "::error::Failed to read field 'nats_user' from $b_file." >&2
+    exit 1
+fi
+if ! b_pass="$(json_field "$b_file" nats_password)"; then
+    echo "::error::Failed to read field 'nats_password' from $b_file." >&2
+    exit 1
+fi
+if ! b_consumer="$(json_field "$b_file" consumer_name)"; then
+    echo "::error::Failed to read field 'consumer_name' from $b_file." >&2
+    exit 1
+fi
 
 for value_name in a_url a_user a_pass a_consumer b_url b_user b_pass b_consumer; do
     if [[ -z "${!value_name}" ]]; then
@@ -214,9 +289,15 @@ assert_connects "a-initial" "$a_url" "$a_user" "$a_pass" "$a_consumer"
 assert_connects "b-initial" "$b_url" "$b_user" "$b_pass" "$b_consumer"
 
 echo "== Removing secondary 'authcallout-a' via DELETE /api/secondary/authcallout-a =="
-remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /dev/null -w '%{http_code}' \
+# Same errexit hazard as elsewhere in this file: wrap the run_client
+# invocation so a failing docker/curl call reports its own cause instead of
+# aborting silently before the HTTP-code check below ever runs.
+if ! remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /dev/null -w '%{http_code}' \
     -X DELETE -H 'X-CSRF-Token: $csrf_token' \
-    'http://$ui_ip:8080/api/secondary/authcallout-a'")"
+    'http://$ui_ip:8080/api/secondary/authcallout-a'")"; then
+    echo "::error::DELETE /api/secondary/authcallout-a via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 if [[ "$remove_http_code" != "200" ]]; then
     echo "::error::DELETE /api/secondary/authcallout-a returned HTTP $remove_http_code, expected 200." >&2
     exit 1
@@ -231,17 +312,26 @@ assert_connects "b-after-a-removed" "$b_url" "$b_user" "$b_pass" "$b_consumer"
 
 echo "== Rotating secondary 'authcallout-b's credential via POST rotate-token =="
 rotate_file="$work_dir/shared/rotate-b.json"
-rotate_http_code="$(run_client "curl -sS -o /shared/rotate-b.json -w '%{http_code}' \
+# Same errexit hazard as the DELETE call above: wrap the run_client
+# invocation so a failing docker/curl call reports its own cause instead of
+# aborting silently before the HTTP-code check below ever runs.
+if ! rotate_http_code="$(run_client "curl -sS -o /shared/rotate-b.json -w '%{http_code}' \
     -X POST -b /shared/cookiejar -H 'X-CSRF-Token: $csrf_token' \
     -H 'Content-Type: application/json' \
     -d '{\"token\":\"$registration_token\"}' \
-    'http://$ui_ip:8080/api/secondary/authcallout-b/rotate-token'")"
+    'http://$ui_ip:8080/api/secondary/authcallout-b/rotate-token'")"; then
+    echo "::error::POST rotate-token for authcallout-b via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 if [[ "$rotate_http_code" != "200" ]]; then
     echo "::error::POST rotate-token for authcallout-b returned HTTP $rotate_http_code, expected 200." >&2
     cat "$rotate_file" >&2 || true
     exit 1
 fi
-b_new_pass="$(json_field "$rotate_file" nats_password)"
+if ! b_new_pass="$(json_field "$rotate_file" nats_password)"; then
+    echo "::error::Failed to read field 'nats_password' from $rotate_file." >&2
+    exit 1
+fi
 if [[ -z "$b_new_pass" ]]; then
     echo "::error::rotate-token response for authcallout-b did not include nats_password." >&2
     exit 1

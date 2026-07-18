@@ -180,7 +180,16 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy nats; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
+        # check aborts the whole script silently the instant `cmd` fails --
+        # errexit fires right at this assignment, before any diagnostic ever
+        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
+        # project name, daemon down) reports its own cause instead of a bare
+        # "Process completed with exit code 1".
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -188,7 +197,10 @@ while (( SECONDS < deadline )); do
     sleep 5
 done
 for service in proxy nats; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
     if [[ "$status" != "healthy" ]]; then
         echo "::error::$service did not become healthy (status: $status)" >&2
@@ -282,7 +294,10 @@ echo "== UI: establishing a session and extracting its CSRF token =="
 # (v1.<expires>.<csrf_token>.<signature>), whose third dot-separated field is
 # the CSRF token every mutating request must echo back.
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://$ui_ip:8080/dhcp'"
-cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
+if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
+    echo "::error::Could not read the session cookie back from $work_dir/shared/cookiejar." >&2
+    exit 1
+fi
 if [[ -z "$cookie_value" ]]; then
     echo "::error::No lancache_ui_session cookie was set by GET /dhcp." >&2
     exit 1
@@ -355,7 +370,10 @@ PYEOF
 }
 
 echo "== Baseline: requesting a lease for $test_mac before any mutation =="
-baseline_address="$(request_lease "baseline" "client-state-baseline")"
+if ! baseline_address="$(request_lease "baseline" "client-state-baseline")"; then
+    echo "::error::request_lease failed outright for the baseline lease (e.g. the underlying docker run could not even start)." >&2
+    exit 1
+fi
 if [[ "$(address_in_range "$baseline_address" "$pool_start" "$pool_end")" != "yes" ]]; then
     echo "::error::Baseline address '$baseline_address' is not in the dynamic pool ($pool_start - $pool_end)." >&2
     exit 1
@@ -363,13 +381,16 @@ fi
 echo "Baseline lease $baseline_address is a normal dynamic-pool address, as expected before any reservation exists."
 
 echo "== UI: adding a real static DHCP reservation via POST /dhcp/static/add (kea_config_modify round trip) =="
-add_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-response -w '%{http_code}' \
+if ! add_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'subnet_id=1' \
     --data-urlencode 'mac=$test_mac' \
     --data-urlencode 'ip=$reserved_ip' \
     --data-urlencode 'hostname=$reserved_hostname' \
-    'http://$ui_ip:8080/dhcp/static/add'")"
+    'http://$ui_ip:8080/dhcp/static/add'")"; then
+    echo "::error::POST /dhcp/static/add via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 if [[ "$add_http_code" != "303" ]]; then
     echo "::error::POST /dhcp/static/add returned HTTP $add_http_code, expected 303 (redirect to /dhcp)." >&2
     run_client "cat /shared/add-response" || true
@@ -379,7 +400,7 @@ fi
 echo "Admin UI accepted the reservation add (303 redirect) -- config-test/config-set/config-write all succeeded against real Kea."
 
 echo "== Verifying the reservation is observable in a follow-up config-get against real Kea =="
-reservation_present="$(docker exec "$kea_container" sh -c '
+if ! reservation_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
         "http://127.0.0.1:8000/" \
@@ -388,7 +409,10 @@ reservation_present="$(docker exec "$kea_container" sh -c '
          | select((."hw-address"|ascii_downcase) == ($mac|ascii_downcase) and ."ip-address" == $ip)]
         | length > 0
     '"'"' >/dev/null && echo yes || echo no
-' -- "$kea_ctrl_token" "$test_mac" "$reserved_ip")"
+' -- "$kea_ctrl_token" "$test_mac" "$reserved_ip")"; then
+    echo "::error::Could not run the config-get reservation-present check against Kea's Control Agent ($kea_container)." >&2
+    exit 1
+fi
 if [[ "$reservation_present" != "yes" ]]; then
     echo "::error::Kea's own config-get does not show the reservation that was just added via the Admin UI." >&2
     exit 1
@@ -396,7 +420,10 @@ fi
 echo "Kea's live config-get confirms the reservation ($test_mac -> $reserved_ip) is present."
 
 echo "== Requesting a SECOND lease for $test_mac: must now receive the reserved address =="
-reserved_address="$(request_lease "post-add" "client-state-post-add")"
+if ! reserved_address="$(request_lease "post-add" "client-state-post-add")"; then
+    echo "::error::request_lease failed outright for the post-add lease (e.g. the underlying docker run could not even start)." >&2
+    exit 1
+fi
 if [[ "$reserved_address" != "$reserved_ip" ]]; then
     echo "::error::After adding the reservation, dhclient received '$reserved_address', expected the reserved address $reserved_ip." >&2
     exit 1
@@ -404,11 +431,14 @@ fi
 echo "Confirmed: a real, subsequent DHCP request for $test_mac now receives the reserved address $reserved_ip -- the mutation genuinely changed what Kea hands out, not just the config file."
 
 echo "== UI: removing the reservation via POST /dhcp/static/remove =="
-remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/remove-response -w '%{http_code}' \
+if ! remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/remove-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'subnet_id=1' \
     --data-urlencode 'mac=$test_mac' \
-    'http://$ui_ip:8080/dhcp/static/remove'")"
+    'http://$ui_ip:8080/dhcp/static/remove'")"; then
+    echo "::error::POST /dhcp/static/remove via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 if [[ "$remove_http_code" != "303" ]]; then
     echo "::error::POST /dhcp/static/remove returned HTTP $remove_http_code, expected 303 (redirect to /dhcp)." >&2
     run_client "cat /shared/remove-response" || true
@@ -417,7 +447,7 @@ if [[ "$remove_http_code" != "303" ]]; then
 fi
 echo "Admin UI accepted the reservation removal (303 redirect)."
 
-reservation_gone="$(docker exec "$kea_container" sh -c '
+if ! reservation_gone="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
         "http://127.0.0.1:8000/" \
@@ -426,7 +456,10 @@ reservation_gone="$(docker exec "$kea_container" sh -c '
          | select((."hw-address"|ascii_downcase) == ($mac|ascii_downcase))]
         | length == 0
     '"'"' >/dev/null && echo yes || echo no
-' -- "$kea_ctrl_token" "$test_mac")"
+' -- "$kea_ctrl_token" "$test_mac")"; then
+    echo "::error::Could not run the config-get reservation-gone check against Kea's Control Agent ($kea_container)." >&2
+    exit 1
+fi
 if [[ "$reservation_gone" != "yes" ]]; then
     echo "::error::Kea's own config-get still shows the reservation after removal via the Admin UI." >&2
     exit 1
@@ -449,11 +482,14 @@ echo "Kea's live config-get confirms the reservation for $test_mac is gone."
 # script isn't exercising, this is just cleanup to make the next assertion
 # valid.
 echo "== Clearing the now-orphaned active Kea lease for $reserved_ip before the next request =="
-lease_del_result="$(docker exec "$kea_container" sh -c '
+if ! lease_del_result="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"lease4-del\",\"service\":[\"dhcp4\"],\"arguments\":{\"ip-address\":\"$2\"}}" \
         "http://127.0.0.1:8000/" | jq -r ".[0].result"
-' -- "$kea_ctrl_token" "$reserved_ip")"
+' -- "$kea_ctrl_token" "$reserved_ip")"; then
+    echo "::error::Could not run lease4-del for $reserved_ip against Kea's Control Agent ($kea_container)." >&2
+    exit 1
+fi
 # 0 = deleted, 3 = Kea's CONTROL_RESULT_EMPTY (no matching lease -- e.g. it
 # already expired on its own) -- both leave $reserved_ip with no active
 # lease, which is all the next assertion actually requires. Anything else is
@@ -466,7 +502,10 @@ fi
 echo "Active lease for $reserved_ip cleared from Kea's lease database (lease4-del result: $lease_del_result)."
 
 echo "== Requesting a THIRD lease for $test_mac: must be back in the dynamic pool =="
-post_remove_address="$(request_lease "post-remove" "client-state-post-remove")"
+if ! post_remove_address="$(request_lease "post-remove" "client-state-post-remove")"; then
+    echo "::error::request_lease failed outright for the post-remove lease (e.g. the underlying docker run could not even start)." >&2
+    exit 1
+fi
 if [[ "$post_remove_address" == "$reserved_ip" ]]; then
     echo "::error::After removing the reservation, dhclient still received the reserved address $reserved_ip." >&2
     exit 1

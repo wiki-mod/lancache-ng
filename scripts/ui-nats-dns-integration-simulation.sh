@@ -67,7 +67,16 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy dns-standard dns-ssl ui; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
+        # check aborts the whole script silently the instant `cmd` fails --
+        # errexit fires right at this assignment, before any diagnostic ever
+        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
+        # project name, daemon down) reports its own cause instead of a bare
+        # "Process completed with exit code 1".
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -75,7 +84,10 @@ while (( SECONDS < deadline )); do
     sleep 5
 done
 for service in proxy dns-standard dns-ssl ui; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
     if [[ "$status" != "healthy" ]]; then
         echo "::error::$service did not become healthy (status: $status)" >&2
@@ -106,12 +118,24 @@ echo "== UI: establishing a session and extracting its CSRF token =="
 # against a protected route establishes the session; the cookie's third
 # dot-separated field is the CSRF token, no HTML scraping required.
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://$ui_ip:8080/domains'"
-cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at the assignment, before the "$cookie_value"/"$csrf_token" empty
+# checks below ever get a chance to run. Wrap both so a broken awk/cut
+# invocation reports its own cause instead of a bare "Process completed with
+# exit code 1".
+if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
+    echo "::error::Failed to read the session cookie from $work_dir/shared/cookiejar (awk invocation failed)." >&2
+    exit 1
+fi
 if [[ -z "$cookie_value" ]]; then
     echo "::error::No lancache_ui_session cookie was set by GET /domains." >&2
     exit 1
 fi
-csrf_token="$(cut -d. -f3 <<<"$cookie_value")"
+if ! csrf_token="$(cut -d. -f3 <<<"$cookie_value")"; then
+    echo "::error::Failed to extract the CSRF token from the session cookie (cut invocation failed)." >&2
+    exit 1
+fi
 if [[ -z "$csrf_token" ]]; then
     echo "::error::Could not extract a CSRF token from the session cookie." >&2
     exit 1
@@ -120,13 +144,22 @@ echo "Session established, CSRF token extracted."
 
 echo "== UI: adding a real LAN record via POST /domains/lan/add =="
 
-add_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-response -w '%{http_code}' \
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at the assignment, before the HTTP-code check below ever runs. Wrap
+# it so a broken run_client/docker invocation (as opposed to curl merely
+# returning a non-303 status, which the check below already catches) reports
+# its own cause instead of a bare "Process completed with exit code 1".
+if ! add_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'name=$test_name' \
     --data-urlencode 'record_type=A' \
     --data-urlencode 'content=$test_content' \
     --data-urlencode 'ttl=60' \
-    'http://$ui_ip:8080/domains/lan/add'")"
+    'http://$ui_ip:8080/domains/lan/add'")"; then
+    echo "::error::POST /domains/lan/add via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 if [[ "$add_http_code" != "303" ]]; then
     echo "::error::POST /domains/lan/add returned HTTP $add_http_code, expected 303 (redirect to /domains)." >&2
     exit 1
@@ -144,7 +177,17 @@ verify_record_resolves() {
     local dns_ip="$2"
     local attempt
     for attempt in $(seq 1 10); do
-        resolved="$(run_client "dig +time=2 +tries=1 +short @$dns_ip A $test_fqdn" | sort -u)"
+        # Under `set -euo pipefail`, `run_client ... | sort -u` can abort the
+        # whole script silently before the resolved-value check below ever
+        # runs: pipefail makes the pipeline's exit status reflect run_client's
+        # own failure even though `sort -u` always succeeds on its own (it
+        # happily sorts zero lines of input) -- wrap the assignment so a
+        # failed dig/run_client invocation against this specific $dns_ip is
+        # reported explicitly instead of dying with no explanation.
+        if ! resolved="$(run_client "dig +time=2 +tries=1 +short @$dns_ip A $test_fqdn" | sort -u)"; then
+            echo "::error::Failed to run dig against $label ($dns_ip) for $test_fqdn (run_client/docker invocation failed, attempt $attempt)." >&2
+            exit 1
+        fi
         [[ "$resolved" = "$test_content" ]] && { echo "$label resolves $test_fqdn to $test_content (attempt $attempt)."; return 0; }
         sleep 1
     done
@@ -157,12 +200,17 @@ verify_record_resolves "dns-ssl" "$dns_ssl_ip"
 
 echo "== UI: removing the LAN record via POST /domains/lan/remove =="
 
-remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/remove-response -w '%{http_code}' \
+# Same reasoning as the add_http_code wrap above: catch a broken
+# run_client/docker invocation itself, not just a non-303 curl result.
+if ! remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/remove-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'name=$test_name' \
     --data-urlencode 'record_type=A' \
     --data-urlencode 'content=$test_content' \
-    'http://$ui_ip:8080/domains/lan/remove'")"
+    'http://$ui_ip:8080/domains/lan/remove'")"; then
+    echo "::error::POST /domains/lan/remove via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 if [[ "$remove_http_code" != "303" ]]; then
     echo "::error::POST /domains/lan/remove returned HTTP $remove_http_code, expected 303 (redirect to /domains)." >&2
     exit 1
@@ -176,7 +224,13 @@ verify_record_gone() {
     local dns_ip="$2"
     local attempt
     for attempt in $(seq 1 10); do
-        resolved="$(run_client "dig +time=2 +tries=1 +short @$dns_ip A $test_fqdn" | sort -u)"
+        # Same pipefail hazard as verify_record_resolves above: wrap so a
+        # failed dig/run_client invocation against this specific $dns_ip is
+        # reported explicitly instead of silently aborting the script.
+        if ! resolved="$(run_client "dig +time=2 +tries=1 +short @$dns_ip A $test_fqdn" | sort -u)"; then
+            echo "::error::Failed to run dig against $label ($dns_ip) for $test_fqdn (run_client/docker invocation failed, attempt $attempt)." >&2
+            exit 1
+        fi
         [[ -z "$resolved" ]] && { echo "$label no longer resolves $test_fqdn (attempt $attempt)."; return 0; }
         sleep 1
     done

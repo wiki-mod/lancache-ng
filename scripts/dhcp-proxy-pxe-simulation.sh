@@ -146,12 +146,31 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
         echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
         exit 1
     }
-    attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-    candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
-    candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+    # Under `set -euo pipefail`, each bare `var="$(cmd1 | cmd2)"` below would abort
+    # the whole script silently the instant either stage failed -- pipefail makes the
+    # pipeline's exit status reflect a failed `printf`/`sed` even though the other
+    # stage might still succeed, and errexit would fire right at the assignment,
+    # before any of the [[ -n ]] checks a later line might have had a chance to run.
+    # Wrap each so a broken parse of $reservation reports its own cause instead of a
+    # bare "Process completed with exit code 1".
+    if ! attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"; then
+        echo "::error::Could not parse 'attempt' out of the subnet reservation output." >&2
+        exit 1
+    fi
+    if ! candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"; then
+        echo "::error::Could not parse 'octet' out of the subnet reservation output." >&2
+        exit 1
+    fi
+    if ! candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"; then
+        echo "::error::Could not parse 'holder_pid' out of the subnet reservation output." >&2
+        exit 1
+    fi
 
     candidate_subnet="172.29.${candidate_octet}.0/24"
-    conflict="$(validation_subnet_conflicts "$candidate_subnet")"
+    if ! conflict="$(validation_subnet_conflicts "$candidate_subnet")"; then
+        echo "::error::Subnet-conflict check failed for candidate subnet $candidate_subnet." >&2
+        exit 1
+    fi
     if [[ -n "$conflict" ]]; then
         echo "Octet $candidate_octet's subnet $candidate_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
         validation_subnet_release "$candidate_pid"
@@ -275,13 +294,30 @@ run_probe() {
 
 fail=0
 
-bios_result="$(run_probe bios --arch 0)"
+# Under `set -euo pipefail`, a bare `result="$(run_probe ...)"` with no adjacent check
+# would abort the whole script silently the instant the underlying `docker exec`/scapy
+# probe failed -- errexit fires right at the assignment, before any diagnostic ever
+# prints. Wrap each so a broken probe invocation reports its own cause instead of a
+# bare "Process completed with exit code 1".
+if ! bios_result="$(run_probe bios --arch 0)"; then
+    echo "::error::PXE probe 'bios' (arch 0) failed to run inside the client container." >&2
+    exit 1
+fi
 echo "$bios_result"
-uefi_x8664_result="$(run_probe uefi-x8664 --arch 7)"
+if ! uefi_x8664_result="$(run_probe uefi-x8664 --arch 7)"; then
+    echo "::error::PXE probe 'uefi-x8664' (arch 7) failed to run inside the client container." >&2
+    exit 1
+fi
 echo "$uefi_x8664_result"
-uefi_arm64_result="$(run_probe uefi-arm64 --arch 11)"
+if ! uefi_arm64_result="$(run_probe uefi-arm64 --arch 11)"; then
+    echo "::error::PXE probe 'uefi-arm64' (arch 11) failed to run inside the client container." >&2
+    exit 1
+fi
 echo "$uefi_arm64_result"
-negative_result="$(run_probe negative-no-pxe --no-pxe)"
+if ! negative_result="$(run_probe negative-no-pxe --no-pxe)"; then
+    echo "::error::PXE probe 'negative-no-pxe' (no PXE tag) failed to run inside the client container." >&2
+    exit 1
+fi
 echo "$negative_result"
 
 # assert_pxe_reply <label> <parsed_result> <expected_filename>

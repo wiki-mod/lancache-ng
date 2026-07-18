@@ -130,7 +130,16 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy dns-standard dns-ssl standard-passthrough-shim; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
+        # check aborts the whole script silently the instant `cmd` fails --
+        # errexit fires right at this assignment, before any diagnostic ever
+        # prints (see issue #841). Wrap it so a broken `compose ps`
+        # invocation (e.g. wrong project name, daemon down) reports its own
+        # cause instead of a bare "Process completed with exit code 1".
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -138,7 +147,10 @@ while (( SECONDS < deadline )); do
     sleep 5
 done
 for service in proxy dns-standard dns-ssl standard-passthrough-shim; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
     if [[ "$status" != "healthy" ]]; then
         echo "::error::$service did not become healthy (status: $status)" >&2
@@ -148,7 +160,10 @@ for service in proxy dns-standard dns-ssl standard-passthrough-shim; do
 done
 echo "proxy, dns-standard, dns-ssl, and standard-passthrough-shim are healthy."
 
-proxy_cid="$("${compose[@]}" ps -q proxy)"
+if ! proxy_cid="$("${compose[@]}" ps -q proxy)"; then
+    echo "::error::Could not query the compose container id for the proxy service." >&2
+    exit 1
+fi
 docker cp "$proxy_cid:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca.crt"
 
 # Each call is a brand new --rm container, so /tmp inside it never survives
@@ -201,7 +216,16 @@ run_client() {
 # trivially also satisfy.
 echo "== DNS: resolving $test_domain against dns-standard and dns-ssl =="
 
-resolved_dns_standard="$(run_client "dig +time=3 +tries=2 +short @$dns_standard_ip A $test_domain" | sort -u)"
+# Under `set -euo pipefail`, `run_client ... | sort -u` can abort the whole
+# script silently before the empty/ambiguous check below ever runs: pipefail
+# makes the pipeline's exit status reflect run_client's own failure even
+# though `sort -u` always succeeds on its own (it happily sorts zero lines
+# of input) -- wrap the assignment so a failed dig/run_client invocation is
+# reported explicitly instead of dying with no explanation (issue #841).
+if ! resolved_dns_standard="$(run_client "dig +time=3 +tries=2 +short @$dns_standard_ip A $test_domain" | sort -u)"; then
+    echo "::error::Failed to run dig against dns-standard ($dns_standard_ip) for $test_domain (run_client/docker invocation failed)." >&2
+    exit 1
+fi
 # sort -u collapses PowerDNS RPZ answering with the same A record on
 # multiple lines (seen during development) -- but a real ambiguity (more
 # than one DISTINCT address, or none at all) leaves no well-defined target
@@ -213,7 +237,10 @@ if [[ -z "$resolved_dns_standard" ]] || [[ "$resolved_dns_standard" == *$'\n'* ]
 fi
 echo "dns-standard resolves $test_domain to $resolved_dns_standard."
 
-resolved_dns_ssl="$(run_client "dig +time=3 +tries=2 +short @$dns_ssl_ip A $test_domain" | sort -u)"
+if ! resolved_dns_ssl="$(run_client "dig +time=3 +tries=2 +short @$dns_ssl_ip A $test_domain" | sort -u)"; then
+    echo "::error::Failed to run dig against dns-ssl ($dns_ssl_ip) for $test_domain (run_client/docker invocation failed)." >&2
+    exit 1
+fi
 if [[ -z "$resolved_dns_ssl" ]] || [[ "$resolved_dns_ssl" == *$'\n'* ]]; then
     echo "::error::dns-ssl returned an empty or ambiguous DNS answer for $test_domain: '$resolved_dns_ssl'" >&2
     exit 1
@@ -229,7 +256,10 @@ echo "== Port routing: proving dns-ssl's answer leads to genuine MITM intercepti
 
 # Our own LAN CA's subject becomes the ISSUER field of every certificate it
 # signs -- this is the reference value both legs below are compared against.
-ca_subject="$(run_client "openssl x509 -noout -subject -in /ca.crt" | sed 's/^subject=//')"
+if ! ca_subject="$(run_client "openssl x509 -noout -subject -in /ca.crt" | sed 's/^subject=//')"; then
+    echo "::error::Failed to read our own LAN CA's subject from ca.crt (run_client/openssl invocation failed)." >&2
+    exit 1
+fi
 [[ -n "$ca_subject" ]] || { echo "::error::Could not read our own LAN CA's subject from ca.crt." >&2; exit 1; }
 echo "LAN CA subject: $ca_subject"
 
@@ -240,7 +270,10 @@ echo "LAN CA subject: $ca_subject"
 # lingering after the handshake waiting for application data that never
 # comes; `< /dev/null` signals EOF immediately instead of writing a stray
 # newline the server might otherwise wait on.
-ssl_issuer="$(run_client "timeout 10 openssl s_client -connect $resolved_dns_ssl:443 -servername $test_domain < /dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null" | sed 's/^issuer=//')"
+if ! ssl_issuer="$(run_client "timeout 10 openssl s_client -connect $resolved_dns_ssl:443 -servername $test_domain < /dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null" | sed 's/^issuer=//')"; then
+    echo "::error::Failed to read the certificate issuer presented by dns-ssl's resolved endpoint ($resolved_dns_ssl) for $test_domain (run_client invocation failed)." >&2
+    exit 1
+fi
 if [[ "$ssl_issuer" != "$ca_subject" ]]; then
     echo "::error::dns-ssl resolved $test_domain to $resolved_dns_ssl, but the certificate presented on its port 443 was issued by '${ssl_issuer:-<none>}', not our own LAN CA ('$ca_subject'). dns-ssl is not routing to a genuine MITM endpoint." >&2
     exit 1
@@ -259,7 +292,10 @@ fi
 echo "dns-ssl's resolved endpoint's certificate is correctly rejected by the public/system CA trust store (only trusted via our own ca.crt) -- confirms interception, not passthrough."
 
 # --- dns-standard's resolved address: must present the REAL origin's own certificate ---
-standard_issuer="$(run_client "timeout 10 openssl s_client -connect $resolved_dns_standard:443 -servername $test_domain < /dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null" | sed 's/^issuer=//')"
+if ! standard_issuer="$(run_client "timeout 10 openssl s_client -connect $resolved_dns_standard:443 -servername $test_domain < /dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null" | sed 's/^issuer=//')"; then
+    echo "::error::Failed to read the certificate issuer presented by dns-standard's resolved endpoint ($resolved_dns_standard) for $test_domain (run_client invocation failed)." >&2
+    exit 1
+fi
 [[ -n "$standard_issuer" ]] \
     || { echo "::error::dns-standard resolved $test_domain to $resolved_dns_standard, but no certificate at all was presented on its port 443 -- SNI passthrough to the real origin is not reaching it." >&2; exit 1; }
 if [[ "$standard_issuer" == "$ca_subject" ]]; then
@@ -312,13 +348,19 @@ echo "== Standard mode: HTTP MISS then HIT for a real file =="
 # deploy/prod/docker-compose.yml's "Port 80: HTTP caching (shared cache for
 # both modes)" comment) -- there is no per-mode HTTP behavior to distinguish
 # here, only the port-443 MITM-vs-passthrough split proven above.
-http_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
+if ! http_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"; then
+    echo "::error::First standard-mode HTTP request via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 grep -qi '^X-Cache-Status: MISS' <<<"$http_status_1" \
     || { echo "::error::First standard-mode HTTP request was not a MISS." >&2; echo "$http_status_1" >&2; exit 1; }
 grep -q '^HTTP_STATUS:200$' <<<"$http_status_1" \
     || { echo "::error::First standard-mode HTTP request did not return HTTP 200." >&2; echo "$http_status_1" >&2; exit 1; }
 
-http_status_2="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body2 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"
+if ! http_status_2="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body2 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"; then
+    echo "::error::Second standard-mode HTTP request via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 grep -qi '^X-Cache-Status: HIT' <<<"$http_status_2" \
     || { echo "::error::Second standard-mode HTTP request was not a HIT." >&2; echo "$http_status_2" >&2; exit 1; }
 grep -q '^HTTP_STATUS:200$' <<<"$http_status_2" \
@@ -336,13 +378,19 @@ echo "== SSL mode: HTTPS MITM MISS then HIT for a real file =="
 # above), not the separately-hardcoded $proxy_ip -- so this cache test, like
 # the port-routing proof above it, is driven by DNS rather than by an
 # address dns-ssl merely happens to share with the hardcoded default.
-https_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$resolved_dns_ssl --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$ssl_test_path'")"
+if ! https_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$resolved_dns_ssl --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$ssl_test_path'")"; then
+    echo "::error::First SSL-mode HTTPS request via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 grep -qi '^X-Cache-Status: MISS' <<<"$https_status_1" \
     || { echo "::error::First SSL-mode HTTPS request was not a MISS." >&2; echo "$https_status_1" >&2; exit 1; }
 grep -q '^HTTP_STATUS:200$' <<<"$https_status_1" \
     || { echo "::error::First SSL-mode HTTPS request did not return HTTP 200." >&2; echo "$https_status_1" >&2; exit 1; }
 
-https_status_2="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$resolved_dns_ssl --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$ssl_test_path'")"
+if ! https_status_2="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$resolved_dns_ssl --cacert /ca.crt -o /shared/sbody2 -D - 'https://$test_domain$ssl_test_path'")"; then
+    echo "::error::Second SSL-mode HTTPS request via run_client failed outright (curl/docker invocation error)." >&2
+    exit 1
+fi
 grep -qi '^X-Cache-Status: HIT' <<<"$https_status_2" \
     || { echo "::error::Second SSL-mode HTTPS request was not a HIT." >&2; echo "$https_status_2" >&2; exit 1; }
 grep -q '^HTTP_STATUS:200$' <<<"$https_status_2" \

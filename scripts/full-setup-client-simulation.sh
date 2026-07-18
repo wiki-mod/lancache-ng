@@ -8,7 +8,10 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; then
+    echo "::error::Failed to resolve the script's own directory." >&2
+    exit 1
+fi
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/lib/ghcr-retry.sh"
 
@@ -30,16 +33,32 @@ dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 standard_shim_ip="${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}"
 
 if [[ -z "$client_domain" ]]; then
-    client_domain="$(awk 'NF && $1 !~ /^#/ { print $1; exit }' "$domain_file")"
+    if ! client_domain="$(awk 'NF && $1 !~ /^#/ { print $1; exit }' "$domain_file")"; then
+        echo "::error::Failed to read a CDN domain from $domain_file." >&2
+        exit 1
+    fi
 fi
 
 [[ -n "$client_domain" ]] \
     || { echo "::error::Could not select a client simulation CDN domain from $domain_file."; exit 1; }
 
-dns_container="$(docker compose -f "$compose_file" ps -q dns-standard)"
+if ! dns_container="$(docker compose -f "$compose_file" ps -q dns-standard)"; then
+    echo "::error::Failed to query the compose container id for dns-standard." >&2
+    exit 1
+fi
 [[ -n "$dns_container" ]] \
     || { echo "::error::dns-standard is not running in the full-setup validation stack."; exit 1; }
 
+# Unlike scripts/ssl-mitm-cache-simulation.sh (which sets up the Compose
+# project itself and so already knows its own "${compose_project}_validation"
+# network name), this script is invoked separately against a stack it did not
+# start, so the project name -- and therefore the network name Compose
+# derives from it -- is not reliably known here. Reading it back off the
+# already-running dns-standard container avoids hardcoding or re-deriving
+# that name. The "*_validation" suffix match picks the Compose validation
+# network specifically if the container happens to be attached to more than
+# one network; falling back to whatever network happens to be first keeps
+# this working even if that naming convention ever changes.
 mapfile -t validation_networks < <(
     docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$dns_container"
 )
@@ -72,7 +91,19 @@ docker run --rm \
 
         check_dns() {
             local label="$1" server_ip="$2" expected_ip="$3" response
-            response="$(dig +time=3 +tries=2 +short @"$server_ip" A "$domain" | awk "NF { print }" | sort -u)"
+            # This inner container bash -ceu (above) sets only -e/-u, not
+            # pipefail, so a failing dig here would not by itself abort this
+            # pipeline (its exit status is sort exit status, which always
+            # succeeds) -- it would instead surface later as a confusing
+            # empty/mismatched response in the expected-IP check below.
+            # Wrapping the assignment explicitly still catches an outright
+            # failure of any stage (e.g. dig/awk/sort missing or misinvoked)
+            # and reports its own specific cause instead of the generic
+            # mismatch message.
+            if ! response="$(dig +time=3 +tries=2 +short @"$server_ip" A "$domain" | awk "NF { print }" | sort -u)"; then
+                echo "::error::$label DNS lookup for $domain against $server_ip failed (dig/awk/sort invocation error)." >&2
+                exit 1
+            fi
             printf "%s DNS response for %s: %s\n" "$label" "$domain" "${response:-<empty>}"
             if ! printf "%s\n" "$response" | grep -Fx "$expected_ip" >/dev/null; then
                 echo "::error::$label DNS did not resolve $domain to expected IP $expected_ip."

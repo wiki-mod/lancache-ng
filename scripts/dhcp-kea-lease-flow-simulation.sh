@@ -115,7 +115,10 @@
 # on an isolated bridge network.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if ! repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd); then
+    echo "::error::Could not resolve the repository root directory from this script's own path." >&2
+    exit 1
+fi
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/dhcp-lease-parse.sh
@@ -195,9 +198,18 @@ dns_image_tag="lancache-ng-dhcp448-dns:$$"
 # container's own required secret (services/dns/entrypoint.sh's
 # PDNS_API_KEY check); nothing in this script's own DDNS verification uses
 # the PowerDNS HTTP API, but the entrypoint refuses to start without it.
-kea_ctrl_token="$(openssl rand -hex 32)"
-ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"
-pdns_api_key="$(openssl rand -hex 32)"
+if ! kea_ctrl_token="$(openssl rand -hex 32)"; then
+    echo "::error::Could not generate a random KEA_CTRL_TOKEN via openssl rand." >&2
+    exit 1
+fi
+if ! ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"; then
+    echo "::error::Could not generate a random DDNS_TSIG_KEY via openssl rand." >&2
+    exit 1
+fi
+if ! pdns_api_key="$(openssl rand -hex 32)"; then
+    echo "::error::Could not generate a random PDNS_API_KEY via openssl rand." >&2
+    exit 1
+fi
 
 # `local status=$?` captures the script's real exit code before any cleanup
 # command below can overwrite $? with its own (success or failure), so
@@ -279,12 +291,24 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
         echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
         exit 1
     }
-    attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-    candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"
-    candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+    if ! attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"; then
+        echo "::error::Could not parse the 'attempt=' field out of validation_subnet_reserve's output." >&2
+        exit 1
+    fi
+    if ! candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"; then
+        echo "::error::Could not parse the 'octet=' field out of validation_subnet_reserve's output." >&2
+        exit 1
+    fi
+    if ! candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"; then
+        echo "::error::Could not parse the 'holder_pid=' field out of validation_subnet_reserve's output." >&2
+        exit 1
+    fi
 
     candidate_subnet="172.31.${candidate_octet}.0/24"
-    conflict="$(validation_subnet_conflicts "$candidate_subnet")"
+    if ! conflict="$(validation_subnet_conflicts "$candidate_subnet")"; then
+        echo "::error::Could not check candidate subnet $candidate_subnet for conflicts against existing Docker networks/host interfaces." >&2
+        exit 1
+    fi
     if [[ -n "$conflict" ]]; then
         echo "Octet $candidate_octet's subnet $candidate_subnet overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
         validation_subnet_release "$candidate_pid"
@@ -595,12 +619,15 @@ echo "== Verifying the granted lease matches the configured Kea subnet =="
 # Address-in-pool check done in Python (not bash arithmetic) for the same
 # reason build-push.yml's own subnet-collision check uses it: correct,
 # readable IPv4 range comparison without hand-rolled octet math.
-address_in_pool="$(python3 - "$offered_address" "$pool_start" "$pool_end" <<'PYEOF'
+if ! address_in_pool="$(python3 - "$offered_address" "$pool_start" "$pool_end" <<'PYEOF'
 import ipaddress, sys
 addr, start, end = (ipaddress.ip_address(a) for a in sys.argv[1:4])
 print("yes" if start <= addr <= end else "no")
 PYEOF
-)"
+)"; then
+    echo "::error::Could not check whether offered address $offered_address falls inside the configured pool ($pool_start - $pool_end) (python3 invocation failed)." >&2
+    exit 1
+fi
 
 fail=0
 if [[ "$address_in_pool" != "yes" ]]; then
@@ -649,6 +676,12 @@ assert_ddns_record_matches_lease() {
     local fqdn="$1" expected_ip="$2" resolved_ip=""
     local ddns_deadline=$((SECONDS + 30))
     while (( SECONDS < ddns_deadline )); do
+        # A transient dig failure/timeout here is deliberately NOT wrapped in
+        # an `if !`/exit-1 guard the way a one-shot assignment elsewhere in
+        # this script is: this line runs inside a retry loop, so a failed dig
+        # should just leave $resolved_ip empty for this iteration (the `[[ ==
+        # ]]` check below then falls through to `sleep 2` and tries again),
+        # not abort the whole script on the first flaky attempt.
         resolved_ip="$(docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 "$fqdn" A 2>/dev/null | tail -n1)"
         if [[ "$resolved_ip" == "$expected_ip" ]]; then
             echo "DDNS verification passed: PowerDNS authoritative has an A record for $fqdn -> $resolved_ip, matching the lease Kea just granted."
@@ -697,6 +730,10 @@ assert_ptr_record_matches_lease() {
     local ip="$1" expected_fqdn="$2" resolved_fqdn=""
     local ptr_deadline=$((SECONDS + 30))
     while (( SECONDS < ptr_deadline )); do
+        # Same intentional non-fatal handling as assert_ddns_record_matches_lease's
+        # own resolved_ip line above: a failed/timed-out dig here just leaves
+        # $resolved_fqdn empty for this iteration and gets retried, it does
+        # not abort the script.
         resolved_fqdn="$(docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 -x "$ip" 2>/dev/null | tail -n1)"
         if [[ "$resolved_fqdn" == "$expected_fqdn" ]]; then
             echo "Reverse DDNS verification passed: PowerDNS authoritative has a PTR record for $ip -> $resolved_fqdn, matching the lease Kea just granted."
@@ -743,8 +780,14 @@ fi
 # uniqueness already used for $network_name/$kea_container above. Their
 # fourth/fifth octets are fixed and distinct from each other so the two MACs
 # themselves can never collide even if $$ happens to match across runs.
-reserved_mac="$(printf '02:07:07:aa:bb:%02x' "$(( $$ % 256 ))")"
-other_mac="$(printf '02:07:07:cc:dd:%02x' "$(( $$ % 256 ))")"
+if ! reserved_mac="$(printf '02:07:07:aa:bb:%02x' "$(( $$ % 256 ))")"; then
+    echo "::error::Could not format the reserved test MAC address." >&2
+    exit 1
+fi
+if ! other_mac="$(printf '02:07:07:cc:dd:%02x' "$(( $$ % 256 ))")"; then
+    echo "::error::Could not format the unrelated test MAC address." >&2
+    exit 1
+fi
 # Deliberately outside both the dynamic pool ($pool_start-$pool_end, the
 # second half of the /24) and Docker's own --ip-range for this network
 # (172.31.${octet}.0/25, the first half) -- the whole point of a static
@@ -919,7 +962,10 @@ if ! kea_ctrl_add_reservation "$reserved_mac" "$reserved_ip"; then
     exit 1
 fi
 
-reservation_present="$(kea_ctrl_reservation_present "$reserved_mac" "$reserved_ip")"
+if ! reservation_present="$(kea_ctrl_reservation_present "$reserved_mac" "$reserved_ip")"; then
+    echo "::error::Could not query Kea's own config-get to confirm the static reservation ($reserved_mac -> $reserved_ip) is present." >&2
+    exit 1
+fi
 if [[ "$reservation_present" != "yes" ]]; then
     echo "::error::Kea's own config-get does not show the reservation that was just added ($reserved_mac -> $reserved_ip)." >&2
     exit 1
@@ -945,12 +991,15 @@ other_offered="$(assert_static_reservation_honored "other-mac" "$other_mac" "cli
     docker logs "$kea_container" >&2 || true
     exit 1
 }
-other_in_pool="$(python3 - "$other_offered" "$pool_start" "$pool_end" <<'PYEOF'
+if ! other_in_pool="$(python3 - "$other_offered" "$pool_start" "$pool_end" <<'PYEOF'
 import ipaddress, sys
 addr, start, end = (ipaddress.ip_address(a) for a in sys.argv[1:4])
 print("yes" if start <= addr <= end else "no")
 PYEOF
-)"
+)"; then
+    echo "::error::Could not check whether the unrelated MAC's offered address $other_offered falls inside the dynamic pool ($pool_start - $pool_end) (python3 invocation failed)." >&2
+    exit 1
+fi
 reservation_isolated=0
 if [[ "$other_offered" != "$reserved_ip" && "$other_in_pool" == "yes" ]]; then
     reservation_isolated=1

@@ -87,8 +87,19 @@ dhcp_pool_end="${subnet_prefix}.$((subnet_base_octet + 27))"
 reservation_ip_a="${subnet_prefix}.$((subnet_base_octet + 28))"
 reservation_ip_b="${subnet_prefix}.$((subnet_base_octet + 29))"
 
-kea_ctrl_token="$(openssl rand -hex 32)"
-ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at this assignment, before any diagnostic ever prints. Wrap each of
+# these two secret-generation calls so a broken `openssl` invocation reports
+# its own cause instead of a bare "Process completed with exit code 1".
+if ! kea_ctrl_token="$(openssl rand -hex 32)"; then
+    echo "::error::Failed to generate the Kea Control Agent auth token (openssl rand -hex 32)." >&2
+    exit 1
+fi
+if ! ddns_tsig_key="$(openssl rand -base64 32 | tr -d '\n')"; then
+    echo "::error::Failed to generate the DDNS TSIG key (openssl rand -base64 32 | tr -d '\\n')." >&2
+    exit 1
+fi
 kea_image_tag="lancache-ng-resetkea:$$"
 kea_container="lancache-ng-resetkea-kea-$$"
 ui_container="lancache-ng-resetkea-ui-$$"
@@ -166,7 +177,16 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy nats; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
+        # check aborts the whole script silently the instant `cmd` fails --
+        # errexit fires right at this assignment, before any diagnostic ever
+        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
+        # project name, daemon down) reports its own cause instead of a bare
+        # "Process completed with exit code 1".
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -174,7 +194,10 @@ while (( SECONDS < deadline )); do
     sleep 5
 done
 for service in proxy nats; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
     if [[ "$status" != "healthy" ]]; then
         echo "::error::$service did not become healthy (status: $status)" >&2
@@ -249,6 +272,12 @@ if [[ "$ui_ready" -ne 1 ]]; then
 fi
 echo "Admin UI is healthy."
 
+# Each call below is a brand new --rm container, so nothing written inside
+# it (other than under /shared) survives past that one call. /shared is
+# bind-mounted from work_dir (a real, persistent host directory) so the
+# cookiejar one run_client call writes is still there for a later run_client
+# call to send back, and so the awk/cut extraction below can read it directly
+# from the host without needing yet another container.
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
@@ -257,22 +286,38 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://${ui_ip}:8080/dhcp'"
-cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at this assignment, before the `[[ -n ... ]]` check below (which only
+# catches an empty/absent cookie, not a broken awk invocation) ever runs.
+if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
+    echo "::error::Failed to read the cookiejar file to extract the lancache_ui_session cookie." >&2
+    exit 1
+fi
 [[ -n "$cookie_value" ]] || { echo "::error::No lancache_ui_session cookie was set by GET /dhcp." >&2; exit 1; }
-csrf_token="$(cut -d. -f3 <<<"$cookie_value")"
+if ! csrf_token="$(cut -d. -f3 <<<"$cookie_value")"; then
+    echo "::error::Failed to extract the CSRF token segment from the session cookie value." >&2
+    exit 1
+fi
 [[ -n "$csrf_token" ]] || { echo "::error::Could not extract a CSRF token from the session cookie." >&2; exit 1; }
 echo "Session established, CSRF token extracted."
 
 echo "== UI: adding reservation A (creates known-good snapshot S_A) =="
+# A fixed, locally-administered (0x02 high nibble) test MAC -- never a real
+# vendor OUI, and unique enough per run (low bits from this run's PID) that
+# concurrent local runs of this script don't collide on the same reservation.
 mac_a="02:11:22:33:55:$(printf '%02x' "$(( $$ % 256 ))")"
 ip_a="$reservation_ip_a"
-add_a_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-a-response -w '%{http_code}' \
+if ! add_a_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-a-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'subnet_id=1' \
     --data-urlencode 'mac=$mac_a' \
     --data-urlencode 'ip=$ip_a' \
     --data-urlencode 'hostname=resetkea-a' \
-    'http://${ui_ip}:8080/dhcp/static/add'")"
+    'http://${ui_ip}:8080/dhcp/static/add'")"; then
+    echo "::error::run_client/curl invocation for POST /dhcp/static/add (reservation A) failed outright." >&2
+    exit 1
+fi
 if [[ "$add_a_code" != "303" ]]; then
     echo "::error::POST /dhcp/static/add (reservation A) returned HTTP $add_a_code, expected 303." >&2
     run_client "cat /shared/add-a-response" || true
@@ -283,13 +328,16 @@ echo "Reservation A added ($mac_a -> $ip_a)."
 echo "== UI: adding reservation B (creates known-good snapshot S_AB) =="
 mac_b="02:11:22:33:66:$(printf '%02x' "$(( $$ % 256 ))")"
 ip_b="$reservation_ip_b"
-add_b_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-b-response -w '%{http_code}' \
+if ! add_b_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-b-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'subnet_id=1' \
     --data-urlencode 'mac=$mac_b' \
     --data-urlencode 'ip=$ip_b' \
     --data-urlencode 'hostname=resetkea-b' \
-    'http://${ui_ip}:8080/dhcp/static/add'")"
+    'http://${ui_ip}:8080/dhcp/static/add'")"; then
+    echo "::error::run_client/curl invocation for POST /dhcp/static/add (reservation B) failed outright." >&2
+    exit 1
+fi
 if [[ "$add_b_code" != "303" ]]; then
     echo "::error::POST /dhcp/static/add (reservation B) returned HTTP $add_b_code, expected 303." >&2
     run_client "cat /shared/add-b-response" || true
@@ -337,7 +385,14 @@ echo "$reset_output"
 echo "setup.sh reported success rolling back to snapshot $snapshot_after_a."
 
 echo "== Verifying via a fresh config-get against the real Kea server =="
-reservation_a_present="$(docker exec "$kea_container" sh -c '
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at this assignment. The `&& echo yes || echo no` below is INSIDE the
+# containerized sh -c script, so it only makes the config-get/jq check itself
+# always resolve to a yes/no answer -- it does not protect against `docker
+# exec` itself failing outright (e.g. $kea_container no longer running),
+# which would abort here with no diagnostic if left unwrapped.
+if ! reservation_a_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
         "http://127.0.0.1:8000/" \
@@ -346,8 +401,11 @@ reservation_a_present="$(docker exec "$kea_container" sh -c '
          | select((."hw-address"|ascii_downcase) == ($mac|ascii_downcase))]
         | length > 0
     '"'"' >/dev/null && echo yes || echo no
-' -- "$kea_ctrl_token" "$mac_a")"
-reservation_b_present="$(docker exec "$kea_container" sh -c '
+' -- "$kea_ctrl_token" "$mac_a")"; then
+    echo "::error::Failed to query Kea's config-get for reservation A ($mac_a) via docker exec against $kea_container." >&2
+    exit 1
+fi
+if ! reservation_b_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
         "http://127.0.0.1:8000/" \
@@ -356,7 +414,10 @@ reservation_b_present="$(docker exec "$kea_container" sh -c '
          | select((."hw-address"|ascii_downcase) == ($mac|ascii_downcase))]
         | length > 0
     '"'"' >/dev/null && echo yes || echo no
-' -- "$kea_ctrl_token" "$mac_b")"
+' -- "$kea_ctrl_token" "$mac_b")"; then
+    echo "::error::Failed to query Kea's config-get for reservation B ($mac_b) via docker exec against $kea_container." >&2
+    exit 1
+fi
 
 failed=0
 if [[ "$reservation_a_present" != "yes" ]]; then

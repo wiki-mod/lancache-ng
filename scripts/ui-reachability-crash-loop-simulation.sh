@@ -131,7 +131,16 @@ if [[ "$ui_status" != "healthy" ]]; then
 fi
 echo "Admin UI is healthy while proxy is still crash-looping."
 
-ui_restarts="$(docker inspect --format '{{.RestartCount}}' "$ui_cid")"
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent `||`
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at this assignment, before the RestartCount check below (or any
+# diagnostic) ever runs. Wrap it so a broken `docker inspect` invocation
+# (e.g. container removed between the health check above and here) reports
+# its own cause instead of a bare "Process completed with exit code 1".
+if ! ui_restarts="$(docker inspect --format '{{.RestartCount}}' "$ui_cid")"; then
+    echo "::error::Failed to read the Admin UI container's RestartCount via docker inspect (container id: $ui_cid)." >&2
+    exit 1
+fi
 if (( ui_restarts > 1 )); then
     echo "::error::Admin UI's own RestartCount is $ui_restarts -- it should never need to restart because of an UNRELATED service's crash loop." >&2
     exit 1
