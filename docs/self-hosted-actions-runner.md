@@ -38,6 +38,12 @@ The build-tools image does not replace the baseline runner requirements below.
 The GitHub workflows still need a working self-hosted runner, Docker daemon,
 Buildx support, outbound network access, and CodeQL action setup.
 
+## Job concurrency serialization
+
+The `promote` job in `build-push.yml` uses job-level concurrency (`concurrency: group: ${{ github.workflow }}-promote`) to serialize `latest` channel updates. The manual `backfill-stack-latest.yml` workflow matches this concurrency group (`"Build & Push-promote"`) so that routine promotion and manual backfill operations do not race each other — a concurrent promotion and backfill would otherwise risk interleaved tag movements and state corruption.
+
+This concurrency group applies only to the `promote` job and related backfill operations; it does not block routine CI runs or other jobs.
+
 ## Acceleration contract
 
 Build acceleration is a CI optimization, not a runtime requirement. Jobs that
