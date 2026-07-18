@@ -564,6 +564,10 @@ if [ "${SSL_ENABLED}" = "1" ]; then
             echo "[lancache] ERROR: Failed to generate CA certificate" >&2
             exit 1
         fi
+        # openssl -keyout follows the umask (0022 by default), leaving ca.key
+        # world-readable (644). Harden it to match certs/generate-ca.sh's own
+        # standalone CA generation, which already does this (#1031).
+        chmod 600 "$CA_DIR/ca.key"
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
         echo "║              ACTION REQUIRED — READ BEFORE CONTINUING            ║"
