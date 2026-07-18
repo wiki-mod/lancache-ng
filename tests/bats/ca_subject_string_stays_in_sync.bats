@@ -5,7 +5,6 @@
 # between certs/generate-ca.sh and services/proxy/entrypoint.sh.
 # Both paths generate CA certificates, and their subject strings must remain
 # identical to avoid cosmetic divergence in newly-generated installations.
-# See issue #968.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -28,13 +27,23 @@ setup() {
     local generate_ca_subj
     local proxy_subj
 
+    # Both files are required to define a CA -subj; treat extraction failure as a
+    # hard test failure rather than skip, since a skip would let this guard go
+    # green precisely when it can no longer inspect one side of the invariant.
+
     # Extract the CA subject from generate-ca.sh (its only -subj is the CA DN).
     generate_ca_subj=$(grep -oP '(?<=-subj ")[^"]*' "$generate_ca_script" | grep -F '/O=')
-    [ -n "$generate_ca_subj" ] || skip "Could not extract CA -subj from generate-ca.sh"
+    if [ -z "$generate_ca_subj" ]; then
+        echo "Could not extract CA -subj (with /O=) from generate-ca.sh"
+        return 1
+    fi
 
     # Extract only the CA-DN -subj from the proxy entrypoint, skipping the CN-only per-domain cert.
     proxy_subj=$(grep -oP '(?<=-subj ")[^"]*' "$proxy_entrypoint" | grep -F '/O=')
-    [ -n "$proxy_subj" ] || skip "Could not extract CA -subj from proxy entrypoint.sh"
+    if [ -z "$proxy_subj" ]; then
+        echo "Could not extract CA -subj (with /O=) from services/proxy/entrypoint.sh"
+        return 1
+    fi
 
     # They must match exactly
     [ "$generate_ca_subj" = "$proxy_subj" ] || {
