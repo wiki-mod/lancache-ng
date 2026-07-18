@@ -116,7 +116,16 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy dns-standard dns-ssl ui; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
+        # check aborts the whole script silently the instant `cmd` fails --
+        # errexit fires right at this assignment, before any diagnostic ever
+        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
+        # project name, daemon down) reports its own cause instead of a bare
+        # "Process completed with exit code 1".
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -124,7 +133,10 @@ while (( SECONDS < deadline )); do
     sleep 5
 done
 for service in proxy dns-standard dns-ssl ui; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
     if [[ "$status" != "healthy" ]]; then
         echo "::error::$service did not become healthy (status: $status)" >&2
@@ -146,12 +158,18 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://$ui_ip:8080/domains'"
-cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
+if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
+    echo "::error::Failed to read the session cookie value out of $work_dir/shared/cookiejar (awk invocation failed)." >&2
+    exit 1
+fi
 if [[ -z "$cookie_value" ]]; then
     echo "::error::No lancache_ui_session cookie was set by GET /domains." >&2
     exit 1
 fi
-csrf_token="$(cut -d. -f3 <<<"$cookie_value")"
+if ! csrf_token="$(cut -d. -f3 <<<"$cookie_value")"; then
+    echo "::error::Failed to extract the CSRF token segment from the session cookie (cut invocation failed)." >&2
+    exit 1
+fi
 if [[ -z "$csrf_token" ]]; then
     echo "::error::Could not extract a CSRF token from the session cookie." >&2
     exit 1
@@ -161,13 +179,16 @@ echo "Session established, CSRF token extracted."
 add_lan_record() {
     local content="$1"
     local http_code
-    http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-response -w '%{http_code}' \
+    if ! http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-response -w '%{http_code}' \
         --data-urlencode 'csrf_token=$csrf_token' \
         --data-urlencode 'name=$test_name' \
         --data-urlencode 'record_type=A' \
         --data-urlencode 'content=$content' \
         --data-urlencode 'ttl=60' \
-        'http://$ui_ip:8080/domains/lan/add'")"
+        'http://$ui_ip:8080/domains/lan/add'")"; then
+        echo "::error::POST /domains/lan/add (content=$content) failed outright (run_client/curl invocation error)." >&2
+        exit 1
+    fi
     if [[ "$http_code" != "303" ]]; then
         echo "::error::POST /domains/lan/add (content=$content) returned HTTP $http_code, expected 303 (redirect to /domains)." >&2
         exit 1
@@ -187,7 +208,16 @@ verify_record_resolves() {
     local expected="$1"
     local attempt resolved
     for attempt in $(seq 1 15); do
-        resolved="$(run_client "dig +time=2 +tries=1 +short @$dns_standard_ip A $test_fqdn" | sort -u)"
+        # Under `set -euo pipefail`, `run_client ... | sort -u` can abort the
+        # whole script silently right here: pipefail makes the pipeline's exit
+        # status reflect run_client's own failure even though `sort -u` always
+        # succeeds on its own (it happily sorts zero lines of input) -- wrap
+        # the assignment so a failed dig/run_client invocation is reported
+        # explicitly instead of dying with no explanation.
+        if ! resolved="$(run_client "dig +time=2 +tries=1 +short @$dns_standard_ip A $test_fqdn" | sort -u)"; then
+            echo "::error::Failed to run dig against dns-standard ($dns_standard_ip) for $test_fqdn (run_client/docker invocation failed)." >&2
+            return 1
+        fi
         [[ "$resolved" = "$expected" ]] && { echo "dns-standard resolves $test_fqdn to $expected (attempt $attempt)."; return 0; }
         sleep 1
     done
@@ -217,7 +247,21 @@ poll_for_new_snapshot() {
     local previous="$1" label="$2"
     local id attempt
     for attempt in $(seq 1 15); do
-        id="$(get_newest_lan_snapshot_id)"
+        # This function is called both directly (the final call near the
+        # bottom of this script, errexit stays on) and via
+        # `old_snapshot_id="$(poll_for_new_snapshot ...)"`-style command
+        # substitution at the earlier call sites -- and command substitution
+        # disables errexit in the subshell it runs in (bash only re-enables
+        # that with
+        # `shopt -s inherit_errexit`, not set here). So a bare `id="$(cmd)"`
+        # here behaves differently depending on which caller invoked this
+        # function. `|| id=""` sidesteps that entirely: it is safe under
+        # errexit in both contexts, and treats a transient query failure the
+        # same as "no snapshot yet" -- keep polling instead of aborting,
+        # since the rollback listener can briefly 500/non-JSON right after
+        # wait_for_rollback_listener's TCP-only readiness check passes (see
+        # that function's own comment on this exact startup lag).
+        id="$(get_newest_lan_snapshot_id)" || id=""
         if [[ -n "$id" && "$id" != "$previous" ]]; then
             echo "$label: new known-good snapshot $id recorded (attempt $attempt)." >&2
             printf '%s\n' "$id"
@@ -265,27 +309,42 @@ echo "== Waiting for the rollback listener (dns-standard's nats-subscriber, port
 wait_for_rollback_listener
 
 echo "== Recording the baseline known-good snapshot state for zone lan. before this test changes anything =="
-baseline_snapshot_id="$(get_newest_lan_snapshot_id)"
+if ! baseline_snapshot_id="$(get_newest_lan_snapshot_id)"; then
+    echo "::error::Failed to query the baseline known-good snapshot id for zone lan. from the rollback listener." >&2
+    exit 1
+fi
 echo "Baseline snapshot id: '${baseline_snapshot_id:-<none>}'"
 
 echo "== Step 1: add the real LAN record (content=$old_content) via the UI, which should automatically trigger a known-good snapshot (services/dns/nats-subscriber's handle_dns_record post-write hook) =="
 add_lan_record "$old_content"
 verify_record_resolves "$old_content"
-old_snapshot_id="$(poll_for_new_snapshot "$baseline_snapshot_id" "after first change")"
+if ! old_snapshot_id="$(poll_for_new_snapshot "$baseline_snapshot_id" "after first change")"; then
+    echo "::error::Failed to capture the post-first-change snapshot id (cause logged above)." >&2
+    exit 1
+fi
 
 echo "== Step 2: change the record to content=$new_content via the UI (second real change), which should trigger another automatic snapshot =="
 add_lan_record "$new_content"
 verify_record_resolves "$new_content"
 echo "dns-standard's recursor now has $test_fqdn=$new_content cached (TTL 60s)."
-new_snapshot_id="$(poll_for_new_snapshot "$old_snapshot_id" "after second change")"
+if ! new_snapshot_id="$(poll_for_new_snapshot "$old_snapshot_id" "after second change")"; then
+    echo "::error::Failed to capture the post-second-change snapshot id (cause logged above)." >&2
+    exit 1
+fi
 
 echo "== Bonus check: GET /snapshots must reject a missing or wrong X-API-Key =="
-unauth_code="$(run_client "curl -sS -o /dev/null -w '%{http_code}' 'http://$dns_standard_ip:$rollback_port/snapshots'")"
+if ! unauth_code="$(run_client "curl -sS -o /dev/null -w '%{http_code}' 'http://$dns_standard_ip:$rollback_port/snapshots'")"; then
+    echo "::error::GET /snapshots (no X-API-Key) request failed outright (run_client/curl invocation error)." >&2
+    exit 1
+fi
 if [[ "$unauth_code" != "401" ]]; then
     echo "::error::GET /snapshots without X-API-Key returned HTTP $unauth_code, expected 401." >&2
     exit 1
 fi
-wrong_key_code="$(run_client "curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong-key' 'http://$dns_standard_ip:$rollback_port/snapshots'")"
+if ! wrong_key_code="$(run_client "curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong-key' 'http://$dns_standard_ip:$rollback_port/snapshots'")"; then
+    echo "::error::GET /snapshots (wrong X-API-Key) request failed outright (run_client/curl invocation error)." >&2
+    exit 1
+fi
 if [[ "$wrong_key_code" != "401" ]]; then
     echo "::error::GET /snapshots with a wrong X-API-Key returned HTTP $wrong_key_code, expected 401." >&2
     exit 1
@@ -293,20 +352,32 @@ fi
 echo "Rollback listener correctly rejects unauthenticated/wrongly-authenticated requests (401)."
 
 echo "== Calling the rollback listener directly: POST /rollback to the earlier snapshot ($old_snapshot_id, content=$old_content) =="
-rollback_payload="$(jq -n --arg zone 'lan.' --arg id "$old_snapshot_id" '{zone: $zone, snapshot_id: $id}')"
+if ! rollback_payload="$(jq -n --arg zone 'lan.' --arg id "$old_snapshot_id" '{zone: $zone, snapshot_id: $id}')"; then
+    echo "::error::Failed to build the rollback request JSON payload (jq invocation failed)." >&2
+    exit 1
+fi
 printf '%s' "$rollback_payload" > "$work_dir/shared/rollback-payload.json"
-rollback_response="$(run_client "curl -sS -X POST \
+if ! rollback_response="$(run_client "curl -sS -X POST \
     -H 'X-API-Key: $pdns_api_key' \
     -H 'Content-Type: application/json' \
     --data-binary @/shared/rollback-payload.json \
-    'http://$dns_standard_ip:$rollback_port/rollback'")"
+    'http://$dns_standard_ip:$rollback_port/rollback'")"; then
+    echo "::error::POST /rollback request failed outright (run_client/curl invocation error)." >&2
+    exit 1
+fi
 echo "Rollback response: $rollback_response"
-applied="$(jq -r '.applied // false' <<<"$rollback_response")"
+if ! applied="$(jq -r '.applied // false' <<<"$rollback_response")"; then
+    echo "::error::Failed to parse 'applied' out of the rollback response (jq invocation failed): $rollback_response" >&2
+    exit 1
+fi
 if [[ "$applied" != "true" ]]; then
     echo "::error::POST /rollback did not report applied=true: $rollback_response" >&2
     exit 1
 fi
-changed_names="$(jq -r '(.changed_names // []) | join(",")' <<<"$rollback_response")"
+if ! changed_names="$(jq -r '(.changed_names // []) | join(",")' <<<"$rollback_response")"; then
+    echo "::error::Failed to parse 'changed_names' out of the rollback response (jq invocation failed): $rollback_response" >&2
+    exit 1
+fi
 if [[ "$changed_names" != *"$test_fqdn"* ]]; then
     echo "::error::Rollback response did not list $test_fqdn among changed_names: $rollback_response" >&2
     exit 1
@@ -320,7 +391,10 @@ fi
 # rollback_listener.rs::rollback_response_body, so this line is what proves
 # the loop-that-publishes actually wires into the response that reports it,
 # not just that the shape is right in isolation.
-flush_ok="$(jq -r '.flush_ok // false' <<<"$rollback_response")"
+if ! flush_ok="$(jq -r '.flush_ok // false' <<<"$rollback_response")"; then
+    echo "::error::Failed to parse 'flush_ok' out of the rollback response (jq invocation failed): $rollback_response" >&2
+    exit 1
+fi
 if [[ "$flush_ok" != "true" ]]; then
     echo "::error::POST /rollback did not report flush_ok=true: $rollback_response" >&2
     exit 1
@@ -334,12 +408,15 @@ echo "== Verifying a fresh known-good snapshot of the restored state was recorde
 poll_for_new_snapshot "$new_snapshot_id" "after rollback" >/dev/null
 
 echo "== Cleaning up the test record =="
-remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/remove-response -w '%{http_code}' \
+if ! remove_http_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/remove-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'name=$test_name' \
     --data-urlencode 'record_type=A' \
     --data-urlencode 'content=$old_content' \
-    'http://$ui_ip:8080/domains/lan/remove'")"
+    'http://$ui_ip:8080/domains/lan/remove'")"; then
+    echo "::error::POST /domains/lan/remove failed outright (run_client/curl invocation error)." >&2
+    exit 1
+fi
 if [[ "$remove_http_code" != "303" ]]; then
     echo "::error::POST /domains/lan/remove returned HTTP $remove_http_code, expected 303 (redirect to /domains)." >&2
     exit 1

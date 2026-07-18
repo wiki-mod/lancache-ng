@@ -67,7 +67,10 @@ git config --global --add safe.directory "$repo_root"
 work_dir="$repo_root/.syslog-forwarding-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
-install_dir="$(mktemp -d "$work_dir/install.XXXXXX")"
+if ! install_dir="$(mktemp -d "$work_dir/install.XXXXXX")"; then
+    echo "::error::Failed to create a unique install directory under $work_dir via mktemp." >&2
+    exit 1
+fi
 
 # Loopback-only addressing (127.0.0.0/8 routes locally with no real
 # interface needed, same reasoning setup-cli-simulation.sh's own comment
@@ -91,7 +94,10 @@ ip_ssl="127.0.${octet}.3"
 sim_compose_project_name() {
     printf 'lancache-ng-syslog-e2e-%s\n' "$(basename "$1" | tr 'A-Z.' 'a-z-')"
 }
-compose_project="$(sim_compose_project_name "$install_dir")"
+if ! compose_project="$(sim_compose_project_name "$install_dir")"; then
+    echo "::error::Failed to derive a sanitized Compose project name from install_dir ($install_dir)." >&2
+    exit 1
+fi
 export COMPOSE_PROJECT_NAME="$compose_project"
 network_name="${compose_project}_default"
 
@@ -104,7 +110,10 @@ network_name="${compose_project}_default"
 # escaping surprises. date +%s%N (nanosecond epoch) + PID is unique enough
 # for one CI run without needing a UUID generator that might not be
 # installed in every build-tools image variant.
-marker_base="lancachee2e$(date +%s%N)pid$$"
+if ! marker_base="lancachee2e$(date +%s%N)pid$$"; then
+    echo "::error::Failed to generate the per-run marker base via date +%s%N." >&2
+    exit 1
+fi
 marker_proxy="${marker_base}proxy"
 marker_ui="${marker_base}ui"
 marker_nats="${marker_base}nats"
@@ -117,7 +126,10 @@ marker_dns="${marker_base}dns"
 # (see watchdog.sh's `log "Interval: ${CHECK_INTERVAL}s | ..."`, which fires
 # immediately at container start, long before the loop's own sleep call
 # ever uses it) -- this script never actually waits out that interval.
-marker_watchdog="$(date +%s%N | tail -c 9)"
+if ! marker_watchdog="$(date +%s%N | tail -c 9)"; then
+    echo "::error::Failed to generate the watchdog CHECK_INTERVAL marker via date +%s%N | tail." >&2
+    exit 1
+fi
 
 cleanup() {
     local status=$?
@@ -204,7 +216,14 @@ else
     printf 'SYSLOG_ENABLED=true\n' >> "$install_dir/.env"
 fi
 
-current_profiles="$(grep '^COMPOSE_PROFILES=' "$install_dir/.env" | head -1 | cut -d= -f2-)"
+# grep finding no COMPOSE_PROFILES= line at all is a legitimate, already-
+# handled state -- the case/`:+` logic below treats an empty current_profiles
+# the same whether the key was present-but-empty or missing outright. Under
+# pipefail, grep's own no-match exit status would otherwise still fail this
+# whole pipeline even though `cut` itself succeeds and yields the same empty
+# output either way, so the trailing `|| true` neutralizes only that expected
+# no-match case instead of turning it into an unrelated fatal error.
+current_profiles="$(grep '^COMPOSE_PROFILES=' "$install_dir/.env" | head -1 | cut -d= -f2- || true)"
 case ",${current_profiles}," in
     *,logging,*) ;;
     *)
@@ -284,7 +303,10 @@ deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in $services_with_healthcheck; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service' during health wait." >&2
+            exit 1
+        fi
         status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
         [[ "$status" = "healthy" ]] || all_ready=0
     done
@@ -298,14 +320,23 @@ echo "::endgroup::"
 
 failed=0
 for service in $all_services; do
-    cid="$("${compose[@]}" ps -q "$service")"
+    if ! cid="$("${compose[@]}" ps -q "$service")"; then
+        echo "::error::Could not query the compose container id for service '$service'." >&2
+        exit 1
+    fi
     if [[ -z "$cid" ]]; then
         echo "::error::$service has no running container" >&2
         failed=1
         continue
     fi
-    restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
-    container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
+    if ! restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"; then
+        echo "::error::Failed to read RestartCount for $service (container $cid) via docker inspect." >&2
+        exit 1
+    fi
+    if ! container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"; then
+        echo "::error::Failed to read container state for $service (container $cid) via docker inspect." >&2
+        exit 1
+    fi
     if [[ "$container_status" != "running" ]]; then
         echo "::error::$service is not running (state: $container_status)" >&2
         failed=1
@@ -348,7 +379,10 @@ if [[ "$failed" -eq 1 ]]; then
     # attached, instead of needing to be reconstructed after the fact from
     # a job whose containers are long gone by the time anyone looks.
     for service in $all_services; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service' while collecting failure diagnostics." >&2
+            exit 1
+        fi
         [[ -n "$cid" ]] || continue
         echo "$service: RestartCount=$(docker inspect --format '{{.RestartCount}}' "$cid" 2>/dev/null || echo '?')"
     done
@@ -396,9 +430,15 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://$ip_standard:8080/domains'"
-cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"
+if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
+    echo "::error::Failed to read the session cookiejar at $work_dir/shared/cookiejar via awk." >&2
+    exit 1
+fi
 [[ -n "$cookie_value" ]] || { echo "::error::No lancache_ui_session cookie was set by GET /domains." >&2; exit 1; }
-csrf_token="$(cut -d. -f3 <<<"$cookie_value")"
+if ! csrf_token="$(cut -d. -f3 <<<"$cookie_value")"; then
+    echo "::error::Failed to extract the CSRF token field from the session cookie via cut." >&2
+    exit 1
+fi
 [[ -n "$csrf_token" ]] || { echo "::error::Could not extract a CSRF token from the session cookie." >&2; exit 1; }
 echo "Session established, CSRF token extracted."
 
@@ -416,7 +456,10 @@ assert_marker_reaches_ui() {
     local marker="$1" description="$2" timeout="${3:-90}"
     local deadline=$((SECONDS + timeout)) body=""
     while (( SECONDS < deadline )); do
-        body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"
+        if ! body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"; then
+            echo "::error::Failed to fetch the Admin UI /logs route from $ip_standard while polling for the $description marker (run_client/docker invocation failed)." >&2
+            exit 1
+        fi
         if grep -qF "$marker" <<<"$body"; then
             echo "OK: $description marker ($marker) is visible via the real Admin UI /logs route."
             return 0
@@ -528,7 +571,10 @@ echo "== netdata: documented weaker check (no operator-triggerable marker mechan
 netdata_deadline=$((SECONDS + 90))
 netdata_seen=0
 while (( SECONDS < netdata_deadline )); do
-    body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"
+    if ! body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"; then
+        echo "::error::Failed to fetch the Admin UI /logs route from $ip_standard while polling for netdata's forwarded log line (run_client/docker invocation failed)." >&2
+        exit 1
+    fi
     if grep -qP '<td[^>]*>\s*netdata\s*</td>' <<<"$body"; then
         netdata_seen=1
         break

@@ -103,14 +103,28 @@ sim_compose_project_name() {
 }
 
 mkdir -p "$repo_root/.setup-cli-simulation-tmp"
-install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
+# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
+# aborts the whole script silently the instant `cmd` fails -- errexit fires
+# right at this assignment, before any diagnostic ever prints (and before a
+# later, separate `[[ -n "$var" ]] || ...` check on its own line ever gets a
+# chance to run -- that check only catches an empty *successful* result, not
+# a failed substitution). Every `if ! var="$(cmd)"; then ...; fi` wrapper in
+# this file exists to report the real failing command instead of a bare
+# "Process completed with exit code 1".
+if ! install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"; then
+    echo "::error::Could not create a temporary install directory under $repo_root/.setup-cli-simulation-tmp." >&2
+    exit 1
+fi
 # cmd_backup's --dest defaults to /var/backups/lancache-ng and cmd_update
 # never overrides it, so that is where the pre-update rollback backup this
 # script verifies in Phase 3 actually lands -- a container-local path with no
 # effect outside this script's own container.
 backup_root="/var/backups/lancache-ng"
 export SETUP_SIM_INSTALL_DIR="$install_dir"
-COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"
+if ! COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"; then
+    echo "::error::Could not derive a unique COMPOSE_PROJECT_NAME from install_dir ($install_dir)." >&2
+    exit 1
+fi
 export COMPOSE_PROJECT_NAME
 
 cleanup() {
@@ -149,7 +163,10 @@ wait_for_stack_healthy() {
     while (( SECONDS < deadline )); do
         all_ready=1
         for service in $services_with_healthcheck; do
-            cid="$("${compose[@]}" ps -q "$service")"
+            if ! cid="$("${compose[@]}" ps -q "$service")"; then
+                echo "::error::Could not query the compose container id for service '$service'." >&2
+                exit 1
+            fi
             status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
             [[ "$status" = "healthy" ]] || all_ready=0
         done
@@ -159,15 +176,24 @@ wait_for_stack_healthy() {
 
     local failed=0
     for service in $all_services; do
-        cid="$("${compose[@]}" ps -q "$service")"
+        if ! cid="$("${compose[@]}" ps -q "$service")"; then
+            echo "::error::Could not query the compose container id for service '$service'." >&2
+            exit 1
+        fi
         if [[ -z "$cid" ]]; then
             echo "::error::$service has no running container" >&2
             failed=1
             continue
         fi
         local restart_count container_status
-        restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
-        container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
+        if ! restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"; then
+            echo "::error::Could not query the restart count for service '$service' (container $cid)." >&2
+            exit 1
+        fi
+        if ! container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"; then
+            echo "::error::Could not query the running state for service '$service' (container $cid)." >&2
+            exit 1
+        fi
         if [[ "$container_status" != "running" ]]; then
             echo "::error::$service is not running (state: $container_status)" >&2
             failed=1
@@ -285,13 +311,19 @@ while true; do
         # for the same "has active endpoints" reason cleanup() does.
         validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
         rm -rf "$install_dir"
-        install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"
+        if ! install_dir="$(mktemp -d "$repo_root/.setup-cli-simulation-tmp/install.XXXXXX")"; then
+            echo "::error::Could not create a temporary install directory under $repo_root/.setup-cli-simulation-tmp for retry attempt $attempt." >&2
+            exit 1
+        fi
         export SETUP_SIM_INSTALL_DIR="$install_dir"
         # Re-derive to match the new install_dir -- the preceding `down` call
         # above still ran under the OLD exported COMPOSE_PROJECT_NAME (correct:
         # it must tear down the failed attempt's own project), so this must be
         # reassigned only after that, not before.
-        COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"
+        if ! COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"; then
+            echo "::error::Could not derive a unique COMPOSE_PROJECT_NAME from install_dir ($install_dir) for retry attempt $attempt." >&2
+            exit 1
+        fi
         export COMPOSE_PROJECT_NAME
         fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
         attempt=$((attempt + 1))
@@ -442,7 +474,10 @@ echo "== Phase 4: setup.sh restore re-converges .env (issue #639) =="
 # mirroring AG-OP-011's "repeat run changes nothing" property for update.
 echo "-- Phase 4a: restoring an already-converged backup is a no-op for .env --"
 bash setup.sh backup --config "$install_dir" --dest "$backup_root"
-noop_backup="$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' | sort | tail -1)"
+if ! noop_backup="$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' | sort | tail -1)"; then
+    echo "::error::Could not list config backups under $backup_root to find the latest one." >&2
+    exit 1
+fi
 [[ -n "$noop_backup" ]] \
     || { echo "::error::No config backup was found to test restore no-op convergence." >&2; exit 1; }
 
@@ -468,7 +503,10 @@ legacy_backup_root="$repo_root/.setup-cli-simulation-tmp/legacy-backup"
 rm -rf "$legacy_backup_root"
 mkdir -p "$legacy_backup_root"
 tar -C "$legacy_backup_root" -xzf "$noop_backup"
-legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d | head -1)"
+if ! legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d | head -1)"; then
+    echo "::error::Could not list extracted directories under $legacy_backup_root to find the synthetic legacy backup fixture." >&2
+    exit 1
+fi
 [[ -n "$legacy_stamp_dir" ]] \
     || { echo "::error::Could not extract the synthetic legacy backup fixture." >&2; exit 1; }
 legacy_env_path="$legacy_stamp_dir/rootfs${install_dir}/.env"
@@ -480,7 +518,14 @@ legacy_env_path="$legacy_stamp_dir/rootfs${install_dir}/.env"
 # collapses them back into CACHE_DIR, the post-restore stack actually mounts
 # this path, so an arbitrary non-existent path would fail the health check
 # below for an unrelated reason and mask what this phase is testing.
-real_cache_dir=$(grep '^CACHE_DIR=' "$legacy_env_path" | head -1 | cut -d= -f2-)
+# grep exits 1 on no match even though head/cut downstream still exit 0, and
+# pipefail propagates that: a legacy_env_path with no CACHE_DIR= line at all
+# (not just an empty value) fails this substitution outright rather than
+# just yielding an empty real_cache_dir.
+if ! real_cache_dir=$(grep '^CACHE_DIR=' "$legacy_env_path" | head -1 | cut -d= -f2-); then
+    echo "::error::Could not read CACHE_DIR from $legacy_env_path (no matching line found)." >&2
+    exit 1
+fi
 [[ -n "$real_cache_dir" ]] \
     || { echo "::error::Synthetic legacy backup fixture has no CACHE_DIR to seed the legacy split keys from." >&2; exit 1; }
 sed -i \
