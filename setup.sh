@@ -4877,10 +4877,14 @@ EOF
         esac
     done
 
-    [[ -n "$primary" ]] || die "--primary is required"
-    [[ -n "$token" ]] || die "--token is required"
-    [[ -n "$name" ]] || die "--name is required"
-    [[ -n "$proxy_ip" ]] || die "--proxy-ip is required"
+    missing_args=()
+    [[ -n "$primary" ]] || missing_args+=("--primary")
+    [[ -n "$token" ]] || missing_args+=("--token")
+    [[ -n "$name" ]] || missing_args+=("--name")
+    [[ -n "$proxy_ip" ]] || missing_args+=("--proxy-ip")
+    if [[ ${#missing_args[@]} -gt 0 ]]; then
+        die "Required argument(s) missing: ${missing_args[*]}"
+    fi
 
     for cmd in curl docker; do
         command -v "$cmd" >/dev/null 2>&1 \

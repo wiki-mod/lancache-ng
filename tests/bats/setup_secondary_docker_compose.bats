@@ -183,3 +183,34 @@ extract_cmd_secondary_heredoc() {
         fail "registration token has regressed back into curl's argv via a literal -d \"...\" argument"
     fi
 }
+
+@test "cmd_secondary collects all missing required arguments and reports them together" {
+    # Regression test to ensure that when multiple required arguments
+    # (--primary, --token, --name, --proxy-ip) are missing, cmd_secondary
+    # collects all of them and reports them in one error message, rather than
+    # failing on the first missing argument and requiring the user to run
+    # the command multiple times. This behavior matches the pattern used for
+    # collecting missing fields from the primary server's response.
+
+    # Verify the argument validation uses the missing_args array pattern
+    grep -q 'missing_args=()' "$repo_root/setup.sh" \
+        || fail "cmd_secondary no longer uses missing_args array pattern"
+
+    # Verify all four required arguments are checked and added to the array
+    grep -q 'missing_args+=(.*--primary' "$repo_root/setup.sh" \
+        || fail "cmd_secondary does not collect missing --primary"
+
+    grep -q 'missing_args+=(.*--token' "$repo_root/setup.sh" \
+        || fail "cmd_secondary does not collect missing --token"
+
+    grep -q 'missing_args+=(.*--name' "$repo_root/setup.sh" \
+        || fail "cmd_secondary does not collect missing --name"
+
+    grep -q 'missing_args+=(.*--proxy-ip' "$repo_root/setup.sh" \
+        || fail "cmd_secondary does not collect missing --proxy-ip"
+
+    # Verify that the error is reported with all missing arguments at once
+    # (using ${missing_args[*]} pattern similar to missing_fields)
+    grep -q 'die.*missing_args\[' "$repo_root/setup.sh" \
+        || fail "cmd_secondary does not report all missing arguments together"
+}
