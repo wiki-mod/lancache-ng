@@ -59,10 +59,19 @@ pre-v0.2.0 upgraders. **Not covered by any bats test** -- neither
 `resolve_cache_dir()` directly (only its side effect, a pre-set
 `CACHE_DIR`, is used by tests).
 
-**`get_health(name)`** (lines 72-79) -- `curl -sf
-$DOCKER_PROXY_URL/containers/$name/json | jq -r '.State.Health.Status //
-"none"'`, falls back to literal string `"unreachable"` on curl/jq failure.
-**Was never tested against a real or mocked HTTP endpoint as of this audit
+**`get_health(name)`** (lines 72-79) -- **updated by PR #885 (2026-07-16)**:
+no longer a straight `curl | jq` pipe. Current code captures curl's own exit
+status first (`body=$(curl -sf --max-time "$CURL_MAX_TIME"
+$DOCKER_PROXY_URL/containers/$name/json) || { echo "unreachable"; return; }`,
+`CURL_MAX_TIME` defaulting to 5s), then runs
+`jq -r '.State.Health.Status // "none"' <<< "$body"` against the captured
+body, falling back to the literal string `"unreachable"` on either the curl
+failure or a jq parse failure. The `--max-time` bound and the
+capture-then-parse split both exist specifically so a hung/unresponsive
+docker-socket-proxy can't stall the whole single-threaded main loop
+indefinitely (a bare pipe would let an empty curl stdout reach `jq`'s
+`// "none"` fallback silently, never producing `"unreachable"`). **Was never
+tested against a real or mocked HTTP endpoint as of this audit
 (2026-07-15); now partially covered** by `tests/bats/watchdog_curl_timeout.bats`
 (added by PR #885, 2026-07-16), which stubs `curl` itself (not `get_health()`)
 so the function's real curl+jq logic runs under test -- confirmed 4 tests
@@ -71,13 +80,16 @@ the `"unreachable"` bash fallback on a real curl failure. The `// "none"`
 jq-fallback sub-case (an HTTP response with no `.State.Health.Status` field)
 was not independently confirmed as covered in this pass.
 
-**`restart_container(name)`** (lines 81-88) -- `curl -sf -X POST
+**`restart_container(name)`** (lines 81-88) -- **updated by PR #885
+(2026-07-16)**: `curl -sf --max-time "$CURL_MAX_TIME" -X POST
 $DOCKER_PROXY_URL/containers/$name/restart`, logs `WARNING: restart call
 failed for $name` on failure but does not retry or escalate. Comment notes
 restart is *intentionally* the only mutating Docker call the socket-proxy
-allowlist permits (no create/exec). **Same test gap as `get_health()`**:
-always stubbed in bats, so the real curl call and its failure-warning
-branch are untested.
+allowlist permits (no create/exec). **Partially fixed, same as
+`get_health()`'s test-gap class**: `tests/bats/watchdog_curl_timeout.bats`
+(added by PR #885) confirms the `--max-time` flag is passed, but no test
+drives a real curl failure through `restart_container()`, so the
+`WARNING: restart call failed` log branch itself is still untested.
 
 **`health_color(status)`** (lines 90-98) -- maps Docker health strings to
 dashboard colors: `healthy`->green, `starting`->yellow, `unhealthy`->red,
@@ -92,13 +104,17 @@ booting" from "watchdog itself lost Docker API access" from the color
 alone.
 
 **`disk_info(dir)`** (lines 100-112) -- returns `unknown` status if `dir`
-doesn't exist; otherwise runs `df "$dir"`, extracts the `Use%` column via
-awk, and buckets into `red` (>= `DISK_ALARM_PCT`, default 95), `yellow`
-(>= `DISK_WARN_PCT`, default 85), else `green`. **Was not directly
+doesn't exist; otherwise runs **`df -P "$dir"`** (updated by PR #885,
+2026-07-16 -- `-P` forces POSIX single-line output so a long overlay/mapper
+device name can't wrap onto its own line and shift `awk 'NR==2'` onto the
+wrong row), extracts the `Use%` column via awk into `${pct:-0}` (also added
+by PR #885, so a `df` failure or unexpected output shape still produces
+valid JSON instead of a syntactically-broken `{"pct": , ...}`), and buckets
+into `red` (>= `DISK_ALARM_PCT`, default 95), `yellow` (>= `DISK_WARN_PCT`,
+default 85), else `green`. **Was not directly
 unit-tested at all as of this audit (2026-07-15); now covered by
-`tests/bats/watchdog_disk_info.bats` (4 tests), added by PR #885
-(2026-07-16) as part of the same change that fixed this function's
-`df -P`/`${pct:-0}` bugs (see the sibling bughunt-watchdog doc's findings
+`tests/bats/watchdog_disk_info.bats` (4 tests), added by the same PR #885
+change described above (see the sibling bughunt-watchdog doc's findings
 #2/#3).** It's invoked as a side effect of `write_status()`,
 but every bats assertion explicitly strips the `"disk"` key from the JSON
 before comparing (`jq 'del(.updated, .disk)'`), specifically because live
@@ -144,8 +160,8 @@ library), atomically through a `.tmp` + `mv`. Emits per-container
 `disk_info()`. Its own header comment states the file is "consumed by the
 Admin UI dashboard." **Well tested for structural convergence/atomicity**
 (no leftover `.tmp`, identical JSON across repeated writes, SSL-enabled
-branch). **Major cross-referenced finding: this file is not actually
-consumed by anything.** Grepping the entire `services/ui/src/` tree for
+branch). **Major cross-referenced finding, Admin UI half: this file is not
+consumed by the Admin UI.** Grepping the entire `services/ui/src/` tree for
 `status.json`, `STATUS_FILE`, or `watchdog-status` (the named Docker
 volume backing `/var/run/watchdog`) returns zero matches. The
 `watchdog-status` volume is mounted only into the `watchdog` container
@@ -158,10 +174,16 @@ duplicates none of `get_health()`/`health_color()`/`write_status()`'s
 logic. Per `AGENTS.md`'s Feature Completeness section ("if backend code
 supports a feature but the Admin UI does not expose it, treat that as UI
 delivery debt by default"), this reads as exactly that category: the
-backend side (`write_status()`, fully implemented and well tested) is
-done, the UI-side consumer was never wired. Flagging as inventory here,
-not proposing removal or a fix. Not previously flagged in any open issue
-found by search.
+Admin-UI side of this consumer was never wired. Flagging as inventory
+here, not proposing removal or a fix. Not previously flagged in any open
+issue found by search. **Currency update (2026-07-18): the file is no
+longer unconsumed overall.** PR #885 added `services/watchdog/healthcheck.sh`,
+a Docker `HEALTHCHECK` (wired into `watchdog` in all four compose files,
+including the previously-uncovered `full-setup`) that reads `STATUS_FILE`'s
+mtime to detect a stalled main loop -- a real runtime dependency on
+`write_status()` continuing to refresh this file every cycle. The Admin-UI
+delivery-debt finding above still stands; only the broader "not consumed by
+anything" framing needed correcting.
 
 **`maybe_purge()`** (lines 177-223) -- daily (rate-limited via
 `PURGE_STAMP`, 86400s) deletion of cache files older than
@@ -187,8 +209,12 @@ has more dedicated tests (~10 vs 6), but the "zero coverage" gap itself is
 closed.
 
 **`maybe_prune_syslog()`** (lines 249-435, by far the largest function in
-the file) -- fail-closed no-op unless `SYSLOG_ENABLED=true` exactly
-(matches the opt-in `logging` profile). Rate-limited daily via its own
+the file) -- **updated by PR #877 (2026-07-16, `73a4fe0`)**: the gate used
+to be a fail-closed no-op unless `SYSLOG_ENABLED=true` exactly; it now uses
+the shared `is_truthy()` helper, accepting `1`/`true`/`yes`/`on`
+case-insensitively, matching the Admin UI's `env_bool()` parsing so the two
+no longer disagree on values like `SYSLOG_ENABLED=yes` (opt-in `logging`
+profile still required either way). Rate-limited daily via its own
 `SYSLOG_PRUNE_STAMP`, same stamp-validation idiom as `maybe_purge()`.
 Two-pass retention engine per #633/#757:
 
@@ -196,7 +222,12 @@ Two-pass retention engine per #633/#757:
   `/var/log/lancache-syslog-ng`) older than `SYSLOG_RETENTION_DAYS`
   (default 30), a floor not the primary control.
 - **Pass 2 (size)**: re-measures with `du -sb`; if still over
-  `SYSLOG_MAX_GB` (default 10, hard-clamped at 1048576 GiB / 1 PiB to
+  `SYSLOG_MAX_GB` (default 10; **also floored by PR #877, 2026-07-16**: a
+  value below 1 GiB -- including a literal `0`, which the pre-existing
+  digit-only validation let through unchanged -- falls back to the default
+  10 instead of producing a 0-byte budget that would make the size pass
+  treat every file as over budget, matching the Admin UI's
+  `env_u32_clamped()` minimum; and hard-clamped at 1048576 GiB / 1 PiB to
   prevent signed 64-bit overflow in the `max_gb * 1024^3` multiplication,
   per #757 review), deletes oldest-first by `%T@` mtime regardless of age,
   explicitly skipping today's per-host `$YEAR$MONTH$DAY.log` file (still
@@ -303,10 +334,16 @@ severity distinction) gets structured downstream.
    (6 tests).
 2. `get_health()` / `restart_container()` -- the real curl+jq/curl-POST
    logic (including the `"unreachable"` and `WARNING: restart call failed`
-   branches) is always stubbed out in bats, never exercised. **FIXED**
-   (curl-boundary-stubbed, not function-stubbed): `watchdog_curl_timeout.bats`
-   (4 tests) covers `--max-time` wiring and the `"unreachable"` fallback; the
-   `// "none"` jq-fallback sub-case was not independently confirmed.
+   branches) is always stubbed out in bats, never exercised.
+   **`get_health()`: FIXED** (curl-boundary-stubbed, not function-stubbed):
+   `watchdog_curl_timeout.bats` (4 tests) covers `--max-time` wiring,
+   `CURL_MAX_TIME` override, and the `"unreachable"` fallback on curl
+   failure; the `// "none"` jq-fallback sub-case was not independently
+   confirmed. **`restart_container()`: only partially fixed** -- the same
+   file confirms its `--max-time` wiring, but no test drives a curl failure
+   through `restart_container()`, so the `WARNING: restart call failed`
+   log branch remains untested; do not treat this item as closed for
+   `restart_container()`.
 3. `disk_info()` -- threshold math (85%/95% boundaries, `df` parse
    failure, missing-dir unknown status) is never directly asserted; only
    indirectly invoked and then explicitly stripped from JSON comparisons.
