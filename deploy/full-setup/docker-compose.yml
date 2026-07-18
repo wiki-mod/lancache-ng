@@ -19,6 +19,19 @@ services:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
       - IP_STANDARD=${VALIDATION_PROXY_IP:-172.30.99.2}
+      # VALIDATION_PROXY_SSL_IP (issue #668): this container is never
+      # actually reachable at this address on the `validation` network --
+      # see the `networks:` block below, which binds only VALIDATION_PROXY_IP.
+      # IP_SSL is passed to entrypoint.sh purely as a logical value: it gates
+      # SSL_ENABLED, is embedded in the default cert's IP SAN, and is
+      # surfaced by the Admin UI. Prod gives IP_SSL a real, separately
+      # reachable LAN address by binding a second host NIC IP and Docker-
+      # port-publishing it into this same container at a different container
+      # port (see entrypoint.sh's "Docker routes IP_SSL:443->container:443
+      # and IP_STANDARD:443->container:8443" comment); that host-level
+      # mechanism has no equivalent for this harness's container-to-
+      # container bridge traffic, which always reaches the container's real
+      # listening ports directly.
       - IP_SSL=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - SSL_ENABLED=1
       - CACHE_MEM_MB=64
@@ -40,11 +53,65 @@ services:
       retries: 2
       start_period: 10s
 
+  # Standard-mode passthrough shim (issue #668). Prod's IP_STANDARD:443 is
+  # Docker-port-published straight into this SAME proxy container's own
+  # internal :8443 SNI-passthrough listener (see entrypoint.sh's "Docker
+  # routes IP_SSL:443->container:443 and IP_STANDARD:443->container:8443"
+  # comment, and nginx.conf's stream block) -- a host-IP-scoped port-publish
+  # mechanism this bridge-network validation harness has no equivalent for,
+  # since a single container only ever gets one address per Compose network.
+  # This tiny socat shim reproduces that exact TCP-level :443 -> proxy:8443
+  # forward as a real, separately dialable address instead. dns-standard's
+  # PROXY_IP below now points here rather than at the proxy container's own
+  # address, so a client that only trusts dns-standard's DNS answer genuinely
+  # lands on the SNI-passthrough listener and never on the interception one --
+  # closing the gap issue #668 raised: previously dns-standard and dns-ssl
+  # resolved to the exact same reachable endpoint, so nothing could tell a
+  # correctly-wired dns-ssl apart from one wrongly pointed at the
+  # standard-mode address. scripts/ssl-mitm-cache-simulation.sh proves this
+  # end-to-end by connecting to whatever each DNS server actually answers
+  # with and inspecting the certificate presented there.
+  #
+  # Gated behind a Compose profile so only that script (which names this
+  # service explicitly on its own `docker compose up` command line) ever
+  # starts it -- every other job in this harness brings the stack up
+  # unrestricted (`docker compose up -d`, no service list) and has no use
+  # for it; profile-gating keeps this addition a no-op there instead of
+  # requiring every one of those jobs' workflow env blocks to also thread a
+  # per-run VALIDATION_STANDARD_SHIM_IP (an un-threaded default here would
+  # otherwise land outside whatever per-run subnet those jobs reserved and
+  # break their unrelated `docker compose up -d`).
+  standard-passthrough-shim:
+    profiles: [ssl-mitm-proof]
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    command: >-
+      sh -c "apk add --no-cache socat >/dev/null && exec socat
+      TCP-LISTEN:443,fork,reuseaddr TCP:proxy:8443"
+    networks:
+      validation:
+        ipv4_address: ${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
+    depends_on:
+      - proxy
+    restart: unless-stopped
+    healthcheck:
+      # nc -z: same "prove a real listener is up" check nats' own healthcheck
+      # below uses (both are alpine-family images with busybox nc built in).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   # DNS services for validation (both standard and SSL modes)
   dns-standard:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
-      - PROXY_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
+      # Points at standard-passthrough-shim above, NOT at the proxy
+      # container's own address (issue #668) -- see that service's comment
+      # for why: this is what makes dns-standard's DNS answer actually lead
+      # somewhere behaviorally distinct from dns-ssl's answer below, instead
+      # of both resolving to the identical reachable endpoint.
+      - PROXY_IP=${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
       - PDNS_API_KEY=validation-pdns-key
       - DDNS_TSIG_KEY=validation-ddns-key
       - NATS_URL=nats://nats:4222
@@ -53,6 +120,9 @@ services:
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY
+      # (inert here: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-standard:/var/lib/powerdns
     networks:
       validation:
@@ -61,7 +131,13 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      # Real query/response probe (AG-VAL-018). The prior `rec_control ping
+      # 2>/dev/null || true` could never report unhealthy: the trailing
+      # `|| true` forces exit 0 regardless of what `rec_control ping` returns,
+      # so this healthcheck was pure decoration (#869). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
+      # is already installed in this image (services/dns/Dockerfile).
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -74,10 +150,13 @@ services:
       - PDNS_API_KEY=validation-pdns-key
       - DDNS_TSIG_KEY=validation-ddns-key
       - NATS_URL=nats://nats:4222
-      - NATS_USER=validation-dns-reader
+      - NATS_USER=validation-dns-replica
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-ssl
     volumes:
+      # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY
+      # (inert here: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-ssl:/var/lib/powerdns
     networks:
       validation:
@@ -86,7 +165,13 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "rec_control ping 2>/dev/null || true"]
+      # Real query/response probe (AG-VAL-018). The prior `rec_control ping
+      # 2>/dev/null || true` could never report unhealthy: the trailing
+      # `|| true` forces exit 0 regardless of what `rec_control ping` returns,
+      # so this healthcheck was pure decoration (#869). Matches
+      # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
+      # is already installed in this image (services/dns/Dockerfile).
+      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -109,7 +194,7 @@ services:
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
-      - proxy-cache:/cache/standard
+      - proxy-cache:/var/cache/lancache
     depends_on:
       - docker-socket-proxy
     networks:
@@ -118,13 +203,54 @@ services:
       validation-api:
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "test -f /var/run/watchdog/status.json || exit 1"]
+      # Freshness-based (mtime), not just existence -- see
+      # services/watchdog/healthcheck.sh's own comment for why a stalled
+      # main loop would otherwise leave a stale-but-present status.json
+      # reading as healthy forever. Upgraded from the previous
+      # `test -f status.json` check (same script now shared with
+      # dev/prod/quickstart) for the same reason.
+      test: ["CMD", "/healthcheck.sh"]
       interval: 10s
       timeout: 5s
       retries: 2
-      start_period: 10s
+      start_period: 15s
 
   # NATS message bus for DNS record sync
+  #
+  # No `container_name` here on purpose (unlike dev/prod): this validation
+  # harness is designed to run as multiple concurrently-isolated `-p
+  # <project>` instances on a shared CI runner, and a fixed name would
+  # collide across them. That means the Admin UI's own `reload_nats_conf()`
+  # restart-by-fixed-name call (docker_client.rs's "nats" -> "lancache-nats"
+  # mapping) silently fails here -- already true before issue #583, just
+  # harmless until now because every credential was static and already
+  # baked into this bootstrap config identically. Issue #583's auth_callout
+  # stanza needs the Admin UI's runtime-generated issuer public key, which
+  # this bootstrap script can't know -- so instead of depending on the
+  # restart working, the ui service is given a fixed literal seed via
+  # NATS_ISSUER_SEED (see its comment there), and this config is baked with
+  # that seed's matching public key ahead of time, so nats-server is
+  # auth_callout-ready from its very first start, with no restart required.
+  #
+  # Since issue #811 this bootstrap mirrors dev/prod's config split so the
+  # auth-callout simulation actually exercises the real include mechanism: the
+  # static nats.conf `include`s a separate auth_callout.conf fragment (rather
+  # than embedding the auth_callout {} block inline). Both files are prebaked
+  # here in one entrypoint run -- because the UI's restart-to-apply no-ops in
+  # this harness (see above), the entrypoint must produce a fully callout-ready
+  # pair itself. The Admin UI still writes auth_callout.conf on startup with its
+  # fixed-seed issuer (matching the prebaked one), but since the restart
+  # no-ops, the already-loaded prebaked pair is what serves the simulation.
+  #
+  # Deliberately NOT wired into the shared-secret bootstrap (#858): every
+  # credential here is a literal string baked into the heredoc below, not an
+  # interpolated `${NATS_..._PASSWORD}` -- there is no environment: block and
+  # no placeholder-or-empty case this harness can ever hit, by design (fixed
+  # values are what make the auth-callout restart-no-op simulation above
+  # reproducible). dev/prod/quickstart's real `${VAR}`-driven nats service is
+  # what the bootstrap targets; retrofitting resolve_shared_secret here would
+  # mean restructuring a CI-only validation harness for no self-heal benefit
+  # it could ever exercise.
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     entrypoint: ["/bin/sh", "-c"]
@@ -136,6 +262,13 @@ services:
         jetstream {
           store_dir: /data
         }
+        # Monitor endpoint: mirrors dev/prod/quickstart's entrypoint (see
+        # those files' matching comment) -- without this, nats-server has no
+        # HTTP monitor listening at all, so /healthz below would never
+        # answer. Verified live against this pinned image (nats-server
+        # 2.14.3): once set, /healthz and /varz answer immediately after
+        # "Server is ready".
+        http_port: 8222
         authorization {
           users = [
             {
@@ -153,13 +286,40 @@ services:
               }
             }
             {
-              user: validation-dns-reader
+              user: validation-dns-replica
               password: validation-nats-password
               permissions = {
                 subscribe = ["lancache.dns.>", "_INBOX.>"]
               }
             }
+            {
+              user: validation-nats-callout
+              password: validation-nats-callout-password
+            }
           ]
+          # Load the auth_callout {} stanza from a separate fragment, exactly
+          # like dev/prod's entrypoint does (issue #811). Prebaked below so it
+          # exists before nats-server starts (a missing include is a fatal boot
+          # error).
+          include "auth_callout.conf"
+        }
+        EOF
+        cat > /etc/nats/auth_callout.conf <<'EOF'
+        auth_callout {
+          # Public half of the ui service's NATS_ISSUER_SEED (see its comment
+          # there). Fixed on purpose for this validation harness -- see the
+          # service-level comment above for why the Admin UI can't establish
+          # this dynamically here the way it does in dev/prod. The Admin UI's
+          # own auth_callout.conf write (routes/secondaries.rs) derives this
+          # same public key from that fixed seed, so its write is byte-compatible
+          # even though the no-op restart means this prebaked copy is the one
+          # actually loaded.
+          issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
+          # Every static user in nats.conf must be listed here (see
+          # nats_auth_callout.rs's module docs for why) -- only real
+          # secondaries, registered at runtime and absent from both lists,
+          # go through the callout.
+          auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout"]
         }
         EOF
         exec nats-server -c /etc/nats/nats.conf
@@ -171,7 +331,12 @@ services:
         ipv4_address: ${VALIDATION_NATS_IP:-172.30.99.8}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 4222 || exit 1"]
+      # Real HTTP probe against the monitor endpoint (http_port: 8222 above),
+      # not just a bare TCP connect on the client port -- proves nats-server's
+      # HTTP monitor is actually answering, matching dev/prod/quickstart's
+      # equivalent check. Uses wget (BusyBox), not curl: verified empirically
+      # that nats:2-alpine ships BusyBox's wget/nc but no curl.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -181,9 +346,12 @@ services:
   ui:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
+      # Shared-secret bootstrap (#858): UI entrypoint resolves PDNS_API_KEY from
+      # here (inert: this validation stack hardcodes a consistent PDNS_API_KEY).
+      - shared-secrets:/var/lib/lancache-secrets
       - nats-conf:/etc/nats
     ports:
-      - "127.0.0.1:9090:8080"
+      - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
@@ -195,11 +363,14 @@ services:
       - PROXY_SSL_SERVICE=proxy
       - STANDARD_LOG=/var/log/nginx/access.log
       - SSL_LOG=/var/log/nginx/access.log
-      - STANDARD_CACHE_DIR=/var/cache/proxy
-      - SSL_CACHE_DIR=/var/cache/proxy
+      - CACHE_DIR=/var/cache/proxy
       - CACHE_MAX_GB=1
       - STANDARD_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
       - SSL_IP=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
+      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
+      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
+      - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
+      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
       - UI_AUTH_USER=
       - UI_AUTH_PASSWORD=
       - ALLOW_INSECURE_UI=true
@@ -208,12 +379,32 @@ services:
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=validation-pdns-key
       - NATS_URL=nats://nats:4222
+      # Issue #866: register_secondary now refuses registration (HTTP 503)
+      # unless NATS_BIND_IP or NATS_ADVERTISE_URL is set -- see the identical
+      # comment in deploy/prod/docker-compose.yml for the full rationale.
+      # scripts/nats-secondary-auth-callout-simulation.sh registers
+      # "secondaries" that are actually client containers on this same
+      # validation Docker network, so `nats://nats:4222` genuinely IS
+      # reachable for them (unlike a real remote secondary on a separate
+      # host/network) -- NATS_ADVERTISE_URL states that explicitly rather
+      # than relying on a bare-NATS_URL fallback that no longer exists.
+      - NATS_ADVERTISE_URL=nats://nats:4222
       - NATS_UI_USER=validation-ui
       - NATS_UI_PASSWORD=validation-ui-password
       - NATS_DNS_WRITER_USER=validation-dns-writer
       - NATS_DNS_WRITER_PASSWORD=validation-nats-password
-      - NATS_DNS_READER_USER=validation-dns-reader
-      - NATS_DNS_READER_PASSWORD=validation-nats-password
+      - NATS_DNS_REPLICA_USER=validation-dns-replica
+      - NATS_DNS_REPLICA_PASSWORD=validation-nats-password
+      - NATS_CALLOUT_USER=validation-nats-callout
+      - NATS_CALLOUT_PASSWORD=validation-nats-callout-password
+      # Fixed literal seed (not the file-based NATS_ISSUER_SEED_PATH default)
+      # so its public half can be baked into the nats service's static
+      # bootstrap config below ahead of time -- this validation harness has
+      # no persistent /data volume for the Admin UI to generate-and-persist
+      # one into, and no fixed nats container name to safely restart-by-name
+      # across concurrently-isolated `-p <project>` runs. Never use a literal
+      # seed like this outside a throwaway validation context.
+      - NATS_ISSUER_SEED=SAAIHYJ2XBQO3QSKX3V5MS4JH25WGTXEFOOXEZ5EXSGDGWOGCMCVWHWTYY
       - SECONDARY_REGISTRATION_TOKEN=validation-secondary-registration-token
     networks:
       validation:
@@ -263,12 +454,24 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/24}
+        # #832: the default fell back to a whole /24 per octet; runs now
+        # reserve a /27 instead (see scripts/lib/reserve-validation-subnet.sh),
+        # but this literal fallback (used only when a script/job runs
+        # standalone with no CI reservation) deliberately keeps the SAME
+        # dotted addresses as before (.99.1 gateway, .99.2 proxy, etc. below)
+        # -- only the CIDR suffix changes, so every other
+        # ${VALIDATION_*_IP:-172.30.99.N} default in this file needed no
+        # change at all.
+        - subnet: ${VALIDATION_SUBNET:-172.30.99.0/27}
           gateway: ${VALIDATION_GATEWAY:-172.30.99.1}
   validation-api:
     internal: true
 
 volumes:
+  # Shared handshake secrets (#858): mounted into every service that must agree
+  # on a generated secret. Inert in this validation stack (secrets are hardcoded
+  # and consistent); present for parity with the dev/prod/quickstart profiles.
+  shared-secrets:
   proxy-cache:
   pdns-data-standard:
   pdns-data-ssl:

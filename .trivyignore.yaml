@@ -4,9 +4,13 @@ vulnerabilities:
   - id: CVE-2026-34040
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
+      - usr/local/lib/docker/cli-plugins/docker-buildx
     statement: >-
-      Docker Compose v5.2.0 and docker/compose main currently embed
-      github.com/docker/docker v28.5.2, and github.com/docker/docker does not
-      publish v29.x Go module tags. Revisit when Docker Compose publishes a
-      release that carries a scanner-visible fixed module version.
+      Docker Compose v5.2.0, docker/buildx v0.35.0, and their respective
+      upstream main branches currently embed github.com/docker/docker
+      v28.5.2, and github.com/docker/docker does not publish v29.x Go module
+      tags. Revisit when a scanner-visible fixed module version exists to
+      bump to instead (see #787 for why docker-buildx was added here: unlike
+      containerd/containerd/v2, which buildx's build now bumps directly,
+      docker/docker genuinely cannot be bumped the same way).
     expired_at: 2026-08-15

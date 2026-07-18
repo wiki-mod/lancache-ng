@@ -12,9 +12,12 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 
 | Version | Status | Support Until |
 |---------|--------|----------------|
-| 1.x     | Current | Ongoing |
+| 0.x (pre-1.0) | Current | Ongoing |
 
-We aim to provide security updates for the current major version. Older versions are not actively maintained.
+lancache-ng has not reached a `1.0.0` release yet (see `docs/release-versioning.md`
+for the full channel/tagging model); the current stable release line is `v0.x`.
+We aim to provide security updates for the current stable release. Older
+releases are not actively maintained.
 
 ## Reporting a Vulnerability
 

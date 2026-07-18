@@ -31,3 +31,41 @@ hex = "0.4"
 form_urlencoded = "1"
 subtle = "2"
 sha2 = "0.11"
+nkeys = "0.4"
+data-encoding = "2"
+# Transparent decompression of syslog-ng's rotated log output (#633:
+# syslog_client.rs). syslog-ng compresses rotated files with zstd, falling
+# back to gzip only if zstd could not be installed at container start (see
+# deploy/*/docker-compose.yml's syslog-ng rotation loop) -- both crates are
+# needed so the Admin UI reader can transparently read either outcome.
+zstd = "0.13"
+flate2 = "1"
+
+[dev-dependencies]
+# Only used by the basic_auth integration test (main.rs), to drive real
+# axum::extract::Request values through the actual Router + middleware stack
+# via ServiceExt::oneshot -- axum itself depends on tower already, so this
+# adds no new runtime behavior, just the test-only `util` feature that
+# exposes `oneshot`.
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+# Deliberate release-profile tuning: fat LTO (not thin) for maximum
+# cross-crate inlining, and codegen-units=2 (down from Cargo's default 16)
+# to trade some build parallelism for better whole-program optimization.
+# Builds run on the project's own sccache/distcc build farm, which has
+# spare capacity for the extra link-time cost this adds.
+#
+# Deliberately NOT set here, each considered and rejected for a concrete
+# reason rather than omitted by oversight:
+# - `strip`: current unstripped binary sizes are not large enough to force
+#   the issue, and stripping would remove symbol names needed for a real
+#   crash backtrace.
+# - `panic = "abort"`: this is a long-running Tokio service; abort-on-panic
+#   changes per-task panic isolation behavior and has not been evaluated
+#   deeply enough to adopt casually.
+# - `target-cpu=native`: this binary ships in Docker images to end-users'
+#   arbitrary hardware, so baking in host-specific CPU instructions would
+#   risk "illegal instruction" crashes on different silicon.
+[profile.release]
+lto = "fat"
+codegen-units = 2

@@ -1,0 +1,273 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Reaps the per-PR GHCR staging tags that build-push.yml now pushes on
+# pull_request events (see #626) so "validate full-setup image" can test a
+# PR's own commits instead of stale base-branch state. Three tag shapes
+# exist per touched service: pr-<N>-sha-<short>-amd64 and
+# pr-<N>-sha-<short>-arm64 (the per-arch legs pushed by build/build-arm64),
+# and pr-<N>-sha-<short> (the combined multi-platform tag merge-manifests
+# assembles from those two legs, and the only one full-setup-validate
+# actually pulls). Without this workflow, those tags would accumulate in
+# GHCR forever -- every PR that touches a runtime service pushes staging
+# images per touched service, and nothing else in the repo ever removes
+# them.
+#
+# Two triggers cover both the common case and the safety-net case:
+#   - pull_request (closed): reaps promptly right after the PR that owns a
+#     given staging tag closes (merged or not).
+#   - schedule: a periodic full sweep across every service's package
+#     versions, so a PR whose close-triggered run never fired (workflow
+#     added after the PR closed, a failed run, a PR closed via a path that
+#     doesn't fire this trigger) still gets cleaned up eventually.
+# Both paths run the exact same reap logic: find every pr-<N>-sha-<short>
+# (optionally -amd64/-arm64 suffixed) tag, resolve PR <N>'s current state,
+# delete if it isn't open. There is no separate "delete just this one PR"
+# fast path -- checking every tag's own PR state is simple, avoids
+# duplicating the reap logic, and doubles as a general sweep on every PR
+# close for free.
+name: GC PR Staging Images
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master, "v[0-9]*"]
+  schedule:
+    # Weekly, offset from build-tools.yml's Sunday 03:23 refresh so the two
+    # scheduled jobs don't contend for the same runner at the same minute.
+    - cron: "17 4 * * 0"
+  workflow_dispatch: {}
+
+# Package version deletion is intentionally NOT done with the default
+# GITHUB_TOKEN: GitHub's REST API for deleting a container package version
+# requires a classic personal access token with read:packages and
+# delete:packages scopes (confirmed against GitHub's own REST API docs while
+# implementing #626) -- the Actions-issued GITHUB_TOKEN cannot do this
+# regardless of the `packages: write` permission granted to a job. No
+# permissions are needed here beyond the workflow default.
+permissions: {}
+
+jobs:
+  gc:
+    name: reap closed-PR staging tags
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
+      # storing it is a deliberate human/admin action (a new credential with
+      # org package-delete rights is a real operational decision, not
+      # something to mint unattended). Until a repo/org admin adds it, this
+      # job degrades to a loud no-op instead of failing the workflow: PR
+      # staging tags will keep accumulating in GHCR, but nothing else breaks.
+      - name: Check for GHCR deletion credentials
+        id: creds
+        env:
+          HAVE_PAT: ${{ secrets.GHCR_PACKAGE_DELETE_PAT != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_PAT" = "true" ]; then
+            echo "have-pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GHCR_PACKAGE_DELETE_PAT is not configured; skipping PR staging-tag GC. Container package version deletion requires a classic PAT with read:packages+delete:packages scopes (the default GITHUB_TOKEN cannot delete package versions) -- a repo/org admin must create this PAT and add it as a repository secret named GHCR_PACKAGE_DELETE_PAT before this job can reap anything. Until then, per-PR staging tags pushed by build-push.yml will keep accumulating in GHCR. See issue #626."
+            echo "have-pat=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reap staging tags for closed PRs
+        if: steps.creds.outputs.have-pat == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+        run: |
+          set -euo pipefail
+
+          org=wiki-mod
+          repo=wiki-mod/lancache-ng
+          # Every service build-push.yml's build/build-arm64 jobs can push a
+          # PR staging tag for. dhcp/dhcp-proxy aren't used by full-setup
+          # validate, but a PR touching them still gets a staging tag pushed
+          # (see #626's build-job change), so they need reaping too.
+          # build-tools is included: full-setup-validate's client-simulation
+          # step pulls it at the PR staging tag as well.
+          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+
+          declare -A pr_state_cache=()
+
+          # Prints exactly one of OPEN / CLOSED / LOOKUP_FAILED for PR $1.
+          # These are NOT the same thing, and collapsing them was a real bug
+          # caught in review: `gh pr view ... 2>/dev/null || echo MISSING`
+          # can't tell "this PR genuinely doesn't exist" apart from "the API
+          # call itself failed" (rate limit, auth hiccup, GitHub outage,
+          # network blip) -- both looked identical to the caller and both
+          # got deleted. A transient lookup failure must NOT be treated as
+          # "safe to delete": that would let a temporary GitHub/token issue
+          # delete an ACTIVE PR's staging images out from under it, which is
+          # exactly the kind of confusing, hard-to-diagnose breakage #626
+          # itself was about. So this distinguishes a confirmed answer
+          # (`gh api` succeeded, or failed with a real 404 -- either way we
+          # KNOW the PR's state) from an ambiguous one (any other failure),
+          # and only a confirmed non-open state is ever deletable.
+          pr_lookup_state() {
+            local pr_number="$1" api_output pr_state
+            if [[ -n "${pr_state_cache[$pr_number]:-}" ]]; then
+              printf '%s\n' "${pr_state_cache[$pr_number]}"
+              return
+            fi
+
+            # `api_output="$(gh api ...)"` as a bare assignment statement is
+            # itself a "simple command" under `set -e`: if `gh api` returns
+            # non-zero, THIS SCRIPT (not just the function) would exit right
+            # here, before a separately-captured `$?` on the next line could
+            # ever be read -- an earlier version of this function did
+            # exactly that and was caught in review. Putting the assignment
+            # directly in the `if` condition makes it a tested context, so a
+            # failure is handled by the `else` branches below instead of
+            # aborting the whole GC run.
+            if api_output="$(gh api "repos/${repo}/pulls/${pr_number}" 2>&1)"; then
+              if pr_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
+                if [[ "$pr_state" == "open" ]]; then
+                  pr_state_cache["$pr_number"]="OPEN"
+                else
+                  pr_state_cache["$pr_number"]="CLOSED"
+                fi
+              else
+                # gh api succeeded (a real response came back) but jq itself
+                # failed to parse it -- same "don't let this bare assignment
+                # trip set -e" reasoning as the gh api call above, applied to
+                # every other jq call in this script.
+                echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $pr_state" >&2
+                pr_state_cache["$pr_number"]="LOOKUP_FAILED"
+              fi
+            elif [[ "$api_output" == *"HTTP 404"* ]]; then
+              # Confirmed: this PR number genuinely does not exist (deleted,
+              # renumbered, whatever) -- a real answer, not an ambiguous one.
+              pr_state_cache["$pr_number"]="CLOSED"
+            else
+              echo "::warning::Could not determine PR #$pr_number's state (not a 404): $api_output" >&2
+              pr_state_cache["$pr_number"]="LOOKUP_FAILED"
+            fi
+
+            printf '%s\n' "${pr_state_cache[$pr_number]}"
+          }
+
+          # had_errors turns a listing or delete failure into a failed GC
+          # run instead of a silently "successful" one. Without this, a
+          # broken GHCR_PACKAGE_DELETE_PAT (missing read:packages or
+          # delete:packages), a rate limit, or a missing `gh` binary would
+          # make every listing/delete call fail, the loop below would just
+          # see empty results or failed deletes, and this workflow would
+          # report success having inspected or removed nothing -- exactly
+          # the kind of "looks healthy but does nothing" failure mode that
+          # would let staging tags accumulate in GHCR forever undetected.
+          # A single service's listing failure doesn't abort the whole run
+          # immediately: other services still get processed (so a
+          # per-package hiccup doesn't block cleanup everywhere else), but
+          # the run still exits non-zero at the end so CI reflects reality.
+          had_errors=0
+          deleted=0
+          kept=0
+          for service in "${services[@]}"; do
+            package="lancache-ng%2F${service}"
+            if ! versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>&1)"; then
+              echo "::error::Failed to list package versions for lancache-ng/${service}: $versions_json"
+              had_errors=1
+              continue
+            fi
+
+            # A "version" in GHCR is keyed by digest, not by tag -- a
+            # back-filled service (see full-setup-validate's own "Ensure PR
+            # staging tags exist" step) shares its digest with a live
+            # edge/dev/latest/sha-* channel tag. Deleting that version would
+            # delete the channel tag too. So this only considers a version
+            # safe to delete when EVERY tag on it is a pr-<N>-sha-* tag
+            # (optionally -amd64/-arm64 suffixed) for a PR that is not open
+            # -- any other tag on the same version (a channel tag, a real
+            # sha-* source tag, or a still-open PR's staging tag) protects
+            # the whole version. A version with no pr-* tags to lose costs
+            # nothing extra anyway (it is byte-for-byte the same image the
+            # channel tag already keeps), so leaving it alone is correct,
+            # not just safe.
+            # jq's exit status inside a process substitution (`< <(... | jq
+            # ...)`) is NOT checked by `set -e` -- bash simply never looks at
+            # it, so a missing/broken `jq` or malformed input here would
+            # make the loop silently see zero versions and this service
+            # would report as "nothing to clean" instead of "couldn't be
+            # inspected." Capturing jq's output via a checked command
+            # substitution first (same fix shape as the listing-failure fix
+            # above) and feeding a plain variable to `read` via a here-string
+            # instead makes a jq failure visible and fails the run, exactly
+            # like every other failure mode in this script.
+            if ! version_list="$(printf '%s' "$versions_json" | jq -c '.[]' 2>&1)"; then
+              echo "::error::Failed to enumerate package versions for lancache-ng/${service} via jq: $version_list"
+              had_errors=1
+              continue
+            fi
+
+            while IFS= read -r version_entry; do
+              [[ -z "$version_entry" ]] && continue
+              if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
+                echo "::error::Failed to read a package version's id for $service via jq: $version_id"
+                had_errors=1
+                continue
+              fi
+              [[ -z "$version_id" || "$version_id" == "null" ]] && continue
+
+              protected=0
+              has_closed_pr_tag=0
+              if ! tag_list="$(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]' 2>&1)"; then
+                echo "::error::Failed to enumerate tags for $service version $version_id via jq: $tag_list"
+                had_errors=1
+                continue
+              fi
+              while IFS= read -r tag; do
+                [[ -z "$tag" ]] && continue
+                if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
+                  pr_number="${BASH_REMATCH[1]}"
+                  case "$(pr_lookup_state "$pr_number")" in
+                    OPEN|LOOKUP_FAILED)
+                      # An ambiguous lookup is treated exactly like an open
+                      # PR: keep, don't delete. See pr_lookup_state's own
+                      # comment for why collapsing these was the actual bug.
+                      protected=1
+                      ;;
+                    CLOSED)
+                      has_closed_pr_tag=1
+                      ;;
+                  esac
+                  [[ "$protected" == "1" ]] && break
+                else
+                  # Any non pr-* tag (edge, dev, latest, vX.Y.Z, sha-*, ...)
+                  # is a real published channel/source tag. Never delete it.
+                  protected=1
+                  break
+                fi
+              done <<< "$tag_list"
+
+              if [[ "$protected" == "1" || "$has_closed_pr_tag" == "0" ]]; then
+                kept=$((kept + 1))
+                continue
+              fi
+
+              # Cosmetic (log message only, the tags this version already
+              # has were fully resolved via tag_list above) -- a jq failure
+              # here degrades the message instead of aborting or failing the
+              # run over something that isn't actually blocking the delete.
+              tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []' 2>&1)" || tags_display="<jq error: $tags_display>"
+              echo "Deleting $service version $version_id (only closed-PR staging tags: $tags_display)."
+              delete_output=""
+              if delete_output="$(gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" 2>&1)"; then
+                deleted=$((deleted + 1))
+              else
+                # Logged and counted, not just warned: this is exactly the
+                # "PAT can list but lacks delete:packages" case (or GitHub
+                # rejecting one specific delete) -- if every delete in a run
+                # failed this way, deleted would stay 0 forever while the
+                # job still exited 0 unless had_errors makes it fail below.
+                echo "::error::Failed to delete $service version $version_id (tags: $tags_display): $delete_output"
+                had_errors=1
+              fi
+            done <<< "$version_list"
+          done
+
+          echo "::notice::PR staging-tag GC complete: deleted $deleted version(s), kept $kept."
+
+          if [[ "$had_errors" == "1" ]]; then
+            echo "::error::One or more package-version listings or deletions failed (see errors above). Failing this run instead of reporting success -- GHCR_PACKAGE_DELETE_PAT may be missing read:packages/delete:packages scopes, the API may be rate-limited, or GitHub rejected a delete for another reason. A GC run that looks healthy while silently doing nothing would let PR staging tags accumulate in GHCR forever undetected."
+            exit 1
+          fi

@@ -37,7 +37,8 @@ change — a short "N/A, this is a one-line typo fix" is fine, but the
 section headings themselves should stay so reviewers always know where to
 look. At minimum, each pull request should explain:
 
-- whether AI assistance was used, using the optional transparency notice when applicable
+- whether AI assistance was used, using the transparency notice at the top of the template
+  - It's okay for us if you used it — just be fair enough to tell us. Keep and edit the notice if you used AI, delete it if you didn't, and never leave it in place saying something that isn't true for this specific PR.
 - what changed
 - what the PR actually changes in before/after terms, with a concrete example where possible
 - why the change is needed and what it fixes or adds
@@ -92,15 +93,22 @@ not by appending new comments each time something is fixed or added.
 lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
-When a release ships:
+As of #899, updating it is automatic and requires no manual collection step:
 
-1. Collect the accumulated `## Changelog` sections from all merged PRs since the
-   last release.
-2. Create a new version heading in `CHANGELOG.md` using the format
-   `## [X.Y.Z] - YYYY-MM-DD` with the release date.
-3. Organize the accumulated changes under standard subheadings: `Added`, `Changed`,
-   `Fixed`, `Deprecated`, `Removed`, `Security`.
-4. Include this changelog update as part of the release PR or tag commit.
+1. `.github/workflows/release-drafter.yml` drafts/updates a GitHub Release on
+   every push to `master`/`v0.2.0`, listing each merged PR as `#NUMBER | TITLE`
+   grouped by label (config: `.github/release-drafter.yml`).
+2. When that release is published (manually, or via a `workflow_dispatch` run
+   of the same workflow), `.github/workflows/update-changelog.yaml` fires and
+   writes the release's name and notes into `CHANGELOG.md`, committing the
+   result automatically.
+
+Applying the `skip-changelog` label to a PR excludes it from the drafted
+release notes (e.g. a pure internal refactor with no user-visible effect).
+
+`scripts/collect-changelog-entries.sh` (added in #890) remains as a manual
+fallback -- useful for reconstructing history or if the automated pipeline is
+ever disabled -- but is no longer the primary path.
 
 Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
 reflects user-visible behavior changes across all merged work for that release.
@@ -127,7 +135,7 @@ GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordin
 
 Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). Rust security correctness continues to be enforced separately by the `dns_rust_quality`, `ui_rust_quality`, `dns_test`, and `ui_test` jobs, which are independent of CodeQL extraction quality.
 
-- Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
+- Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
 - Keep workflow changes reviewable:
   - document changed checks,
   - explain any intentional risk,
@@ -193,6 +201,22 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
   actionlint .github/workflows/*.yml
 ```
 
+Also run `scripts/check-action-node-versions.sh` (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
+
+```bash
+bash scripts/check-action-node-versions.sh
+```
+
+#### Optional: a local pre-push hook for this same check
+
+`.githooks/pre-push` runs `scripts/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck`/`shellcheck-hosted` jobs are the actual, non-bypassable enforcement (they run the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
+
+Enable it once per checkout:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 For Rust services, run the relevant Cargo checks for the service you changed inside
 the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 
@@ -217,12 +241,15 @@ instead.
 
 Rust code coverage has a per-crate minimum threshold, not one shared number:
 `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
-of this writing), and `services/dns/nats-subscriber` currently has a 0%
-threshold because its existing tests only cover its data model, not its
-subscribe/forward logic (tracked in #504). Raise each crate's threshold
-independently as that crate gains real coverage — do not average or share a
-single "minimum" number across both, since their coverage levels differ by
-an order of magnitude for unrelated reasons.
+of this writing), and `services/dns/nats-subscriber`'s threshold is still set
+at 0% in the workflow. Issue #504 (closed via PR #515) already added real
+unit tests for `dns_record_to_zone_update()`'s subscribe/forward logic
+(extracted as a pure, testable function), so the crate's tests are no longer
+data-model-only, but the `rust_coverage` job's threshold was deliberately
+left at 0% pending a real tarpaulin measurement and hasn't been raised since.
+Raise each crate's threshold independently as that crate gains real coverage
+— do not average or share a single "minimum" number across both, since their
+coverage levels differ by an order of magnitude for unrelated reasons.
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
 say so in the pull request and explain why.

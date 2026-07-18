@@ -1,6 +1,11 @@
 {# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 
-   Access logs viewer: shows cache hits/misses from both proxy modes. #}
+   Logs viewer. Two mutually exclusive modes, chosen by routes/logs.rs based
+   on Config::syslog_enabled (#633 PR4): the nginx access-log tail (default,
+   shows cache hits/misses from both proxy modes -- unchanged from before
+   this PR), or -- once an install opts into `docker compose --profile
+   logging` -- a tail of the central syslog-ng store covering every wired
+   service, not just the proxy. #}
 {% extends "base.html" %}
 {% block title %} – Logs{% endblock %}
 
@@ -9,14 +14,61 @@
 
   <div class="flex items-center justify-between">
     <div>
-      <h1 class="text-xl font-bold text-white">Access Logs</h1>
-      <p class="text-sm text-slate-400 mt-1">Letzte 200 Einträge aus beiden Proxy-Modi</p>
+      <h1 class="text-xl font-bold text-white">{% if syslog_mode %}Syslog{% else %}Access Logs{% endif %}</h1>
+      <p class="text-sm text-slate-400 mt-1">
+        {% if syslog_mode %}Letzte 200 Einträge aus dem zentralen Syslog-Speicher{% else %}Letzte 200 Einträge aus beiden Proxy-Modi{% endif %}
+      </p>
     </div>
     <button onclick="location.reload()"
             class="text-sm text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
       Aktualisieren
     </button>
   </div>
+
+  {% if syslog_mode %}
+  <!-- Host filter bar: server-side, since parse_syslog_tail's host arg
+       restricts which files are even opened, not a client-side row hider
+       like the nginx branch's filter bar below. -->
+  <div class="flex gap-3 flex-wrap">
+    <select id="syslog-host-filter"
+            onchange="location.href = this.value ? ('/logs?host=' + encodeURIComponent(this.value)) : '/logs'"
+            class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+      <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
+      {% for h in syslog_hosts %}
+      <option value="{{ h }}" {% if selected_host and h == selected_host %}selected{% endif %}>{{ h }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="card p-0 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs" id="syslog-table">
+        <thead class="bg-slate-700/50">
+          <tr class="text-slate-400 text-left">
+            <th class="px-4 py-3 font-medium w-48">Zeit</th>
+            <th class="px-4 py-3 font-medium w-40">Host</th>
+            <th class="px-4 py-3 font-medium w-32">Programm</th>
+            <th class="px-4 py-3 font-medium">Nachricht</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700/50">
+          {% if syslog_logs %}
+          {% for entry in syslog_logs %}
+          <tr class="hover:bg-slate-700/20 transition-colors">
+            <td class="px-4 py-2 text-slate-500 font-mono">{{ entry.timestamp }}</td>
+            <td class="px-4 py-2 text-blue-400 font-mono">{{ entry.host }}</td>
+            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.program }}</td>
+            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.message }}</td>
+          </tr>
+          {% endfor %}
+          {% else %}
+          <tr><td colspan="4" class="px-4 py-8 text-center text-slate-500">Noch keine Log-Einträge</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
 
   <!-- Filter bar -->
   <div class="flex gap-3 flex-wrap">
@@ -78,11 +130,13 @@
       </table>
     </div>
   </div>
+  {% endif %}
 
 </div>
 {% endblock %}
 
 {% block scripts %}
+{% if not syslog_mode %}
 <script>
 let currentFilter = 'all';
 
@@ -105,4 +159,5 @@ function filterLogs(filter) {
 
 document.getElementById('btn-all').classList.add('bg-slate-700');
 </script>
+{% endif %}
 {% endblock %}

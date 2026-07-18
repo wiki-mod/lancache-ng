@@ -14,19 +14,32 @@ fail() {
   exit 1
 }
 
+# #822: GHCR_RETRY_USERNAME/GHCR_RETRY_PASSWORD are optional -- every call
+# site wired up after the "Pattern D" fix passes them (the same
+# github.actor/GITHUB_TOKEN the caller's own "Log in to GHCR" step already
+# used), so a transient GHCR 401 here retries with a fresh login instead of
+# failing a promotion/release job outright. A caller that leaves them unset
+# (this script is also documented as safe to run ad hoc directly on a
+# release/promotion runner) still gets ghcr_retry's backoff+retry, just
+# without the relogin step -- see ghcr_retry's own comment in
+# scripts/lib/ghcr-retry.sh.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$script_dir/lib/ghcr-retry.sh"
+
 # docker buildx imagetools prints single-platform images differently from
 # multi-platform indexes. Current lancache-ng prebuilt images are amd64-only,
 # so first read the single-platform image fields. If those are not populated,
 # fall back to the plain multi-platform "Platform:" lines. This deliberately
 # avoids external JSON parsers because release/promotion jobs run directly on
 # self-hosted runners.
-single_platform="$(docker buildx imagetools inspect "$image" --format '{{if .Image}}{{.Image.OS}}/{{.Image.Architecture}}{{end}}' 2>&1)" \
+single_platform="$(ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker buildx imagetools inspect "$image" --format '{{if .Image}}{{.Image.OS}}/{{.Image.Architecture}}{{end}}' 2>&1)" \
   || fail "Failed to inspect image platform for $image: $single_platform"
 
 if [[ -n "$single_platform" && "$single_platform" != "<no value>/<no value>" && "$single_platform" != "unknown/unknown" ]]; then
   discovered_platforms="$single_platform"
 else
-  inspect_text="$(docker buildx imagetools inspect "$image" 2>&1)" \
+  inspect_text="$(ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker buildx imagetools inspect "$image" 2>&1)" \
     || fail "Failed to inspect image manifest for $image: $inspect_text"
   discovered_platforms="$(printf '%s\n' "$inspect_text" | awk '$1 == "Platform:" && $2 != "unknown/unknown" { print $2 }' | sort -u)"
 fi

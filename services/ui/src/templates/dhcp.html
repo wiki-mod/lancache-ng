@@ -54,13 +54,14 @@
       <div class="text-sm text-amber-300 space-y-2">
         <p>dnsmasq proxy mode is active. This page shows the live proxy values and lets you edit them directly as simple fields.</p>
         <ul class="list-disc pl-5 space-y-1 text-amber-200">
-          <li>Proxy-DHCP / PXE helper only</li>
-          <li>Expected proxy options: <code>DHCP_SUBNET_START</code>, <code>DHCP_DNS_PRIMARY</code>, <code>DHCP_DNS_SECONDARY</code>, <code>UPSTREAM_DHCP_IP</code></li>
-          <li>DNS values are plain IP fields; no JSON, no client-class syntax, no advanced parser tricks</li>
+          <li>Proxy-DHCP / PXE helper only -- the upstream/router DHCP server keeps issuing every ordinary client's lease and options</li>
+          <li>Every option below (router, NTP, domain, PXE/TFTP boot info, custom options) is delivered only through the supplemental ProxyDHCP/PXE exchange, to PXE/network-boot-aware clients. Ordinary clients never see them; their DNS, gateway, NTP, and domain settings come entirely from the upstream server.</li>
+          <li>No lease-time field: dnsmasq never issues a lease of its own in this mode, so a lease-time value would have no effect. Use Kea mode if you need LanCache NG to control lease time.</li>
+          <li>All fields below are plain text (IPs, a filename, a domain name); no JSON, no client-class syntax, no advanced parser tricks</li>
         </ul>
         <div class="grid gap-2 md:grid-cols-2 rounded border border-amber-500/30 bg-slate-900/50 p-3 text-xs">
           <div><span class="text-slate-400">Subnet start:</span> <span class="text-white">{{ dhcp_proxy_subnet_start }}</span></div>
-          <div><span class="text-slate-400">Upstream DHCP:</span> <span class="text-white">{{ dhcp_upstream_dhcp_ip }}</span></div>
+          <div><span class="text-slate-400">Upstream DHCP (info only):</span> <span class="text-white">{{ dhcp_upstream_dhcp_ip }}</span></div>
           <div><span class="text-slate-400">DNS 1:</span> <span class="text-white">{{ dhcp_dns_primary }}</span></div>
           <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
         </div>
@@ -73,9 +74,10 @@
                 class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server</label>
+              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server (documentation only)</label>
               <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
                 class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases.</p>
             </div>
             <div>
               <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
@@ -86,6 +88,45 @@
               <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
               <input type="text" name="dhcp_dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="10.0.0.11"
                 class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Listen interface (optional)</label>
+              <input type="text" name="dhcp_proxy_interface" value="{{ dhcp_proxy_interface }}" placeholder="eth0"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">Bind dnsmasq to one host interface instead of all of them. Leave empty on a single-NIC host.</p>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Router/gateway option (optional, PXE-scoped)</label>
+              <input type="text" name="dhcp_proxy_router" value="{{ dhcp_proxy_router }}" placeholder="10.0.0.1"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">NTP servers (optional, PXE-scoped)</label>
+              <input type="text" name="dhcp_ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="10.0.0.20, 10.0.0.21"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">Comma-separated IPv4 list.</p>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Domain option (optional, PXE-scoped)</label>
+              <input type="text" name="dhcp_proxy_domain" value="{{ dhcp_proxy_domain }}" placeholder="lan.local"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">PXE boot filename (optional)</label>
+              <input type="text" name="dhcp_proxy_boot_filename" value="{{ dhcp_proxy_boot_filename }}" placeholder="pxelinux.0"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">PXE boot server address (optional)</label>
+              <input type="text" name="dhcp_proxy_boot_server" value="{{ dhcp_proxy_boot_server }}" placeholder="10.0.0.5"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">Requires a boot filename above; defaults to this host's own address if left empty while a filename is set.</p>
+            </div>
+            <div class="col-span-2">
+              <label class="block text-xs text-slate-400 mb-1">Additional safe custom options (optional, PXE-scoped)</label>
+              <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono">{{ dhcp_proxy_custom_options_form }}</textarea>
+              <p class="text-xs text-slate-500 mt-1">One <code>CODE:VALUE</code> pair per line, e.g. <code>60:PXEClient</code>. Codes already used by the dedicated fields above (3, 6, 15, 42) are rejected here to avoid two conflicting ways to set the same option.</p>
             </div>
           </div>
           <button type="submit"
@@ -116,6 +157,11 @@
         <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
         <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
         <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
+        {# Lists the extra nmap broadcast-dhcp-discover fields (Router, DNS, lease time, ...) for a
+           found conflicting server, alongside the address already shown above in check-conflict-status.
+           Hidden by default/on every re-check; only populated+shown by checkDhcpConflict() itself when
+           data.conflict.status === 'found' and details are present, see script below. #}
+        <ul id="check-conflict-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
         <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
       </div>
       <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
@@ -290,6 +336,60 @@
           </div>
         </form>
       </div>
+
+      <div class="p-4 bg-slate-900/40 border-t border-slate-700 space-y-3">
+        <div>
+          <h3 class="text-sm font-medium text-slate-200">Zusätzliche DHCP-Optionen</h3>
+          <p class="text-xs text-slate-500 mt-1">
+            Freie Kea-Optionen werden als einfache DHCPv4-Code/Wert-Paare verwaltet. Router, DNS, Domain, Domain-Search und NTP bleiben über die festen Felder oben geschützt.
+          </p>
+        </div>
+
+        {% if subnet.custom_options | length > 0 %}
+        <div class="space-y-2">
+          {% for option in subnet.custom_options %}
+          <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-700 bg-slate-800 px-3 py-2">
+            <div class="text-sm">
+              <span class="text-slate-400">Code</span>
+              <span class="text-white font-medium">{{ option.code }}</span>
+              <span class="text-slate-500 mx-2">→</span>
+              <span class="text-slate-200">{{ option.data }}</span>
+            </div>
+            <form method="POST" action="/dhcp/subnet/option/remove" class="inline"
+              onsubmit="return confirm('DHCP-Option {{ option.code }} aus {{ subnet.subnet }} entfernen?')">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
+              <input type="hidden" name="code" value="{{ option.code }}">
+              <input type="hidden" name="data" value="{{ option.data }}">
+              <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
+                Entfernen
+              </button>
+            </form>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-xs text-slate-500">Keine zusätzlichen DHCP-Optionen für dieses Subnet konfiguriert.</p>
+        {% endif %}
+
+        <form method="POST" action="/dhcp/subnet/option/add" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Options-Code</label>
+            <input type="number" name="code" min="1" max="254" placeholder="66" required
+              class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Wert</label>
+            <input type="text" name="data" placeholder="192.168.1.10 oder bootfile.efi" required
+              class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+          </div>
+          <button type="submit" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
+            Option hinzufügen
+          </button>
+        </form>
+      </div>
     </div>
     {% endfor %}
   </div>
@@ -370,6 +470,7 @@
             <th class="text-left py-2 text-slate-300">Hostname</th>
             <th class="text-left py-2 text-slate-300">Subnet</th>
             <th class="text-left py-2 text-slate-300">Ablauf</th>
+            <th class="text-left py-2 text-slate-300">Aktion</th>
           </tr>
         </thead>
         <tbody>
@@ -382,11 +483,68 @@
             <td class="py-2 text-slate-400">
               <span class="dhcp-expiry" data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
             </td>
+            <td class="py-2">
+              <form method="POST" action="/dhcp/lease/release" class="inline"
+                onsubmit="return confirm('Lease {{ lease.ip }} freigeben?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="ip" value="{{ lease.ip }}">
+                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                  Freigeben
+                </button>
+              </form>
+            </td>
           </tr>
           {% endfor %}
           {% if leases | length == 0 %}
           <tr>
-            <td colspan="5" class="py-4 text-slate-500 text-center">Keine aktiven Leases</td>
+            <td colspan="6" class="py-4 text-slate-500 text-center">Keine aktiven Leases</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Konfigurations-Snapshots (#614) -->
+  <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">Konfigurations-Snapshots</h2>
+      <span class="text-xs text-slate-400">Aufbewahrung: {{ kea_snapshot_retention }}</span>
+    </div>
+    <p class="text-sm text-slate-400 mb-4">
+      Nach jeder erfolgreich übernommenen DHCP-Änderung wird die validierte Konfiguration
+      hier als Snapshot gesichert. Bei Bedarf kann auf einen früheren Snapshot zurückgerollt
+      werden; die ausgewählte Konfiguration wird vor der Übernahme erneut geprüft.
+    </p>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="border-b border-slate-700">
+          <tr>
+            <th class="text-left py-2 text-slate-300">Erstellt</th>
+            <th class="text-left py-2 text-slate-300">Aktion</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for snapshot in kea_snapshots %}
+          <tr class="border-b border-slate-700 hover:bg-slate-700">
+            <td class="py-2 text-white">
+              <span class="dhcp-expiry" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
+            </td>
+            <td class="py-2">
+              <form method="POST" action="/dhcp/snapshot/rollback" class="inline"
+                onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
+                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                  Zurückrollen
+                </button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if kea_snapshots | length == 0 %}
+          <tr>
+            <td colspan="2" class="py-4 text-slate-500 text-center">Noch keine Snapshots vorhanden</td>
           </tr>
           {% endif %}
         </tbody>
@@ -412,12 +570,28 @@ function toggleEditSubnet(id) {
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
   const conflictEl = document.getElementById('check-conflict-status');
+  const conflictDetailsEl = document.getElementById('check-conflict-details');
   const clientEl = document.getElementById('check-client-status');
   statusEl.textContent = 'Prüfe...';
   conflictEl.textContent = 'Konfliktprobe läuft...';
+  // Reset the details list on every run (button re-click or the
+  // DOMContentLoaded auto-run further down), not just when a conflict is
+  // found below -- otherwise a later "no conflict" re-check would still
+  // show a stale server's fields from a previous run.
+  conflictDetailsEl.replaceChildren();
+  conflictDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
-    const res = await fetch('/api/dhcp/check');
+    // POST with an explicit CSRF header, not a plain GET: this endpoint has
+    // a real side effect (starts/stops the DHCP conflict-probe container on
+    // the server), and this app's CSRF protection only covers mutating
+    // methods -- see check_dhcp_conflict's own comment in dhcp.rs.
+    const res = await fetch('/api/dhcp/check', {
+      method: 'POST',
+      headers: {
+        'X-CSRF-Token': '{{ csrf_token }}'
+      }
+    });
     const data = await res.json();
     if (data.status === 'verified') {
       statusEl.className = 'text-sm text-green-400';
@@ -436,6 +610,19 @@ async function checkDhcpConflict() {
     if (data.conflict?.status === 'found') {
       conflictEl.className = 'text-sm text-yellow-400';
       conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
+      // Label/value pairs come straight from the rogue DHCP server's
+      // own DHCPOFFER response (untrusted network input relayed via the
+      // probe container), so each row is built with textContent, never
+      // innerHTML -- a malicious value must never be interpreted as markup.
+      const details = data.conflict.details ?? [];
+      for (const item of details) {
+        const li = document.createElement('li');
+        li.textContent = `${item.label}: ${item.value}`;
+        conflictDetailsEl.appendChild(li);
+      }
+      if (details.length > 0) {
+        conflictDetailsEl.classList.remove('hidden');
+      }
     } else if (data.conflict?.status === 'not_found') {
       conflictEl.className = 'text-sm text-green-400';
       conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';

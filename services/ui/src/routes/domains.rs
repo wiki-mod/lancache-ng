@@ -56,16 +56,30 @@ pub struct Record {
 
 pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let dns_domains = read_domain_file(&state.config.cdn_domains_file);
-    let ssl_domains = read_domain_file(&state.config.ssl_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
+    // #628: zone/record known-good snapshot rollback -- see
+    // routes/dns_snapshots.rs's module doc comment for why this is a thin
+    // HTTP call to nats-subscriber's own listener, not logic living here.
+    let zone_snapshot_groups =
+        crate::routes::dns_snapshots::fetch_zone_snapshot_groups(&state).await;
 
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
-    ctx.insert("ssl_domains", &ssl_domains);
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
+    ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
+    // Retention count shown on the zone-snapshot panel: the same
+    // KEEP_KNOWN_GOOD_CONFIGS variable and default this adapter shares with
+    // every other known-good-snapshot adapter (docs/known-good-config-
+    // snapshots.md's contract) -- reusing the field the Kea adapter already
+    // reads rather than adding a second config field with an identical
+    // value.
+    ctx.insert(
+        "zone_snapshot_retention",
+        &state.config.kea_keep_known_good_configs,
+    );
     ctx.insert("active_page", "domains");
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
@@ -92,10 +106,20 @@ pub async fn add_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         append_domain(&state.config.cdn_domains_file, &domain)
     };
-    if let Err(e) = wrote {
-        tracing::error!("Failed to write dns domain: {}", e);
-    } else {
-        flush_recursor_cache(&state).await;
+    // The UI must not report success if the CDN domain file itself was never
+    // updated -- unlike the best-effort recursor-flush/proxy-restart calls
+    // below, this write is the actual mutation the request represents (same
+    // reasoning as toggle_aaaa_filter's marker-write check further down in
+    // this file).
+    dns_write_result_to_response(wrote, "write")?;
+    flush_recursor_cache(&state, &domain.domain).await;
+    // The SSL proxy derives its wildcard-cert root domains and nginx
+    // host-allowlist maps from this same file at container startup (see
+    // services/proxy/entrypoint.sh) — there is no separate SSL domain
+    // list to edit anymore, so adding a DNS entry that needs TLS
+    // interception also needs the proxy restarted to pick it up.
+    if state.config.ssl_enabled {
+        restart_ssl(&state).await;
     }
     Ok(Redirect::to("/domains"))
 }
@@ -115,55 +139,20 @@ pub async fn remove_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         remove_domain(&state.config.cdn_domains_file, &domain)
     };
-    if let Err(e) = removed {
-        tracing::error!("Failed to remove dns domain: {}", e);
-    } else {
-        flush_recursor_cache(&state).await;
-    }
-    Ok(Redirect::to("/domains"))
-}
-
-pub async fn add_ssl(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(form): Form<AddForm>,
-) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
-    let Some(domain) = parse_domain_entry(&form.domain) else {
-        tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain");
-        return Err(axum::http::StatusCode::BAD_REQUEST);
+    // Same reasoning as add_dns: the CDN domain file write is the request's
+    // actual mutation, so a failed write must not redirect as success.
+    dns_write_result_to_response(removed, "remove")?;
+    let flushed_domain = match &domain {
+        DomainDeleteTarget::Canonical(spec) => spec.domain.clone(),
+        DomainDeleteTarget::Raw(raw) => raw.clone(),
     };
-
-    let wrote = {
-        let _guard = state.file_lock.lock().expect("file lock poisoned");
-        append_domain(&state.config.ssl_domains_file, &domain)
-    };
-    if let Err(e) = wrote {
-        tracing::error!("Failed to write ssl domain: {}", e);
-    } else {
-        restart_ssl(&state).await;
-    }
-    Ok(Redirect::to("/domains"))
-}
-
-pub async fn remove_ssl(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(form): Form<AddForm>,
-) -> Result<Redirect, axum::http::StatusCode> {
-    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
-    let Some(domain) = normalize_domain_delete_entry(&form.domain) else {
-        tracing::warn!(domain = %form.domain, "Rejected invalid ssl domain delete");
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    };
-
-    let removed = {
-        let _guard = state.file_lock.lock().expect("file lock poisoned");
-        remove_domain(&state.config.ssl_domains_file, &domain)
-    };
-    if let Err(e) = removed {
-        tracing::error!("Failed to remove ssl domain: {}", e);
-    } else {
+    flush_recursor_cache(&state, &flushed_domain).await;
+    // The SSL proxy derives its wildcard-cert root domains and nginx
+    // host-allowlist maps from this same file at container startup (see
+    // services/proxy/entrypoint.sh) — removing a domain here means the
+    // proxy must no longer accept TLS-intercepted connections for it,
+    // so it needs the same restart as adding one to pick up the removal.
+    if state.config.ssl_enabled {
         restart_ssl(&state).await;
     }
     Ok(Redirect::to("/domains"))
@@ -207,7 +196,7 @@ pub async fn add_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state).await;
+    flush_recursor_cache(&state, &name).await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -254,7 +243,7 @@ pub async fn remove_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state).await;
+    flush_recursor_cache(&state, &name).await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -289,10 +278,25 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
-async fn flush_recursor_cache(state: &AppState) {
+async fn flush_recursor_cache(state: &AppState, domain: &str) {
+    // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
+    // parameter and only flushes an exact name match, not a subtree --
+    // confirmed live while building issue #400's integration test:
+    // `?type=packet` (the previous call) always returned 422 Unprocessable
+    // Entity, and even `?domain=.` or `?domain=lan.` leave a just-deleted
+    // leaf record (e.g. `host.lan.`) resolving from cache until its TTL
+    // naturally expires. The caller must pass the exact name that changed.
+    // PowerDNS also requires canonical (dot-terminated) form, or the flush
+    // itself is rejected outright ("DNS Name '' is not canonical") --
+    // ensure that here so callers don't all need to remember it themselves.
+    let canonical_domain = if domain.ends_with('.') {
+        domain.to_string()
+    } else {
+        format!("{domain}.")
+    };
     let url = format!(
-        "{}/api/v1/servers/localhost/cache/flush?type=packet",
-        state.config.pdns_rec_url
+        "{}/api/v1/servers/localhost/cache/flush?domain={}",
+        state.config.pdns_rec_url, canonical_domain
     );
     state
         .http_client
@@ -303,9 +307,13 @@ async fn flush_recursor_cache(state: &AppState) {
         .ok();
 
     // Also publish flush event so all recursor instances clear their cache
+    // for this same domain, not just the one this UI instance talks to.
     state
         .nats
-        .publish("lancache.dns.flush", "{}".into())
+        .publish(
+            "lancache.dns.flush",
+            json!({"domain": canonical_domain}).to_string().into(),
+        )
         .await
         .ok();
 }
@@ -322,6 +330,23 @@ async fn restart_ssl(state: &AppState) {
     {
         tracing::error!("Restart proxy service failed: {}", e);
     }
+}
+
+// Maps the CDN domain file write's own Result to the operator-facing
+// response. `action` names the operation in the log line ("write"/"remove")
+// so add_dns/remove_dns keep their own distinct log message while sharing
+// this decision: on failure, log and report 500 instead of the success
+// redirect the caller would otherwise send -- the write is the actual
+// mutation the request represents, so a failure here can never look like a
+// success to the operator, same as toggle_aaaa_filter's marker-write check.
+fn dns_write_result_to_response(
+    result: anyhow::Result<()>,
+    action: &str,
+) -> Result<(), axum::http::StatusCode> {
+    result.map_err(|e| {
+        tracing::error!("Failed to {action} dns domain: {e}");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 fn aaaa_filter_marker_paths(state: &AppState) -> [PathBuf; 2] {
@@ -603,34 +628,60 @@ fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
 fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let mut removed = false;
-    let sep = if content.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
 
-    let new = content
-        .lines()
-        .filter(|line| {
+    // Previously this picked ONE separator for the whole file (CRLF if the
+    // file contained CRLF *anywhere*, else LF) and rejoined every retained
+    // line with it. A file with mixed endings (e.g. a CRLF header hand-edited
+    // on Windows followed by LF domain entries appended from Linux/the
+    // container) would then have every surviving LF line rewritten with a
+    // spurious trailing \r. $domain is read verbatim by the proxy/DNS
+    // entrypoints, so that stray \r leaked into generated nginx map/cert
+    // names and stream targets (#656). Preserving each line's own original
+    // terminator instead avoids rewriting any line that wasn't removed.
+    let new: String = split_lines_preserve_terminators(&content)
+        .into_iter()
+        .filter(|(line, _terminator)| {
             let keep = !line_matches_domain_delete(line, domain);
             if !keep {
                 removed = true;
             }
             keep
         })
-        .collect::<Vec<_>>()
-        .join(sep);
+        .map(|(line, terminator)| format!("{line}{terminator}"))
+        .collect();
 
     if removed {
-        let new = if content.ends_with('\n') && !new.is_empty() {
-            format!("{new}{sep}")
-        } else {
-            new
-        };
         write_domain_file_atomic(path, &new)?;
     }
 
     Ok(())
+}
+
+// Splits file content into (line, terminator) pairs without normalizing line
+// endings, so a caller that drops some lines and rejoins the rest reproduces
+// each surviving line's own original terminator ("\r\n", "\n", or "" for a
+// final line with no trailing newline at all) instead of forcing one
+// separator across the whole file. See remove_domain's comment (#656) for why
+// that distinction matters here.
+fn split_lines_preserve_terminators(content: &str) -> Vec<(&str, &str)> {
+    let mut lines = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() {
+        if let Some(idx) = rest.find('\n') {
+            let (line_with_lf, remainder) = rest.split_at(idx + 1);
+            let without_lf = &line_with_lf[..line_with_lf.len() - 1];
+            if let Some(stripped) = without_lf.strip_suffix('\r') {
+                lines.push((stripped, "\r\n"));
+            } else {
+                lines.push((without_lf, "\n"));
+            }
+            rest = remainder;
+        } else {
+            lines.push((rest, ""));
+            rest = "";
+        }
+    }
+    lines
 }
 
 fn line_matches_domain_delete(line: &str, domain: &DomainDeleteTarget) -> bool {
@@ -843,6 +894,80 @@ mod tests {
         assert!(!is_valid_domain(&format!("{}.example.com", "a".repeat(64))));
     }
 
+    // Cross-language parity guard (issue #822 pattern audit): this
+    // validator's bash counterpart (_is_valid_domain in
+    // scripts/lib/domain-validation.sh, embedded byte-identically into
+    // services/proxy/entrypoint.sh and services/dns/entrypoint.sh) is a
+    // fully independent implementation, with nothing enforcing the two
+    // agree. Both this test and
+    // tests/bats/domain_validation_parity.bats's "bash _is_valid_domain
+    // agrees with the shared parity fixture on every case" iterate the same
+    // shared fixture file, so a change to either validator that silently
+    // starts disagreeing with the other fails one of the two test suites
+    // instead of shipping unnoticed.
+    //
+    // Dynamically generated length-boundary cases (a 64-char label, a
+    // >253-char total domain) are intentionally not in the shared fixture --
+    // they can't be expressed as static fixture lines -- and stay covered
+    // separately by accepts_domain_entries_with_optional_wildcard_marker
+    // above and the bash side's tests/bats/proxy_cert_generation.bats.
+    #[test]
+    fn is_valid_domain_matches_shared_parity_fixture() {
+        // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's
+        // own established pattern, see main.rs's TEMPLATE_DIR test setup),
+        // not include_str!: the fixture lives outside this crate's source
+        // tree (tests/fixtures/ at the repo root, shared with the bash
+        // side), so a compile-time embed would bake an out-of-crate path
+        // into the build; a runtime read gives a clear "fixture missing"
+        // failure instead.
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/domain-validation-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+
+        for line in contents.lines() {
+            // Same skip rule as the bash reader's
+            // `[[ -z "$line" || "$line" == \#* ]]`: blank lines and comment
+            // lines are not cases. This must match the bash side's skip
+            // logic exactly, or the two readers would silently disagree on
+            // which lines even count as fixture cases.
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((expect, domain)) = line.split_once(' ') else {
+                panic!("malformed shared parity fixture line (expected \"valid|invalid <domain>\"): {line:?}");
+            };
+            total += 1;
+
+            let actual = if is_valid_domain(domain) {
+                "valid"
+            } else {
+                "invalid"
+            };
+            if actual != expect {
+                mismatches.push(format!("'{domain}' expected={expect} actual={actual}"));
+            }
+        }
+
+        // Fail closed if the fixture itself is empty/unreadable-but-present
+        // (e.g. header-only) -- a vacuous loop would make this test pass
+        // without checking anything.
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} shared parity fixture case(s) disagreed with the Rust validator:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
     fn domain_spec(domain: &str, wildcard_only: bool) -> DomainSpec {
         DomainSpec {
             wildcard_only,
@@ -1009,6 +1134,69 @@ mod tests {
     }
 
     #[test]
+    fn split_lines_preserve_terminators_keeps_each_lines_own_ending() {
+        // Directly exercises the pure splitting helper with every terminator
+        // shape remove_domain must round-trip: CRLF, LF, and a final line
+        // with no trailing newline at all.
+        let content = "a\r\nb\nc";
+        assert_eq!(
+            split_lines_preserve_terminators(content),
+            vec![("a", "\r\n"), ("b", "\n"), ("c", "")]
+        );
+
+        // Trailing newline on the last line must also be preserved, not lost.
+        let content_trailing_nl = "a\nb\n";
+        assert_eq!(
+            split_lines_preserve_terminators(content_trailing_nl),
+            vec![("a", "\n"), ("b", "\n")]
+        );
+
+        assert_eq!(
+            split_lines_preserve_terminators(""),
+            Vec::<(&str, &str)>::new()
+        );
+    }
+
+    #[test]
+    fn remove_domain_preserves_each_surviving_lines_own_terminator_on_mixed_endings() {
+        // Reproduces #656: a CRLF header/comment followed by LF domain
+        // entries plus one CRLF domain entry (the realistic "hand-edited on
+        // Windows, then appended to from Linux/the container" scenario).
+        // Removing one LF entry must not rewrite the OTHER surviving LF/CRLF
+        // lines to match a single globally-chosen separator.
+        let base = std::env::temp_dir().join(format!(
+            "lancache-domains-mixed-endings-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        let mixed = "# comment\r\nexample.com\nsteamcontent.com\r\nkeep-lf.example.com\n";
+        fs::write(&file, mixed.as_bytes()).unwrap();
+
+        remove_domain(
+            file.to_str().unwrap(),
+            &DomainDeleteTarget::Canonical(domain_spec("example.com", false)),
+        )
+        .unwrap();
+
+        let after_remove = fs::read_to_string(&file).unwrap();
+        // Exact byte-for-byte expectation: only the matched line is gone,
+        // every surviving line keeps its OWN original terminator (CRLF
+        // header, CRLF domain entry, LF domain entry) -- none of them get
+        // normalized to whatever separator the old single-`sep` logic would
+        // have picked for the whole file.
+        assert_eq!(
+            after_remove,
+            "# comment\r\nsteamcontent.com\r\nkeep-lf.example.com\n"
+        );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn bind_mount_replace_errors_use_in_place_fallback() {
         assert!(is_bind_mount_replace_error(
             &std::io::Error::from_raw_os_error(LINUX_ERRNO_EBUSY)
@@ -1037,6 +1225,96 @@ mod tests {
             fs::read_to_string(&file).unwrap(),
             "new.example.com\n".to_string()
         );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    // add_dns/remove_dns must never log a failed CDN-file write and still
+    // return the success redirect. dns_write_result_to_response is the
+    // exact mapping both handlers apply via `?`, so pinning its Ok/Err
+    // behavior here covers that handler-level error mapping without needing
+    // a fully wired AppState (Docker/NATS/SQLite), which no other route test
+    // in this file constructs either.
+    #[test]
+    fn dns_write_result_to_response_reports_ok_on_success() {
+        assert_eq!(dns_write_result_to_response(Ok(()), "write"), Ok(()));
+    }
+
+    #[test]
+    fn dns_write_result_to_response_reports_500_on_failure() {
+        let err = anyhow::anyhow!("disk full");
+        assert_eq!(
+            dns_write_result_to_response(Err(err), "write"),
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    #[test]
+    fn add_dns_write_failure_maps_to_error_not_success() {
+        // Reproduces the real failure add_dns feeds through
+        // dns_write_result_to_response: append_domain errors when its
+        // target's parent directory does not exist (the temp-file it writes
+        // before renaming has nowhere to land).
+        let base = temp_dir("add-dns-missing-parent");
+        let file = base.join("missing-subdir").join("cdn-domains.txt");
+        let domain = domain_spec("steamcontent.com", false);
+
+        let wrote = append_domain(file.to_str().unwrap(), &domain);
+        assert!(wrote.is_err());
+        assert_eq!(
+            dns_write_result_to_response(wrote, "write"),
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    // Success-path counterpart to add_dns_write_failure_maps_to_error_not_success:
+    // guards that dns_write_result_to_response's error mapping never turns a
+    // genuinely successful write into a false failure.
+    #[test]
+    fn add_dns_write_success_maps_to_ok() {
+        let base = temp_dir("add-dns-success");
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        let domain = domain_spec("steamcontent.com", false);
+
+        let wrote = append_domain(file.to_str().unwrap(), &domain);
+        assert!(wrote.is_ok());
+        assert_eq!(dns_write_result_to_response(wrote, "write"), Ok(()));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn remove_dns_write_failure_maps_to_error_not_success() {
+        // remove_domain's first step reads the CDN file; a missing file (the
+        // same class of on-disk problem the write-side test above covers)
+        // fails immediately.
+        let base = temp_dir("remove-dns-missing-file");
+        let file = base.join("cdn-domains.txt");
+        let target = DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", false));
+
+        let removed = remove_domain(file.to_str().unwrap(), &target);
+        assert!(removed.is_err());
+        assert_eq!(
+            dns_write_result_to_response(removed, "remove"),
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    // Success-path counterpart to remove_dns_write_failure_maps_to_error_not_success:
+    // guards that dns_write_result_to_response's error mapping never turns a
+    // genuinely successful removal into a false failure.
+    #[test]
+    fn remove_dns_write_success_maps_to_ok() {
+        let base = temp_dir("remove-dns-success");
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cdn-domains.txt");
+        fs::write(&file, "steamcontent.com\n").unwrap();
+        let target = DomainDeleteTarget::Canonical(domain_spec("steamcontent.com", false));
+
+        let removed = remove_domain(file.to_str().unwrap(), &target);
+        assert!(removed.is_ok());
+        assert_eq!(dns_write_result_to_response(removed, "remove"), Ok(()));
 
         fs::remove_dir_all(&base).unwrap();
     }

@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="gfx/logo-readme.png" alt="LanCache-NG logo" width="220">
+</p>
+
 # lancache-ng
 
-
+[![Rust coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwiki-mod%2Flancache-ng%2Fbadges%2Fcoverage%2Frust-master.json)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml?query=branch%3Amaster)
 
 LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.
 
@@ -15,13 +19,13 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional Watchtower helper updates and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
 ### Test coverage
 
-The build badge above reflects the status of the primary CI pipeline, which includes Rust test coverage validation. On every push, the `rust_coverage` job runs `cargo tarpaulin` against the `services/dns/nats-subscriber` and `services/ui` crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber` currently has a 0% threshold because its existing tests only cover its data model, not its subscribe/forward logic (tracked in #504). Each crate's threshold is raised independently as that crate gains real coverage.
+The Rust coverage badge above is a Shields endpoint backed by `coverage/rust-master.json` on the repository's `badges` branch -- this README is only ever viewed on `master` (GitHub always renders the default branch's README on the repo homepage), so the badge here specifically tracks `master`'s own coverage rather than whatever integration branch happens to be active. On trusted branch pushes, the `rust_coverage`/`publish_coverage_badge` jobs write the latest measured `services/ui` and `services/dns/nats-subscriber` percentages to a branch-scoped file (`coverage/rust-<branch>.json`, so master and the active `vX.Y.Z` integration branch don't overwrite each other's numbers); pull requests measure and gate coverage but do not publish badge JSON. The same coverage job runs `cargo tarpaulin` against both Rust crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber`'s threshold is still set at 0% in the workflow. Issue #504 (closed via PR #515) added real unit tests for `dns_record_to_zone_update()`'s subscribe/forward logic, extracted as a pure, testable function -- so the crate's tests are no longer data-model-only -- but the `rust_coverage` job's threshold was deliberately left at 0% pending a real tarpaulin measurement, and nothing has raised it since. Each crate's threshold is raised independently as that crate gains real coverage.
 
 ## What this project does
 
@@ -34,7 +38,7 @@ LanCache NG combines several services into one Docker based stack:
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
-  - optional Watchtower helper updates
+  - optional scheduled automatic updates (ordered, health-gated, Admin UI last)
   - optional watchdog and convergence checks
   - optional secondary DNS nodes synced through NATS
 
@@ -66,7 +70,7 @@ It can:
 - ask for the cache server IP
 - optionally enable SSL caching with a second IP
 - ask for cache directory and cache size
-- optionally enable Watchtower helper updates
+- optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
 - create config-only or full backups
 - restore setup-script backups
@@ -200,8 +204,7 @@ software and update CDN downloads that you intentionally route through the cache
 The nginx cache key intentionally uses the host and path, not the full request URI with the
 query string. Many CDN download URLs include per-request signatures or expiry tokens in the
 query string. Including those values in the cache key would make each signed URL look like a
-different object and would greatly reduce cache hits. The full request URI is still forwarded
-to the upstream CDN for validation; only the local cache key ignores the query string.
+different object and would greatly reduce cache hits. On a cache miss (or once the cached entry has expired), the full request URI including the query string is forwarded to the upstream CDN for validation. Cache hits within the configured validity window are served directly from the local cache without contacting upstream.
 
 For the same reason, LanCache NG intentionally ignores selected upstream cache headers such as
 `Cache-Control`, `Expires`, `Vary` and `Set-Cookie` for cached download responses. Do not use
@@ -293,11 +296,33 @@ The update command can:
 - pull the current repository state
 - update the compose file
 - pull newer images
-- restart the stack
+- restart every service except the Admin UI first, verify the whole non-UI
+  set is actually healthy, then restart the Admin UI last
+- automatically roll back to the pre-update backup if that health check fails
 
 Setup and update always consume prebuilt runtime images. They do not build the
 production stack locally, so host-side build acceleration is never a runtime
 or install dependency.
+
+### Scheduled automatic updates
+
+Instead of running `setup.sh update` manually, a host `systemd` timer
+(`lancache-auto-update.timer`) can run the same ordered, health-gated update
+on a schedule. Enable it at install time (the "Scheduled automatic updates"
+prompt, default: disabled), later by setting `AUTO_UPDATE_ENABLED=1` in `.env`
+and re-running `setup.sh`, or from the Admin UI's Setup page (release channel
+and scheduled-update toggle). A change made from the Admin UI is picked up by
+the host's convergence timer (currently every 5 minutes), not instantly --
+that control's own copy says so. It only actually pulls and restarts when the
+selected release channel has moved to a new image set -- an unchanged channel
+is a silent no-op, not a full restart on every tick. Manually trigger the same
+check with:
+
+```bash
+sudo /opt/lancache-ng/setup.sh auto-update
+```
+
+**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/backup-restore.md` for rollback options.
 
 Create a manual backup with:
 
@@ -318,10 +343,14 @@ See `docs/backup-restore.md` for backup scope, restore testing, secret handling,
 
 `LANCACHE_IMAGE_CHANNEL` selects the first-party image channel. `setup.sh`
 resolves mutable channels to the immutable `LANCACHE_IMAGE_TAG` used by Docker
-Compose.
+Compose. The interactive installer asks which channel to use, defaulting to
+`stable`.
 
-- `latest` is the default stable release channel.
-- `edge` is the tested pre-stable channel promoted from `master`.
+- `stable` (default) is the channel promoted after the full release
+  validation gate. `LANCACHE_IMAGE_CHANNEL=latest` is the same channel under
+  its original name — both resolve to the identical published image.
+- `edge` is the most recently built, less tested pre-stable channel promoted
+  from `master`. Opt in only if you want the newest changes.
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
@@ -358,6 +387,27 @@ You can also view live logs manually:
 cd /opt/lancache-ng
 docker compose logs -f
 ```
+
+### Reporting a bug
+
+If you need to open a GitHub issue for something that isn't working, run:
+
+```bash
+sudo /opt/lancache-ng/setup.sh create-logs-for-issue
+```
+
+This bundles everything a maintainer needs to triage the report into one
+compressed, timestamped archive and prints its path:
+
+- `docker compose logs`/`ps`/`config` output
+- a copy of `.env`/`.env.local` with every credential-shaped value (API keys,
+  TSIG keys, passwords, tokens) redacted
+- host facts (Docker/Compose versions, kernel, disk space)
+- known-good-snapshot directory listings (file names only, no content) --
+  see `docs/known-good-config-snapshots.md`
+
+Review the archive yourself before attaching it to an issue -- this command
+never uploads or attaches anything automatically.
 
 ## Point your clients to the cache
 
@@ -522,15 +572,16 @@ You can manage domains in the Admin UI.
 
 This is the easiest option and usually does not require a rebuild.
 
-Manual domain files:
+Manual domain file:
 
 ```text
 services/dns/cdn-domains.txt
-services/proxy/cdn-ssl-domains.txt
 ```
 
-Use `cdn-domains.txt` for DNS based cache routing.  
-Use `cdn-ssl-domains.txt` for SSL mode certificate coverage.
+One list drives everything: DNS based cache routing, and (as of v0.2.0)
+SSL mode certificate coverage too. The proxy derives each entry's
+registrable root domain automatically at startup and generates a wildcard
+cert for it — there is no separate SSL domain file to keep in sync by hand.
 
 After manual file changes in a repository-based setup, restart the affected
 services so they reload the mounted files:
@@ -555,6 +606,18 @@ This is useful if:
 - you want DNS closer to some clients
 
 Secondary DNS nodes sync with the primary through NATS.
+
+**Prerequisite**: the primary must be configured with a NATS address a remote
+secondary can actually reach before you register one. By default NATS is not
+published on the host at all, so registration fails closed with HTTP 503
+until the primary has `NATS_BIND_IP` (reusing the same trusted LAN/VPN
+interface `docker-compose.nats-secondary.yml` binds NATS to) or, for a
+non-default port/scheme/hostname, the more specific `NATS_ADVERTISE_URL`
+set in its `.env`/`.env.local`, and the `nats` service recreated with the
+`docker-compose.nats-secondary.yml` override included so it actually
+publishes that address. See
+[docs/architecture-ng.md's "Remote secondary NATS access"](docs/architecture-ng.md#remote-secondary-nats-access)
+section for the full setup and the exact failure modes it fail-closes.
 
 Setup example:
 
@@ -609,61 +672,64 @@ SSL_ENABLED=1
 
 LANCACHE_STATE_DIR=/opt/lancache-ng
 
-# Optional per-service overrides. Leave unset unless you intentionally split
-# state across multiple disks; compose derives normal state paths from
-# LANCACHE_STATE_DIR.
-# CACHE_DIR_STANDARD=/opt/lancache-ng/cache
-# CACHE_DIR_SSL=/opt/lancache-ng/cache
+# Optional cache directory override. Leave unset unless you intentionally place
+# the cache on a separate disk; compose derives it from LANCACHE_STATE_DIR.
+# CACHE_DIR=/opt/lancache-ng/cache
 
 CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512
-NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
 PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
 
 CACHE_MAX_GB=50
 
 # First-party service image selector.
-# latest is the latest stable release channel.
-# Use edge only when you explicitly want the tested pre-stable channel.
+# stable is the channel promoted after the full release validation gate
+# (latest is the same channel under its original name -- both resolve
+# identically). Use edge only when you explicitly want the most recently
+# built, less tested pre-stable channel.
 # setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
 # Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
-LANCACHE_IMAGE_CHANNEL=latest
+LANCACHE_IMAGE_CHANNEL=stable
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
-Set `NGINX_UPSTREAM_RESOLVER` to real upstream DNS servers only (for example public, ISP, or corporate resolvers). Do not set it to the LanCache DNS/proxy IP, or nginx will resolve CDN hostnames back to the cache and loop.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. It is **not** read from `deploy/prod/.env.local` — `deploy/prod/docker-compose.yml`'s `proxy` service only loads it via `env_file: ../../config/prod/proxy.env`, with no `${NGINX_UPSTREAM_RESOLVER}` interpolation in that service's `environment:` list, so an override placed in `.env.local` has no effect on this variable. Edit `config/prod/proxy.env` directly, then recreate the `proxy` container (`docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml up -d proxy`) to pick up the change. Because `config/prod/proxy.env` is a tracked file (unlike `.env.local`), a manual edit to it can conflict with the repository pull during the upgrade flow described below if a future release also touches that file — the pre-pull config backup in that flow covers this file too, so follow those steps (don't edit and pull outside of them) and reapply your resolver override afterward if it was reset. The default there — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
 - `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
-- `strict` NOT RECOMMENDED! Only proxies hosts matching `services/proxy/cdn-ssl-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until missing CDN root domains are added. That means, you need to add manually all domains by hand!
+- `strict` NOT RECOMMENDED! Only proxies hosts whose root domain is derived from `services/dns/cdn-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until the missing CDN hostname is added to `cdn-domains.txt` — there is no separate file to maintain, but you still need to add every CDN hostname you want to cache by hand.
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
-`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` means the
-latest stable release. Use `edge` only when you explicitly want the tested
-pre-stable channel. `setup.sh` resolves mutable channels through the `stack`
-pointer image and writes the immutable `LANCACHE_IMAGE_TAG` that Docker Compose
-pulls. If you install from a tagged release archive or a checked-out `vX.Y.Z` /
-`vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned` and
-`LANCACHE_IMAGE_TAG` to that same release tag so the running containers match
-the source tree.
+`KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq/PowerDNS configurations are kept for automatic rollback if a newly generated config fails validation at container startup. It also controls how many known-good Kea DHCP config snapshots the Admin UI keeps for operator-selected rollback (see the DHCP settings page). See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
+
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `stable` (default)
+and `latest` both mean the same released channel — `stable` is the friendlier
+name `setup.sh`'s interactive picker offers, `latest` is the original name and
+remains valid. Use `edge` only when you explicitly want the most recently
+built, less tested pre-stable channel. `setup.sh` resolves mutable channels
+through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG`
+that Docker Compose pulls. If you install from a tagged release archive or a
+checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned`
+and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers
+match the source tree.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` select where first-party images are pulled from. Keep the defaults for GHCR, or point both values at a private mirror that provides the complete stack package set.
 The resulting install/update path still stays pull-only and does not depend on
 local compiler caches or remote compiler services.
 
-Current prebuilt first-party images are published for `linux/amd64`. Multi-architecture images are tracked separately; non-amd64 production installs should not assume the prebuilt pull-only path is available yet.
+Current prebuilt first-party images are published for both `linux/amd64` and `linux/arm64`, built natively on GitHub-hosted arm64 runners rather than emulated -- see `docs/self-hosted-actions-runner.md`.
 
 Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
 Keep `deploy/prod/.env` as the checked-in template. Manual production changes
 belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
-`setup.sh update`, `setup.sh backup`, `setup.sh restore`, and `setup.sh update-ip`
-when present.
+`setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,
+`setup.sh update-ip`, and `setup.sh create-logs-for-issue` when present.
 
 If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 
@@ -671,9 +737,36 @@ If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 DDNS_TSIG_KEY=<generate-a-secret>
 NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
-NATS_DNS_READER_PASSWORD=<generate-a-secret>
+NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
+NATS_CALLOUT_PASSWORD=<generate-a-secret>
+```
+
+`SECONDARY_REGISTRATION_TOKEN` is different from the values above: it is
+always required, even on a single-node install that never registers a
+secondary DNS node. The Admin UI's boot-time check refuses to start on an
+empty value or on the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
+placeholder (an empty token previously allowed unauthenticated secondary
+registration — see issue #659), so replace it with a real secret regardless
+of whether you plan to use secondary DNS:
+
+```env
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 ```
+
+### Secret generation and persistence
+
+Secrets in `.env` follow a simple rule: they are generated once on first install (or first update), and never rotated by later updates as long as a real value already exists. The `setup.sh` script provides a `get_or_generate_secret` helper that checks each secret key:
+
+- If the value is a placeholder (empty or the literal string `<generate-a-secret>`), a new secret is generated.
+- If a real value is already present, it is preserved unchanged — even across multiple updates.
+
+Secret formats vary by key:
+
+- `*_KEY` secrets (e.g. `DDNS_TSIG_KEY`): 32 hex characters
+- `*_PASSWORD` secrets (e.g. `NATS_UI_PASSWORD`): 32 base64 characters
+- `SECONDARY_REGISTRATION_TOKEN`: 20 alphanumeric characters
+
+Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 
 Create directories:
 

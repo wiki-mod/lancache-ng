@@ -15,6 +15,18 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # The shared build-tools image already carries the Rust toolchain, sccache,
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
+#
+# Everything below builds a custom distcc wrapper. It exists because
+# distcc-pump preprocesses every `#include` locally before sending the job to
+# a remote host, and the `aws-lc-sys` crate (a transitive TLS dependency)
+# writes generated C headers into its own Cargo build/target directory at
+# build time. distcc-pump's header discovery cannot see files that don't
+# exist until the build is already underway, so pump-mode compilation of
+# those specific translation units fails. The wrapper below detects an
+# aws-lc-sys generated-header include path in the compiler arguments and, for
+# just that case, routes the job to a non-pump distcc host (or the local
+# compiler if none is configured) instead of letting it go through pump mode
+# and fail.
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
@@ -157,7 +169,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
             distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"; \
           fi; \
           case "$distcc_host_spec" in \
-            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_spec" ;; \
+            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_base" ;; \
             *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;; \
           esac; \
         done; \
@@ -183,7 +195,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
             return 0; \
           fi; \
           eval "$distcc_pump_env"; \
-          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
+          distcc_pump_real_hosts=""; \
+          for distcc_host_token in ${DISTCC_HOSTS:-}; do case "$distcc_host_token" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done; \
+          if [ -z "$distcc_pump_real_hosts" ]; then unset DISTCC_HOSTS; fi; \
           PATH="$distcc_wrapper_dir:$PATH"; \
           export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
@@ -219,6 +233,18 @@ RUN --mount=type=secret,id=sccache_redis_url \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
       if [ "${distcc_enabled:-0}" = "1" ]; then \
+        # The `{ set +e; ...; echo "$?" >file; set -e; } | tee log` shape
+        # above (not `set -o pipefail`, which dash under `sh -c` doesn't
+        # support) is how the real cargo build exit code survives being
+        # piped through `tee`: `$?` right after a piped command would
+        # otherwise reflect `tee`'s own exit status, not cargo's.
+        # Two independent failure paths are handled here: if distcc is
+        # enabled, ANY build failure is assumed distcc-related and retried
+        # with distcc disabled first (below). If distcc isn't enabled (or
+        # its retry also failed), the log is grep'd for sccache-specific
+        # error signatures before giving up, since a build can fail purely
+        # because the remote sccache server was unreachable/misbehaving
+        # while the local compiler would have worked fine.
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
@@ -251,6 +277,14 @@ RUN --mount=type=secret,id=sccache_redis_url \
     && run_cargo_build \
     && rm -rf src
 
+# This first build only had a throwaway `fn main() {}`, so it compiled every
+# dependency crate but nothing from `src/`. Because only Cargo.toml/Cargo.lock
+# were COPYed before that RUN, Docker's layer cache can reuse the compiled
+# dependency artifacts here even when application source changes on every
+# commit — only this second, real build (after copying the actual `src/`)
+# reruns when the app code changes. The sccache/distcc setup, wrapper checks,
+# and fallback logic in the RUN block below are otherwise identical to the
+# one above for the same acceleration to apply to both builds.
 COPY src ./src
 # Same helper functions as the pre-cache RUN above (configure_sccache, configure_distcc,
 # disable_distcc, resolve_distcc_wrapper_dir, resolve_cargo_jobs, run_cargo_build), this
@@ -304,7 +338,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
             distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"; \
           fi; \
           case "$distcc_host_spec" in \
-            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_spec" ;; \
+            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_base" ;; \
             *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;; \
           esac; \
         done; \
@@ -330,7 +364,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
             return 0; \
           fi; \
           eval "$distcc_pump_env"; \
-          DISTCC_HOSTS_NO_PUMP="${DISTCC_HOSTS:-$DISTCC_HOSTS_NO_PUMP}"; \
+          distcc_pump_real_hosts=""; \
+          for distcc_host_token in ${DISTCC_HOSTS:-}; do case "$distcc_host_token" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done; \
+          if [ -z "$distcc_pump_real_hosts" ]; then unset DISTCC_HOSTS; fi; \
           PATH="$distcc_wrapper_dir:$PATH"; \
           export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
           trap 'distcc-pump --shutdown' EXIT; \
@@ -366,6 +402,18 @@ RUN --mount=type=secret,id=sccache_redis_url \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
       if [ "${distcc_enabled:-0}" = "1" ]; then \
+        # The `{ set +e; ...; echo "$?" >file; set -e; } | tee log` shape
+        # above (not `set -o pipefail`, which dash under `sh -c` doesn't
+        # support) is how the real cargo build exit code survives being
+        # piped through `tee`: `$?` right after a piped command would
+        # otherwise reflect `tee`'s own exit status, not cargo's.
+        # Two independent failure paths are handled here: if distcc is
+        # enabled, ANY build failure is assumed distcc-related and retried
+        # with distcc disabled first (below). If distcc isn't enabled (or
+        # its retry also failed), the log is grep'd for sccache-specific
+        # error signatures before giving up, since a build can fail purely
+        # because the remote sccache server was unreachable/misbehaving
+        # while the local compiler would have worked fine.
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
@@ -432,13 +480,13 @@ RUN groupadd --system --gid 10001 lancache \
 
 EXPOSE 8080
 
+# Runtime defaults mirror the compose files: one shared cache path is mounted
+# read-only for dashboard reporting, while writes remain owned by proxy/watchdog.
 ENV TEMPLATE_DIR=/templates \
     CDN_DOMAINS_FILE=/data/cdn-domains.txt \
-    SSL_DOMAINS_FILE=/data/cdn-ssl-domains.txt \
     STANDARD_LOG=/var/log/nginx/access.log \
     SSL_LOG=/var/log/nginx/access.log \
-    STANDARD_CACHE_DIR=/var/cache/proxy \
-    SSL_CACHE_DIR=/var/cache/proxy \
+    CACHE_DIR=/var/cache/proxy \
     PROXY_SERVICE=proxy \
     SSL_ENABLED=1 \
     PROXY_STANDARD_URL=http://proxy \

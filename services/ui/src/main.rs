@@ -14,10 +14,13 @@
 
 mod config;
 mod docker_client;
+mod kea_snapshots;
+mod nats_auth_callout;
 mod nats_config;
 mod nginx_client;
 mod routes;
 mod session;
+mod syslog_client;
 
 use anyhow::Result;
 use axum::{
@@ -40,6 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
 use tera::Tera;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 pub struct AppState {
     pub templates: Tera,
@@ -53,13 +58,75 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub ui_session_secret: [u8; 32],
     pub ui_session_ttl: Duration,
+    // The auth-callout issuer account's public NKey, rendered into nats.conf's
+    // `auth_callout { issuer: ... }` field (see nats_auth_callout.rs). The
+    // matching private seed never leaves the loaded `KeyPair` the callout
+    // responder task holds.
+    pub nats_issuer_public_key: String,
 }
 
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
+const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-registration.token";
 
+// Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
+// not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
+// exact-literal list previously missed deploy/quickstart/.env's distinct
+// YOUR_SECONDARY_REGISTRATION_TOKEN_HERE default, which manual quickstart deploys
+// that skip setup.sh ship untouched -- letting anyone who reads this public repo
+// register a secondary against it (flagged in review on PR #743). The first
+// five checks mirror setup.sh's own secret_value_is_placeholder pattern set
+// case-for-case so both checks stay in sync; the trailing `<...>` check is an
+// addition beyond that set, added because README.md's own
+// `SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>` code-block example (which
+// setup.sh's detector does NOT actually recognize, despite README prose
+// claiming otherwise -- a pre-existing doc/script inconsistency out of scope
+// here) is itself pasteable verbatim by a manual deployer. A real hex/base64
+// secret can never match any of these patterns by chance.
+//
+// Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
+// e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
+// normalize first, then match against lowercase/underscore patterns. This is
+// a deliberate fail-safe widening: it can only make MORE values match as a
+// placeholder, never fewer, so a real randomly-generated hex/base64 secret is
+// not realistically affected. The `<...>` bracket check is applied to the raw
+// (non-normalized) token since it only inspects punctuation, not casing.
+//
+// This is one of three independently-maintained placeholder detectors in this
+// repo (the others: scripts/lib/shared-secret-bootstrap.sh's
+// secret_is_placeholder, embedded into the dns/dhcp/ui entrypoints, and
+// setup.sh's secret_value_is_placeholder), kept deliberately separate per the
+// maintainer decision recorded in issue #967 (Option B: cross-validate, don't
+// unify). Divergence from the shared entrypoint library, confirmed via
+// tests/fixtures/placeholder-detection-cases.txt and this module's own
+// secondary_registration_token_is_placeholder_matches_shared_parity_fixture
+// test: this function requires the full YOUR_*_HERE suffix (matching
+// setup.sh) and has no generic *_HERE-on-any-value rule, where the shared
+// entrypoint library accepts a bare YOUR_* prefix and any *_HERE suffix.
+// Pre-existing, not reconciled here (#967 Option B keeps the pattern sets
+// separate); no shipped SECONDARY_REGISTRATION_TOKEN placeholder actually
+// needs either bare form, so the gap has not mattered in practice, but it is
+// a real, confirmed divergence, not an intentional design choice.
+fn secondary_registration_token_is_placeholder(token: &str) -> bool {
+    if token.is_empty() {
+        return true;
+    }
+    let normalized = token.to_lowercase().replace('-', "_");
+    normalized.starts_with("change_me_")
+        || (normalized.starts_with("your_") && normalized.ends_with("_here"))
+        || normalized.starts_with("changeme")
+        || normalized.contains("change_me")
+        || (normalized.starts_with("lancache_") && normalized.ends_with("_secret"))
+        || (token.starts_with('<') && token.ends_with('>'))
+}
+
+// Persists the CSRF/session-signing secret across restarts so existing
+// sessions don't get invalidated on every container recreate. `create_new`
+// makes the write atomic and exclusive (no lost-update race if two processes
+// start concurrently), and 0o600 keeps the raw key readable only by the
+// container's own user.
 fn load_or_create_session_secret() -> Result<[u8; 32]> {
     const SESSION_SECRET_FILE: &str = "/data/lancache-ui-session.secret";
 
@@ -92,6 +159,97 @@ fn load_or_create_session_secret() -> Result<[u8; 32]> {
     }
 }
 
+// Resolves the effective SECONDARY_REGISTRATION_TOKEN, generating and persisting
+// a strong random one when the configured value is missing or a checked-in
+// placeholder. setup.sh always generates a real hex32 token
+// (`get_or_generate_secret ... hex32`), but the compose header's documented
+// manual path ("Or manually: Edit .env ... docker compose up -d") ships either
+// an empty default (deploy/quickstart compose's `${SECONDARY_REGISTRATION_TOKEN:-}`)
+// or a public placeholder (deploy/quickstart/.env's YOUR_..._HERE,
+// deploy/prod/.env's CHANGE_ME_*, deploy/dev compose's lancache-reg-dev-secret).
+// Those all previously boot-looped the UI. Generating the same kind of secret
+// setup.sh would -- persisted next to the other /data secrets so it never
+// rotates across restarts (a rotating token would break an already-registered
+// secondary) -- keeps the security invariant intact (registration still needs
+// an unguessable secret) while removing both the crash and the guessable public
+// default. An operator-supplied real value always wins and is preserved. `path`
+// is a parameter so the create branch is unit-testable.
+fn load_or_create_secondary_registration_token(
+    configured: &str,
+    path: &str,
+) -> Result<String, String> {
+    if !secondary_registration_token_is_placeholder(configured) {
+        return Ok(configured.to_string());
+    }
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let existing = contents.trim();
+            if secondary_registration_token_is_placeholder(existing) {
+                return Err(format!(
+                    "persisted secondary registration token at {path} is empty or a \
+                     placeholder — refusing to start. Delete the file to regenerate it, \
+                     or set SECONDARY_REGISTRATION_TOKEN to a real secret"
+                ));
+            }
+            Ok(existing.to_string())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let token = hex::encode(rand::random::<[u8; 32]>());
+            let mut open_options = OpenOptions::new();
+            open_options.create_new(true).write(true);
+            #[cfg(unix)]
+            open_options.mode(0o600);
+            let mut file = open_options.open(path).map_err(|e| {
+                format!("failed to create secondary registration token file at {path}: {e}")
+            })?;
+            file.write_all(token.as_bytes()).map_err(|e| {
+                format!("failed to write secondary registration token file at {path}: {e}")
+            })?;
+            file.sync_all().map_err(|e| {
+                format!("failed to sync secondary registration token file at {path}: {e}")
+            })?;
+            tracing::warn!(
+                "SECONDARY_REGISTRATION_TOKEN was unset or a placeholder; generated a \
+                 persistent random registration token at {path}. To register a secondary \
+                 DNS node, read the value from that file or set SECONDARY_REGISTRATION_TOKEN \
+                 explicitly."
+            );
+            Ok(token)
+        }
+        Err(err) => Err(format!(
+            "failed to read secondary registration token file at {path}: {err}"
+        )),
+    }
+}
+
+// Additive-only migration for the `secondaries` table (issue #583): adds
+// `nats_user`/`nats_password_hash`, the per-secondary auth-callout identity
+// columns, without touching the legacy `nats_token` column (kept as an
+// unused, harmless leftover rather than dropped -- SQLite's DROP COLUMN
+// requires a table rebuild, and there is nothing to gain from that risk on a
+// column register_secondary simply stops reading). A secondary registered
+// under the pre-#583 shared-token model has NULL nats_password_hash until it
+// is re-registered or rotated, at which point `authorize_secondary` (see
+// nats_auth_callout.rs) naturally denies it -- documented in CHANGELOG.md as
+// a required manual step after upgrading.
+fn migrate_secondaries_table_for_auth_callout(conn: &Connection) -> rusqlite::Result<()> {
+    let existing_columns: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(secondaries)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    if !existing_columns.iter().any(|c| c == "nats_user") {
+        conn.execute("ALTER TABLE secondaries ADD COLUMN nats_user TEXT", [])?;
+    }
+    if !existing_columns.iter().any(|c| c == "nats_password_hash") {
+        conn.execute(
+            "ALTER TABLE secondaries ADD COLUMN nats_password_hash TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn is_mutating_method(method: &Method) -> bool {
     matches!(
         *method,
@@ -114,6 +272,11 @@ const TEMPLATE_NAMES: &[&str] = &[
     "setup.html",
 ];
 
+// 'unsafe-inline' on script-src/style-src is a deliberate, narrower exception
+// to an otherwise strict CSP: the Tera templates use inline `onclick=`
+// handlers and inline `<style>` blocks rather than a nonce/hash scheme. Every
+// other directive stays locked down (no external hosts, no object/frame
+// embedding), so this does not open the page to third-party script injection.
 const ADMIN_UI_CSP: &str = "default-src 'self'; \
              base-uri 'self'; \
              object-src 'none'; \
@@ -202,6 +365,32 @@ async fn chart_js() -> impl IntoResponse {
             ),
         ],
         include_str!("static/chart.umd.min.js"),
+    )
+}
+
+async fn favicon_ico() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/x-icon"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_bytes!("static/favicon.ico").as_slice(),
+    )
+}
+
+async fn logo_icon() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000",
+            ),
+        ],
+        include_bytes!("static/logo-icon.png").as_slice(),
     )
 }
 
@@ -358,11 +547,54 @@ async fn basic_auth(
     }
 }
 
-fn load_templates(dir: &str) -> Tera {
+struct StaticTemplateValue {
+    value: String,
+}
+
+impl StaticTemplateValue {
+    fn new(value: String) -> Self {
+        Self { value }
+    }
+}
+
+impl tera::Function<String> for StaticTemplateValue {
+    fn call(&self, _kwargs: tera::Kwargs, _state: &tera::State<'_>) -> String {
+        self.value.clone()
+    }
+}
+
+fn register_lancache_image_template_functions(templates: &mut Tera, cfg: &config::Config) {
+    templates.register_function(
+        "lancache_image_registry",
+        StaticTemplateValue::new(cfg.lancache_image_registry.clone()),
+    );
+    templates.register_function(
+        "lancache_image_prefix",
+        StaticTemplateValue::new(cfg.lancache_image_prefix.clone()),
+    );
+    templates.register_function(
+        "lancache_image_channel",
+        StaticTemplateValue::new(cfg.lancache_image_channel.clone()),
+    );
+    templates.register_function(
+        "lancache_image_tag",
+        StaticTemplateValue::new(cfg.lancache_image_tag.clone()),
+    );
+}
+
+// Panics on any missing/malformed template rather than returning a Result:
+// a broken template is a deploy-time defect, not a runtime condition to
+// recover from, and failing at startup (before the listener binds) is far
+// preferable to a page-specific 500 the first time a user visits that route.
+fn load_templates(cfg: &config::Config) -> Tera {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
+    // Functions must be registered before any template is added: Tera
+    // validates function calls at parse time, so a template calling one of
+    // these (e.g. base.html) would fail to parse if added first.
+    register_lancache_image_template_functions(&mut t, cfg);
     for name in TEMPLATE_NAMES {
-        let path = format!("{}/{}", dir, name);
+        let path = format!("{}/{}", cfg.template_dir, name);
         let content = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Cannot read template {}: {}", path, e));
         t.add_raw_template(name, &content)
@@ -371,20 +603,32 @@ fn load_templates(dir: &str) -> Tera {
     t
 }
 
+// NOTE: `main()` awaits this before binding the HTTP listener, so the Admin UI
+// serves nothing at all — not even the login page — until NATS is reachable.
+// A NATS outage therefore takes down the whole UI, not just NATS-backed
+// features; this retry loop with exponential backoff (capped at 30s) is what
+// keeps the process alive while waiting, rather than exiting and needing an
+// external restart policy to retry the connection.
 async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
     let mut delay = std::time::Duration::from_secs(1);
     let max_delay = std::time::Duration::from_secs(30);
 
     loop {
-        let result = if cfg.nats_ui_user.is_empty() || cfg.nats_ui_password.is_empty() {
-            async_nats::connect(&cfg.nats_url).await
-        } else {
-            async_nats::ConnectOptions::with_user_and_password(
-                cfg.nats_ui_user.clone(),
-                cfg.nats_ui_password.clone(),
-            )
-            .connect(&cfg.nats_url)
-            .await
+        // preflight_startup_config (called before this fn, see main()) has
+        // already rejected a missing/empty nats_ui_password via
+        // validate_runtime_nats_credentials, so by this point it's always
+        // Some -- the None arm only exists because the field's type doesn't
+        // encode that invariant.
+        let result = match (cfg.nats_ui_user.is_empty(), cfg.nats_ui_password.as_deref()) {
+            (false, Some(password)) if !password.is_empty() => {
+                async_nats::ConnectOptions::with_user_and_password(
+                    cfg.nats_ui_user.clone(),
+                    password.to_string(),
+                )
+                .connect(&cfg.nats_url)
+                .await
+            }
+            _ => async_nats::connect(&cfg.nats_url).await,
         };
 
         match result {
@@ -436,38 +680,99 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
     Ok(())
 }
 
+// SECONDARY_REGISTRATION_TOKEN gates the one route
+// (`POST /api/secondary/register`) that lets a new secondary DNS node join
+// this primary -- see routes/secondaries.rs's own empty-token and
+// constant-time comparison checks, which enforce the same invariant again on
+// every request as defense in depth. The invariant this guards:
+// - an empty token was the original vulnerability (flagged on PR #195):
+//   an unset configured token compared equal to an unset/empty request
+//   token, so any client could register.
+// - a known placeholder is the same problem restated: its value is public,
+//   readable straight out of this repository's checked-in deploy/prod/.env
+//   and deploy/quickstart/.env defaults.
+//
+// setup.sh already generates a real SECONDARY_REGISTRATION_TOKEN
+// unconditionally for every install (`get_or_generate_secret ... hex32`, same
+// ensure_secret_env_key pipeline as PDNS_API_KEY/DDNS_TSIG_KEY). The documented
+// manual compose path does not run setup.sh, so main() resolves the token
+// through load_or_create_secondary_registration_token first: an operator's real
+// value is kept, otherwise a persistent random one is generated -- meaning the
+// token reaching this function is already guaranteed real on every path. This
+// check therefore stays as a defense-in-depth assertion on the *resolved* value
+// (a resolution bug that ever yielded an empty/placeholder token must still fail
+// closed rather than start in a silently insecure state, issue #659), not as
+// the primary boot gate it once was.
+fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        return Err(
+            "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
+             Generate one with: openssl rand -hex 32"
+                .to_string(),
+        );
+    }
+    if secondary_registration_token_is_placeholder(token) {
+        return Err(format!(
+            "SECONDARY_REGISTRATION_TOKEN is still set to a default placeholder \
+             ('{token}') — refusing to start. Generate a real secret with: \
+             openssl rand -hex 32"
+        ));
+    }
+    Ok(())
+}
+
 fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
     validate_ui_session_ttl_seconds(cfg.ui_session_ttl_seconds)?;
     nats_config::validate_runtime_nats_credentials(cfg)?;
     Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
 }
 
+// Central logging pipeline (#633): mirrors the existing stdout tracing layer
+// with a second layer that appends plain-text events to UI_LOG_FILE, so
+// fluent-bit can tail it the same way it already tails nginx's access.log
+// (see docs/architecture-ng.md's logging matrix). Runs before config::Config
+// is loaded (tracing must exist first, since Config::from_env() failures are
+// themselves reported via tracing::error!), so the log path is read directly
+// from the environment here rather than through Config. Opening the file is
+// best-effort: installs that never mount the shared log volume (i.e. never
+// opt into the `logging` compose profile) must still start and log to
+// stdout only -- a missing/unwritable log path is never a hard failure.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap());
+    let stdout_layer = tracing_subscriber::fmt::layer();
+
+    let ui_log_file =
+        std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
+    let file_layer = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ui_log_file)
+        .ok()
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(Mutex::new(file))
+        });
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap()),
-        )
-        .init();
+    init_tracing();
 
-    let cfg = match config::Config::from_env() {
+    let mut cfg = match config::Config::from_env() {
         Ok(cfg) => cfg,
         Err(message) => {
             tracing::error!("{message}");
             std::process::exit(1);
         }
     };
-
-    // SECONDARY_REGISTRATION_TOKEN must be non-empty; an empty token allows
-    // unauthenticated registration (empty string matches empty string).
-    if cfg.secondary_registration_token.is_empty() {
-        tracing::error!(
-            "SECONDARY_REGISTRATION_TOKEN is not set or empty — refusing to start. \
-             Generate one with: openssl rand -hex 32"
-        );
-        std::process::exit(1);
-    }
 
     // Validate before the retry loop and secret creation so bad env overrides
     // fail closed without waiting on NATS or creating durable session state.
@@ -496,7 +801,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let templates = load_templates(&cfg.template_dir);
+    let templates = load_templates(&cfg);
     let docker = docker_client::connect_from_env()?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -505,7 +810,57 @@ async fn main() -> Result<()> {
     let nats = connect_nats_with_retry(&cfg).await;
     let ui_session_secret = load_or_create_session_secret()?;
 
+    // Resolve the effective secondary-registration token alongside the other
+    // durable /data secrets: a real operator value is preserved, otherwise a
+    // persistent random one is generated so the documented manual compose path
+    // starts securely instead of crash-looping (see
+    // load_or_create_secondary_registration_token). validate_* then asserts the
+    // resolved value is real as defense in depth.
+    let secondary_registration_token = match load_or_create_secondary_registration_token(
+        &cfg.secondary_registration_token,
+        SECONDARY_REGISTRATION_TOKEN_FILE,
+    ) {
+        Ok(token) => token,
+        Err(message) => {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(message) = validate_secondary_registration_token(&secondary_registration_token) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
+    cfg.secondary_registration_token = secondary_registration_token;
+
+    // Loaded before the DB/state so its public key can be baked into the
+    // initial nats.conf write below, and its private seed handed to the
+    // auth-callout responder task once state exists (see nats_auth_callout.rs).
+    // NATS_ISSUER_SEED (a literal seed value) takes precedence over the
+    // file-based path when set -- see config.rs's nats_issuer_seed docs for
+    // why (deterministic validation harnesses with no persistent /data).
+    let issuer_keypair = match &cfg.nats_issuer_seed {
+        Some(seed) => match nkeys::KeyPair::from_seed(seed) {
+            Ok(kp) => kp,
+            Err(e) => {
+                tracing::error!("NATS_ISSUER_SEED is not a valid NKey seed: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            match nats_auth_callout::load_or_create_issuer_keypair(&cfg.nats_issuer_seed_path) {
+                Ok(kp) => kp,
+                Err(message) => {
+                    tracing::error!("{message}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let nats_issuer_public_key = issuer_keypair.public_key();
+
     let db = {
+        // This SQLite DB stores Admin-UI-local secondary registration metadata.
+        // Runtime DNS/DHCP/proxy state stays in PowerDNS, Kea, NATS, and Docker.
         let conn = Connection::open("/data/lancache-ui.db").expect("Cannot open UI database");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS secondaries (
@@ -517,6 +872,8 @@ async fn main() -> Result<()> {
             );",
         )
         .expect("Cannot init database schema");
+        migrate_secondaries_table_for_auth_callout(&conn)
+            .expect("Cannot migrate secondaries table for auth-callout columns");
         Mutex::new(conn)
     };
 
@@ -532,6 +889,7 @@ async fn main() -> Result<()> {
         db,
         ui_session_secret,
         ui_session_ttl,
+        nats_issuer_public_key,
     });
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up
@@ -540,11 +898,34 @@ async fn main() -> Result<()> {
         tracing::warn!("Could not reload initial nats.conf: {}", e);
     }
 
+    // Runs for the lifetime of the process: answers every NATS auth-callout
+    // request for secondaries (see nats_auth_callout.rs). Registering,
+    // removing, or rotating a secondary only ever touches the `secondaries`
+    // table now -- no nats.conf rewrite or NATS restart needed for any of
+    // those, since this task re-checks the DB on every single connection
+    // attempt.
+    tokio::spawn(nats_auth_callout::run_auth_callout(
+        Arc::clone(&state),
+        Arc::new(issuer_keypair),
+    ));
+
     // Routes that are always public (protected by their own token).
-    let public_routes = Router::new().route("/health", get(health)).route(
-        "/api/secondary/register",
-        post(routes::secondaries::register_secondary),
-    );
+    let public_routes = Router::new()
+        .route("/health", get(health))
+        .route(
+            "/api/secondary/register",
+            post(routes::secondaries::register_secondary),
+        )
+        // Not behind basic_auth on purpose: these are non-sensitive brand
+        // assets, not gated content. Serving them through the protected
+        // router would attach a session-issuing Set-Cookie to a response
+        // already marked publicly cacheable, letting a shared cache in
+        // front of the Admin UI replay one client's session cookie to
+        // another (see PR #553 review). The browser's own Basic Auth
+        // prompt still blocks every request to this origin regardless, so
+        // this doesn't change when a client can actually fetch them.
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/static/logo-icon.png", get(logo_icon));
 
     // Routes that are protected by Basic Auth when auth is enabled. The
     // middleware also issues per-session CSRF state for every request.
@@ -556,17 +937,33 @@ async fn main() -> Result<()> {
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
         .route("/dhcp/subnet/remove", post(routes::dhcp::remove_subnet))
+        .route(
+            "/dhcp/subnet/option/add",
+            post(routes::dhcp::add_subnet_option),
+        )
+        .route(
+            "/dhcp/subnet/option/remove",
+            post(routes::dhcp::remove_subnet_option),
+        )
         .route("/dhcp/static/add", post(routes::dhcp::add_reservation))
         .route(
             "/dhcp/static/remove",
             post(routes::dhcp::remove_reservation),
         )
-        .route("/api/dhcp/check", get(routes::dhcp::check_dhcp_conflict))
+        .route("/dhcp/lease/release", post(routes::dhcp::release_lease))
+        .route(
+            "/dhcp/snapshot/rollback",
+            post(routes::dhcp::rollback_kea_snapshot),
+        )
+        // POST, not GET: this route has a real side effect (starts/stops the
+        // DHCP conflict-probe container) and CSRF protection in this app's
+        // basic_auth middleware only covers mutating methods -- see
+        // check_dhcp_conflict's own comment for the header-based CSRF check
+        // that pairs with this route now being a mutating method.
+        .route("/api/dhcp/check", post(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
-        .route("/domains/ssl/add", post(routes::domains::add_ssl))
-        .route("/domains/ssl/remove", post(routes::domains::remove_ssl))
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
         .route(
             "/domains/lan/remove",
@@ -576,9 +973,14 @@ async fn main() -> Result<()> {
             "/domains/aaaa-filter",
             post(routes::domains::toggle_aaaa_filter),
         )
+        .route(
+            "/domains/zones/rollback",
+            post(routes::dns_snapshots::rollback_zone_snapshot),
+        )
         .route("/stats", get(routes::stats::stats_page))
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
+        .route("/setup/update", post(routes::setup::update_stack_settings))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/static/admin.css", get(admin_css))
@@ -616,6 +1018,89 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    // Proves migrate_secondaries_table_for_auth_callout actually adds
+    // nats_user/nats_password_hash via ALTER TABLE when a table predates
+    // the auth-callout columns, and that the new columns are immediately
+    // writable/readable afterwards -- not just that the SQL statement runs
+    // without error.
+    #[test]
+    fn migration_adds_auth_callout_columns_to_a_fresh_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );",
+        )
+        .unwrap();
+
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+
+        // Must be able to write and read the new columns now.
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at, nats_user, nats_password_hash)
+             VALUES ('sec-a', 'sec-a', '', 0, 'sec-a', 'somehash')",
+            [],
+        )
+        .unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT nats_password_hash FROM secondaries WHERE name = 'sec-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "somehash");
+    }
+
+    // A container restart re-runs this migration against an already-migrated
+    // database, so it must tolerate being applied twice without erroring on
+    // "duplicate column name" and must never touch a pre-existing row's
+    // original columns (nats_token, registered_at) in the process.
+    #[test]
+    fn migration_preserves_existing_rows_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at)
+             VALUES ('pre-existing', 'pre-existing', 'old-shared-token', 42)",
+            [],
+        )
+        .unwrap();
+
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+        // Running it again (e.g. a second container start after the first
+        // already migrated) must not error on "duplicate column name".
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+
+        let (nats_token, registered_at): (String, i64) = conn
+            .query_row(
+                "SELECT nats_token, registered_at FROM secondaries WHERE name = 'pre-existing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(nats_token, "old-shared-token");
+        assert_eq!(registered_at, 42);
+    }
+
+    // X-Forwarded-Proto can carry a comma-separated chain when multiple
+    // proxies each append their own value; only the first (leftmost, i.e.
+    // closest to the original client) entry reflects what the client
+    // actually used. Reading a later entry instead could flip HSTS
+    // on/off incorrectly for a request that traversed more than one hop.
     #[test]
     fn forwarded_proto_https_detection_uses_first_proxy_value() {
         let mut headers = axum::http::HeaderMap::new();
@@ -631,6 +1116,11 @@ mod tests {
         assert!(!forwarded_proto_is_https(&headers));
     }
 
+    // Locks in the specific external hosts and directives that must never
+    // reappear in ADMIN_UI_CSP: a future change that adds a script tag
+    // pulling from a CDN (as earlier revisions of this UI did) must not be
+    // "fixed" by loosening the CSP to allow it, since that would reopen the
+    // page to third-party script injection.
     #[test]
     fn csp_keeps_scripts_self_hosted_without_external_cdn_allowances() {
         assert!(ADMIN_UI_CSP.contains("script-src 'self' 'unsafe-inline'"));
@@ -639,6 +1129,10 @@ mod tests {
         assert!(!ADMIN_UI_CSP.contains("'unsafe-eval'"));
     }
 
+    // Baseline correctness for basic_auth_is_valid across its three states:
+    // no Authorization header, a header with the wrong password, and the
+    // matching credentials -- proving the constant-time comparison logic
+    // still rejects/accepts the same way plain string equality would.
     #[test]
     fn basic_auth_rejects_wrong_credentials_and_accepts_correct_ones() {
         fn auth_header(user: &str, pass: &str) -> HeaderValue {
@@ -663,6 +1157,10 @@ mod tests {
         assert!(basic_auth_is_valid(&headers, "admin", "secret"));
     }
 
+    // Security invariant: possessing a valid, unexpired session cookie must
+    // never be treated as equivalent to presenting valid Basic auth
+    // credentials -- see the inline comment below for why a copied/replayed
+    // cookie or a rotated password would otherwise silently bypass auth.
     #[test]
     fn a_valid_session_cookie_never_substitutes_for_required_basic_auth() {
         // A session cookie only ever carries CSRF state, never authentication:
@@ -682,6 +1180,12 @@ mod tests {
         ));
     }
 
+    // resolve_admin_ui_auth_mode must fail closed by default: no credentials
+    // and no explicit ALLOW_INSECURE_UI opt-in is an error, not a silent
+    // unauthenticated start. It must also reject a *partial*
+    // configuration (only one of UI_AUTH_USER/UI_AUTH_PASSWORD set) even when
+    // ALLOW_INSECURE_UI is true, since that combination is almost certainly a
+    // misconfiguration rather than an intentional insecure deployment.
     #[test]
     fn admin_ui_auth_requires_explicit_opt_in_for_insecure_mode() {
         assert_eq!(
@@ -694,6 +1198,167 @@ mod tests {
         assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
     }
 
+    // Every placeholder string actually checked into this repo's deploy
+    // templates and README (not just deploy/prod/.env's literal) must be
+    // rejected -- a manual deployer who copies one of these public,
+    // guessable values verbatim would otherwise let anyone register a
+    // secondary DNS node against their primary. A real generated secret
+    // must still pass.
+    #[test]
+    fn secondary_registration_token_rejects_empty_and_known_placeholders() {
+        assert!(validate_secondary_registration_token("").is_err());
+        // Every placeholder form actually checked into the repo's deploy/*/.env
+        // templates must be rejected, not just deploy/prod/.env's literal.
+        for placeholder in [
+            "CHANGE_ME_SECONDARY_REGISTRATION_TOKEN", // deploy/prod/.env
+            "YOUR_SECONDARY_REGISTRATION_TOKEN_HERE", // deploy/quickstart/.env
+            "changeme",
+            "please-change-me-now",
+            "lancache-default-secret",
+            "<generate-a-secret>", // README.md's SECONDARY_REGISTRATION_TOKEN example
+        ] {
+            assert!(
+                validate_secondary_registration_token(placeholder).is_err(),
+                "expected placeholder {placeholder:?} to be rejected"
+            );
+        }
+        // A real generated secret (openssl rand -hex 32 shape) must pass.
+        assert!(validate_secondary_registration_token(
+            "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
+        )
+        .is_ok());
+    }
+
+    // Cross-language parity coverage for secret/token placeholder detection
+    // (issue #967). This checks the "rust" column of the shared fixture
+    // against secondary_registration_token_is_placeholder(); the "shared" and
+    // "setup" columns are checked the same way, against the other two
+    // independent implementations, by
+    // tests/bats/placeholder_detection_parity.bats. Three implementations
+    // exist on purpose (maintainer decision: Option B in #967, not a merge),
+    // but every case they're known to agree OR legitimately disagree on is
+    // pinned here so a silent future drift fails a test instead of going
+    // unnoticed.
+    #[test]
+    fn secondary_registration_token_is_placeholder_matches_shared_parity_fixture() {
+        // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's own
+        // established pattern, see the TEMPLATE_DIR test setup and
+        // domains.rs's is_valid_domain_matches_shared_parity_fixture test),
+        // not include_str!: the fixture lives outside this crate's source
+        // tree (tests/fixtures/ at the repo root, shared with the bash
+        // side), so a compile-time embed would bake an out-of-crate path
+        // into the build; a runtime read gives a clear "fixture missing"
+        // failure instead.
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+
+        for line in contents.lines() {
+            let line = line.trim_end();
+            // Blank lines and comment lines are not cases -- must match the
+            // bash reader's `[[ -z "$line" || "$line" == \#* ]]` skip rule
+            // exactly, or the two readers would silently disagree on which
+            // lines even count as fixture cases.
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Fields: <value> <shared> <setup> <rust>, whitespace-separated.
+            // Only the "rust" (4th) field is relevant here.
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [value, _shared, _setup, rust] = fields.as_slice() else {
+                panic!(
+                    "malformed shared parity fixture line (expected \"<value> <shared> <setup> <rust>\"): {line:?}"
+                );
+            };
+            let expect = *rust;
+            total += 1;
+
+            let actual = if secondary_registration_token_is_placeholder(value) {
+                "placeholder"
+            } else {
+                "real"
+            };
+            if actual != expect {
+                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
+            }
+        }
+
+        // Fail closed if the fixture itself is empty/unreadable-but-present
+        // (e.g. header-only) -- a vacuous loop would make this test pass
+        // without checking anything.
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} shared parity fixture case(s) disagreed with the Rust implementation:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    // Covers the three states load_or_create_secondary_registration_token
+    // must distinguish: a real operator-supplied value passes through
+    // untouched without ever touching disk; an unset/empty value generates
+    // and persists a fresh random hex32 token; and a later start with a
+    // placeholder value reuses the already-persisted token rather than
+    // generating a new one. That last case is the one that matters most --
+    // rotating the token on every restart would invalidate every already
+    // registered secondary's stored credentials.
+    #[test]
+    fn load_or_create_secondary_registration_token_generates_persists_and_preserves() {
+        // A real operator-supplied value is returned unchanged and no file is
+        // read or written (path deliberately does not exist).
+        let real = "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d";
+        assert_eq!(
+            load_or_create_secondary_registration_token(
+                real,
+                "/nonexistent/lancache-ng-must-not-be-read.token"
+            )
+            .unwrap(),
+            real
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-ng-secreg-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secondary-registration.token");
+        let path_str = path.to_str().unwrap();
+
+        // An empty configured value generates a real hex32 token and persists it.
+        let generated = load_or_create_secondary_registration_token("", path_str).unwrap();
+        assert_eq!(generated.len(), 64, "expected a 32-byte hex token");
+        assert!(!secondary_registration_token_is_placeholder(&generated));
+
+        // Idempotent: a later start with a placeholder value reuses the persisted
+        // token (must never rotate), whichever placeholder form triggered it.
+        let reused = load_or_create_secondary_registration_token(
+            "YOUR_SECONDARY_REGISTRATION_TOKEN_HERE",
+            path_str,
+        )
+        .unwrap();
+        assert_eq!(generated, reused);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Zero would issue sessions that expire the instant they are created,
+    // and an unbounded value (up to u64::MAX) risks overflow once a session's
+    // expiry is computed as `now + ttl` (see session::issue_session_at's
+    // checked_add). Pinning both the exact 1-year ceiling and the rejection
+    // of pathologically large input keeps that arithmetic safe even if a
+    // future change stops going through Duration::from_secs first.
     #[test]
     fn ui_session_ttl_rejects_zero_and_overflow_prone_values() {
         assert!(validate_ui_session_ttl_seconds(0).is_err());
@@ -703,12 +1368,25 @@ mod tests {
         assert!(validate_ui_session_ttl_seconds(u64::MAX).is_err());
     }
 
+    // preflight_startup_config runs several independent validations via `?`,
+    // so their order determines which single error message an operator with
+    // *multiple* misconfigured values actually sees. This sets both the TTL
+    // and the NATS credentials to invalid values at once and asserts the TTL
+    // error wins -- pinning the current check order so a future reordering
+    // doesn't silently swap which error surfaces first without anyone
+    // noticing.
     #[test]
     fn startup_preflight_rejects_invalid_ttl_before_other_static_checks() {
+        // `Config::from_env()` reads process-global env vars (CACHE_DIR,
+        // CACHE_MAX_GB, and their legacy split-key fallbacks). Hold the same
+        // lock config.rs's own env-mutating tests use so this test never
+        // observes another thread's in-flight legacy values and hits
+        // `resolve_cache_dir`/`resolve_cache_max_gb`'s fail-closed panic.
+        let _guard = config::env_test_lock().lock().unwrap();
         let mut cfg = config::Config::from_env().unwrap();
         cfg.ui_session_ttl_seconds = 0;
         cfg.nats_ui_user = "invalid user".to_string();
-        cfg.nats_ui_password = "still-invalid".to_string();
+        cfg.nats_ui_password = Some("still-invalid".to_string());
 
         assert_eq!(
             preflight_startup_config(&cfg),
@@ -716,6 +1394,104 @@ mod tests {
         );
     }
 
+    // Tera validates function calls at template-parse time (see
+    // load_templates), so a template referencing lancache_image_registry()
+    // etc. would fail to load entirely if registration were missing, wired to
+    // the wrong config field, or registered after templates were added --
+    // this proves the four functions are actually registered and each
+    // returns its own configured value, not a copy-pasted mix-up between
+    // registry/prefix/channel/tag.
+    #[test]
+    fn lancache_image_template_functions_render_runtime_config() {
+        let _guard = config::env_test_lock().lock().unwrap();
+
+        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+
+        let cfg = config::Config::from_env().unwrap();
+        let mut templates = Tera::default();
+        register_lancache_image_template_functions(&mut templates, &cfg);
+        templates
+            .add_raw_template(
+                "runtime.html",
+                "{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }} [{{ lancache_image_channel() }}]",
+            )
+            .unwrap();
+
+        let rendered = templates
+            .render("runtime.html", &tera::Context::new())
+            .unwrap();
+        assert_eq!(
+            rendered,
+            "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [edge]"
+        );
+
+        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        std::env::remove_var("LANCACHE_IMAGE_TAG");
+    }
+
+    // Regression test for #848: load_templates() parses the *real* on-disk
+    // templates (unlike lancache_image_template_functions_render_runtime_config
+    // above, which adds a throwaway inline template), so this both proves
+    // logs.html still parses after the host-filter dropdown was added and
+    // that the dropdown actually reflects a selected host and the full host
+    // list passed in the render context.
+    #[test]
+    fn logs_html_renders_syslog_host_filter_dropdown_with_selection() {
+        let _guard = config::env_test_lock().lock().unwrap();
+
+        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        std::env::set_var(
+            "TEMPLATE_DIR",
+            format!("{}/src/templates", env!("CARGO_MANIFEST_DIR")),
+        );
+
+        let cfg = config::Config::from_env().unwrap();
+        let templates = load_templates(&cfg);
+
+        let mut ctx = tera::Context::new();
+        ctx.insert("active_page", "logs");
+        ctx.insert("syslog_mode", &true);
+        ctx.insert("syslog_logs", &Vec::<syslog_client::SyslogEntry>::new());
+        ctx.insert(
+            "syslog_hosts",
+            &vec!["dns-ssl".to_string(), "watchdog".to_string()],
+        );
+        ctx.insert("selected_host", &Some("watchdog".to_string()));
+        ctx.insert("logs", &Vec::<nginx_client::LogEntry>::new());
+
+        let rendered = templates.render("logs.html", &ctx).unwrap();
+        assert!(
+            rendered.contains(r#"<option value="watchdog" selected>watchdog</option>"#),
+            "expected the watchdog <option> to carry `selected`, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"<option value="dns-ssl" >dns-ssl</option>"#),
+            "expected the non-selected dns-ssl <option> to be present without `selected`, got:\n{rendered}"
+        );
+
+        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        std::env::remove_var("LANCACHE_IMAGE_TAG");
+        std::env::remove_var("TEMPLATE_DIR");
+    }
+
+    // This crate has two similarly-named CSRF header helpers: main.rs's own
+    // csrf_header_value reads the client-facing X-CSRF-Token header, while
+    // session::csrf_header_value reads INTERNAL_CSRF_HEADER_NAME, the
+    // separate internal header the basic_auth middleware injects with the
+    // real session's CSRF token before a request reaches its handler. This
+    // pins that the session-module helper reads back exactly that internal
+    // header and not the client-facing one, guarding against the two being
+    // mixed up.
     #[test]
     fn session_cookie_helper_matches_the_session_header() {
         let empty_headers = HeaderMap::new();
@@ -731,5 +1507,245 @@ mod tests {
             session::csrf_header_value(&headers),
             Some("session-token-a")
         );
+    }
+
+    // ─── basic_auth full-chain integration tests ───
+    //
+    // The tests above exercise basic_auth's own leaf functions
+    // (basic_auth_is_valid, forwarded_proto_is_https, ...) in isolation.
+    // These four instead drive real axum::extract::Request values through
+    // the actual Router + `from_fn_with_state(state, basic_auth)` layer via
+    // tower::ServiceExt::oneshot, the same way a real HTTP request would
+    // reach it -- so a bug in how the pieces are wired together (not just a
+    // bug in one leaf function) would actually be caught.
+    use tower::ServiceExt;
+
+    // Builds a real AppState so the full middleware (which is hardwired to
+    // `State<Arc<AppState>>`, not a trimmed-down test double) can run
+    // unmodified. `docker`/`nats` are real client objects but never make a
+    // network call in these tests: bollard's connect_with_http only builds
+    // an HTTP client (no handshake at construction time), and async-nats's
+    // `retry_on_initial_connect` makes `connect()` return immediately,
+    // retrying the actual TCP handshake in a background task -- fine here
+    // because basic_auth itself never touches state.docker or state.nats.
+    async fn test_app_state(
+        auth_user: Option<&str>,
+        auth_password: Option<&str>,
+        secret: [u8; 32],
+        ttl: Duration,
+    ) -> Arc<AppState> {
+        // Scoped tightly around the synchronous env read only: clippy (and
+        // real deadlock risk under multi-threaded tokio::test) both reject
+        // holding a std::sync::MutexGuard across the .await points below.
+        let mut cfg = {
+            let _guard = config::env_test_lock().lock().unwrap();
+            config::Config::from_env().unwrap()
+        };
+        cfg.auth_user = auth_user.map(str::to_string);
+        cfg.auth_password = auth_password.map(str::to_string);
+
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:1", 120, bollard::API_DEFAULT_VERSION)
+                .unwrap();
+        let nats = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:14222")
+            .await
+            .unwrap();
+
+        Arc::new(AppState {
+            templates: Tera::default(),
+            config: cfg,
+            docker,
+            http_client: reqwest::Client::new(),
+            file_lock: std::sync::Mutex::new(()),
+            kea_config_lock: tokio::sync::Mutex::new(()),
+            dhcp_probe_lock: tokio::sync::Mutex::new(()),
+            nats,
+            db: Mutex::new(Connection::open_in_memory().unwrap()),
+            ui_session_secret: secret,
+            ui_session_ttl: ttl,
+            nats_issuer_public_key: String::new(),
+        })
+    }
+
+    // A single trivial route standing in for every real protected route --
+    // what matters for these tests is only what basic_auth itself does
+    // before the request ever reaches a handler, not any specific handler's
+    // own behavior.
+    fn test_protected_router(state: Arc<AppState>) -> Router {
+        async fn dummy_ok() -> &'static str {
+            "ok"
+        }
+        Router::new()
+            .route("/protected", get(dummy_ok).post(dummy_ok))
+            .layer(axum::middleware::from_fn_with_state(state, basic_auth))
+    }
+
+    // A mutating request with no CSRF token anywhere (no header, no form
+    // field, no cookie at all) must be rejected outright -- this is the
+    // baseline CSRF gate every mutating route relies on, exercised here
+    // through the real middleware rather than just its `verify_csrf_token`
+    // helper. Basic Auth is left unconfigured so this test isolates the
+    // CSRF branch from the separate 401 gate already covered by
+    // `basic_auth_rejects_wrong_credentials_and_accepts_correct_ones`.
+    #[tokio::test]
+    async fn basic_auth_middleware_rejects_mutating_request_without_csrf_token() {
+        let secret = [0xAA; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(None, None, secret, ttl).await;
+        let router = test_protected_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from("some=data"))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // A mutating request whose body exceeds MAX_CSRF_BODY_BYTES must be
+    // rejected with 400 before the CSRF field is ever parsed out of it --
+    // this is the fail-closed guard against buffering an unbounded body
+    // into memory on every mutating request (axum::body::to_bytes's own
+    // cap), not a CSRF-specific check, but it lives in the same code path
+    // and was previously only reachable by inspection, not a real request.
+    #[tokio::test]
+    async fn basic_auth_middleware_rejects_oversized_body_on_mutating_request() {
+        let secret = [0xBB; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(None, None, secret, ttl).await;
+        let router = test_protected_router(state);
+
+        let oversized = vec![b'a'; MAX_CSRF_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .body(Body::from(oversized))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // The middleware accepts a submitted CSRF token from either of two
+    // places (see basic_auth's `csrf_header_value(...).or_else(...
+    // form_urlencoded...))`): the X-CSRF-Token header (used by this app's
+    // own JSON `fetch()` calls, e.g. secondaries.html) or a `csrf_token`
+    // form field (used by every plain HTML <form> submit in this app's
+    // templates). Both must independently pass through the real request
+    // pipeline, not just the leaf comparison function.
+    #[tokio::test]
+    async fn basic_auth_middleware_accepts_csrf_token_via_header_or_form_field() {
+        let secret = [0xCC; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(None, None, secret, ttl).await;
+        let session = session::issue_session(&secret, ttl);
+        let cookie = format!("{}={}", session::SESSION_COOKIE_NAME, session.cookie_value);
+
+        let router = test_protected_router(Arc::clone(&state));
+        let header_request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(axum::http::header::COOKIE, cookie.clone())
+            .header(CSRF_HEADER_NAME, session.csrf_token.clone())
+            .body(Body::empty())
+            .unwrap();
+        let header_response = router.oneshot(header_request).await.unwrap();
+        assert_eq!(header_response.status(), StatusCode::OK);
+
+        let router = test_protected_router(state);
+        let form_request = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(axum::http::header::COOKIE, cookie)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from(format!("csrf_token={}", session.csrf_token)))
+            .unwrap();
+        let form_response = router.oneshot(form_request).await.unwrap();
+        assert_eq!(form_response.status(), StatusCode::OK);
+    }
+
+    // The full chain, end to end: an unauthenticated request is rejected
+    // (the Basic Auth gate runs unconditionally, even for a plain GET with
+    // no CSRF involved at all); a first authenticated GET has no session
+    // cookie yet, so the middleware issues one via Set-Cookie -- the same
+    // thing a real browser's first page load does; and only a follow-up
+    // mutating request presenting both correct Basic Auth *and* that real
+    // session's own CSRF token reaches the downstream handler.
+    #[tokio::test]
+    async fn basic_auth_middleware_full_accept_path_with_basic_auth_and_csrf() {
+        let secret = [0xDD; 32];
+        let ttl = Duration::from_secs(300);
+        let state = test_app_state(Some("admin"), Some("secret"), secret, ttl).await;
+        let auth_header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("admin:secret")
+        );
+
+        let router = test_protected_router(Arc::clone(&state));
+        let unauthenticated = Request::builder()
+            .method("GET")
+            .uri("/protected")
+            .body(Body::empty())
+            .unwrap();
+        let unauthenticated_response = router.oneshot(unauthenticated).await.unwrap();
+        assert_eq!(unauthenticated_response.status(), StatusCode::UNAUTHORIZED);
+
+        let router = test_protected_router(Arc::clone(&state));
+        let first_get = Request::builder()
+            .method("GET")
+            .uri("/protected")
+            .header(axum::http::header::AUTHORIZATION, auth_header.clone())
+            .body(Body::empty())
+            .unwrap();
+        let first_response = router.oneshot(first_get).await.unwrap();
+        assert_eq!(first_response.status(), StatusCode::OK);
+
+        let set_cookie = first_response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("a fresh session must set a cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // Set-Cookie carries attributes (Path=/, SameSite=..., Max-Age=...)
+        // after the first `;` -- strip those down to the bare `name=value`
+        // pair a request's own Cookie header uses.
+        let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+        let cookie_value = cookie_pair
+            .strip_prefix(&format!("{}=", session::SESSION_COOKIE_NAME))
+            .expect("Set-Cookie must carry the session cookie")
+            .to_string();
+        let issued_session =
+            session::validate_session_cookie(&cookie_value, &secret, SystemTime::now())
+                .expect("the issued cookie must itself validate");
+
+        let router = test_protected_router(state);
+        let accepted_post = Request::builder()
+            .method("POST")
+            .uri("/protected")
+            .header(axum::http::header::AUTHORIZATION, auth_header)
+            .header(axum::http::header::COOKIE, cookie_pair)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from(format!(
+                "csrf_token={}",
+                issued_session.csrf_token
+            )))
+            .unwrap();
+        let accepted_response = router.oneshot(accepted_post).await.unwrap();
+        assert_eq!(accepted_response.status(), StatusCode::OK);
     }
 }

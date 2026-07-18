@@ -102,7 +102,13 @@ packetcache:
   servfail_ttl: 30
 
 # ── REST API (LAN-accessible, restricted by allow_from) ──────────────────────
+# webserver: true actually turns the listener on -- the other fields alone
+# (address/port/allow_from/api_key) are accepted without error but silently
+# do nothing without this flag (confirmed live: port 8082 never bound,
+# breaking every packet-cache flush call -- both the UI's own flush after a
+# LAN record change and nats-subscriber's flush after processing one).
 webservice:
+  webserver: true
   address: 0.0.0.0
   port: 8082
   allow_from:

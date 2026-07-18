@@ -1,7 +1,7 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! Main dashboard route displaying cache statistics and connection metrics.
 
-use crate::{config::DhcpMode, nginx_client, AppState};
+use crate::{config::DhcpMode, nginx_client, syslog_client, AppState};
 use axum::extract::State;
 use axum::response::{Html, Json};
 use serde_json::json;
@@ -10,32 +10,33 @@ use tera::Context;
 
 pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let cfg = &state.config;
-    let shared_cache = cfg.standard_cache_dir == cfg.ssl_cache_dir;
 
-    let standard_status =
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url).await;
-    let ssl_status = if !cfg.ssl_enabled {
-        None
-    } else if cfg.proxy_standard_url == cfg.proxy_ssl_url {
-        standard_status.clone()
-    } else {
-        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
+    // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and
+    // only diverge when an operator explicitly runs standard-mode and
+    // ssl-mode as two separate proxy services with different stub_status
+    // endpoints (see CLAUDE.md's "Two-Mode / Two-IP Architecture"). When
+    // they're equal, the second HTTP call would just re-fetch identical
+    // stats from the same nginx, so it's skipped and the first result is
+    // reused instead.
+    let standard_status_future =
+        nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url);
+    let ssl_status_future = async {
+        if cfg.ssl_enabled && cfg.proxy_standard_url != cfg.proxy_ssl_url {
+            nginx_client::get_stub_status(&state.http_client, &cfg.proxy_ssl_url).await
+        } else {
+            None
+        }
     };
 
-    // Start the blocking collectors together so cache scans and log parsing
-    // can overlap instead of serializing the dashboard render path.
-    let standard_used_gb_task = tokio::task::spawn_blocking({
-        let d = cfg.standard_cache_dir.clone();
+    // Each of these three stats sources does blocking I/O (`du`, reading
+    // full log files) — run in spawn_blocking so a slow disk doesn't stall
+    // the async runtime's worker threads for other in-flight requests. Start
+    // every independent collector before awaiting so dashboard latency is the
+    // slowest collector, not the sum of all collectors.
+    let cache_used_task = tokio::task::spawn_blocking({
+        let d = cfg.cache_dir.clone();
         move || nginx_client::get_cache_size_gb(&d)
     });
-    let ssl_used_gb_task = if shared_cache {
-        None
-    } else {
-        Some(tokio::task::spawn_blocking({
-            let d = cfg.ssl_cache_dir.clone();
-            move || nginx_client::get_cache_size_gb(&d)
-        }))
-    };
     let log_stats_task = tokio::task::spawn_blocking({
         let sl = cfg.standard_log.clone();
         let xl = cfg.ssl_log.clone();
@@ -51,25 +52,69 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         move || nginx_client::parse_log_tail(&path, 10)
     });
 
-    let standard_used_gb = standard_used_gb_task.await.unwrap_or(0.0);
-    let ssl_used_gb = if shared_cache {
-        standard_used_gb
-    } else {
-        ssl_used_gb_task
-            .expect("ssl cache collector is only skipped when caches are shared")
-            .await
-            .unwrap_or(0.0)
-    };
-    let log_stats = log_stats_task.await.unwrap_or_default();
-    let recent_logs = recent_logs_task.await.unwrap_or_default();
+    // Syslog store size/stats (#633 PR4): same spawn_blocking-wrapped shape
+    // as the three collectors above (get_syslog_size_gb shells out to `du`,
+    // get_syslog_stats does a full-tree scan, both block). Gated on
+    // syslog_enabled the same way ssl_status_future is gated on ssl_enabled
+    // above -- when the `logging` profile was never opted into,
+    // SYSLOG_LOG_ROOT may not even exist, so these must stay pure no-ops
+    // rather than run `du`/walk a directory that isn't there.
+    let syslog_size_task = tokio::task::spawn_blocking({
+        let enabled = cfg.syslog_enabled;
+        let root = cfg.syslog_log_root.clone();
+        move || {
+            if enabled {
+                syslog_client::get_syslog_size_gb(&root)
+            } else {
+                0.0
+            }
+        }
+    });
+    let syslog_stats_task = tokio::task::spawn_blocking({
+        let enabled = cfg.syslog_enabled;
+        let root = cfg.syslog_log_root.clone();
+        move || {
+            if enabled {
+                syslog_client::get_syslog_stats(&root)
+            } else {
+                syslog_client::SyslogStats::default()
+            }
+        }
+    });
 
-    let shared_cache_max_gb = cfg.standard_cache_max_gb;
-    let standard_pct = cache_usage_pct(standard_used_gb, cfg.standard_cache_max_gb);
-    let ssl_pct = cache_usage_pct(ssl_used_gb, cfg.ssl_cache_max_gb);
-    let shared_cache_pct = cache_usage_pct(standard_used_gb, shared_cache_max_gb);
+    let (
+        standard_status,
+        distinct_ssl_status,
+        cache_used_result,
+        log_stats_result,
+        recent_logs_result,
+        syslog_size_result,
+        syslog_stats_result,
+    ) = tokio::join!(
+        standard_status_future,
+        ssl_status_future,
+        cache_used_task,
+        log_stats_task,
+        recent_logs_task,
+        syslog_size_task,
+        syslog_stats_task,
+    );
+    let ssl_status = if !cfg.ssl_enabled {
+        None
+    } else if cfg.proxy_standard_url == cfg.proxy_ssl_url {
+        standard_status.clone()
+    } else {
+        distinct_ssl_status
+    };
+    let cache_used_gb = cache_used_result.unwrap_or(0.0);
+    let log_stats = log_stats_result.unwrap_or_default();
+    let recent_logs = recent_logs_result.unwrap_or_default();
+    let syslog_size_gb = syslog_size_result.unwrap_or(0.0);
+    let syslog_stats = syslog_stats_result.unwrap_or_default();
+
+    let cache_pct = cache_usage_pct(cache_used_gb, cfg.cache_max_gb);
 
     let mut ctx = Context::new();
-    ctx.insert("shared_cache", &shared_cache);
     ctx.insert("ssl_enabled", &cfg.ssl_enabled);
     let dhcp_mode = cfg.effective_dhcp_mode();
     let has_kea = matches!(dhcp_mode, DhcpMode::Kea);
@@ -77,17 +122,16 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("dhcp_mode_has_kea", &has_kea);
     ctx.insert("standard_status", &standard_status);
     ctx.insert("ssl_status", &ssl_status);
-    ctx.insert("standard_used_gb", &format!("{:.1}", standard_used_gb));
-    ctx.insert("ssl_used_gb", &format!("{:.1}", ssl_used_gb));
-    ctx.insert("shared_cache_used_gb", &format!("{:.1}", standard_used_gb));
-    ctx.insert("standard_max_gb", &cfg.standard_cache_max_gb);
-    ctx.insert("ssl_max_gb", &cfg.ssl_cache_max_gb);
-    ctx.insert("shared_cache_max_gb", &shared_cache_max_gb);
-    ctx.insert("standard_pct", &standard_pct);
-    ctx.insert("ssl_pct", &ssl_pct);
-    ctx.insert("shared_cache_pct", &shared_cache_pct);
+    ctx.insert("cache_dir", &cfg.cache_dir);
+    ctx.insert("cache_used_gb", &format!("{:.1}", cache_used_gb));
+    ctx.insert("cache_max_gb", &cfg.cache_max_gb);
+    ctx.insert("cache_pct", &cache_pct);
     ctx.insert("log_stats", &log_stats);
     ctx.insert("recent_logs", &recent_logs);
+    ctx.insert("syslog_enabled", &cfg.syslog_enabled);
+    ctx.insert("syslog_size_gb", &format!("{:.1}", syslog_size_gb));
+    ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
+    ctx.insert("syslog_stats", &syslog_stats);
     ctx.insert("active_page", "dashboard");
 
     crate::routes::render(
@@ -106,6 +150,12 @@ fn cache_usage_pct(used_gb: f64, max_gb: f64) -> u64 {
     }
 }
 
+// JSON counterpart to `dashboard()`'s stub_status section only (registered
+// at GET /api/metrics in main.rs). Deliberately omits the cache-size and
+// log-parsing work above, which is the expensive part of `dashboard()` --
+// intended for cheap polling of just the connection metrics. `dashboard.html`'s
+// own inline script polls this endpoint every 10s to refresh the live
+// connection-count numbers without re-running the heavier work above.
 pub async fn metrics_api(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = &state.config;
     let standard_status =

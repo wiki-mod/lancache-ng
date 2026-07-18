@@ -1,0 +1,144 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# GitHub Action for deriving a per-CI-run full-setup validation Docker subnet
+name: Derive validation network
+description: >-
+  Compute a per-run 172.30.<octet>.<base>/27 validation Docker subnet (and
+  its matching gateway/service IPs) from the current workflow run ID and
+  attempt. Used by the full-setup validation jobs so two different,
+  concurrent workflow runs sharing a self-hosted runner host never fight
+  over the same fixed bridge subnet (see issue #623). This action's own
+  hash-only derivation alone still leaves a check-then-create race between
+  two concurrent runs that derive the same candidate (#703) -- the
+  `subnet`/`gateway`/`*_ip` outputs below are only the STARTING candidate;
+  full-setup-validate.yml's own "Reserve a validation subnet and start the
+  stack" step is what makes the actually-used subnet collision-safe, via a
+  host-local flock plus retry loop (scripts/lib/reserve-validation-subnet.sh)
+  if that starting candidate turns out to be locked or in use.
+  #832 redesign: each reservation claims a /27 (30 usable hosts, comfortably
+  more than the ~10 the validation stack assigns today) drawn from a pool of
+  eight /27 blocks per third octet of the SAME already-owned 172.30.0.0/16
+  (~2,000 slots total, versus 252 one-per-octet /24 slots before), rather
+  than widening the search into the wider private 172.16.0.0/12 block --
+  that range is ALSO Docker's own default address-pool range for other,
+  unrelated networks on the same runner host (see CHANGELOG's #654 entry
+  for a real bug this project already hit from relying on that same range).
+  This action's own run step calls
+  scripts/lib/reserve-validation-subnet.sh's
+  validation_subnet_seed_for_attempt/validation_subnet_derive_slot/
+  validation_subnet_export_env functions directly (issue #822 pattern
+  audit: this used to be a second, independently-maintained reimplementation
+  of the same formula, kept in sync only by a code comment and
+  tests/bats/reserve_validation_subnet.bats's "matches
+  derive-validation-network's own formula" tests, with no guard preventing
+  the two from silently drifting). Since there is now only one
+  implementation, agreement with full-setup-validate.yml's own "Reserve a
+  validation subnet and start the stack" step (which sources the same
+  script) is structural, not a maintained invariant.
+
+outputs:
+  subnet:
+    description: Validation network subnet, e.g. 172.30.42.96/27
+    value: ${{ steps.derive.outputs.subnet }}
+  gateway:
+    description: Validation network gateway IP
+    value: ${{ steps.derive.outputs.gateway }}
+  proxy_ip:
+    description: proxy service IP (standard mode)
+    value: ${{ steps.derive.outputs.proxy_ip }}
+  proxy_ssl_ip:
+    description: proxy service IP (SSL mode)
+    value: ${{ steps.derive.outputs.proxy_ssl_ip }}
+  dns_standard_ip:
+    description: dns-standard service IP
+    value: ${{ steps.derive.outputs.dns_standard_ip }}
+  dns_ssl_ip:
+    description: dns-ssl service IP
+    value: ${{ steps.derive.outputs.dns_ssl_ip }}
+  watchdog_ip:
+    description: watchdog service IP
+    value: ${{ steps.derive.outputs.watchdog_ip }}
+  netdata_ip:
+    description: netdata service IP
+    value: ${{ steps.derive.outputs.netdata_ip }}
+  nats_ip:
+    description: nats service IP
+    value: ${{ steps.derive.outputs.nats_ip }}
+  ui_ip:
+    description: ui service IP
+    value: ${{ steps.derive.outputs.ui_ip }}
+  standard_shim_ip:
+    description: >-
+      standard-passthrough-shim service IP (issue #668) -- only started by
+      scripts/ssl-mitm-cache-simulation.sh's own `docker compose up` call
+      (the service is Compose-profile-gated), but derived here alongside
+      every other per-run address so that job's env block can thread a
+      collision-free value the same way it already does for the others.
+    value: ${{ steps.derive.outputs.standard_shim_ip }}
+  project_name:
+    description: Compose project name (derived for per-run isolation)
+    value: ${{ steps.derive.outputs.project_name }}
+  ui_port:
+    description: Admin UI host port (derived to avoid port collisions)
+    value: ${{ steps.derive.outputs.ui_port }}
+
+runs:
+  using: composite
+  steps:
+    # A fixed 172.30.99.0/24 validation subnet repeatedly collided when two
+    # different workflow runs landed on the same shared self-hosted runner
+    # host at the same time (#623) -- `needs:` only serializes jobs *within*
+    # one run, not across runs. Deriving the subnet from this run's own
+    # identity means two concurrent runs (almost) never pick the same one.
+    - name: Derive a per-run validation subnet
+      id: derive
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+        : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+
+        # Calls the SAME shared functions full-setup-validate.yml's own
+        # "Reserve a validation subnet and start the stack" step sources
+        # directly, instead of reimplementing the octet/subblock/slot
+        # formula inline a second time (issue #822 pattern audit: the two
+        # copies had no sync guard beyond a code comment demanding they stay
+        # byte-for-byte identical, and tests/bats/reserve_validation_subnet.bats
+        # could only check the two AGREE, not prevent one from drifting).
+        # This is now structurally impossible to drift, since there is only
+        # one implementation left.
+        # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+        source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+
+        # run_attempt is included because a rerun of a failed run reuses the
+        # exact same run_id -- without it, re-running a failed job would
+        # derive the same subnet again and could collide with a leftover
+        # bridge from its own previous (failed, possibly not fully torn
+        # down) attempt. attempt_number 1 here: this action always computes
+        # the FIRST, uncontested candidate for a run -- full-setup-validate.yml's
+        # own reservation step is what salts the seed for a genuine retry
+        # (attempt_number > 1) if this starting candidate turns out to be
+        # locked or in use (see validation_subnet_seed_for_attempt).
+        raw="$(validation_subnet_seed_for_attempt "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" 1)"
+        slot="$(validation_subnet_derive_slot "$raw")"
+
+        validation_subnet_export_env "$slot"
+
+        echo "Derived validation subnet ${VALIDATION_SUBNET} (slot ${slot}) from run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}."
+
+        {
+          echo "slot=${slot}"
+          echo "subnet=${VALIDATION_SUBNET}"
+          echo "gateway=${VALIDATION_GATEWAY}"
+          echo "proxy_ip=${VALIDATION_PROXY_IP}"
+          echo "dns_standard_ip=${VALIDATION_DNS_STANDARD_IP}"
+          echo "proxy_ssl_ip=${VALIDATION_PROXY_SSL_IP}"
+          echo "dns_ssl_ip=${VALIDATION_DNS_SSL_IP}"
+          echo "watchdog_ip=${VALIDATION_WATCHDOG_IP}"
+          echo "netdata_ip=${VALIDATION_NETDATA_IP}"
+          echo "nats_ip=${VALIDATION_NATS_IP}"
+          echo "ui_ip=${VALIDATION_UI_IP}"
+          echo "standard_shim_ip=${VALIDATION_STANDARD_SHIM_IP}"
+          echo "project_name=${COMPOSE_PROJECT_NAME}"
+          echo "ui_port=${VALIDATION_UI_PORT}"
+        } >> "$GITHUB_OUTPUT"

@@ -1,0 +1,121 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Attest image provenance to GHCR with retry
+description: >-
+  Wraps actions/attest (push-to-registry: true) with the issue #822 GHCR
+  retry policy: attest once, and on failure wait, re-authenticate with a
+  fresh `docker login`, and retry -- up to 4 total attempts (1 initial + 3
+  retries). See .github/actions/ghcr-build-push-retry for why this is a
+  second, separate composite action rather than one generic wrapper: a
+  `uses:` step's action reference cannot be parameterized, so each wrapped
+  action type needs its own explicit, chained retry steps.
+inputs:
+  registry:
+    description: Registry hostname to log in to on retry.
+    required: false
+    default: ghcr.io
+  username:
+    description: Registry username to re-authenticate with before a retry.
+    required: true
+  password:
+    description: Registry password/token to re-authenticate with before a retry.
+    required: true
+  backoff-seconds:
+    description: Seconds to wait before each retry, before re-authenticating.
+    required: false
+    default: "30"
+  subject-name:
+    required: true
+  subject-digest:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        push-to-registry: true
+
+    - name: Wait before retry 1
+      if: steps.attempt1.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 1
+      if: steps.attempt1.outcome == 'failure'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure'
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        push-to-registry: true
+
+    - name: Wait before retry 2
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 2
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        push-to-registry: true
+
+    - name: Wait before retry 3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt4
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        push-to-registry: true
+
+    # continue-on-error on every attempt above means none of their failures
+    # fail this composite action by itself -- this step surfaces the real
+    # pass/fail to the calling job.
+    - name: Resolve outcome across all attempts
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        for outcome in "${{ steps.attempt1.outcome }}" "${{ steps.attempt2.outcome }}" "${{ steps.attempt3.outcome }}" "${{ steps.attempt4.outcome }}"; do
+          if [[ "$outcome" == "success" ]]; then
+            exit 0
+          fi
+        done
+        echo "::error::All attestation attempts for ${{ inputs.subject-name }}@${{ inputs.subject-digest }} failed." >&2
+        exit 1

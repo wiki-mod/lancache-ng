@@ -24,15 +24,26 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # contents: write (widened from read, #897): scripts/lib/promote-lock.sh's
+  # acquire/release steps push/delete a dedicated refs/promote-lock/global
+  # ref to implement the cross-workflow mutex below -- see that file's own
+  # header comment and build-push.yml's `promote` job for the full
+  # reasoning. This ref is outside refs/heads/* and refs/tags/*, so it
+  # cannot touch protected branches or release tags.
+  contents: write
   packages: write
 
-concurrency:
-  # `latest` writes must serialize with the normal release promotion job in
-  # build-push.yml so rollback state cannot interleave across workflows.
-  group: "Build & Push-publish"
-  cancel-in-progress: false
-
+# REMOVED (#897): `latest` writes used to serialize with build-push.yml's
+# `promote` job via a shared workflow/job-level `concurrency:` group name
+# ("Build & Push-promote", #777). That primitive can silently cancel
+# whichever of the two workflows' runs is still queued (not yet running) the
+# moment the other one also requests the same group -- a real, confirmed gap
+# once #892 let multiple `promote`-reaching runs build in parallel. Real
+# mutual exclusion, still global across BOTH workflows (re-scoping either one
+# per-ref would reopen #777 -- a backfill racing a promotion for a different
+# ref), now comes from the SAME scripts/lib/promote-lock.sh git-ref lock
+# build-push.yml's `promote` job uses, acquired/released as explicit steps
+# below instead of relying on GitHub's own concurrency admission.
 defaults:
   run:
     shell: bash
@@ -72,6 +83,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # See build-push.yml's `promote` job for the full #897 rationale: this
+      # acquires the SAME global refs/promote-lock/global ref that job uses,
+      # so a manual backfill and an automatic promotion still can never move
+      # tags at the same time (the #777 property), without relying on
+      # GitHub's own concurrency admission (which can drop a queued run).
+      - name: Acquire the cross-workflow promote lock
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/promote-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
+
+          # Same budget as build-push.yml's `promote` job -- see that job's
+          # own step for the reasoning behind these numbers.
+          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -88,9 +122,19 @@ jobs:
           SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
           EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
           EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
-          REQUIRED_PLATFORMS: linux/amd64
+          # release/stack-images.yml declares every runtime service's "latest"
+          # channel (and the stack pointer) as linux/amd64 + linux/arm64; keep
+          # this in sync with that manifest so a backfill from an older
+          # amd64-only release tag cannot silently reset latest to an
+          # amd64-only stack and break arm64 installs on the default channel (#665).
+          REQUIRED_PLATFORMS: linux/amd64,linux/arm64
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
           # Product stack latest backfill intentionally excludes build-tools:
           # that tooling image has its own build/publish workflow and mutable
@@ -106,11 +150,18 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
+          # Wrapped in ghcr_retry (#822): every caller of this helper in this
+          # workflow expects the image to actually exist (this is a manual,
+          # operator-confirmed recovery run against already-published
+          # releases, never a "might not be built yet" probe), so a transient
+          # 401 here is a pure retry candidate. The `|| true` callers below
+          # (previous_refs) tolerate genuine absence the same way
+          # promote/backfill's build-push.yml counterparts do.
           digest_for_image() {
             local image=$1 digest
 
             # shellcheck disable=SC2016 # Go template is evaluated by Docker.
-            if ! digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
               return 1
             fi
             digest="${digest%\"}"
@@ -133,7 +184,8 @@ jobs:
             for target_image in "${promoted_targets[@]}"; do
               previous_digest="${previous_refs[$target_image]:-}"
               if [[ -n "$previous_digest" ]]; then
-                docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
+                ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                  docker buildx imagetools create --prefer-index=false -t "$target_image" "${target_image%:*}@${previous_digest}" \
                   || echo "::error::Could not restore previous digest for $target_image."
               else
                 echo "::error::No previous digest existed for $target_image; manual GHCR inspection is required."
@@ -143,8 +195,8 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          docker buildx imagetools inspect "$source_stack" >/dev/null
-          docker pull "$source_stack" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$source_stack" >/dev/null
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$source_stack" >/dev/null
           container_id="$(docker create "$source_stack")"
           stack_env="$(docker cp "${container_id}:/stack.env" - | tar -xO)"
           docker rm "$container_id" >/dev/null
@@ -174,7 +226,8 @@ jobs:
           source_stack_immutable_digest="$(digest_for_image "$source_stack_immutable")"
           [[ "$source_stack_digest" = "$source_stack_immutable_digest" ]] \
             || { echo "::error::${source_stack} digest does not match ${source_stack_immutable}; refusing to promote drifted release sources."; exit 1; }
-          bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
+          GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
 
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
@@ -183,7 +236,8 @@ jobs:
             source_sha_digest="$(digest_for_image "$source_image")"
             [[ "$source_release_digest" = "$source_sha_digest" ]] \
               || { echo "::error::${source_release_image} digest does not match ${source_image}; refusing to promote drifted release sources."; exit 1; }
-            bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
+            GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+              bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
           done
 
           bash scripts/check-stable-external-images.sh
@@ -193,13 +247,15 @@ jobs:
             source_release_digest="$(digest_for_image "$source_release_image")"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
             previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
-            docker buildx imagetools create --prefer-index=false -t "$target_image" "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create --prefer-index=false -t "$target_image" "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}"
             promoted_targets+=("$target_image")
           done
 
           target_stack="ghcr.io/${REPOSITORY}/stack:latest"
           previous_refs["$target_stack"]="$(digest_for_image "$target_stack" || true)"
-          docker buildx imagetools create --prefer-index=false -t "$target_stack" "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create --prefer-index=false -t "$target_stack" "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}"
           promoted_targets+=("$target_stack")
 
           for service in "${services[@]}"; do
@@ -218,3 +274,27 @@ jobs:
             printf -- '- Source commit: %s\n' "$declared_commit"
             printf -- '- Target channel: latest\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # `if: always()` (issue #897): release regardless of whether the
+      # backfill above succeeded or failed, so a real backfill failure
+      # cannot ALSO wedge every other queued promote/backfill run behind
+      # this job's own stale_after timeout for no reason.
+      - name: Release the cross-workflow promote lock
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/promote-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          # See build-push.yml's `promote` job for why `|| true` here is the
+          # documented AG-VAL-004 exception: release is best-effort cleanup,
+          # not correctness-critical (the stale_after takeover recovers a
+          # skipped/failed release), and must never flip an otherwise
+          # successful backfill to a failed job status.
+          promote_lock_release origin "$holder_note" || true

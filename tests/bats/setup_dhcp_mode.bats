@@ -108,11 +108,17 @@ setup() {
     run envsubst < "$repo_root/services/dhcp-proxy/dnsmasq.conf.template"
     [ "$status" -eq 0 ]
 
-    # DNS must stay disabled and the proxy must target the upstream server.
+    # DNS must stay disabled and the proxy must serve the configured subnet.
     [[ "$output" == *"port=0"* ]]
     [[ "$output" == *"dhcp-range=10.0.0.0,proxy"* ]]
     [[ "$output" == *"dhcp-option-pxe=6,10.0.0.10,10.0.0.11"* ]]
-    [[ "$output" == *"dhcp-proxy=10.0.0.1"* ]]
+
+    # Issue #450: `dhcp-proxy=<ip>` means "treat these DHCP-relay agents as
+    # full proxies" (RFC 5107) -- it does nothing without --dhcp-relay=,
+    # which this service never configures (confirmed against a live
+    # `dnsmasq --help`/`--test`). It must not reappear in the template;
+    # UPSTREAM_DHCP_IP is documentation-only now (see docs/dhcp-modes.md).
+    [[ "$output" != *"dhcp-proxy="* ]]
 
     # No placeholder may survive rendering; an unexpanded ${VAR} would mean a
     # required value was silently dropped into the running config.

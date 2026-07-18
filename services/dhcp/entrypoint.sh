@@ -9,8 +9,188 @@
 
 set -e
 
+# ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
+# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
+# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats):
+# this image builds from services/dhcp/ alone with no shared-file build context.
+# BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
+# lancache_shared_secret_dir
+# Directory holding the cross-container shared secrets, mounted from the
+# `shared-secrets` named volume into every container that must agree on a
+# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+lancache_shared_secret_dir() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
+}
+
+# lancache_shared_secret_gid
+# The Admin UI process runs as this gid (services/ui/Dockerfile pins uid/gid
+# 10001); dns/dhcp/nats run as root. Shared secret files are created group-owned
+# by this gid and mode 0640 so the unprivileged UI can read a root-created file
+# without the secret becoming world-readable -- the same cross-uid model the
+# nats.conf bootstrap already uses. Overridable for tests.
+lancache_shared_secret_gid() {
+    printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
+}
+
+# lancache_gen_hex32
+# 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
+# `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
+# images AND the BusyBox nats:2-alpine image, and nats:2-alpine ships no openssl.
+lancache_gen_hex32() {
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# lancache_gen_base64_32
+# base64 of 32 random bytes, for the DDNS TSIG key (PowerDNS/Kea expect a
+# base64-encoded HMAC key, matching setup.sh's `openssl rand -base64 32`).
+lancache_gen_base64_32() {
+    head -c 32 /dev/urandom | base64 | tr -d '\n'
+}
+
+# secret_is_placeholder <value>
+# True (returns 0) when the value is empty or one of the universal checked-in
+# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
+# The split-brain invariant requires every consumer of a given secret to decide
+# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
+# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
+# so routing their placeholder decision through this one definition keeps them in
+# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
+# dev tokens) match those in addition to this.
+#
+# Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
+# e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
+# normalize first, then match against lowercase/underscore patterns. This is a
+# deliberate fail-safe widening: it can only make MORE values match as a
+# placeholder, never fewer, so a real randomly-generated hex/base64 secret is
+# not realistically affected.
+#
+# This is one of three independently-maintained placeholder detectors in this
+# repo (the others: setup.sh's secret_value_is_placeholder, and
+# services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
+# deliberately separate per the maintainer decision recorded in issue #967
+# (Option B: cross-validate, don't unify). Divergences from the other two,
+# confirmed via tests/fixtures/placeholder-detection-cases.txt and
+# tests/bats/placeholder_detection_parity.bats:
+#   - This function does NOT recognize the legacy "lancache-*-secret"
+#     template-default shape. This omission IS deliberate:
+#     deploy/dev/docker-compose.yml and deploy/dev/.env ship real, working dev
+#     secrets in exactly that shape (e.g. lancache-nats-ui-dev-secret) that
+#     this read path must accept as configured, not regenerate.
+#   - This function does NOT recognize a bare "change-me"/"change_me" infix
+#     without a CHANGE_ME/changeme prefix, unlike setup.sh/Rust. Pre-existing,
+#     not reconciled here (#967 Option B keeps the three pattern sets
+#     separate rather than unifying them); no known rationale beyond that.
+#   - This function DOES recognize a bare YOUR_* prefix without a trailing
+#     _HERE suffix, and a generic *_HERE suffix on any value (not just
+#     YOUR_*_HERE) -- both wider than setup.sh/Rust. Also pre-existing and not
+#     reconciled here; no shipped placeholder in this repo actually needs
+#     either bare form, so the gap has not mattered in practice, but it is a
+#     real, confirmed divergence, not an intentional design choice.
+secret_is_placeholder() {
+    _sip_norm=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+    case "$_sip_norm" in
+        "" | change_me* | changeme* | your_* | *_here) return 0 ;;
+    esac
+    return 1
+}
+
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# Resolves a shared secret and prints it on stdout with no trailing newline.
+#   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
+#     operator/setup.sh-supplied real value always wins and is never persisted
+#     to the shared volume (all containers share one .env, so they all already
+#     agree on it). The CALLER is responsible for passing empty here when the
+#     configured value is a known placeholder for that specific secret.
+#   - Otherwise reads $dir/<name> if it already exists (some container generated
+#     it first), else atomically creates it with a freshly generated value.
+# Atomicity/race: the value is written to a temp file on the shared volume FIRST,
+# then the final name is claimed with `ln` (a hardlink, atomic and failing if the
+# target already exists). Because the temp already holds the full value before
+# the link, a concurrent reader in another container never observes a partial or
+# empty file, and a container that loses the create race falls back to reading
+# the winner's value instead of erroring. Returns non-zero (and prints nothing)
+# only if the shared volume is unwritable, so the caller can fail closed rather
+# than silently diverge.
+resolve_shared_secret() {
+    _rss_name="$1"
+    _rss_cur="$2"
+    _rss_gen="$3"
+
+    if [ -n "$_rss_cur" ]; then
+        printf '%s' "$_rss_cur"
+        return 0
+    fi
+
+    _rss_dir="$(lancache_shared_secret_dir)"
+    _rss_file="${_rss_dir}/${_rss_name}"
+
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+
+    mkdir -p "$_rss_dir" 2>/dev/null || true
+
+    _rss_val="$($_rss_gen)"
+    if [ -z "$_rss_val" ]; then
+        return 1
+    fi
+
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    printf '%s' "$_rss_val" > "$_rss_tmp"
+    chmod 0640 "$_rss_tmp" 2>/dev/null || true
+    chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
+
+    if ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
+        rm -f "$_rss_tmp"
+        printf '%s' "$_rss_val"
+        return 0
+    fi
+
+    rm -f "$_rss_tmp"
+    if [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    return 1
+}
+# END shared-secret-bootstrap library
+
 install -d -m 750 /run/kea
 mkdir -p /var/lib/kea
+# Central logging pipeline (#633): Kea's loggers write to this file in
+# addition to stdout (see kea-dhcp4.conf.template's "output-options" and
+# migrate_dhcp4_config()'s logger patch below) so fluent-bit can tail it, the
+# same "file on shared volume" pattern proxy/nginx already uses -- Kea itself
+# never creates a missing parent directory for a logger's file output, it
+# just fails to start, so this must exist before either daemon runs.
+# MUST be exactly /var/log/kea (issue #773): Kea 2.6.3's packaged binaries
+# hard-restrict file-logger `output` paths to that one directory as a
+# security hardening against arbitrary file writes via a malicious
+# config-set -- any other path (the project's usual /var/log/lancache-dhcp
+# convention included) fails config load with "invalid path in `output`",
+# refusing to start at all, not just losing the file log.
+mkdir -p /var/log/kea
+
+case "${1:-}" in
+    nmap|/usr/bin/nmap|/bin/nmap)
+        exec "$@"
+        ;;
+esac
+
+# Known-good Kea config snapshots (#614, follow-up to #415) are written by
+# the Admin UI's own process (services/ui/src/kea_snapshots.rs), not by this
+# entrypoint or the Kea daemons themselves -- Kea never reads or writes this
+# directory. The UI container runs as a fixed non-root UID/GID (10001, see
+# services/ui/Dockerfile), while this container runs as root and owns
+# everything else under /var/lib/kea (kea-dhcp4.conf, kea-leases4.csv, ...).
+# Since /var/lib/kea itself is root-owned (mode 0755, not writable by the UI
+# user), the UI process cannot even create its own subdirectory here without
+# this. Re-asserted on every start, the same pattern the `nats` service uses
+# to keep its shared /etc/nats/nats.conf writable by the Admin UI user after
+# a NATS restart (see deploy/*/docker-compose.yml).
+mkdir -p /var/lib/kea/config-snapshots
+chown -R 10001:10001 /var/lib/kea/config-snapshots
 
 # Defaults
 : "${DHCP_SUBNET:=10.0.0.0/24}"
@@ -24,16 +204,47 @@ if [ -z "${DHCP_NTP_SERVERS+x}" ]; then
 fi
 : "${DHCP_DNS_PRIMARY:=127.0.0.1}"
 : "${DHCP_DNS_SECONDARY:=127.0.0.1}"
-: "${KEA_CTRL_TOKEN:=}"
-: "${DDNS_TSIG_KEY:=}"
+# Resolve the shared KEA_CTRL_TOKEN and DDNS_TSIG_KEY (issue #858). KEA_CTRL_TOKEN
+# is used by both Kea's control-agent here and the Admin UI's DHCP API client;
+# DDNS_TSIG_KEY by both this daemon (signing DDNS updates) and PowerDNS (verifying
+# them). A real configured value wins; an empty/placeholder value is replaced by a
+# first-writer-wins value shared via the shared-secrets volume so both sides agree,
+# instead of crash-looping. If the shared volume is unwritable, resolution returns
+# empty and the fail-closed placeholder checks below still exit 1.
+_kea_ctrl_token_cfg="${KEA_CTRL_TOKEN:-}"
+if secret_is_placeholder "$_kea_ctrl_token_cfg"; then
+    _kea_ctrl_token_cfg=""
+else
+    case "$_kea_ctrl_token_cfg" in
+        lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) _kea_ctrl_token_cfg="" ;;
+    esac
+fi
+KEA_CTRL_TOKEN="$(resolve_shared_secret kea-ctrl-token "$_kea_ctrl_token_cfg" lancache_gen_hex32)" || KEA_CTRL_TOKEN=""
+_ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
+if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
+DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 : "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
-: "${DHCP_DDNS_PORT:=53}"
+# 5300, not 53 (issue #706): 5300 is pdns_server's (the authoritative
+# daemon, the only PowerDNS process with dnsupdate=yes) actual DNS-protocol
+# port, per services/dns/pdns.conf.template's local-port=5300. Port 53 is
+# pdns_recursor's port -- it does not relay the DNS UPDATE opcode to the
+# authoritative backend, so DDNS updates sent there simply time out
+# (confirmed empirically) with no error on either side.
+: "${DHCP_DDNS_PORT:=5300}"
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
-# Verify KEA_CTRL_TOKEN is set to a non-default secret.
+# Verify KEA_CTRL_TOKEN is set to a non-default secret. secret_is_placeholder's
+# universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
+# uses YOUR_*_HERE elsewhere, e.g. SECONDARY_REGISTRATION_TOKEN) plus this
+# service's own legacy shipped defaults below.
+if secret_is_placeholder "$KEA_CTRL_TOKEN"; then
+    echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
+    echo "Generate one with: openssl rand -hex 32"
+    exit 1
+fi
 case "$KEA_CTRL_TOKEN" in
-    ""|"CHANGE_ME_KEA_CTRL_TOKEN"|"lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
+    "lancache-dhcp-secret"|"lancache-dhcp-dev-secret"|"lancache-dhcp-prod-secret")
         echo "ERROR: KEA_CTRL_TOKEN must be set to a strong generated secret."
         echo "Generate one with: openssl rand -hex 32"
         exit 1
@@ -126,19 +337,32 @@ build_ntp_option() {
     printf ',\n          {\n            "name": "ntp-servers",\n            "data": "%s"\n          }' "$ntp_servers_csv"
 }
 
-case "$DDNS_TSIG_KEY" in
-    ""|CHANGE_ME*|changeme*)
-        echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
-        printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
-        exit 1
-        ;;
-esac
+# Kea always requires a real DDNS_TSIG_KEY (unlike PowerDNS, which falls back
+# to a loopback-only, TSIG-off safe state) -- see docs/threat-model.md T12.
+if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+    echo "ERROR: DDNS_TSIG_KEY must be set to the shared secret used by the PowerDNS containers."
+    printf '%s\n' "Generate one with: openssl rand -base64 32 | tr -d '\\n'"
+    exit 1
+fi
+
+# Kea's lease_cmds hook (needed for lease4-del, used by the Admin UI's
+# release-lease route and by this container's own upgrade migration below)
+# ships under Debian's arch-specific multiarch lib directory, e.g.
+# /usr/lib/x86_64-linux-gnu on amd64 vs /usr/lib/aarch64-linux-gnu on arm64
+# (this service is built for both, see RELEASE_PLATFORMS). Resolve the actual
+# installed path at startup instead of hardcoding either one, so the same
+# template/migration works unmodified on every built architecture.
+KEA_LEASE_CMDS_HOOK_PATH="$(find /usr/lib -maxdepth 5 -name libdhcp_lease_cmds.so 2>/dev/null | head -n1)"
+if [ -z "$KEA_LEASE_CMDS_HOOK_PATH" ]; then
+    echo "ERROR: libdhcp_lease_cmds.so not found under /usr/lib. Kea's lease_cmds hook is required for lease4-del (used by the Admin UI's release-lease route)."
+    exit 1
+fi
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH
 
 # shellcheck disable=SC2016
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}'
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}'
 
 render_kea_config() {
     local template=$1 target=$2
@@ -212,11 +436,23 @@ migrate_dhcp4_config() {
         exit 1
     fi
     next="$(mktemp)"
+    # kea_log_file: central logging pipeline (#633). Existing installs'
+    # persisted kea-dhcp4.conf (on the /var/lib/kea volume, so it survives
+    # upgrades untouched otherwise) only has the "stdout" output-option this
+    # migration originally wrote -- the jq filter below adds the file output
+    # alongside it (not in place of it) for both the "kea-dhcp4" and
+    # "kea-dhcp4.dhcp4" loggers, same dual-output shape as a first-boot
+    # render of the template. Comments cannot live in kea-dhcp4.conf.template
+    # itself (or the runtime JSON this migration writes) because both must
+    # stay parseable by `jq` -- see migrate_dhcp4_config's own callers and
+    # tests/bats/*kea* for the parseability contract this relies on.
     if ! jq \
         --arg domain "$DHCP_DOMAIN" \
         --argjson lease_time "$DHCP_LEASE_TIME" \
         --argjson max_lease_time "$DHCP_MAX_LEASE_TIME" \
         --argjson ntp_migration_map "$ntp_migration_map" \
+        --arg lease_cmds_hook_path "$KEA_LEASE_CMDS_HOOK_PATH" \
+        --arg kea_log_file "/var/log/kea/kea-dhcp4.log" \
         '
         def is_ipv4:
           type == "string"
@@ -256,6 +492,8 @@ migrate_dhcp4_config() {
 
         .Dhcp4["control-socket"]["socket-name"] = "/run/kea/kea4.sock"
         |
+        .Dhcp4["hooks-libraries"] = ((.Dhcp4["hooks-libraries"] // []) | if any(.[]; .library == $lease_cmds_hook_path) then . else . + [{"library": $lease_cmds_hook_path}] end)
+        |
         .Dhcp4["multi-threading"] = ({"enable-multi-threading": false} + (.Dhcp4["multi-threading"] // {}))
         | .Dhcp4["dhcp-ddns"] = ({
             "enable-updates": true,
@@ -279,7 +517,7 @@ migrate_dhcp4_config() {
           ))
         | walk(migrate_ntp_option)
         | .Dhcp4.loggers = ((.Dhcp4.loggers // []) as $loggers
-          | if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
+          | (if any($loggers[]; .name == "kea-dhcp4.dhcp4") then
               $loggers | map(if .name == "kea-dhcp4.dhcp4" then .severity = "ERROR" else . end)
             else
               $loggers + [{
@@ -289,6 +527,14 @@ migrate_dhcp4_config() {
                 "debuglevel": 0
               }]
             end)
+          | map(
+              if (.name == "kea-dhcp4" or .name == "kea-dhcp4.dhcp4") then
+                .["output-options"] = ((.["output-options"] // [{"output": "stdout"}]) as $opts
+                  | if any($opts[]; .output == $kea_log_file) then $opts
+                    else $opts + [{"output": $kea_log_file}]
+                    end)
+              else . end
+            ))
         ' \
         "$runtime" > "$next"; then
         rm -f "$next"
@@ -309,6 +555,18 @@ migrate_dhcp4_config /var/lib/kea/kea-dhcp4.conf
 # The Control Agent config is not modified by the UI, but it is persisted on
 # the Kea data volume. Regenerate it when KEA_CTRL_TOKEN or KEA_CTRL_HOST
 # changes so upgrades do not leave the API using stale credentials.
+#
+# This is a full-file `cmp`, not a field-level merge, by design: unlike
+# kea-dhcp4.conf above (which the Admin UI mutates live, so
+# migrate_dhcp4_config() merges narrowly to preserve that live state), this
+# file has no UI-mutated state to protect, and full regeneration is what lets
+# a future template change (new auth default, logger, socket path) reach
+# already-deployed installs on upgrade -- the same reason kea-dhcp-ddns.conf
+# below is fully regenerated rather than merged. The tradeoff: any manual
+# edit made directly to the persisted /var/lib/kea/kea-ctrl-agent.conf (e.g.
+# added TLS settings or an extra authenticated client) is silently discarded
+# on the next container start. Do not hand-edit this file; per #651, it is
+# treated as fully generated, like every other file this entrypoint renders.
 CTRL_AGENT_TEMPLATE="/etc/kea/kea-ctrl-agent.conf.template"
 CTRL_AGENT_RUNTIME="/var/lib/kea/kea-ctrl-agent.conf"
 CTRL_AGENT_NEXT="$(mktemp)"
@@ -322,6 +580,45 @@ fi
 
 # The DHCP-DDNS daemon config is not edited by the UI. Regenerate it on start
 # so upgrades can fix D2 schema or target changes without touching DHCP subnets.
+#
+# services/dhcp/kea-dhcp-ddns.conf's forward-ddns/reverse-ddns "name" fields
+# (issue #706) carry a literal trailing dot ("${DHCP_DOMAIN}.", each reverse
+# zone name below) that can't be documented inline in that file itself: it
+# is validated as plain JSON elsewhere (tests/bats/dhcp_kea_config_generation.bats
+# runs `jq empty` on the rendered output), and Kea's own config format,
+# while it does tolerate `//`/`/* */` comments as an extension, would break
+# that strict-JSON check. Kea's D2 daemon matches an outgoing update's
+# target FQDN against each ddns-domains "name" by treating it as a DNS-name
+# suffix, not a substring -- without the trailing dot, "name" is parsed as a
+# bare, non-fully-qualified label and D2 never finds a match for any real
+# (dotted, fully-qualified) FQDN it tries to update, silently discarding
+# every forward/reverse change with a "no match" error instead of sending
+# it (confirmed empirically against a real Kea 2.6.3 D2 instance -- issue
+# #706's DDNS-follow-through test is what first exercised this path
+# end-to-end). Kea's own config parser does not add the trailing dot
+# itself, so it must be literal in the template.
+#
+# reverse-ddns.ddns-domains (issue #768): this used to be a single entry
+# named the literal catch-all "in-addr.arpa." -- but Kea D2 requires "name"
+# to match one real, existing zone (it cannot express "any of these
+# dynamically-selected per-octet zones" in one entry), and PowerDNS never
+# creates a zone with that exact literal name; it only ever creates the
+# narrower private-range subzones services/dns/entrypoint.sh's
+# PRIVATE_REVERSE_ZONES list creates (e.g. "31.172.in-addr.arpa."). Every
+# reverse/PTR DDNS update was therefore rejected by PowerDNS with "Can't
+# determine backend for domain 'in-addr.arpa'" (RCODE 9, NOTAUTH),
+# unconditionally, for any octet -- confirmed against a real Kea 2.6.3 +
+# PowerDNS 5.2.11 stack. The fix mirrors PRIVATE_REVERSE_ZONES exactly: one
+# ddns-domains entry per IPv4 private-range subzone PowerDNS actually hosts
+# (the same 18 zones, verbatim), each targeting the same dns-servers as
+# forward-ddns above, so Kea's D2 can match a lease's reverse FQDN (e.g.
+# "50.1.168.192.in-addr.arpa.") against the correct, real zone by suffix.
+# IPv6 reverse zones (c.f.ip6.arpa./d.f.ip6.arpa.) are deliberately excluded
+# here -- this project's Kea config is Dhcp4-only, no DHCPv6, so D2 never
+# generates an IPv6 PTR update in the first place. If
+# services/dns/entrypoint.sh's PRIVATE_REVERSE_ZONES list ever changes, this
+# list must be updated to match (tests/bats/dhcp_kea_config_generation.bats
+# guards the two staying in sync).
 DDNS_TEMPLATE="/etc/kea/kea-dhcp-ddns.conf.template"
 DDNS_RUNTIME="/var/lib/kea/kea-dhcp-ddns.conf"
 DDNS_NEXT="$(mktemp)"

@@ -5,9 +5,21 @@
 # Tests zone format validity, serial monotonicity, and domain/record handling
 # without requiring a running PowerDNS daemon.
 
+# `run !` (used below to correctly fail a test on a negated assertion, see
+# the SC2314 comments at each use site) requires Bats >= 1.5.0. Declaring
+# this turns a silent BW02 runtime warning into a clear version-mismatch
+# failure if this suite ever runs under an older Bats.
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    helper_file="$BATS_TEST_TMPDIR/dns-zone-helpers.sh"
+
+    # generate_rpz_zone() calls _is_valid_domain/_normalize_domain (#822
+    # pattern audit fix); source the canonical library first so the helper
+    # has them available, matching how services/dns/entrypoint.sh's real
+    # embedded copy is available to its own call site.
+    # shellcheck source=scripts/lib/domain-validation.sh
+    source "$repo_root/scripts/lib/domain-validation.sh"
 
     # Source the helper that provides generate_rpz_zone()
     # shellcheck source=tests/bats/helpers/dns-zone-helpers.sh
@@ -103,7 +115,11 @@ count_record_type() {
     [ "$status" -eq 0 ]
     # Should have A records but no AAAA records
     grep -qx 'example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
-    ! grep -q 'AAAA' "$zone_file"
+    # A bare "! cmd" does not fail a Bats test on its own (SC2314): Bats runs
+    # test bodies under `set -e`, and bash exempts a "!"-negated command from
+    # triggering errexit, so a failing assertion here would silently fall
+    # through to whatever runs next instead of failing the test.
+    run ! grep -q 'AAAA' "$zone_file"
 }
 
 @test "zone ignores comments and empty lines" {
@@ -118,8 +134,9 @@ count_record_type() {
     # Should only have records for the two valid domains
     grep -qx 'valid\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     grep -qx 'another\.com 60 IN A 192\.0\.2\.1' "$zone_file"
-    # Should not include comment lines
-    ! grep -q '^#' "$zone_file"
+    # Should not include comment lines. See the SC2314 comment above: a bare
+    # "! cmd" wouldn't fail this test if a comment line leaked into the zone.
+    run ! grep -q '^#' "$zone_file"
 }
 
 @test "zone strips leading and trailing whitespace from domains" {
@@ -145,8 +162,10 @@ count_record_type() {
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
 
     [ "$status" -eq 0 ]
-    # Wildcard-only domain should only have wildcard record, not base domain
-    ! grep -qx 'wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    # Wildcard-only domain should only have wildcard record, not base domain.
+    # See the SC2314 comment above: this assertion is followed by more
+    # assertions, so a bare "! cmd" here would not fail the test on its own.
+    run ! grep -qx 'wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     grep -qx '\*\.wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     # Normal domain should have both
     grep -qx 'normal\.com 60 IN A 192\.0\.2\.1' "$zone_file"
@@ -250,8 +269,6 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     # Extract record lines (skip header) and verify order
-    local ordered_record
-    local wildcard_record
     local base_line
     base_line=$(grep -n 'ordered\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
     local wildcard_line
@@ -259,4 +276,67 @@ count_record_type() {
 
     # Base domain record should appear before wildcard record
     [ "$base_line" -lt "$wildcard_line" ]
+}
+
+# #822 pattern audit: RPZ generation previously had zero domain validation.
+# A malformed or overly-broad entry (here, a bare TLD) would generate a
+# "*.com"-style wildcard rule matching almost every domain under that TLD --
+# a real security gap, not just a cosmetic one. This proves the fix is wired
+# into the actual generation path generate_rpz_zone() exercises (not just
+# proven correct in isolation by domain_validation_parity.bats), and that
+# the WARNING is emitted so an operator notices the entry was dropped.
+@test "generate_rpz_zone skips a bare-TLD entry instead of emitting an overly-broad wildcard rule" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' 'com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: skipping invalid domain entry in RPZ zone: com"* ]]
+    # A bare "! cmd" would not fail this test on its own (SC2314): the first
+    # assertion here is followed by a second one, and Bats' `set -e` does not
+    # treat a negated command's failure as fatal, so a real regression (the
+    # overly-broad "*.com" rule this test exists to catch) could silently
+    # pass if only the second assertion's result determined the outcome.
+    run ! grep -q '\*\.com ' "$zone_file"
+    run ! grep -q '^com ' "$zone_file"
+}
+
+# Same class of gap, for a literal "*" entry (as broad as an RPZ rule can
+# get -- would match every domain PowerDNS resolves).
+@test "generate_rpz_zone skips a literal '*' entry" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' '*' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: skipping invalid domain entry in RPZ zone: *"* ]]
+    run ! grep -q '^\*\.\* ' "$zone_file"
+}
+
+# A mixed file (one bad entry alongside good ones) must still process the
+# valid entries normally -- one malformed line must not abort the whole
+# zone or silently drop unrelated, valid domains too.
+@test "generate_rpz_zone processes valid entries normally alongside a skipped invalid one" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    {
+        printf '%s\n' 'good.example.com'
+        printf '%s\n' 'com'
+        printf '%s\n' 'also-good.example.com'
+    } > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    grep -q '^good\.example\.com 60 IN A' "$zone_file"
+    grep -q '^also-good\.example\.com 60 IN A' "$zone_file"
+    [[ "$output" == *"WARNING: skipping invalid domain entry in RPZ zone: com"* ]]
+    run ! grep -q '\*\.com ' "$zone_file"
 }

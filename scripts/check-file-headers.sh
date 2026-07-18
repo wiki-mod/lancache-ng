@@ -28,6 +28,9 @@ is_excluded() {
         services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
         # Vendored third-party file and generated/compiled build output.
         services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;
+        # Vendored third-party data file (Mozilla Public Suffix List) —
+        # already carries its own upstream MPL-2.0 header.
+        services/proxy/public_suffix_list.dat) return 0 ;;
         # Binary/compiled asset types a comment header cannot apply to.
         *.png | *.jpg | *.jpeg | *.gif | *.ico | *.svg | *.woff | *.woff2 | *.ttf | *.eot | *.crt | *.key | *.pem) return 0 ;;
         *) return 1 ;;
