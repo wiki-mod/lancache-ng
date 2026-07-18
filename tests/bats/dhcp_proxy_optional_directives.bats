@@ -38,9 +38,15 @@ setup() {
 }
 
 @test "interface, router, ntp, and domain each render their own line" {
+    # shellcheck disable=SC2034 # read by _dhcp_proxy_render_optional_directives,
+    # sourced dynamically into this shell by load_dhcp_proxy_optional_directives_helpers
+    # (see setup() above) -- shellcheck cannot see the cross-file read.
     DHCP_PROXY_INTERFACE="eth0"
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment above
     DHCP_PROXY_ROUTER="10.0.0.1"
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment above
     DHCP_NTP_SERVERS="10.0.0.20,10.0.0.21"
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment above
     DHCP_PROXY_DOMAIN="lan.local"
 
     run _dhcp_proxy_render_optional_directives "$dest_conf"
@@ -54,7 +60,10 @@ setup() {
 }
 
 @test "boot filename and server render a single dhcp-boot line" {
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment in the
+    # "interface, router, ntp, and domain" test above
     DHCP_PROXY_BOOT_FILENAME="pxelinux.0"
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment above
     DHCP_PROXY_BOOT_SERVER="10.0.0.5"
 
     run _dhcp_proxy_render_optional_directives "$dest_conf"
@@ -66,6 +75,8 @@ setup() {
 }
 
 @test "boot server without a filename is not rendered and warns" {
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment in the
+    # "interface, router, ntp, and domain" test above
     DHCP_PROXY_BOOT_SERVER="10.0.0.5"
 
     run _dhcp_proxy_render_optional_directives "$dest_conf"
@@ -119,6 +130,8 @@ setup() {
     # internal space between "PXE" and "Client" in the value must survive --
     # this is the regression a naive `xargs`-based trim (which also
     # collapses internal whitespace) would reintroduce.
+    # shellcheck disable=SC2034 # see DHCP_PROXY_INTERFACE comment in the
+    # "interface, router, ntp, and domain" test above
     DHCP_PROXY_CUSTOM_OPTIONS="  60:PXE Client  ;93:0"
 
     run _dhcp_proxy_render_optional_directives "$dest_conf"

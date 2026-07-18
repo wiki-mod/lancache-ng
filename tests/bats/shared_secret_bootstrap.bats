@@ -14,7 +14,11 @@ setup() {
     export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/secrets"
     # No gid 10001 exists in CI; chgrp is best-effort in the library, so point
     # it at the current gid to keep the test hermetic.
-    export LANCACHE_SHARED_SECRET_GID="$(id -g)"
+    # Declared and exported separately (SC2155): combining them would mask
+    # a real failure exit status from `id -g` behind the export builtin's
+    # own (always-successful-here) return value.
+    LANCACHE_SHARED_SECRET_GID="$(id -g)"
+    export LANCACHE_SHARED_SECRET_GID
 }
 
 teardown() {

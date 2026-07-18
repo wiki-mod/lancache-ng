@@ -51,6 +51,9 @@ setup() {
 
 @test "resolve_lancache_image_channel returns an explicit stable channel unchanged" {
     missing_env="$BATS_TEST_TMPDIR/missing.env"
+    # shellcheck disable=SC2034 # read by resolve_lancache_image_channel(),
+    # sourced from setup.sh via load_setup_env_helpers -- shellcheck cannot
+    # see the cross-file dynamic-scope read.
     LANCACHE_IMAGE_CHANNEL="stable"
     run resolve_lancache_image_channel "$missing_env"
     [ "$status" -eq 0 ]
@@ -59,6 +62,8 @@ setup() {
 
 @test "resolve_lancache_image_channel infers stable from a LANCACHE_IMAGE_TAG=stable convenience value" {
     missing_env="$BATS_TEST_TMPDIR/missing.env"
+    # shellcheck disable=SC2034 # see LANCACHE_IMAGE_CHANNEL comment in the
+    # test above
     LANCACHE_IMAGE_TAG="stable"
     run resolve_lancache_image_channel "$missing_env"
     [ "$status" -eq 0 ]

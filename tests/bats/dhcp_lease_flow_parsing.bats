@@ -9,6 +9,11 @@
 # (which only runs via workflow_dispatch and needs a runner with Docker), so
 # a regression in the parser itself is still caught by normal, fast bats CI.
 
+# Required for `run !` (used below to correctly fail a test on a negated
+# assertion, see the SC2314 comment inline) -- same requirement as
+# dns_zone_generation.bats.
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
@@ -127,7 +132,16 @@ write_lease_fixture() {
     [ "$status" -eq 0 ]
     parsed="$output"
 
-    ! printf '%s\n' "$parsed" | grep -q '^ntp_servers='
+    # SC2314: a bare `! cmd` mid-test is exempt from bash's own `set -e`
+    # (per the bash manual, a command whose status is inverted by `!` never
+    # triggers errexit) and, since it isn't the test's final statement
+    # either, Bats has no other hook to notice it failed -- this line could
+    # never fail the test regardless of what grep found. `run !` (Bats >=
+    # 1.5.0, required below) makes Bats itself assert that the wrapped
+    # command exits nonzero, failing the test outright if it doesn't -- no
+    # separate `$status` check needed or wanted, matching the equivalent
+    # fix already applied in dns_zone_generation.bats.
+    run ! grep -q '^ntp_servers=' <<< "$parsed"
     run dhcp_lease_field "$parsed" ntp_servers
     [ "$status" -eq 1 ]
 }

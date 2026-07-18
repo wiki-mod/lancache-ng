@@ -194,7 +194,11 @@ run_one_cycle() {
 @test "write_status with SSL enabled includes a stable DNS-SSL block across repeated writes" {
     export SSL_ENABLED=1
     export C_DNS_SSL="lancache-dns-ssl"
+    # shellcheck disable=SC2034 # read by write_status() (sourced from
+    # services/watchdog/watchdog.sh) -- shellcheck cannot see the
+    # cross-file dynamic-scope read.
     F_DNS_SSL=0
+    # shellcheck disable=SC2034 # see F_DNS_SSL comment above
     H_DNS_SSL="healthy"
 
     write_status
