@@ -203,7 +203,11 @@ to the operator anywhere in this project:**
   `scripts/*-simulation.sh` CI script builds on — has neither
   `dhcp`/`dhcp-proxy` nor the `logging` profile (`syslog-ng`/`fluent-bit`)
   at all; only `dev`/`quickstart` have all 9 wired services *and* the full
-  logging profile together. PR #828 (open, not yet merged into `v0.2.0`)
+  logging profile together. PR #828 (**correction, 2026-07-18 review pass:
+  merged 2026-07-15 into `v0.2.0` as `4a5e0c11`**, the same day as this
+  research pass -- this paragraph's earlier "open, not yet merged" status
+  was left stale after that merge; see the summary table and currency-check
+  note above for the already-corrected status)
   adds `scripts/syslog-forwarding-simulation.sh` running against
   `deploy/quickstart` instead, proving 6 of 9 services
   (`proxy`, `ui`, `nats`, `dns-standard`, `dns-ssl`, `watchdog`) end-to-end
@@ -440,8 +444,7 @@ above, just on the dashboard instead of the logs page.
 
 ## 5. Open items / follow-up candidates surfaced by this inventory (not filed as issues — this is a research pass, not a fix pass)
 
-1. `services/ui/src/routes/logs.rs`'s `logs_page` hardcodes `host=None` and
-   ignores `?filter=` in syslog mode — real, current, user-facing gap.
+1. **Correction (2026-07-18 review pass): the `host=None` half of this item is stale.** `services/ui/src/routes/logs.rs`'s `logs_page` no longer hardcodes `host=None` — PR #865 (`2137157f`, closes #848) wired a real `?host=` parameter through to `parse_syslog_tail`, confirmed directly against current `origin/v0.2.0` (see §3.4 above, already marked FIXED there). The still-unconfirmed, real remaining gap is that `logs_page` continues to ignore `?filter=` in syslog mode — that half of this item stands as-is.
 2. `docs/architecture-ng.md` cites the now-closed #633 for a still-open gap
    (documentation drift, `AG-DOC-001` territory) — needs a live tracking
    issue reference once one exists.
