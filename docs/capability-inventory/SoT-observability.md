@@ -20,8 +20,28 @@ as wired in `deploy/{dev,prod,quickstart,full-setup}/docker-compose.yml`,
 **`origin/v0.2.0`**. Cross-referenced against issues #453 (central logging
 umbrella, OPEN), #632 (baseline, closed), #633 (follow-up: full matrix,
 Admin UI integration, retention engine — CLOSED 2026-07-13, verified against
-PRs #753/#756/#757/#758), and PR #828 (open, not yet merged into v0.2.0 —
-"real syslog-ng -> Admin UI visibility E2E simulation").
+PRs #753/#756/#757/#758), and PR #828 (**merged** 2026-07-15 into `v0.2.0` as
+commit `4a5e0c11` — "real syslog-ng -> Admin UI visibility E2E simulation";
+open at the time this doc was originally written, merged later the same day).
+
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). Two
+> corrections: (1) PR #828's status above updated from "open" to "merged";
+> it remains a test-only PR that adds no fix, per this doc's own §3.4/§4
+> analysis. (2) The `logs.rs` per-host-filtering gap this doc calls "not yet
+> fixed" (§3.4, point 1, and the summary table) **is now fixed**: PR #865
+> (`2137157f`, closes #848) wires a real `?host=` query parameter through to
+> `parse_syslog_tail`, adds `list_syslog_hosts()` for a UI dropdown, and
+> defensively rejects a path-traversal-shaped host value -- the exact
+> landmine this doc's own bughunt sibling (finding #10) had flagged as latent
+> in the unfixed code. Point 3 (200-line cap starving quiet hosts) is also
+> fixed, by PR #861 (`88b429d6`). Point 2 (`?filter=` silently ignored in
+> syslog mode) was not independently re-verified against the current
+> `logs.html` template in this pass -- current code documents `filter` and
+> `host` as intentionally distinct, mode-specific parameters (see
+> `logs.rs`'s own doc comments), which may or may not fully resolve the
+> original UX concern; flagging as unconfirmed rather than asserting either
+> way. See details in the section below.
 
 ---
 
@@ -358,9 +378,12 @@ This is a textbook instance of AGENTS.md's Feature Completeness rule
 ("If backend code supports a feature but the Admin UI does not expose it,
 treat that as UI delivery debt by default") — the backend
 (`syslog_client.rs`) already has the capability; only the route wiring in
-`logs.rs` is incomplete. Not yet fixed as of this audit (no PR found that
-touches `logs.rs`'s `host=None` call or adds syslog-mode filter support;
-PR #828 is a *test* PR, adds no fix).
+`logs.rs` is incomplete. **Not yet fixed as of this audit (2026-07-15)**; PR
+#828 is a *test* PR, adds no fix. **FIXED as of 2026-07-18's currency
+check**: PR #865 (`2137157f`, closes #848) wires a real `?host=` parameter
+through to `parse_syslog_tail` and adds `list_syslog_hosts()` for a UI
+dropdown -- confirmed directly against current `origin/v0.2.0`'s
+`services/ui/src/routes/logs.rs`.
 
 **Dashboard tile** (`services/ui/src/templates/dashboard.html`, gated on
 `syslog_enabled`): shows only `syslog_stats.hosts | length` (host *count*,
@@ -412,8 +435,8 @@ above, just on the dashboard instead of the logs page.
 | Retention/storage-budget engine | Done — `watchdog.sh`'s `maybe_prune_syslog()`, age-first-then-size-budget-priority |
 | CI guard for logging matrix | Done — `scripts/check-logging-matrix.sh` in `validate-compose` |
 | fluent-bit healthcheck | Done (binary-integrity only, documented limitation) |
-| **Live E2E proof: real event → syslog-ng → Admin UI visibility** | **In progress, not yet merged** — PR #828 (open) covers 6/9 services with per-run markers + a weaker netdata check; `dhcp`/`dhcp-proxy` explicitly deferred |
-| **`logs.rs` per-host/filter bug found during that E2E scoping** | **Still open, not yet fixed** — confirmed directly in code this session (§3.4) |
+| **Live E2E proof: real event → syslog-ng → Admin UI visibility** | **Merged 2026-07-15** (`4a5e0c11`, PR #828) — covers 6/9 services with per-run markers + a weaker netdata check; `dhcp`/`dhcp-proxy` explicitly deferred |
+| **`logs.rs` per-host/filter bug found during that E2E scoping** | **FIXED 2026-07-16** by PR #865 (`2137157f`) — `?host=` now wired through to `parse_syslog_tail`; see currency-check note above |
 
 ## 5. Open items / follow-up candidates surfaced by this inventory (not filed as issues — this is a research pass, not a fix pass)
 
