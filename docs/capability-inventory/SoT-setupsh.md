@@ -578,7 +578,23 @@ is up, not that it actually resolves.)
 **Idempotence**: `--rotate` explicitly preserves anything not being rotated
 (`KEEP_KNOWN_GOOD_CONFIGS` from existing `.env` if not overridden); a
 non-`--rotate` run against an existing directory `die()`s rather than
-silently overwriting.
+silently overwriting — but that guard only protects the **local** files.
+The registration POST (`${primary}/api/secondary/register`) fires
+unconditionally before `cmd_secondary` ever checks whether `secondary_dir`
+already exists, and the primary's handler
+(`register_secondary` in `services/ui/src/routes/secondaries.rs`) does an
+unconditional `INSERT OR REPLACE INTO secondaries` for that name on every
+call, generating and hashing a brand-new `nats_password` whether or not this
+is a genuinely new registration. So re-running `setup.sh secondary` without
+`--rotate` against an already-provisioned local directory still rotates that
+secondary's credential on the primary before the local `die()` fires: the
+operator sees a clean failure with no local files touched, but the primary
+now expects a password this secondary's untouched local `.env` doesn't have,
+silently breaking that secondary's NATS auth until it is re-registered (this
+time with `--rotate`) to pick up the new credential. This is the same class
+of primary-mutates-before-local-guard risk that the `--rotate` preflight
+comment above (issue #665) already documents for the `--rotate` path itself;
+this repeat-without-rotate path has no equivalent guard on the primary side.
 
 **Test coverage — the weakest in the file.** `tests/bats/setup_secondary_docker_compose.bats`
 is a REGRESSION TEST FOR A TEXT PATTERN, not a functional test: it locates
