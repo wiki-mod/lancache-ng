@@ -25,9 +25,15 @@ Audited against a fresh clone of `origin/v0.2.0` (branch `bughunt-ui-routes`).
 > `DOMContentLoaded` handler still auto-fires this endpoint unconditionally
 > on every page load, still restarting the dhcp-probe container and running
 > a real nmap broadcast scan with no caching or cooldown; verdict updated
-> to PARTIALLY FIXED below. Every other finding in this document was
-> independently re-checked against current code and remains accurate/
-> unfixed as originally recorded.
+> to PARTIALLY FIXED below. The same `d971063c`/#978 commit also fixed
+> finding #20 (`add_reservation`'s unvalidated `hostname` field) by adding an
+> `is_valid_domain_name` guard; verdict updated to FIXED below. Finding #3
+> (`metrics_api` "confirmed dead code") was also corrected this pass -- not
+> a currency gap but a factually wrong original finding: `dashboard.html`
+> has called `fetch('/api/metrics')` since long before this document's own
+> baseline. Every other finding in this document was independently
+> re-checked against current code and remains accurate/unfixed as
+> originally recorded.
 
 Methodology: vacuum-first, unscoped, exhaustive -- every finding is collected as observed, with
 no pre-filtering or self-verification during collection (verification is a later, separate
@@ -75,11 +81,19 @@ findings that overlap with it are still listed (for completeness) with a note.
    merge both files. This is an actual behavioral inconsistency between `dashboard.rs` and
    `logs.rs` for the exact same "recent log lines" concept, not just a coverage gap.
 
-3. **`metrics_api` (`GET /api/metrics`) is confirmed dead code from the frontend's perspective**
-   (already noted in the SoT inventory; repeating here per the "no pre-filtering" collection
-   rule). No JS/template in `services/ui/src/templates/` or `static/` calls it. Either wire it
-   up or remove it -- as currently shipped it's unreachable functionality that still consumes
-   review/test attention.
+3. ~~**`metrics_api` (`GET /api/metrics`) is confirmed dead code from the frontend's perspective**~~
+   **CORRECTED (2026-07-18 currency check): this finding was wrong, not merely stale.**
+   `services/ui/src/templates/dashboard.html`'s own `<script>` block calls
+   `fetch('/api/metrics')` in `refreshDashboardMetrics()` (polled every 10s) to patch the live
+   connection-count numbers in place, and `main.rs` wires `GET /api/metrics` to
+   `routes::dashboard::metrics_api`. This call predates this document's own `3f53ac3b` baseline
+   by a wide margin (added by `4fa73ddf`, #446, long before this bug-hunt pass started) -- it is
+   not a later fix landing after the fact, the original finding was simply incorrect the moment
+   it was written. It was carried over from the SoT inventory (`docs/capability-inventory/
+   SoT-ui-routes.md`) unverified, under this doc's own "no pre-filtering during collection" rule;
+   that sibling document likely carries the same incorrect "dead code" claim and should be
+   checked/corrected separately -- not fixed here, since it lives on a different branch
+   (`docs/inventory-ui-routes`).
 
 4. `cache_usage_pct` (`routes/dashboard.rs:145-151`) has no lower-bound clamp: if `used_gb` were
    ever negative (not currently possible from `get_cache_size_gb`'s real implementation, but
@@ -334,21 +348,21 @@ findings that overlap with it are still listed (for completeness) with a note.
 ## dhcp.rs -- by far the largest and most complex route file (5568 lines; full non-test code,
 lines 1-3317, read in full; test module, lines 3318-5568, scanned by test-name coverage)
 
-20. **`add_reservation`'s `hostname` field is submitted to Kea with zero format validation,
-    unlike every other identity-bearing field in this file.** (`routes/dhcp.rs:1436-1494`)
-    `add_reservation` validates `form.mac` (`is_valid_mac`) and `form.ip` (`is_valid_ip`) before
-    use, but `form.hostname` is inserted straight into the reservation JSON
-    (`"hostname": form.hostname`, line ~1484) with no length cap, no character-set check, and no
-    DNS-label validity check -- a sharp contrast with `routes/domains.rs`'s LAN-record routes,
-    which validate every name field against `is_valid_dns_fqdn`/`is_valid_dns_fqdn_allow_
-    underscore` before it can reach NATS/PowerDNS. Since Kea's DDNS integration turns a
-    reservation's hostname into an actual DNS record (per this project's own architecture, a
-    lease/reservation hostname eventually becomes a `dns-standard`-side A/PTR record), an
-    unvalidated hostname here could produce a malformed DDNS update that Kea/PowerDNS then has
-    to reject or mishandle downstream, with the rejection surfacing far from where the bad input
-    was actually accepted. Whether Kea's own config-test/config-set validates hostname shape
-    server-side (which would fail this request loudly rather than silently) was not traced
-    further outside this file.
+20. ~~**`add_reservation`'s `hostname` field is submitted to Kea with zero format validation,
+    unlike every other identity-bearing field in this file.**~~ **FIXED by #978 (commit
+    `d971063c`, 2026-07-18 currency check).** (`routes/dhcp.rs:1436-1494` at original writing)
+    `add_reservation` validated `form.mac` (`is_valid_mac`) and `form.ip` (`is_valid_ip`) before
+    use, but `form.hostname` used to be inserted straight into the reservation JSON with no
+    length cap, no character-set check, and no DNS-label validity check -- a sharp contrast with
+    `routes/domains.rs`'s LAN-record routes, which validate every name field before it can reach
+    NATS/PowerDNS. **Confirmed fixed against current `origin/v0.2.0`**: `add_reservation` now
+    guards with `if !form.hostname.trim().is_empty() && !is_valid_domain_name(&form.hostname)`
+    before the value reaches the reservation JSON (deliberately allowing an empty hostname
+    through unchanged, since that was already a supported, pre-existing state per the fix's own
+    commit comment referencing issue #947) and rejects an invalid one with a clear error instead
+    of forwarding it to Kea. This is the same commit (`d971063c`/#978) already cited above in
+    the currency-check note for closing finding #21's CSRF-exemption half -- both fixes shipped
+    together.
 
 21. **PARTIALLY FIXED by #978 (commit `d971063c`) -- the CSRF-exemption half is closed, the
     disruptive auto-trigger-on-every-page-load behavior itself is NOT.** Originally: "`GET /dhcp`
@@ -452,8 +466,9 @@ All 9 route files plus `mod.rs` (10 files, matching the SoT inventory's own file
 been read in full for their non-test code. `dhcp.rs`'s ~2250-line test module was scanned by
 test-name/coverage rather than read line-by-line, given its size; no additional findings were
 derived from the test code itself beyond the coverage-gap observations already folded into the
-numbered findings above (e.g. finding #20's note that no test exercises `add_reservation`'s
-hostname field, since none of the existing tests target it).
+numbered findings above (e.g. finding #20, now fixed: `is_valid_domain_name` itself has direct
+unit-test coverage, though no test in this module specifically drives `add_reservation`'s own
+handler with an invalid hostname to exercise its rejection path end-to-end).
 
 This document is the raw, unfiltered output of the collection phase for issue #849 (vacuum-first,
 no self-verification during collection, per the maintainer-agreed methodology for this sweep).
