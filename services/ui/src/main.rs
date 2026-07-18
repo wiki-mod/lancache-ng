@@ -85,13 +85,40 @@ const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-regist
 // claiming otherwise -- a pre-existing doc/script inconsistency out of scope
 // here) is itself pasteable verbatim by a manual deployer. A real hex/base64
 // secret can never match any of these patterns by chance.
+//
+// Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
+// e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
+// normalize first, then match against lowercase/underscore patterns. This is
+// a deliberate fail-safe widening: it can only make MORE values match as a
+// placeholder, never fewer, so a real randomly-generated hex/base64 secret is
+// not realistically affected. The `<...>` bracket check is applied to the raw
+// (non-normalized) token since it only inspects punctuation, not casing.
+//
+// This is one of three independently-maintained placeholder detectors in this
+// repo (the others: scripts/lib/shared-secret-bootstrap.sh's
+// secret_is_placeholder, embedded into the dns/dhcp/ui entrypoints, and
+// setup.sh's secret_value_is_placeholder), kept deliberately separate per the
+// maintainer decision recorded in issue #967 (Option B: cross-validate, don't
+// unify). Divergence from the shared entrypoint library, confirmed via
+// tests/fixtures/placeholder-detection-cases.txt and this module's own
+// secondary_registration_token_is_placeholder_matches_shared_parity_fixture
+// test: this function requires the full YOUR_*_HERE suffix (matching
+// setup.sh) and has no generic *_HERE-on-any-value rule, where the shared
+// entrypoint library accepts a bare YOUR_* prefix and any *_HERE suffix.
+// Pre-existing, not reconciled here (#967 Option B keeps the pattern sets
+// separate); no shipped SECONDARY_REGISTRATION_TOKEN placeholder actually
+// needs either bare form, so the gap has not mattered in practice, but it is
+// a real, confirmed divergence, not an intentional design choice.
 fn secondary_registration_token_is_placeholder(token: &str) -> bool {
-    token.is_empty()
-        || token.starts_with("CHANGE_ME_")
-        || (token.starts_with("YOUR_") && token.ends_with("_HERE"))
-        || token.starts_with("changeme")
-        || token.contains("change-me")
-        || (token.starts_with("lancache-") && token.ends_with("-secret"))
+    if token.is_empty() {
+        return true;
+    }
+    let normalized = token.to_lowercase().replace('-', "_");
+    normalized.starts_with("change_me_")
+        || (normalized.starts_with("your_") && normalized.ends_with("_here"))
+        || normalized.starts_with("changeme")
+        || normalized.contains("change_me")
+        || (normalized.starts_with("lancache_") && normalized.ends_with("_secret"))
         || (token.starts_with('<') && token.ends_with('>'))
 }
 
@@ -1200,6 +1227,79 @@ mod tests {
             "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
         )
         .is_ok());
+    }
+
+    // Cross-language parity coverage for secret/token placeholder detection
+    // (issue #967). This checks the "rust" column of the shared fixture
+    // against secondary_registration_token_is_placeholder(); the "shared" and
+    // "setup" columns are checked the same way, against the other two
+    // independent implementations, by
+    // tests/bats/placeholder_detection_parity.bats. Three implementations
+    // exist on purpose (maintainer decision: Option B in #967, not a merge),
+    // but every case they're known to agree OR legitimately disagree on is
+    // pinned here so a silent future drift fails a test instead of going
+    // unnoticed.
+    #[test]
+    fn secondary_registration_token_is_placeholder_matches_shared_parity_fixture() {
+        // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's own
+        // established pattern, see the TEMPLATE_DIR test setup and
+        // domains.rs's is_valid_domain_matches_shared_parity_fixture test),
+        // not include_str!: the fixture lives outside this crate's source
+        // tree (tests/fixtures/ at the repo root, shared with the bash
+        // side), so a compile-time embed would bake an out-of-crate path
+        // into the build; a runtime read gives a clear "fixture missing"
+        // failure instead.
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+
+        for line in contents.lines() {
+            let line = line.trim_end();
+            // Blank lines and comment lines are not cases -- must match the
+            // bash reader's `[[ -z "$line" || "$line" == \#* ]]` skip rule
+            // exactly, or the two readers would silently disagree on which
+            // lines even count as fixture cases.
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Fields: <value> <shared> <setup> <rust>, whitespace-separated.
+            // Only the "rust" (4th) field is relevant here.
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [value, _shared, _setup, rust] = fields.as_slice() else {
+                panic!(
+                    "malformed shared parity fixture line (expected \"<value> <shared> <setup> <rust>\"): {line:?}"
+                );
+            };
+            let expect = *rust;
+            total += 1;
+
+            let actual = if secondary_registration_token_is_placeholder(value) {
+                "placeholder"
+            } else {
+                "real"
+            };
+            if actual != expect {
+                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
+            }
+        }
+
+        // Fail closed if the fixture itself is empty/unreadable-but-present
+        // (e.g. header-only) -- a vacuous loop would make this test pass
+        // without checking anything.
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} shared parity fixture case(s) disagreed with the Rust implementation:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
     }
 
     // Covers the three states load_or_create_secondary_registration_token

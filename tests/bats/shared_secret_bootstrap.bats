@@ -70,6 +70,26 @@ teardown() {
     done
 }
 
+# Case-insensitivity and "-"/"_" equivalence (issue #967): a deliberate
+# fail-safe widening of the same pattern set above, not a new pattern family.
+# The full cross-implementation case list (including documented divergences
+# from setup.sh's and the Rust implementation's own pattern sets) lives in
+# tests/fixtures/placeholder-detection-cases.txt, exercised by
+# tests/bats/placeholder_detection_parity.bats; this test only proves the
+# normalization itself works for THIS implementation in isolation.
+@test "secret_is_placeholder is case-insensitive and treats - and _ as equivalent" {
+    for p in "CHANGE-ME-X" "change_me_x" "Change-Me-X" "CHANGEME-THING" "your-token-here" "YOUR-TOKEN-HERE" "anything-HERE"; do
+        run secret_is_placeholder "$p"
+        [ "$status" -eq 0 ] || { echo "expected placeholder after normalization: '$p'"; false; }
+    done
+    # Real values must stay real even with mixed-case/dash content that
+    # doesn't actually match a placeholder pattern once normalized.
+    for real in "A-Real-64-Hex-Value" "VALIDATION-UI-PASSWORD" "acme-service-token"; do
+        run secret_is_placeholder "$real"
+        [ "$status" -ne 0 ] || { echo "wrongly flagged real value as placeholder: '$real'"; false; }
+    done
+}
+
 @test "concurrent first-writers converge on ONE shared value (no split-brain)" {
     mkdir -p "$TEST_DIR/out"
     workers=20
