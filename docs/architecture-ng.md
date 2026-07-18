@@ -206,7 +206,10 @@ verified against `services/watchdog/watchdog.sh`: the daemon's own
 `check_and_maybe_restart` loop only polls and auto-restarts `proxy`,
 `dns-standard`, and (when `SSL_ENABLED=1`) `dns-ssl` -- the three container
 names it takes via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
-`CONTAINER_DNS_SSL`, feeding the Admin UI's dashboard traffic-light status.
+`CONTAINER_DNS_SSL`. `watchdog.sh` writes this state to a `status.json` file
+every 30 seconds, but as of this writing the Admin UI has no route or
+template that reads that file -- there is no per-service dashboard status
+indicator today (UI delivery debt; see "Status" below).
 Kea, syslog-ng, fluent-bit, `nats`, and `ui` all have a real Docker
 healthcheck too (so `docker inspect`/`docker compose ps` and CI's own
 wait-for-healthy scripts can see it), but the watchdog daemon does not poll
@@ -222,7 +225,12 @@ or restart any of those five itself.
 - Alarm at 95% (red)
 - Monitors actual disk usage, not just nginx `max_size`
 
-**Status:** displayed as traffic light bar in Admin UI (green/yellow/red per service)
+**Status:** `watchdog.sh` computes per-service health and disk-usage color
+(green/yellow/red) into `status.json` every 30 seconds, but nothing in the
+Admin UI (`services/ui/src/routes/dashboard.rs`, `templates/dashboard.html`)
+reads or renders that file as of this writing -- there is no per-service
+"traffic light" indicator in the UI today. Treat this as unfinished Admin UI
+delivery, not a shipped feature (see "Feature Completeness" in `AGENTS.md`).
 
 ## syslog-ng
 
@@ -304,7 +312,9 @@ Epic / GOG: not supported.
 - Netdata integrated (proxy via `/api/netdata`)
 - Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
 - Dashboard: cache fill level, hit/miss rate, active connections
-- Watchdog traffic light bar: one indicator per service, persistently visible
+- Watchdog per-service traffic light bar: **not yet implemented** -- `watchdog.sh`
+  computes the underlying `status.json` state, but the Admin UI does not read
+  or render it (see the "Status" note under Watchdog above)
 
 ## Admin UI
 
