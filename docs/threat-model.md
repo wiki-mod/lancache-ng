@@ -274,23 +274,36 @@ record changes, or subscribes to read cache/DNS metadata.
     it needs; subscribe to `lancache.dns.>`.
   - **DNS replica** (the primary's own co-located dns-ssl container only —
     there is always exactly one) — consume-only JetStream permissions, plus
-    two narrow exceptions on top: `publish` on `lancache.dns.flush`, so its
-    own `nats-subscriber` can signal a post-rollback recursor cache-flush,
-    and (issue #906, a deliberate widening beyond the original least-
+    three narrow exceptions on top: `publish` on `lancache.dns.flush`, so its
+    own `nats-subscriber` can signal a post-rollback recursor cache-flush;
+    (issue #906, a deliberate widening beyond the original least-
     privilege scope) `publish` on `lancache.dns.record`, so the same
     `rollback_listener.rs`'s `publish_rollback_records` can republish
     restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
     dns-ssl instead of its default `dns-standard:8083` (not the case in any
     shipped deployment today, but the identity's permissions must hold
-    regardless of which URL an operator configures). **Accepted tradeoff**:
+    regardless of which URL an operator configures); and (docs/bug-hunt/
+    nats.md's Finding D) `publish` on `$JS.API.STREAM.CREATE.LANCACHE_DNS`,
+    so this identity's own `nats-subscriber` process can create the
+    `LANCACHE_DNS` stream itself if it is ever the first of the two
+    `nats-subscriber` processes (writer or replica) to connect after a cold
+    start — without it, that race silently denied the replica's
+    `create_stream` fallback and crash-looped the container until the
+    writer's own stream creation eventually succeeded (self-healing, but a
+    real, reproducible, previously-untested window). **Accepted tradeoff**:
     unlike the narrower flush-only grant this replaces, a compromised
     dns-ssl NATS credential can now forge or replicate `lan.` DNS record
-    changes too, not merely trigger a cache-flush signal — this was a
+    changes too, not merely trigger a cache-flush signal, and can also
+    administratively create the shared `LANCACHE_DNS` stream — this was a
     conscious maintainer decision (widen the permission) over the
     alternative of making the rollback listener itself fail closed when it
     lacks this permission, made explicitly to keep the rollback path
     working correctly regardless of which DNS node runs it, rather than
-    depending on `DNS_ROLLBACK_URL`'s default never changing.
+    depending on `DNS_ROLLBACK_URL`'s default never changing. The
+    stream-create grant carries no equivalent alternative: gating
+    `nats-subscriber`'s own startup on which of the two nodes boots first
+    would reintroduce the same ordering dependency this permission exists
+    to remove.
   - **Auth-callout responder** (the Admin UI itself) — no subject permissions
     of its own; only recognized by name so its own connection to answer
     `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to
