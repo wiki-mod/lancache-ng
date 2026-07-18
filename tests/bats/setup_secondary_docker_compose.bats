@@ -17,28 +17,35 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 }
 
+# Extracts the heredoc body setup.sh's cmd_secondary() writes to
+# ${secondary_dir}/docker-compose.yml, from the write_generated_runtime_file
+# line (exclusive) through the closing bare "EOF" line (exclusive, via
+# `exit` before it would be printed). Shared by both tests below so the
+# extraction logic can't silently diverge between them the way it briefly
+# did here -- this project's own #822 pattern (the same parsing logic
+# hand-duplicated across call sites until one copy drifts) applies just as
+# much to test helpers as it does to production code.
+extract_cmd_secondary_heredoc() {
+    local heredoc_start
+    heredoc_start=$(grep -n 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml" <<EOF' \
+        "$repo_root/setup.sh" | cut -d: -f1)
+    [[ -n "$heredoc_start" ]] || return 1
+
+    awk -v start="$heredoc_start" '
+        NR <= start { next }
+        /^EOF$/ { exit }
+        found || /^services:/ { found = 1; print }
+    ' "$repo_root/setup.sh"
+}
+
 @test "cmd_secondary heredoc in setup.sh contains healthcheck block" {
     # Regression test for #652: the heredoc that generates the secondary
     # docker-compose.yml must include a healthcheck block. This block is
     # critical for PowerDNS health detection in production.
-    #
-    # Extract the heredoc from setup.sh's cmd_secondary function (lines between
-    # 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml" <<EOF'
-    # and the closing EOF), then verify it contains the healthcheck block with
-    # all required fields in the correct YAML structure.
 
-    local heredoc_start heredoc_end extracted_heredoc
-
-    # Find the write_generated_runtime_file line that starts the docker-compose.yml heredoc
-    heredoc_start=$(grep -n 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml" <<EOF' \
-        "$repo_root/setup.sh" | cut -d: -f1)
-
-    [[ -n "$heredoc_start" ]] || skip "Could not find cmd_secondary heredoc start"
-
-    # Extract lines from the start until the closing EOF on its own line
-    # This is a simple regex-based extraction; sed is used to grab the range
-    extracted_heredoc=$(sed -n "$((heredoc_start)),$((heredoc_start + 100))p" "$repo_root/setup.sh" \
-        | sed '/^EOF$/q')
+    local extracted_heredoc
+    extracted_heredoc=$(extract_cmd_secondary_heredoc) \
+        || skip "Could not find cmd_secondary heredoc start"
 
     # Verify the essential healthcheck fields are present in order
     echo "$extracted_heredoc" | grep -q "healthcheck:" \
@@ -140,22 +147,17 @@ setup() {
     # writes byte-for-byte -- against the checked-in reference, so ANY future
     # divergence between the two copies (not just a healthcheck regression)
     # fails here.
-    local heredoc_start heredoc_body reference_body
+    local heredoc_body reference_body
 
-    heredoc_start=$(grep -n 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml" <<EOF' \
-        "$repo_root/setup.sh" | cut -d: -f1)
-    [[ -n "$heredoc_start" ]] || skip "Could not find cmd_secondary heredoc start"
+    heredoc_body=$(extract_cmd_secondary_heredoc) \
+        || skip "Could not find cmd_secondary heredoc start"
 
     # The heredoc is unquoted (<<EOF), so setup.sh must backslash-escape
     # every literal `$` and backtick meant to survive into the generated
     # file (otherwise the shell would expand/execute them at generation
     # time). Undo that escaping here so the comparison is against the same
     # literal text the reference file already contains unescaped.
-    heredoc_body=$(awk -v start="$heredoc_start" '
-        NR <= start { next }
-        /^EOF$/ { exit }
-        found || /^services:/ { found = 1; print }
-    ' "$repo_root/setup.sh" | sed -e 's/\\\$/$/g' -e 's/\\`/`/g')
+    heredoc_body=$(echo "$heredoc_body" | sed -e 's/\\\$/$/g' -e 's/\\`/`/g')
 
     reference_body=$(awk '/^services:/ { found = 1 } found { print }' \
         "$repo_root/deploy/secondary/docker-compose.yml")
