@@ -152,9 +152,10 @@ fn cache_usage_pct(used_gb: f64, max_gb: f64) -> u64 {
 
 // JSON counterpart to `dashboard()`'s stub_status section only (registered
 // at GET /api/metrics in main.rs). Deliberately omits the cache-size and
-// log-parsing work above, which is the expensive part of `dashboard()` —
-// intended for cheap polling of just the connection metrics, though nothing
-// in this codebase currently calls this endpoint from the frontend.
+// log-parsing work above, which is the expensive part of `dashboard()` --
+// intended for cheap polling of just the connection metrics. `dashboard.html`'s
+// own inline script polls this endpoint every 10s to refresh the live
+// connection-count numbers without re-running the heavier work above.
 pub async fn metrics_api(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = &state.config;
     let standard_status =
