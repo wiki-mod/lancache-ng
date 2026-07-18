@@ -9,6 +9,22 @@ replacement for it.
 Component role: health monitor, auto-restart daemon, daily cache-age purge,
 syslog-ng retention engine, and Admin-UI status-file writer.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). PR #885
+> ("watchdog.sh hardening bundle") added four new bats files --
+> `tests/bats/watchdog_disk_info.bats` (4 tests), `tests/bats/watchdog_purge.bats`
+> (6 tests), `tests/bats/watchdog_config_validation.bats` (13 tests), and
+> `tests/bats/watchdog_curl_timeout.bats` (4 tests) -- confirmed present via
+> `git ls-tree` on current `origin/v0.2.0`. This closes the three
+> test-coverage gaps this doc calls out below as untested/undertested:
+> `disk_info()` (§ below, "never unit-tested at all"), `maybe_purge()`
+> ("zero bats coverage... largest test-coverage gap"), and the
+> `get_health()`/curl real-endpoint gap. `resolve_cache_dir()`'s specific
+> error-exit path was not independently re-confirmed as covered by the new
+> `watchdog_config_validation.bats` in this pass -- flagged as likely but
+> unconfirmed. See the inline updates on each finding below and the
+> re-ranked "Summary of test-coverage gaps" section at the end.
+
 ## 1. Monitored containers (tracked in #842, not re-litigated here)
 
 `check_and_maybe_restart()` is called for exactly three containers in the
@@ -46,11 +62,14 @@ pre-v0.2.0 upgraders. **Not covered by any bats test** -- neither
 **`get_health(name)`** (lines 72-79) -- `curl -sf
 $DOCKER_PROXY_URL/containers/$name/json | jq -r '.State.Health.Status //
 "none"'`, falls back to literal string `"unreachable"` on curl/jq failure.
-**Never tested against a real or mocked HTTP endpoint** -- every bats test
-redefines/stubs this function entirely (`get_health() { printf '%s\n'
-"${health_queue[...]}"; }`), so the actual curl+jq parsing, the `// "none"`
-jq fallback, and the `"unreachable"` bash fallback are all unexercised by
-CI.
+**Was never tested against a real or mocked HTTP endpoint as of this audit
+(2026-07-15); now partially covered** by `tests/bats/watchdog_curl_timeout.bats`
+(added by PR #885, 2026-07-16), which stubs `curl` itself (not `get_health()`)
+so the function's real curl+jq logic runs under test -- confirmed 4 tests
+covering the `--max-time` flag being passed, `CURL_MAX_TIME` override, and
+the `"unreachable"` bash fallback on a real curl failure. The `// "none"`
+jq-fallback sub-case (an HTTP response with no `.State.Health.Status` field)
+was not independently confirmed as covered in this pass.
 
 **`restart_container(name)`** (lines 81-88) -- `curl -sf -X POST
 $DOCKER_PROXY_URL/containers/$name/restart`, logs `WARNING: restart call
@@ -75,8 +94,12 @@ alone.
 **`disk_info(dir)`** (lines 100-112) -- returns `unknown` status if `dir`
 doesn't exist; otherwise runs `df "$dir"`, extracts the `Use%` column via
 awk, and buckets into `red` (>= `DISK_ALARM_PCT`, default 95), `yellow`
-(>= `DISK_WARN_PCT`, default 85), else `green`. **Not directly
-unit-tested at all.** It's invoked as a side effect of `write_status()`,
+(>= `DISK_WARN_PCT`, default 85), else `green`. **Was not directly
+unit-tested at all as of this audit (2026-07-15); now covered by
+`tests/bats/watchdog_disk_info.bats` (4 tests), added by PR #885
+(2026-07-16) as part of the same change that fixed this function's
+`df -P`/`${pct:-0}` bugs (see the sibling bughunt-watchdog doc's findings
+#2/#3).** It's invoked as a side effect of `write_status()`,
 but every bats assertion explicitly strips the `"disk"` key from the JSON
 before comparing (`jq 'del(.updated, .disk)'`), specifically because live
 `df` output is non-deterministic in CI. That means the actual threshold
@@ -151,14 +174,17 @@ invalid. Uses a single `find -print0` / `while read -d ''` loop (fixed in
 #112, which had previously logged a count from a separate, mismatched find
 call). Stamp-in-`/tmp` volatility was fixed in #111 (stamp now lives under
 `/var/run/watchdog`, which is a named volume, so it survives container
-restarts). **Zero bats coverage** -- confirmed by grep: `maybe_purge`
-appears in `watchdog_syslog_prune.bats` only inside a comment describing
-the helper-extraction range, never as an actual test invocation, and does
-not appear in `watchdog_idempotence.bats` at all. Its near-identical
-sibling `maybe_prune_syslog()` (below) has ~10 dedicated tests;
-`maybe_purge()`, despite sharing the same stamp-validation idiom and the
-same historical bug class (#111, #112), has none. This is the single
-largest test-coverage gap found in this file.
+restarts). **Had zero bats coverage as of this audit (2026-07-15) --
+confirmed by grep: `maybe_purge` appeared in `watchdog_syslog_prune.bats`
+only inside a comment describing the helper-extraction range, never as an
+actual test invocation, and did not appear in `watchdog_idempotence.bats`
+at all. This was the single largest test-coverage gap found in this file.
+Now FIXED**: `tests/bats/watchdog_purge.bats` (6 tests), added by PR #885
+(2026-07-16, the same PR that also fixed `maybe_purge()`'s
+false-success-stamp-on-missing-`CACHE_DIR` bug), confirmed present on
+current `origin/v0.2.0`. Its sibling `maybe_prune_syslog()` (below) still
+has more dedicated tests (~10 vs 6), but the "zero coverage" gap itself is
+closed.
 
 **`maybe_prune_syslog()`** (lines 249-435, by far the largest function in
 the file) -- fail-closed no-op unless `SYSLOG_ENABLED=true` exactly
@@ -266,26 +292,40 @@ severity distinction) gets structured downstream.
 
 ## 7. Summary of test-coverage gaps (ranked by size of gap)
 
+> **Currency check (2026-07-18):** items 1-3 below are FIXED by PR #885
+> (2026-07-16), which added `watchdog_purge.bats`, `watchdog_curl_timeout.bats`,
+> and `watchdog_disk_info.bats`. Original ranking preserved for the
+> historical record; current status noted per item.
+
 1. `maybe_purge()` -- zero direct test coverage despite sharing the exact
    stamp-validation idiom and historical bug class (#111/#112) as the
-   extensively-tested `maybe_prune_syslog()`.
+   extensively-tested `maybe_prune_syslog()`. **FIXED**: `watchdog_purge.bats`
+   (6 tests).
 2. `get_health()` / `restart_container()` -- the real curl+jq/curl-POST
    logic (including the `"unreachable"` and `WARNING: restart call failed`
-   branches) is always stubbed out in bats, never exercised.
+   branches) is always stubbed out in bats, never exercised. **FIXED**
+   (curl-boundary-stubbed, not function-stubbed): `watchdog_curl_timeout.bats`
+   (4 tests) covers `--max-time` wiring and the `"unreachable"` fallback; the
+   `// "none"` jq-fallback sub-case was not independently confirmed.
 3. `disk_info()` -- threshold math (85%/95% boundaries, `df` parse
    failure, missing-dir unknown status) is never directly asserted; only
    indirectly invoked and then explicitly stripped from JSON comparisons.
+   **FIXED**: `watchdog_disk_info.bats` (4 tests).
 4. `resolve_cache_dir()` -- no direct test; its error-exit path
    (disagreeing split cache dirs) and legacy-fallback branches are
-   unexercised.
+   unexercised. **Not independently re-confirmed this pass** -- may be
+   partially covered by the new `watchdog_config_validation.bats` (13
+   tests), but this wasn't verified line-by-line against that file's
+   actual assertions.
 5. `health_color()` -- only the `healthy`->green mapping is asserted;
    `starting`, `unhealthy`, and the `none`/`unreachable`->yellow default
-   are not.
+   are not. **Not independently re-confirmed this pass.**
 
 Best-covered in this file: `check_and_maybe_restart()` and
 `maybe_prune_syslog()`, both with multi-scenario convergence/idempotence-
 style test suites -- though `check_and_maybe_restart()`'s `"none"`/
-`"unreachable"` silent-no-op path (section 2) is untested even there.
+`"unreachable"` silent-no-op path (section 2) is untested even there (not
+independently re-confirmed this pass).
 
 ## 8. Posting status
 
