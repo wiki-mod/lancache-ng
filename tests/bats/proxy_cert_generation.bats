@@ -345,10 +345,6 @@ teardown() {
 # this is the regression case for a serial file that gets truncated,
 # corrupted, or replaced instead of updated in place.
 @test "serial file survives multiple certificate generations" {
-    local domain1="domain1.example.com"
-    local domain2="domain2.example.com"
-    local domain3="domain3.example.com"
-
     # Generate three certificates
     for i in 1 2 3; do
         domain="domain${i}.example.com"

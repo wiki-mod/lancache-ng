@@ -201,6 +201,9 @@ STUB
     # and the freshly-rendered candidate for THIS session failing validation
     # for an unrelated reason (forcing a rollback to the v1 snapshot above,
     # which still has the old 172.20.0.2 address baked in).
+    # shellcheck disable=SC2034 # read by _dns_auth_validate_snapshot_or_rollback,
+    # sourced from services/dns/entrypoint.sh -- shellcheck cannot see the
+    # cross-file dynamic-scope read.
     PDNS_LOCAL_ADDRESS="172.20.0.9"
     printf 'BROKEN pdns config v2\n' > "$pdns_conf"
     run _dns_auth_validate_snapshot_or_rollback "$pdns_conf"

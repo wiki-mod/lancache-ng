@@ -13,7 +13,6 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    helper_file="$BATS_TEST_TMPDIR/dns-zone-helpers.sh"
 
     # generate_rpz_zone() calls _is_valid_domain/_normalize_domain (#822
     # pattern audit fix); source the canonical library first so the helper
@@ -270,8 +269,6 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     # Extract record lines (skip header) and verify order
-    local ordered_record
-    local wildcard_record
     local base_line
     base_line=$(grep -n 'ordered\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
     local wildcard_line

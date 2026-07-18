@@ -44,6 +44,8 @@ setup() {
     }
     export -f sleep docker
 
+    # shellcheck disable=SC2034 # read by ghcr_retry() in scripts/lib/ghcr-retry.sh,
+    # sourced above -- shellcheck cannot see the cross-file read.
     GHCR_RETRY_BACKOFF_SECONDS=0
     GHCR_RETRY_MAX_ATTEMPTS=4
     relogin_log="$BATS_TEST_TMPDIR/relogins"

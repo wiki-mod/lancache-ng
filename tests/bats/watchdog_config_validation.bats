@@ -118,7 +118,11 @@ setup() {
         [ "$SSL_ENABLED" = "1" ]
         [ "$C_DNS_SSL" = "lancache-dns-ssl" ]
 
+        # shellcheck disable=SC2034 # read by write_status() (sourced from
+        # services/watchdog/watchdog.sh via load_watchdog_functions above) --
+        # this is a cross-file dynamic-scope read static analysis cannot see.
         F_DNS_SSL=0
+        # shellcheck disable=SC2034 # see F_DNS_SSL comment above
         H_DNS_SSL="healthy"
         write_status
         run jq -e '.services["lancache-dns-ssl"]' "$status_file"
@@ -150,6 +154,13 @@ setup() {
     run --separate-stderr resolve_cache_dir
 
     [ "$status" -ne 0 ]
+    # shellcheck disable=SC2154 # $stderr is populated by Bats itself via
+    # `run --separate-stderr` (Bats >= 1.5.0, required above); the Bats
+    # dialect support recognizes $status/$output/$lines but not this newer
+    # variable, so it misreports it as never assigned. Verified this is a
+    # real, working assertion (not a silent no-op): temporarily mangling
+    # resolve_cache_dir()'s error message made this exact line fail as
+    # expected, then the mangling was reverted.
     [[ "$stderr" == *"CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths"* ]]
     # The bug this fixes: the same message used to go through log() to
     # stdout, which "$(resolve_cache_dir)"'s command substitution silently

@@ -145,11 +145,15 @@ STUB
 
 @test "workflow change: build-tools untouched is still back-filled, not required" {
     # Every forced-touched service present; build-tools untouched -> back-fill.
-    export EXISTING_IMAGES="$(printf '%s\n' \
+    # Declared and exported separately (SC2155): combining them would mask a
+    # real failure exit status from the command substitution behind the
+    # export builtin's own (always-successful-here) return value.
+    EXISTING_IMAGES="$(printf '%s\n' \
         ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/dns:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/watchdog:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0)"
+    export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
