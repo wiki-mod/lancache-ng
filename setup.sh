@@ -4967,9 +4967,16 @@ EOF
     SECONDARY_RESPONSE_FILE="$response_file"
     trap 'rm -f -- "${SECONDARY_RESPONSE_FILE:-}"' EXIT
 
-    if ! http_status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST \
+    # The registration token is passed to curl as a JSON body read from
+    # stdin (`-d @-`), not as a literal `-d "..."` argument: the latter puts
+    # the token in this process's argv for the whole request's lifetime
+    # (visible to anything reading `ps`/`/proc/<pid>/cmdline` on this host),
+    # the same exposure class already fixed for kea_ctrl_post's Basic-Auth
+    # credential (#955/#956).
+    if ! http_status=$(printf '{"token":"%s","name":"%s"}' "$token" "$name" \
+        | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
+        -d @- \
         "${primary}/api/secondary/register"); then
         die "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running."
     fi
