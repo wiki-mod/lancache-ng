@@ -38,8 +38,14 @@ setup() {
 teardown() {
     # Belt-and-suspenders, same convention as reserve_validation_subnet.bats:
     # kill any holder process a test forgot to release so a leaked
-    # background process can never outlive its test.
-    [[ -n "${holder_pid:-}" ]] && kill "$holder_pid" 2>/dev/null
+    # background process can never outlive its test. Process-GROUP kill
+    # (see the "held lock" test's own comment for why): under bats' own
+    # test-execution wrapper, bash does not exec-replace itself for a
+    # backgrounded holder's final `sleep`, so the holder's `sleep` runs as
+    # a genuine child process that a plain `kill "$holder_pid"` would never
+    # touch, leaking it (and its inherited copy of the locked fd) past this
+    # test.
+    [[ -n "${holder_pid:-}" ]] && kill -- "-${holder_pid}" 2>/dev/null
     true
 }
 
@@ -87,7 +93,27 @@ wait_for_marker() {
     # from inside that subshell falsely "succeed" against a lock it never
     # actually opened itself. `bash -c` here is a fresh process that must
     # open (and therefore genuinely contend for) the lock file itself.
-    bash -c '
+    #
+    # `setsid` (own process group), not a plain `bash -c ... &`: confirmed
+    # empirically (bats run with debug tracing) that under bats' own test
+    # runner, bash does NOT apply its usual last-command exec-optimization
+    # to the holder's trailing `sleep 30` -- it stays a genuine forked CHILD
+    # of the holder shell, with its own independent copy of the inherited,
+    # locked fd (fork duplicates file descriptors; the flock itself is
+    # attached to the shared open-file-description behind them, so the
+    # child alone holding a copy is enough to keep the lock held). A plain
+    # `kill "$holder_pid"` below would only terminate the parent shell,
+    # leaving that `sleep` child running (and the lock still held) for the
+    # rest of its 30s, which is exactly the failure this comment is here to
+    # prevent someone from reintroducing: it looked like a correct release
+    # in a plain manual repro (where the exec-optimization DOES fire and
+    # collapses parent+child into one process), and only broke under bats.
+    # `setsid` puts the whole holder (parent and any child it forks) in its
+    # own process group, so `kill -- "-$holder_pid"` below (negative PID =
+    # process GROUP, not just the one PID) reaches all of it -- matching
+    # how a real CI runner actually tears down a step's whole process tree
+    # at step end, not just its top-level shell.
+    setsid bash -c '
         source "'"$lock_lib"'"
         QUICKSTART_COMPOSE_LOCK_PATH="'"$test_lock_path"'" quickstart_compose_lock_acquire
         touch "'"$ready_marker"'"
@@ -101,10 +127,11 @@ wait_for_marker() {
     run flock -n "$test_lock_path" -c true
     [ "$status" -ne 0 ]
 
-    # Simulates the workflow step's shell exiting at the end of a `run:`
-    # step -- the original inline pattern never released explicitly either,
-    # relying on process exit to close the descriptor and drop the flock.
-    kill "$holder_pid"
+    # Simulates the workflow step's shell (and everything it forked) exiting
+    # at the end of a `run:` step -- the original inline pattern never
+    # released explicitly either, relying on process exit to close the
+    # descriptor and drop the flock.
+    kill -- "-${holder_pid}"
     wait "$holder_pid" 2>/dev/null || true
 
     # Released: the same non-blocking probe must now succeed.
