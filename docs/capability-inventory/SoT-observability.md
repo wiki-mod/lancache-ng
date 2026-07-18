@@ -26,9 +26,13 @@ open at the time this doc was originally written, merged later the same day).
 
 > **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
 > `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). Two
-> corrections: (1) PR #828's status above updated from "open" to "merged";
-> it remains a test-only PR that adds no fix, per this doc's own §3.4/§4
-> analysis. (2) The `logs.rs` per-host-filtering gap this doc calls "not yet
+> corrections: (1) PR #828's status above updated from "open" to "merged".
+> Its title and primary purpose are the E2E visibility simulation described
+> above, but its merge commit (`4a5e0c11`) is not test-only and does add
+> real fixes beyond that: it added Docker `HEALTHCHECK`s for `nats`/`ui`
+> (see §2.1/§3.2), `read_from_head=on` on every fluent-bit tail input, the
+> netdata real-file `[logs]` redirect described in §2.2 below, and the
+> `UI_LOGS_MAX_ENTRIES` config knob (`services/ui/src/config.rs`). (2) The `logs.rs` per-host-filtering gap this doc calls "not yet
 > fixed" (§3.4, point 1, and the summary table) **is now fixed**: PR #865
 > (`2137157f`, closes #848) wires a real `?host=` query parameter through to
 > `parse_syslog_tail`, adds `list_syslog_hosts()` for a UI dropdown, and
@@ -274,9 +278,11 @@ matrix — consistent):**
 - dnsmasq (dhcp-proxy) / nats-server: each supports only **one** log
   destination at a time (no dual-output mode) — `docker logs` on these two
   containers goes silent once the `logging` profile is active, an accepted
-  documented trade-off (nats's authoritative `log_file:` setting lives in
-  the Admin UI's `update_nats_conf`, not the compose-generated boot config,
-  since issue #811).
+  documented trade-off (the compose-generated boot config's inline
+  `nats.conf` heredoc is the SOLE governor of `log_file:
+  /var/log/lancache-nats/nats.log`; since issue #811 the Admin UI's
+  `services/ui/src/routes/secondaries.rs` writes only the separate
+  `auth_callout.conf` fragment, which carries no `log_file` directive).
 - Admin UI (`ui`): `main.rs`'s `init_tracing()` adds a second
   `tracing-subscriber` layer writing to `UI_LOG_FILE` alongside stdout —
   best-effort, a missing/unwritable log path never blocks startup.
@@ -284,11 +290,22 @@ matrix — consistent):**
   `entrypoint`/`command` override wraps it with
   `exec /watchdog.sh > >(tee -a ...) 2>&1` so it stays PID 1 (signal
   handling unaffected) while also feeding a file.
-- netdata: writes `health.log`/`collector.log`/`error.log` etc. under
-  `/var/log/netdata` by default — that path is mounted onto the shared
-  `netdata-logs` volume, fluent-bit tails it read-only. (No custom netdata
-  log-level/verbosity configuration found anywhere in the repo — stock
-  defaults.)
+- netdata: this build's own log paths under `/var/log/netdata`
+  (`access`/`collector`/`daemon`/`health`/...) are symlinks to
+  `/dev/stdout`/`stderr` by default, not real files — nothing for
+  fluent-bit to tail as-is. PR #828 added an `entrypoint`/`command`
+  override (dev/prod/quickstart compose) that writes a custom
+  `/etc/netdata/netdata.conf` with a `[logs]` section redirecting only
+  `daemon` and `health` to real files under `/var/log/netdata/*.file.log`
+  before exec'ing the image's own entrypoint; that path is mounted onto the
+  shared `netdata-logs` volume, fluent-bit tails it read-only. `collector`,
+  `access`, and `debug` deliberately stay on their stdout defaults and are
+  **not** collected (per the compose file's own comment: `collector` is
+  high-rate internal diagnostics, `access` is high-rate API chatter, and
+  `debug` is empty unless enabled — collecting them would flood the shared
+  bounded `/logs` view). So this is a real, intentional custom
+  configuration, not "stock defaults" as an earlier draft of this section
+  claimed.
 - `dhcp-probe`: **not applicable**, one-shot diagnostic helper
   (`restart: "no"`), started/stopped on demand by the Admin UI for a single
   probe run — no persistent process/log stream to route. Documented as a
@@ -440,7 +457,8 @@ above, just on the dashboard instead of the logs page.
 | CI guard for logging matrix | Done — `scripts/check-logging-matrix.sh` in `validate-compose` |
 | fluent-bit healthcheck | Done (binary-integrity only, documented limitation) |
 | **Live E2E proof: real event → syslog-ng → Admin UI visibility** | **Merged 2026-07-15** (`4a5e0c11`, PR #828) — covers 6/9 services with per-run markers + a weaker netdata check; `dhcp`/`dhcp-proxy` explicitly deferred |
-| **`logs.rs` per-host/filter bug found during that E2E scoping** | **FIXED 2026-07-16** by PR #865 (`2137157f`) — `?host=` now wired through to `parse_syslog_tail`; see currency-check note above |
+| **`logs.rs` per-host bug found during that E2E scoping** | **FIXED 2026-07-16** by PR #865 (`2137157f`) — `?host=` now wired through to `parse_syslog_tail`; see currency-check note above |
+| **`logs.rs` `?filter=` silently ignored in syslog mode** | **Unconfirmed/still open** — `logs_page` returns early in the syslog branch before `params.filter` is ever read (confirmed against current `origin/v0.2.0`); see currency-check note and §5 item 1 |
 
 ## 5. Open items / follow-up candidates surfaced by this inventory (not filed as issues — this is a research pass, not a fix pass)
 
