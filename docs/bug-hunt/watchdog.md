@@ -558,22 +558,40 @@ These were already documented in `docs/capability-inventory/SoT-watchdog.md`
 (branch `docs/inventory-watchdog`) and the matching #843 comment; listed
 here only because this pass independently re-read and confirmed each one
 against `origin/v0.2.0`'s actual code, per the "vacuum first" instruction
-that prior documentation is a starting point, not a boundary:
+that prior documentation is a starting point, not a boundary. Original
+bullets below are preserved as the historical record of this section's
+initial pass; a second currency check (2026-07-18, cross-checked against
+the sibling `docs/capability-inventory/SoT-watchdog.md` currency pass) found
+that PR #885 (`0d6a6dcc`) closed three of these gaps with new bats
+coverage -- inline notes mark exactly which:
 
 - `maybe_purge()` has zero direct bats coverage despite sharing
   `maybe_prune_syslog()`'s exact stamp-validation idiom and historical bug
   class (#111/#112). Confirmed: `grep -n maybe_purge tests/bats/*.bats`
   shows it only inside a comment in `watchdog_syslog_prune.bats`, never
-  invoked, and not present at all in `watchdog_idempotence.bats`.
+  invoked, and not present at all in `watchdog_idempotence.bats`. **FIXED**:
+  `tests/bats/watchdog_purge.bats` (6 tests, added by PR #885) now exercises
+  `maybe_purge()` directly, including its rate-limiting and
+  missing-`CACHE_DIR` paths.
 - `get_health()`/`restart_container()`'s real curl+jq/curl-POST logic
   (including the `"unreachable"` and `WARNING: restart call failed`
   branches) is always stubbed out in both bats files -- confirmed by
   reading `watchdog_idempotence.bats:57-66`, which redefines both functions
-  entirely before any test runs.
+  entirely before any test runs. **PARTIALLY FIXED**:
+  `tests/bats/watchdog_curl_timeout.bats` (4 tests, added by PR #885) stubs
+  `curl` itself rather than the two functions, so `get_health()`'s real
+  curl+jq logic now runs under test (`--max-time` wiring, `CURL_MAX_TIME`
+  override, the `"unreachable"` fallback on curl failure) and
+  `restart_container()`'s `--max-time` wiring is confirmed too -- but
+  `restart_container()`'s own failure path (the `WARNING: restart call
+  failed` log line) still has no test asserting it, so this remains a real,
+  narrower gap.
 - `disk_info()`'s threshold math has no direct assertions -- confirmed:
   every JSON comparison in `watchdog_idempotence.bats` explicitly
   `del(.updated, .disk)`s before comparing (lines 170, 176, 203, 208, 221,
-  227).
+  227). **FIXED**: `tests/bats/watchdog_disk_info.bats` (4 tests, added by
+  PR #885) directly asserts the JSON output for an existing directory, a
+  missing directory, a `df` failure, and the `-P` invocation flag.
 - `resolve_cache_dir()`'s error-exit path (disagreeing
   `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL`) is untested directly. Separately
   re-verified during this pass (see note below) that the `exit 1` inside
@@ -598,7 +616,11 @@ that prior documentation is a starting point, not a boundary:
 - `STATUS_FILE`/`write_status()`'s output has no consumer anywhere in
   `services/ui/src/` -- confirmed via grep for `status.json`, `STATUS_FILE`,
   and `watchdog-status` across the UI source tree during this pass: zero
-  matches, matching the SoT's finding.
+  matches, matching the SoT's finding. **Still true for the Admin UI**, but
+  no longer true in general: PR #885 added `services/watchdog/healthcheck.sh`,
+  a Docker `HEALTHCHECK` that reads `STATUS_FILE`'s mtime to detect a stalled
+  main loop (see finding 10 / N2 below), so `write_status()` now has a real
+  runtime consumer -- just not the Admin UI.
 - The `full-setup`/`full-setup-deep-validate` CI harnesses only assert
   `watchdog`'s Docker health status reaches `"healthy"` within 90s
   (`full-setup-validate.yml:356-410`) -- they do not exercise
@@ -662,11 +684,20 @@ while `deploy/full-setup` does: `test -f /var/run/watchdog/status.json`
 **existence-only**. `status.json` is (re)written every loop via `.tmp`+`mv`
 and, once created, never disappears -- so a loop that stalls *after* its first
 successful write (the finding-4 no-timeout-curl hang scenario) keeps the probe
-green forever. Any healthcheck propagated into dev/prod/quickstart (the
-finding-10 fix, which is a Bringschuld since the probe already exists and is
+green forever. Any healthcheck propagated into dev/prod/quickstart (a
+straightforward extension, since the probe already exists and is
 CI-validated in full-setup) should therefore be **freshness-based** (assert
 `status.json`'s mtime is within a few `CHECK_INTERVAL`s), not existence-based,
 to actually cover the failure mode finding 4 describes.
+
+**Currency note (2026-07-18):** this is exactly what PR #885 shipped --
+`services/watchdog/healthcheck.sh` is a shared, mtime-based freshness probe
+(not existence-only) now wired as the `HEALTHCHECK` for `watchdog` in all
+four compose files (`deploy/dev`, `deploy/prod`, `deploy/quickstart`,
+`deploy/full-setup`), replacing the old full-setup-only
+`test -f status.json` check. The recommendation above is preserved as the
+historical record of what this finding originally asked for; it is no
+longer open.
 
 ### N3. `CHECK_INTERVAL` is unvalidated -- a bad value is a crash loop, unlike every other numeric knob (new) — FIXED by PR #885 (2026-07-16)
 
