@@ -221,9 +221,15 @@ or restart any of those five itself.
 - Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
 
 **Disk monitoring:**
-- Warning in UI at 85% full (yellow)
-- Alarm at 95% (red)
-- Monitors actual disk usage, not just nginx `max_size`
+- `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
+  color and writes it into `status.json` every 30 seconds, monitoring actual
+  disk usage, not just nginx `max_size` -- but, same gap as "Status" above,
+  nothing in the Admin UI reads or renders that file, so this warning/alarm
+  is not currently operator-visible in the UI (see #849 observability
+  finding #3). The dashboard's own cache-usage bar (`cache_pct` in
+  `services/ui/src/routes/dashboard.rs`) is a separate, independently
+  computed value (used cache bytes vs. `CACHE_MAX_GB`), not this disk-usage
+  color.
 
 **Status:** `watchdog.sh` computes per-service health and disk-usage color
 (green/yellow/red) into `status.json` every 30 seconds, but nothing in the
