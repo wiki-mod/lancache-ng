@@ -675,6 +675,23 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-executable-bits.sh
 
+      - name: Check build-tools smoke-test coverage (#790/#791)
+        # Standing guard for #822 Pattern G: keeps select-build-tools-image.sh's
+        # smoke_test_image() required-tools list from drifting behind
+        # tools/build-tools/Dockerfile's own verification list, so a tool the
+        # image installs and a consumer needs can never again be silently
+        # unverified by the smoke test (#775/#787/#790/#791). Pure text
+        # comparison of two files, no Docker/LAN dependency of its own, same
+        # class as the checks above.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-build-tools-smoke-coverage.sh
+
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -747,6 +764,20 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-executable-bits.sh
+
+      - name: Check build-tools smoke-test coverage (#790/#791)
+        # Same guard as the self-hosted shellcheck job's own step above (see
+        # its comment for the full rationale); duplicated here so the
+        # GitHub-hosted fallback path enforces it too when self-hosted
+        # runners are unavailable.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-build-tools-smoke-coverage.sh
 
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup

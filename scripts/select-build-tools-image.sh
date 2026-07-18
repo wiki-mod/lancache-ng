@@ -92,6 +92,8 @@ smoke_test_image() {
       cargo-audit
       shellcheck
       actionlint
+      bats
+      shellspec
       distcc
       distcc-pump
       docker
@@ -117,19 +119,30 @@ smoke_test_image() {
 
     docker --version >/dev/null
     docker compose version >/dev/null
-    # docker buildx version is deliberately NOT checked here yet (issue #791,
-    # follow-up to #787/#789). This smoke test only trusts the already-
-    # published `:dev`/`:edge` channel image (BUILD_TOOLS_REQUIRE_PUBLISHED
-    # callers have no local-build fallback, see the strict-mode branch
-    # below), and that published image cannot contain buildx until AFTER
-    # #789 merges and republishes it -- adding this check in the same PR
-    # that first adds buildx to tools/build-tools/Dockerfile would fail
-    # every check on that PR itself. #776 widened this same smoke test for
-    # dhclient/expect/tcpdump safely because those were already in an
-    # earlier, separately-published Dockerfile by the time that PR ran;
-    # #791 re-adds this check once the same is true for buildx.
+    # docker buildx is verified here now (issue #791). It was deliberately
+    # deferred while #789 first added buildx to tools/build-tools/Dockerfile,
+    # because this strict path (BUILD_TOOLS_REQUIRE_PUBLISHED callers have no
+    # local-build fallback -- see the strict-mode branch below) trusts the
+    # already-published :dev/:edge image, which could not contain buildx
+    # until after #789 merged and republished it. That has since happened, so
+    # gating on it now no longer creates the chicken-and-egg failure #791
+    # documents. The setup.sh assert_resolved_image_tag_platform_supported
+    # check hard-requires buildx (issue #787), so a published image silently
+    # missing it must fail this smoke test rather than surface deeper.
+    # (No apostrophes in these comments: this whole block is a single-quoted
+    # bash -lc argument, so a stray quote would terminate it -- see #833.)
+    docker buildx version >/dev/null
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
+    # bats and shellspec are the two test-runner tools real consumer suites
+    # depend on (tests/bats/*.bats via `bats tests/bats`; tests/shellspec via
+    # shellspec). #790: the smoke test asserted neither, even though both are
+    # installed and build-time-verified in tools/build-tools/Dockerfile --
+    # exactly the derive-not-from-real-requirements drift #822 Pattern G
+    # names. scripts/check-build-tools-smoke-coverage.sh now guards against
+    # this list drifting from the Dockerfile verification list again.
+    bats --version >/dev/null
+    shellspec --version >/dev/null
     cargo-audit --version >/dev/null
     sccache --version >/dev/null
     distcc --version >/dev/null
