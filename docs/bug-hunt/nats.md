@@ -14,6 +14,25 @@ All line numbers/commit references are against `origin/v0.2.0` at commit
 `3f53ac3` ("fix: wait for real endpoint detach before removing validation
 networks (#835)"), fetched fresh for this pass.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6`; see per-finding corrections below. Since this pass was written,
+> merged fixes have closed three findings:
+> - **Finding A** (CRITICAL) — **FIXED** by issue #866 / PR #881
+>   (`register_secondary` now refuses with `503` when no advertised NATS URL
+>   is configured, instead of silently handing out the internal
+>   `nats://nats:4222`).
+> - **Finding B** (HIGH) — **FIXED** by issue #867 / PR #882 (writer and
+>   replica publish lists now include `lancache.dns.flush`, and rollback flush
+>   failures are surfaced in the response body as `flush_ok`/`flush_failed_names`).
+> - **Finding G** (INFO) — **FIXED** by PR #828 (now merged): `http_port: 8222`
+>   + a real `wget .../healthz` probe are present in all four stacks.
+>
+> **Finding D** (MODERATE) is **still open**: the replica's publish list still
+> omits `$JS.API.STREAM.CREATE.LANCACHE_DNS` on `v0.2.0` (only the writer can
+> create the stream), so the cold-start race remains. Finding C was already
+> RESOLVED in this file; issue #845 is now CLOSED. Individual verdicts are
+> updated inline below.
+
 ---
 
 ## Finding A — remote secondary registration always hands out an
@@ -82,6 +101,22 @@ Confirmed by static trace only (config default -> hardcoded compose literal
 -> setup.sh write -> auto-start -> success message), no runtime ambiguity
 involved.
 
+### Finding A — FIXED (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+Fixed by issue #866 / PR #881 (`fix(ui): refuse remote-secondary registration
+without a reachable NATS URL`). `register_secondary`
+(`services/ui/src/routes/secondaries.rs`) now resolves the address to hand out
+via `state.config.advertised_nats_url()` *before* generating a credential or
+touching the database. When that returns `None` (neither `NATS_ADVERTISE_URL`
+nor `NATS_BIND_IP` is set — i.e. this primary has no address a remote
+secondary could ever reach), it logs an actionable error and returns
+`503 SERVICE_UNAVAILABLE` with zero side effects, instead of silently handing
+out the Docker-internal `nats://nats:4222`. The critical "always hands out an
+unreachable URL + unconditional success message" path no longer exists: a
+primary not configured for remote secondaries now fails the registration
+loudly rather than half-registering a secondary that can never sync. Issue
+#866 is CLOSED.
+
 ---
 
 ## Finding B — post-rollback recursor cache flush is permission-denied for
@@ -132,6 +167,26 @@ own comment describes fixing for the *normal* (UI-triggered) flush path
 (issue #400, switching from `?type=packet`/`?domain=.` to an exact-name
 flush) — but the rollback path's flush was apparently never checked against
 the actual permission grants for the identity that executes it.
+
+### Finding B — FIXED (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+Fixed by issue #867 / PR #882 (`fix(dns): grant rollback flush publish
+permission + surface flush failure`). Both halves of the finding are now
+addressed on `v0.2.0`:
+
+- **Permission**: the generated `nats.conf` publish lists for both DNS roles
+  (dev/prod/quickstart, byte-identical) now include `"lancache.dns.flush"` —
+  the writer's and the replica's, each with an inline comment pointing back at
+  `rollback_listener.rs`'s `rollback_handler`. The replica additionally gained
+  `"lancache.dns.record"` for `publish_rollback_records` (a deliberate,
+  maintainer-accepted tradeoff documented inline).
+- **Surfacing**: `rollback_listener.rs` now collects every name whose flush
+  send/ack fails into `flush_failed_names` and returns it in the response body
+  (`rollback_response_body`) as `flush_ok`/`flush_failed_names`, instead of
+  only `eprintln!`-logging it while still reporting `applied: true`.
+
+Issue #867 is CLOSED. The post-rollback recursor flush now works for the
+identity that actually executes it.
 
 ---
 
@@ -264,9 +319,15 @@ list has `$JS.API.STREAM.INFO.LANCACHE_DNS` but not `...STREAM.CREATE...`,
 implying replica is expected to find the stream already created by writer.
 
 `docker-compose.yml`'s `dns-standard`/`dns-ssl` both declare
-`depends_on: [nats]` (list form, **no** `condition: service_healthy` —
-and `nats` itself currently has no healthcheck at all in dev/prod/quickstart,
-see Finding H) and have **no ordering dependency on each other**. If
+`depends_on: [nats]` (list form, **no** `condition: service_healthy`) and have
+**no ordering dependency on each other**. (Correction 2026-07-18: this
+paragraph originally added "and `nats` itself currently has no healthcheck at
+all in dev/prod/quickstart, see Finding G" — that is now stale, PR #828 added
+a real `nats` healthcheck to all four stacks; but since the `depends_on` here
+is still the plain list form with no `condition: service_healthy`, the new
+healthcheck does not add any ordering, and — critically — the race is between
+`dns-standard` and `dns-ssl`, which have no dependency on each other at all, so
+Finding D is unaffected by #828 and remains open.) If
 dns-ssl's `nats-subscriber` reaches `get_stream`/`create_stream` before
 dns-standard's has actually created `LANCACHE_DNS`, dns-ssl's process
 `exit(1)`s (main.rs:243-264: replica lacks `STREAM.CREATE`, so the fallback
@@ -277,6 +338,16 @@ wraps the binary in an unconditional restart loop (`sleep 3`), so once
 dns-standard's stream exists, the next retry succeeds. But it is a real,
 reproducible crash/restart window on every cold full-stack start, it is
 noisy in logs, and there is no test anywhere covering it (see Finding I).
+
+**Still OPEN as of 2026-07-18 (`origin/v0.2.0` @ `dc8d79c6`).** Verified
+directly: the replica's generated `nats.conf` publish list gained
+`lancache.dns.flush`, `lancache.dns.record`, and `$JS.API.STREAM.INFO.LANCACHE_DNS`
+(via PRs #882/#916), but still deliberately **omits**
+`$JS.API.STREAM.CREATE.LANCACHE_DNS` — only the writer can create the stream —
+so the cold-start race described here is unchanged. This matches the coupling
+noted for the Finding-C fix (issue #845, now CLOSED): making full-setup match
+the other stacks' explicit grants must also address this race, or it trades a
+cosmetic inconsistency for a real crash-loop window.
 
 ---
 
@@ -367,6 +438,17 @@ four stacks, but that commit is **not yet present on this v0.2.0 branch** —
 confirmed directly by reading all four compose files' `nats:` blocks; this
 matches the SoT's own caveat that the fix is "pending that PR's merge".
 
+### Finding G — FIXED (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+PR #828 is now merged (merge commit `4a5e0c11`, 2026-07-15T20:35Z). All four
+`deploy/*/docker-compose.yml` `nats:` blocks now set `http_port: 8222` in the
+generated `nats.conf` and use
+`test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]`
+— a real HTTP monitor probe, replacing the previous none/bare-TCP checks. The
+weak/absent-healthcheck gap this finding described is closed. (The dev-branch
+commit `83567a8` the SoT cites landed its content via the squashed merge
+commit `4a5e0c11`; the literal `83567a8` SHA is not in `v0.2.0` history.)
+
 ---
 
 ## Finding H — no test anywhere validates that the configured NATS
@@ -441,13 +523,13 @@ everything noticed" rule, since it read as suspicious before verification.
 
 ## Summary / suggested severity ranking for the later filter phase
 
-1. **Finding A** (unreachable/unconfigurable secondary NATS URL) — CRITICAL, confirmed, novel.
-2. **Finding B** (rollback flush permission gap) — HIGH, confirmed, novel.
+1. **Finding A** (unreachable/unconfigurable secondary NATS URL) — CRITICAL, confirmed, novel. **FIXED 2026-07-18 by #866/#881.**
+2. **Finding B** (rollback flush permission gap) — HIGH, confirmed, novel. **FIXED 2026-07-18 by #867/#882.**
 3. **Finding C** (full-setup publish-omitted semantics) — **RESOLVED by live nats-server v2.14.3 test (runner .240): omitted `publish` = allow-all, so the "silently denied/crash-loop" reading is REFUTED.** Downgraded to a least-privilege / stack-consistency note; settles issue #845. See the "Finding C — RESOLVED by live test" subsection above.
-4. **Finding D** (dns-replica stream-create startup race) — MODERATE, confirmed, self-healing.
+4. **Finding D** (dns-replica stream-create startup race) — MODERATE, confirmed, self-healing. **Still OPEN 2026-07-18** (replica still lacks `$JS.API.STREAM.CREATE.LANCACHE_DNS`).
 5. **Finding E** (reload_nats_conf silent best-effort) — MODERATE, confirmed.
 6. **Finding F** (full-setup restart-by-name 404) — LOW, already documented/mitigated; broader pattern (six hardcoded names) worth a cross-component note.
-7. **Finding G** (no/weak nats healthcheck) — INFO, matches SoT, pending PR #828.
+7. **Finding G** (no/weak nats healthcheck) — INFO, matches SoT. **FIXED 2026-07-18 by #828** (now merged; `http_port: 8222` + `wget .../healthz` in all four stacks).
 8. **Finding H** (no permission-sufficiency test coverage) — INFO, test gap.
 9. **Finding I** (plaintext nats:// to remote secondaries) — INFO, matches SoT.
 10. **Finding J** (dead dev-only bind mount) — INFO, matches SoT.
