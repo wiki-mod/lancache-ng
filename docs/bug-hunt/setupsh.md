@@ -14,6 +14,32 @@ of GitHub branch-protection settings via `gh api`. No pre-filtering, no
 self-verification during collection — that happens in a later, separate
 phase. Findings are listed in the order encountered, not by severity.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6`; see per-finding corrections below. Changes since this pass:
+> - **Finding #1** (DNS probe silently no-ops without `dig`) — **FIXED** by
+>   PR #883: `verify_stack_functional_health` now calls
+>   `require_functional_check_tool dig … || return 1` (fails closed) and
+>   `install_missing_tools curl dig` runs before the gate.
+> - **Finding #5** (missing `local` in `cmd_secondary`) — **partially FIXED**
+>   by PR #941: `missing_fields` and `secondary_env_file` are now declared
+>   `local`; the `for cmd in curl docker` loop variable `cmd` is still
+>   undeclared.
+> - **Finding #8** — the "`v0.2.0` has no branch protection at all (404)"
+>   sub-claim is **now stale**: `v0.2.0` is branch-protected today (required
+>   checks: `shellcheck`, `validate-compose`, `CI scope policy`, `line
+>   endings`, `file purpose headers`, `PR template validation`, `PR tracking
+>   metadata`, `coverage (Rust)`, `validate full-setup image`; `strict:false`).
+>   The other sub-claim (the setup-CLI E2E *aggregate* is not itself a required
+>   check) still holds — that job is not in either branch's list.
+> - **Finding #9** — **REFUTED** in this hunt's own authoritative issue roll-up
+>   (`run !` under `bats_require_minimum_version 1.5.0` is an active negation
+>   assertion, not a vacuous one); reconciled inline.
+>
+> Findings #2, #3, #4, #7, #10 re-verified as **still valid** (line numbers
+> drifted: `setup.sh` grew 6084→6291). Where a finding cites a line number,
+> the numeric citation is offset but the code it points at is unchanged unless
+> noted otherwise.
+
 ---
 
 ## 1. `verify_stack_functional_health`'s DNS probe silently no-ops without `dig`
@@ -54,6 +80,17 @@ by default, so this is plausibly the common case, not a rare edge case.
 Severity assessment: serious — this is exactly the safety-critical
 "validate before/after mutate" gate AGENTS.md calls out, and it degrades
 silently with no operator-visible warning.
+
+### Finding #1 — FIXED (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+Fixed by PR #883 (`fix: make setup.sh's functional health gate fail closed on
+a missing probe tool`). `verify_stack_functional_health` no longer silently
+skips the DNS probe when `dig` is absent: it now calls
+`require_functional_check_tool dig "the DNS resolution probe" || return 1`,
+which `print_error`s and fails the gate closed rather than falling through to
+`return 0`. Separately, `install_missing_tools curl dig` now runs before the
+gate so `dig` is present on the host in the normal path. The silent-pass
+degradation this finding described no longer exists.
 
 ---
 
@@ -202,6 +239,15 @@ more than one `cmd_*` function in the same shell (e.g. a test harness, or
 
 Severity assessment: info.
 
+### Finding #5 — partially FIXED (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+PR #941 (`fix(setup): declare leaked locals in migrate_env_for_update,
+cmd_secondary`) added `local missing_fields secondary_env_file` to
+`cmd_secondary`'s up-front declarations, so two of the three names this finding
+flagged no longer leak. The third — the `for cmd in curl docker` loop variable
+`cmd` — is **still undeclared** on `v0.2.0`, so that one remains an (info-level)
+global leak. Not fully closed.
+
 ---
 
 ## 6. Suggested SSL IP can overflow to an invalid octet
@@ -306,6 +352,24 @@ test-coverage matrix) actually blocks a bad merge in practice. Flagging for
 the maintainer to confirm intent (this may already be a known, accepted gap
 while v0.2.0 is pre-stable) rather than asserting it is unintentional.
 
+### Finding #8 — partially superseded (verified 2026-07-18 against `origin/v0.2.0` @ `dc8d79c6`)
+
+Sub-finding 2 is now **stale/fixed**: `v0.2.0` is no longer unprotected. A live
+`gh api repos/wiki-mod/lancache-ng/branches/v0.2.0/protection` now returns a
+real protection object (no 404), with required status checks `shellcheck`,
+`validate-compose`, `CI scope policy`, `line endings`, `file purpose headers`,
+`PR template validation`, `PR tracking metadata (labels/milestone/project)`,
+`coverage (Rust)`, and `validate full-setup image` (`strict:false`). `master`
+carries the same list (`strict:true`). So a PR can no longer be merged into
+`v0.2.0` with those checks red.
+
+Sub-finding 1 **still holds**: the setup-CLI E2E aggregate (the
+`full-setup-deep-validate` "Full-Setup Deep Validate" job that runs
+`scripts/setup-cli-simulation.sh`) is **not** in either branch's
+required-status-checks list — `validate full-setup image` is the image build,
+not the CLI simulation. The real end-to-end exerciser of
+`setup.sh install`/`update`/`restore` is still not a required merge gate.
+
 ---
 
 ## 9. Vacuous assertion in `setup_update_idempotence.bats` — `run !` result is never checked
@@ -344,6 +408,19 @@ legacy-cache-key-collapse migration, though the same collapse is still
 proven at the real-CLI level by `scripts/setup-cli-simulation.sh` Phase 4b's
 `grep -q '^CACHE_DIR_STANDARD=' "$install_dir/.env" && { echo error; exit 1;
 }` check, which correctly uses the bare/unwrapped form).
+
+### Finding #9 — REFUTED (verified 2026-07-18; matches this hunt's own authoritative issue roll-up)
+
+This finding was overturned during the hunt's own filter phase and recorded as
+REFUTED in the authoritative #849 roll-up comment. `tests/bats/setup_update_idempotence.bats`
+declares `bats_require_minimum_version 1.5.0` (line 23, confirmed still present
+on `v0.2.0`), under which `run ! <cmd>` is **not** a bare capture followed by
+no assertion — the `!` makes `run` itself assert that the command exits
+non-zero and fail the test if it unexpectedly succeeds. So lines 158-159 *do*
+enforce "the legacy `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` keys were removed", and
+the premise that "no assertion follows the `run` call" was wrong. Retained here
+(rather than deleted) to keep the raw-findings record and its correction
+together.
 
 ---
 
