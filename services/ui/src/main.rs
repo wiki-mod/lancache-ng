@@ -99,13 +99,16 @@ const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-regist
 // secret_is_placeholder, embedded into the dns/dhcp/ui entrypoints, and
 // setup.sh's secret_value_is_placeholder), kept deliberately separate per the
 // maintainer decision recorded in issue #967 (Option B: cross-validate, don't
-// unify). Known, intentional divergence: this function requires the full
-// YOUR_*_HERE suffix (matching setup.sh) where the shared entrypoint library
-// accepts a bare YOUR_* prefix -- see
+// unify). Divergence from the shared entrypoint library, confirmed via
 // tests/fixtures/placeholder-detection-cases.txt and this module's own
 // secondary_registration_token_is_placeholder_matches_shared_parity_fixture
-// test for the full cross-validated case list, including every documented
-// divergence.
+// test: this function requires the full YOUR_*_HERE suffix (matching
+// setup.sh) and has no generic *_HERE-on-any-value rule, where the shared
+// entrypoint library accepts a bare YOUR_* prefix and any *_HERE suffix.
+// Pre-existing, not reconciled here (#967 Option B keeps the pattern sets
+// separate); no shipped SECONDARY_REGISTRATION_TOKEN placeholder actually
+// needs either bare form, so the gap has not mattered in practice, but it is
+// a real, confirmed divergence, not an intentional design choice.
 fn secondary_registration_token_is_placeholder(token: &str) -> bool {
     if token.is_empty() {
         return true;

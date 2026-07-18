@@ -946,15 +946,21 @@ env_key_has_value() {
 # services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
 # deliberately separate per the maintainer decision recorded in issue #967
 # (Option B: cross-validate, don't unify) rather than sourcing the shared
-# library directly. Known, intentional divergence: this write path
-# additionally recognizes the legacy "lancache-*-secret" template-default
-# shape and a bare "change-me"/"change_me" infix, wider than the shared
-# library, because setup.sh must never mistake a stale template default for a
-# real secret it should preserve -- but it requires a full YOUR_*_HERE suffix
-# match rather than the shared library's bare YOUR_* prefix. See
+# library directly. Divergences from the shared library, confirmed via
 # tests/fixtures/placeholder-detection-cases.txt and
-# tests/bats/placeholder_detection_parity.bats for the full cross-validated
-# case list, including every documented divergence.
+# tests/bats/placeholder_detection_parity.bats:
+#   - This write path additionally recognizes the legacy "lancache-*-secret"
+#     template-default shape and a bare "change-me"/"change_me" infix. This
+#     IS deliberate: setup.sh must never mistake a stale template default for
+#     a real secret it should preserve, unlike the shared library's read path
+#     (see that function's own comment for why it omits both).
+#   - This write path requires a full YOUR_*_HERE suffix match, and does not
+#     have the shared library's generic *_HERE-on-any-value rule, both
+#     narrower than the shared library. Pre-existing, not reconciled here
+#     (#967 Option B keeps the pattern sets separate); no shipped placeholder
+#     in this repo actually needs either bare form, so the gap has not
+#     mattered in practice, but it is a real, confirmed divergence, not an
+#     intentional design choice.
 secret_value_is_placeholder() {
     local value="$1"
     local normalized="${value,,}"

@@ -65,17 +65,24 @@ lancache_gen_base64_32() {
 # repo (the others: setup.sh's secret_value_is_placeholder, and
 # services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
 # deliberately separate per the maintainer decision recorded in issue #967
-# (Option B: cross-validate, don't unify). Known, intentional divergences from
-# the other two -- this function does NOT recognize the legacy
-# "lancache-*-secret" template-default shape (deploy/dev/docker-compose.yml
-# and deploy/dev/.env ship real, working dev secrets in exactly that shape,
-# e.g. lancache-nats-ui-dev-secret, that this read path must accept, not
-# regenerate) or a bare "change-me"/"change_me" infix without a CHANGE_ME/
-# changeme prefix, but it DOES recognize a bare YOUR_* prefix without a
-# trailing _HERE suffix, wider than the other two. See
-# tests/fixtures/placeholder-detection-cases.txt and
-# tests/bats/placeholder_detection_parity.bats for the full cross-validated
-# case list, including every documented divergence.
+# (Option B: cross-validate, don't unify). Divergences from the other two,
+# confirmed via tests/fixtures/placeholder-detection-cases.txt and
+# tests/bats/placeholder_detection_parity.bats:
+#   - This function does NOT recognize the legacy "lancache-*-secret"
+#     template-default shape. This omission IS deliberate:
+#     deploy/dev/docker-compose.yml and deploy/dev/.env ship real, working dev
+#     secrets in exactly that shape (e.g. lancache-nats-ui-dev-secret) that
+#     this read path must accept as configured, not regenerate.
+#   - This function does NOT recognize a bare "change-me"/"change_me" infix
+#     without a CHANGE_ME/changeme prefix, unlike setup.sh/Rust. Pre-existing,
+#     not reconciled here (#967 Option B keeps the three pattern sets
+#     separate rather than unifying them); no known rationale beyond that.
+#   - This function DOES recognize a bare YOUR_* prefix without a trailing
+#     _HERE suffix, and a generic *_HERE suffix on any value (not just
+#     YOUR_*_HERE) -- both wider than setup.sh/Rust. Also pre-existing and not
+#     reconciled here; no shipped placeholder in this repo actually needs
+#     either bare form, so the gap has not mattered in practice, but it is a
+#     real, confirmed divergence, not an intentional design choice.
 secret_is_placeholder() {
     _sip_norm=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
     case "$_sip_norm" in
