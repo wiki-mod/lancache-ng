@@ -196,11 +196,21 @@ EOF
     # A negative-test string like "$repo_root/scripts/does-not-exist.sh" uses
     # the real repo_root variable but names nothing that actually exists on
     # disk -- it must be dropped, not treated as a dependency the filter must
-    # cover.
+    # cover. Also references the real setup.sh alongside it (not covered by
+    # the workflow fixture below) so this test proves the negative-test
+    # string is silently dropped specifically -- rather than merely
+    # exercising the separate "zero real dependencies found at all" fail-safe
+    # this script also has, which a fixture with ONLY the non-existent
+    # reference would hit instead, proving nothing about the exclusion this
+    # test is actually named for.
     printf '#!/usr/bin/env bash\n' > "$fixture_root/setup.sh"
     cat > "$fixture_root/tests/bats/negative_smoke.bats" <<EOF
 setup() {
     repo_root="\$(cd "\$BATS_TEST_DIRNAME/../.." && pwd)"
+}
+
+${at_test} "reads the real setup.sh" {
+    [ -f "\$repo_root/setup.sh" ]
 }
 
 ${at_test} "fails closed when a script does not exist" {
@@ -211,6 +221,7 @@ EOF
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
+    [[ "$output" != *"does-not-exist.sh"* ]]
 }
 
 @test "resolves the check_*.bats self-referencing BATS_TEST_DIRNAME/../../scripts form" {
