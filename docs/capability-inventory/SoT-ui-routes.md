@@ -7,11 +7,32 @@ lost mid-audit.
 
 Audited against: `origin/v0.2.0` (commit `3f53ac3` at the time of this pass).
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits landed since this document's `3f53ac3b` baseline);
+> see corrections below. Two of these commits are directly relevant to
+> route-level behavior described in this document: `53a5ba7f` (#878) fixed
+> `domains.rs`'s `add_dns`/`remove_dns` silently redirecting as success on a
+> failed CDN-domain-file write (a correctness fix, not a coverage-gap fix --
+> the E2E-coverage-gap claim below for these two routes still stands, since
+> no simulation script was added). `d971063c` (#978) converted
+> `GET /api/dhcp/check` to `POST /api/dhcp/check` with an explicit CSRF check
+> (closing a real CSRF-exemption gap on a state-mutating GET), corrected
+> below; the underlying auto-fire-on-every-page-load behavior itself
+> (dhcp.html's `DOMContentLoaded` handler still calls this endpoint
+> unconditionally, restarting the dhcp-probe container and running a real
+> nmap scan) is unchanged and not addressed by that fix. `domains.rs`,
+> `secondaries.rs`, and `dhcp.rs` also grew in line/test count from other
+> commits in the interim (line/test counts corrected below); the syslog
+> branch of `logs.rs` gained a real (if different) filter mechanism
+> (`?host=`, #865/#848) since this document was written, corrected below.
+> Every other narrative/behavioral claim in this document was independently
+> re-checked against current code and remains accurate.
+
 ## services/ui feature routes capability inventory
 
 Scope: exhaustive pass over every file in `services/ui/src/routes/` (10 files, all read in full against `origin/v0.2.0`), cross-referenced against `services/ui/src/main.rs`'s route table (the actual HTTP method+path wiring, since the route modules themselves don't declare their own paths), `services/ui/src/templates/` (8 templates), the 11 `scripts/*-simulation.sh` E2E scripts, and the current open-issue list. Governance read in full for this pass: `.github/AGENTS.md` (all 452 lines, including the Rule Enforcement Matrix), `CLAUDE.md` (both the stale copy on `fix/sccache-fallback-exit-code` and the current `origin/v0.2.0` version -- they differ meaningfully, e.g. `origin/v0.2.0` describes a unified single `services/proxy` container with port-based mode split, not two separate proxy services), and `CONTRIBUTING.md` (`origin/v0.2.0`, 299 lines).
 
-Files present: `dashboard.rs`, `dhcp.rs` (5568 lines -- by far the largest route file in the project), `dns_snapshots.rs`, `domains.rs`, `logs.rs`, `mod.rs` (shared helpers, not a route module), `netdata_proxy.rs`, `secondaries.rs`, `setup.rs`, `stats.rs`.
+Files present: `dashboard.rs`, `dhcp.rs` (5780 lines as of the 2026-07-18 currency check, 5568 at original writing -- by far the largest route file in the project), `dns_snapshots.rs`, `domains.rs`, `logs.rs`, `mod.rs` (shared helpers, not a route module), `netdata_proxy.rs`, `secondaries.rs`, `setup.rs`, `stats.rs`.
 
 ---
 
@@ -34,7 +55,7 @@ Files present: `dashboard.rs`, `dhcp.rs` (5568 lines -- by far the largest route
 
 ### `logs.rs` -- `GET /logs`
 
-- `logs_page()`: two mutually-exclusive branches (per the file's own header comment) -- if `SYSLOG_ENABLED=true` (the `logging` Compose profile), renders the last 200 entries from the syslog-ng store (`syslog_client::parse_syslog_tail`); otherwise falls back to parsing nginx's own access log tail directly (`nginx_client::parse_log_tail`), splitting 200/100+100 between a shared or split standard/SSL log file. Supports a `?filter=<cache_status>` query param in the nginx branch only (retains only entries matching the given cache status, e.g. `HIT`/`MISS`) -- the syslog branch has no equivalent filter param wired, an asymmetry between the two branches that isn't flagged anywhere as intentional vs. a gap.
+- `logs_page()`: two mutually-exclusive branches (per the file's own header comment) -- if `SYSLOG_ENABLED=true` (the `logging` Compose profile), renders the last N entries from the syslog-ng store (`syslog_client::parse_syslog_tail`); otherwise falls back to parsing nginx's own access log tail directly (`nginx_client::parse_log_tail`), splitting the budget between a shared or split standard/SSL log file. Supports a `?filter=<cache_status>` query param in the nginx branch only (retains only entries matching the given cache status, e.g. `HIT`/`MISS`) -- the syslog branch still has no equivalent *cache-status* filter wired, but as of #865/#848 (landed after this document's original writing) it gained its own, differently-shaped `?host=` filter (restricting the tail to one wired host's subdirectory, backed by a real dropdown in `logs.html`'s syslog-mode branch and a `list_syslog_hosts()` helper), and the code's own comment now explicitly documents the asymmetry as intentional (`?filter` "has no meaning for syslog lines"), not an unflagged gap. `?host=` is only ever honored when it's an exact member of `list_syslog_hosts()`'s real result.
 - Backend calls: nginx or syslog-ng log files only, no Kea/PowerDNS/NATS/Docker.
 - E2E coverage: none of the 11 simulation scripts hit `/logs`. #453 (open, "central syslog-ng logging with fluent-bit forwarding") is the umbrella issue whose scope this syslog branch belongs to -- worth checking against #453's own acceptance criteria for whether the `/logs` UI-level behavior (not just syslog-ng ingestion itself) was meant to be covered there or is a residual gap.
 
@@ -75,21 +96,21 @@ Files present: `dashboard.rs`, `dhcp.rs` (5568 lines -- by far the largest route
 
 ---
 
-### `domains.rs` -- CDN domain list, LAN DNS records, AAAA filter (1139 lines)
+### `domains.rs` -- CDN domain list, LAN DNS records, AAAA filter (1321 lines as of 2026-07-18, 1139 at original writing)
 
 Routes (from `main.rs`): `GET /domains`, `POST /domains/dns/add`, `POST /domains/dns/remove`, `POST /domains/lan/add`, `POST /domains/lan/remove`, `POST /domains/aaaa-filter`.
 
 - `domains_page()`: renders the CDN domain list (parsed from `cdn_domains_file`), LAN DNS records (fetched live from PowerDNS Authoritative's `zones/lan` API), current AAAA-filter marker state, and (via `dns_snapshots.rs`) the zone snapshot rollback panel.
-- `add_dns()` / `remove_dns()`: validate and rewrite `cdn_domains_file` (atomic temp-file+rename, with an in-place fallback for bind-mounted individual files that can't be renamed -- `EBUSY`/errno 16 -- documented as intentionally non-atomic in that fallback case), then flush the PowerDNS Recursor's cache for the exact changed domain (canonical dot-terminated form required by PDNS or the flush itself is rejected) and publish a `lancache.dns.flush` NATS event so every recursor instance clears cache, not just the one this UI talks to. If `ssl_enabled`, restarts the SSL proxy service (via `docker_client::restart_service`) since the proxy derives its wildcard-cert root domains and host-allowlist from this same file at container startup -- **no separate SSL domain list exists anymore**, so any CDN-domain add/remove that needs TLS interception requires this restart to take effect.
+- `add_dns()` / `remove_dns()`: validate and rewrite `cdn_domains_file` (atomic temp-file+rename, with an in-place fallback for bind-mounted individual files that can't be renamed -- `EBUSY`/errno 16 -- documented as intentionally non-atomic in that fallback case), then flush the PowerDNS Recursor's cache for the exact changed domain (canonical dot-terminated form required by PDNS or the flush itself is rejected) and publish a `lancache.dns.flush` NATS event so every recursor instance clears cache, not just the one this UI talks to. If `ssl_enabled`, restarts the SSL proxy service (via `docker_client::restart_service`) since the proxy derives its wildcard-cert root domains and host-allowlist from this same file at container startup -- **no separate SSL domain list exists anymore**, so any CDN-domain add/remove that needs TLS interception requires this restart to take effect. **As of #878** (landed after this document's original writing): a failed `cdn_domains_file` write now maps through a shared `dns_write_result_to_response` helper to `500 Internal Server Error` instead of the unconditional success redirect both handlers previously sent regardless of write outcome -- the best-effort recursor-flush/proxy-restart calls that follow a *successful* write remain fire-and-log, since they're downstream side effects rather than the request's own mutation.
 - `add_lan_record()` / `remove_lan_record()`: publish a `lancache.dns.record` NATS message (`{action: replace|delete, zone: "lan", ...}`) rather than calling PowerDNS's API directly -- the actual zone mutation happens asynchronously in `nats-subscriber`. Validates record type (A/AAAA/CNAME/MX/TXT for add; a much wider set incl. SRV/CAA/DS/DNSKEY/NAPTR/LOC/HTTPS/SVCB/`TYPE<n>` for delete, since an operator must be able to delete a pre-existing rrset outside the add-form's whitelist), TTL bounds, and name/content shape per record type (including underscore-label support for TXT/SRV-style names like `_dmarc.lan.`/`_acme-challenge.lan.`).
 - `toggle_aaaa_filter()`: writes/removes a marker file (`aaaa-filter-enabled`) in **both** `dns-standard` and `dns-ssl`'s state dirs. If either write fails, returns 500 rather than reporting success -- "the UI must not report success if any DNS instance cannot observe the requested marker state" per its own comment.
 - Backend calls: PowerDNS Authoritative (`fetch_lan_records`), PowerDNS Recursor (`flush_recursor_cache`), NATS publish (`lancache.dns.flush`, `lancache.dns.record`), Docker restart (`restart_ssl` -> `docker_client::restart_service`), direct filesystem writes (domain file, AAAA marker files).
-- Extensive in-file unit test coverage (14 tests): domain entry parsing incl. wildcard-only (`.example.com`) vs. root-domain semantics (explicitly distinct per `AGENTS.md`'s "Domain scope semantics" rule -- not normalized away), atomic file rewrite preserving comments/mixed line-endings (issue #656 regression test), bind-mount EBUSY fallback, LAN record validation edge cases.
+- Extensive in-file unit test coverage (21 tests as of 2026-07-18, 14 at original writing -- the growth is `add_dns`/`remove_dns`'s new failure-mapping tests from #878, see the currency-check note above): domain entry parsing incl. wildcard-only (`.example.com`) vs. root-domain semantics (explicitly distinct per `AGENTS.md`'s "Domain scope semantics" rule -- not normalized away), atomic file rewrite preserving comments/mixed line-endings (issue #656 regression test), bind-mount EBUSY fallback, LAN record validation edge cases, and (since #878) `dns_write_result_to_response`'s success/failure mapping for both `add_dns` and `remove_dns`.
 - E2E coverage: `/domains/lan/add` and `/domains/lan/remove` ARE exercised end-to-end by both `dns-zone-rollback-simulation.sh` and `ui-nats-dns-integration-simulation.sh` (real HTTP POST through the UI, real NATS publish, real PowerDNS zone mutation, real `dig` verification). **Not** covered by any simulation script: `/domains/dns/add`, `/domains/dns/remove` (the CDN-domain-file + SSL-proxy-restart path), and `/domains/aaaa-filter`. Given that `add_dns`/`remove_dns` is the one route in this file that also triggers a Docker container restart (`restart_ssl`), and per `AG-VAL-014` ("Proxy/cache behavior changes require a response or cache-behavior check that proves the proxy still serves the intended path"), this looks like the most operationally significant untested path in this file.
 
 ---
 
-### `secondaries.rs` -- NATS secondary node registration (589 lines)
+### `secondaries.rs` -- NATS secondary node registration (629 lines as of 2026-07-18, 589 at original writing; test count unchanged at 5)
 
 Routes: `GET /secondaries`, `POST /api/secondary/register` (public, own token, not behind Basic Auth), `DELETE /api/secondary/{name}`, `POST /api/secondary/{name}/rotate-token`.
 
@@ -105,9 +126,9 @@ Routes: `GET /secondaries`, `POST /api/secondary/register` (public, own token, n
 
 ---
 
-### `dhcp.rs` -- by far the largest and most complex route file (5568 lines)
+### `dhcp.rs` -- by far the largest and most complex route file (5780 lines as of 2026-07-18, 5568 at original writing)
 
-Routes (from `main.rs`): `GET /dhcp`, `POST /dhcp/mode`, `POST /dhcp/proxy`, `POST /dhcp/subnet/add`, `POST /dhcp/subnet/update`, `POST /dhcp/subnet/remove`, `POST /dhcp/subnet/option/add`, `POST /dhcp/subnet/option/remove`, `POST /dhcp/static/add`, `POST /dhcp/static/remove`, `POST /dhcp/lease/release`, `POST /dhcp/snapshot/rollback`, `GET /api/dhcp/check`.
+Routes (from `main.rs`): `GET /dhcp`, `POST /dhcp/mode`, `POST /dhcp/proxy`, `POST /dhcp/subnet/add`, `POST /dhcp/subnet/update`, `POST /dhcp/subnet/remove`, `POST /dhcp/subnet/option/add`, `POST /dhcp/subnet/option/remove`, `POST /dhcp/static/add`, `POST /dhcp/static/remove`, `POST /dhcp/lease/release`, `POST /dhcp/snapshot/rollback`, `POST /api/dhcp/check` (converted from `GET` by #978, see below).
 
 **Whole-stack mode control:**
 - `dhcp_page()`: renders current DHCP mode (disabled/Kea/dnsmasq-proxy), dnsmasq-proxy settings, and -- only if Kea is actually reachable (`kea_api_available`: mode is Kea AND `dhcp_api_url` is non-empty) -- live subnets/leases/reservations (leases+reservations fetched concurrently via `tokio::join!`) plus known-good Kea config snapshots. Never hard-errors: an unreachable Kea renders empty tables rather than a broken page.
@@ -121,7 +142,7 @@ Routes (from `main.rs`): `GET /dhcp`, `POST /dhcp/mode`, `POST /dhcp/proxy`, `PO
 - `release_lease()` (**the other #556 ask**): calls Kea's `lease4-del` directly via `kea_post` (bypasses the config-modify chain entirely -- this is a runtime lease-database action, not a config-file change). Correctly distinguishes Kea's `CONTROL_RESULT_EMPTY` (3, "no matching lease" -- an ordinary race, surfaced as 404) from a genuine error (surfaced as 500).
 - **Cross-reference: issue #556 ("DHCP Admin UI is still missing lease release and custom DHCP-option management") is CLOSED.** Both gaps it named are fully implemented in the current `origin/v0.2.0` code (`release_lease` and `add_subnet_option`/`remove_subnet_option` above) -- this is a stale example in this audit's own task framing; the code has moved past it.
 - `rollback_kea_snapshot()`: operator-selected rollback to one of N retained known-good Kea config snapshots (#614). Path-traversal-safe (`form.snapshot_id` is never used to build a filesystem path unless it exactly matches an id `list_snapshot_ids` already found on disk). Reuses the same `kea_config_modify` chain, so a rollback gets the identical config-test/config-set/config-write/rollback-on-failure guarantees as every other mutation, plus its own fresh known-good snapshot on success.
-- `check_dhcp_conflict()` (`GET /api/dhcp/check`): runs a predeclared one-shot `dhcp-probe` container (nmap broadcast-dhcp-discover conflict scan + a `dhclient` dry-run) via start/wait/logs only -- Docker `exec` and generic container creation are explicitly banned from the UI's Docker API surface for security reasons (per the file's own header comment). Returns a combined `{status, conflict, client}` JSON with `conflict_found` outranking everything else regardless of the client check's own result.
+- `check_dhcp_conflict()` (`POST /api/dhcp/check`, converted from `GET` by **#978** since this document's original writing): runs a predeclared one-shot `dhcp-probe` container (nmap broadcast-dhcp-discover conflict scan + a `dhclient` dry-run) via start/wait/logs only -- Docker `exec` and generic container creation are explicitly banned from the UI's Docker API surface for security reasons (per the file's own header comment). Returns a combined `{status, conflict, client}` JSON with `conflict_found` outranking everything else regardless of the client check's own result. **#978 closed a real CSRF-exemption gap**: this route mutates server state (starts/stops the `dhcp-probe` container) but was previously reachable via a plain, CSRF-exempt `GET` (this app's CSRF protection only ever covered mutating HTTP methods) -- it is now `POST` with an explicit `verify_csrf_header` check, mirroring `secondaries::remove_secondary`/`rotate_token`. This does **not** change `dhcp.html`'s own `DOMContentLoaded` handler, which still calls this endpoint unconditionally (now as a CSRF-token-bearing POST) on every single page load of `/dhcp` -- the disruptive auto-restart-probe-plus-scan-on-every-load behavior itself is unrelated to the CSRF gap and remains exactly as before.
 
 **Kea API core (shared machinery, not routes):** `kea_post`/`kea_result` (raw Control Agent HTTP + Kea's own success/failure result-code convention), `kea_config_modify`/`kea_config_modify_with_post` (the full config-get/modify/test/set/write chain with a 3-way write-outcome type -- `Success`/`ConfirmedFailure`/`AmbiguousFailure` -- so a network error on `config-write` is never conflated with Kea explicitly rejecting the write; an ambiguous failure gets one retry before giving up rather than either blindly rolling back a write that may have actually succeeded, or leaving a genuine failure unconfirmed forever), `rollback_kea_config` (re-applies the pre-change config on a confirmed write failure).
 
