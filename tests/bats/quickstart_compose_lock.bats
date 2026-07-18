@@ -67,7 +67,11 @@ wait_for_marker() {
 }
 
 @test "acquiring locks the overridden path, not the real hardcoded default" {
-    quickstart_compose_lock_acquire "$test_lock_path"
+    # Prefix assignment, not a positional argument: the function takes none
+    # (see its own header for why -- SC2119/actionlint), so this suite
+    # overrides the variable instead, scoped to just this one call (confirmed
+    # empirically that it reverts to the outer value once the call returns).
+    QUICKSTART_COMPOSE_LOCK_PATH="$test_lock_path" quickstart_compose_lock_acquire
     [ -e "$test_lock_path" ]
 
     # A non-blocking probe against the REAL default path must still succeed
@@ -85,7 +89,7 @@ wait_for_marker() {
     # open (and therefore genuinely contend for) the lock file itself.
     bash -c '
         source "'"$lock_lib"'"
-        quickstart_compose_lock_acquire "'"$test_lock_path"'"
+        QUICKSTART_COMPOSE_LOCK_PATH="'"$test_lock_path"'" quickstart_compose_lock_acquire
         touch "'"$ready_marker"'"
         sleep 30
     ' &
@@ -111,7 +115,7 @@ wait_for_marker() {
 @test "a second acquirer blocks (no -n) until the first holder releases, then proceeds -- matches the original inline flock's semantics" {
     bash -c '
         source "'"$lock_lib"'"
-        quickstart_compose_lock_acquire "'"$test_lock_path"'"
+        QUICKSTART_COMPOSE_LOCK_PATH="'"$test_lock_path"'" quickstart_compose_lock_acquire
         touch "'"$ready_marker"'"
         sleep 2
     ' &
@@ -122,7 +126,7 @@ wait_for_marker() {
     start_epoch="$(date +%s)"
     # Blocking acquire (this function's actual production call, not a `-n`
     # probe): must wait for the holder's sleep 2 to finish, not fail fast.
-    quickstart_compose_lock_acquire "$test_lock_path"
+    QUICKSTART_COMPOSE_LOCK_PATH="$test_lock_path" quickstart_compose_lock_acquire
     elapsed=$(( $(date +%s) - start_epoch ))
 
     wait "$holder_pid" 2>/dev/null || true
@@ -139,7 +143,7 @@ wait_for_marker() {
     # time this command returns, the subprocess has already exited.
     bash -c '
         source "'"$lock_lib"'"
-        quickstart_compose_lock_acquire "'"$test_lock_path"'"
+        QUICKSTART_COMPOSE_LOCK_PATH="'"$test_lock_path"'" quickstart_compose_lock_acquire
     '
 
     # If the fd/lock had somehow survived past the subprocess's exit, this

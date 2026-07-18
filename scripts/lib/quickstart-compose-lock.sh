@@ -35,10 +35,20 @@
 # the property syslog-forwarding-simulation.sh's own separate-lock-file
 # mistake violated. Keeping one constant here (rather than letting each
 # call site pass its own path) makes that shared scope structurally
-# impossible to accidentally narrow again. The optional override parameter
-# on the function below exists only so this file's own bats coverage can
-# point at a throwaway test path instead of the real one -- production
-# call sites must always call it with no argument.
+# impossible to accidentally narrow again. The function below takes no
+# argument at all (a positional override was considered and dropped: with
+# `local lock_path="${1:-$QUICKSTART_COMPOSE_LOCK_PATH}"`, shellcheck's
+# SC2119/SC2120 flags every real, no-argument call site as "did you forget
+# to pass $1?", and actionlint's embedded shellcheck pass turns that into a
+# hard CI failure -- there is no legitimate call site that should EVER pass
+# an override, so there is nothing for that warning to correctly guard
+# against here). Instead, this file's own bats coverage overrides the
+# variable itself via a prefix assignment scoped to just that one call
+# (`QUICKSTART_COMPOSE_LOCK_PATH="$test_path" quickstart_compose_lock_acquire`
+# -- confirmed empirically that this reverts to the outer value once the
+# call returns, exactly like it would for an external command, not a
+# permanent mutation of the test's own shell). Production call sites must
+# never do this themselves.
 #
 # WHY THIS MUST BE `source`d, NEVER EXECUTED AS A SUBPROCESS (`bash
 # quickstart-compose-lock.sh`): `exec {fd}>path` opens a file descriptor in
@@ -76,19 +86,18 @@
 # change, but the path itself carries no reason to move).
 QUICKSTART_COMPOSE_LOCK_PATH="/tmp/lancache-setup-cli-simulation.lock"
 
-# quickstart_compose_lock_acquire [lock_path]
+# quickstart_compose_lock_acquire
 # Blocks (like the original inline `flock` with no `-n`) until the lock at
-# <lock_path> (default: $QUICKSTART_COMPOSE_LOCK_PATH) is free, then holds
-# it for the remainder of the caller's shell -- see the file header for why
-# that requires this function to run in the caller's own shell via `source`
-# rather than as a subprocess. There is no matching "release" function: the
-# original inline pattern never released explicitly either, relying on the
-# workflow step's shell exiting at the end of the step to close the
-# descriptor and drop the flock, and this refactor preserves that same
-# implicit-release behavior rather than changing it.
+# $QUICKSTART_COMPOSE_LOCK_PATH is free, then holds it for the remainder of
+# the caller's shell -- see the file header for why that requires this
+# function to run in the caller's own shell via `source` rather than as a
+# subprocess, and why this reads the variable rather than taking an
+# argument. There is no matching "release" function: the original inline
+# pattern never released explicitly either, relying on the workflow step's
+# shell exiting at the end of the step to close the descriptor and drop the
+# flock, and this refactor preserves that same implicit-release behavior
+# rather than changing it.
 quickstart_compose_lock_acquire() {
-    local lock_path="${1:-$QUICKSTART_COMPOSE_LOCK_PATH}"
-
-    exec {QUICKSTART_COMPOSE_LOCK_FD}>"$lock_path"
+    exec {QUICKSTART_COMPOSE_LOCK_FD}>"$QUICKSTART_COMPOSE_LOCK_PATH"
     flock "$QUICKSTART_COMPOSE_LOCK_FD"
 }
