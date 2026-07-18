@@ -19,6 +19,18 @@ All source was read directly from `origin/v0.2.0` (checked out as this
 branch's parent) to match the capability-inventory document's own branch
 convention.
 
+> **Review-triage update (2026-07-18):** two PR-review findings on this
+> document were verified against current code and corrected here: Finding 3
+> (`nats_auth_callout.rs` subscribe-failure backoff — the illustrative
+> "`$SYS.REQ.USER.AUTH` permissions problem" trigger doesn't match how
+> `async-nats 0.49.1`'s `Client::subscribe` actually surfaces errors, so the
+> scenario and severity were corrected) and Finding 5 (`secondaries.nats_user`
+> uniqueness — the presumed independently-generated, CSPRNG-derived
+> `nats_user` value doesn't exist; `routes/secondaries.rs` sets it equal to
+> the `name` primary key, so the collision this finding worried about cannot
+> occur through the current write path). The other 8 findings were
+> re-checked and remain accurate as originally written.
+
 Starting point: `docs/capability-inventory/SoT-ui-core.md` (branch
 `docs/inventory-ui-core`) and the original audit comment on issue #843. That
 document is a floor, not a ceiling, for this pass — several items below
@@ -98,17 +110,32 @@ The connect-failure branch above this does `delay = min(delay * 2, max_delay)`
 on every failure (proper exponential backoff, 1s→30s cap). The
 subscribe-failure branch does not — it sleeps whatever `delay` currently is
 and `continue`s, which re-enters the loop from the top and reconnects to
-NATS. Since a successful reconnect resets `delay` back to `1s` right before
-subscribe is attempted again, a *persistently* failing subscribe (e.g. a
-permissions problem specifically on `$SYS.REQ.USER.AUTH`, as opposed to a
-connection failure) causes the responder to hot-loop reconnect + subscribe
-roughly once per second indefinitely, rather than backing off the way every
-other retry loop in this file (and `connect_nats_with_retry` in `main.rs`)
-does.
+NATS.
 
-**Severity estimate**: moderate (missing backoff on one specific failure
-path; would show up as sustained ~1 req/s reconnect traffic against the local
-NATS broker under a specific misconfiguration, not a crash).
+**Corrected 2026-07-18** (was: framed around a "`$SYS.REQ.USER.AUTH`
+permissions problem" as the persistent trigger — checked directly against
+the pinned `async-nats 0.49.1` source and that premise doesn't hold).
+`Client::subscribe` only returns `Err` for local subject validation or an
+internal command-channel send failure; it does not wait for, or surface, a
+server-side authorization decision — NATS reports subscription permission
+violations asynchronously, after the `SUB` frame has already been sent, not
+as this call's synchronous result. `REQUEST_AUTH_SUBJECT` is a fixed,
+always-valid constant, so subject validation can't trigger this branch in
+practice; the realistic trigger is the internal-channel-send-failure case —
+e.g. the client's background I/O task having already exited between
+`connect()` succeeding and `subscribe()` being called. That is a narrow,
+transient race rather than a condition that reliably repeats every loop
+iteration, so the missing backoff is still a real gap (this branch skips the
+`delay`-growth step the connect-failure branch gets), but it would not
+necessarily produce the sustained ~1 req/s hot-loop the original framing
+implied. A genuine NATS authorization problem on this subject would surface
+through a different code path than the one this finding covers (the
+subscription/connection being torn down by the server after `sub.next()`
+starts returning `None` or an error), not through this `Err` branch.
+
+**Severity estimate**: minor / info (missing backoff on one specific,
+narrow-race failure path — real code-quality gap, but the previously-claimed
+persistent-hot-loop trigger does not hold for this branch).
 
 ---
 
@@ -138,7 +165,8 @@ host clock; silent rather than logged).
 ## 5. `secondaries.nats_user` has no DB-level uniqueness constraint
 
 **Files**: `services/ui/src/main.rs` (schema/migration),
-`services/ui/src/nats_auth_callout.rs` (`authorize_secondary_with_conn`)
+`services/ui/src/nats_auth_callout.rs` (`authorize_secondary_with_conn`),
+`services/ui/src/routes/secondaries.rs` (registration write path)
 
 The `secondaries` table's `nats_user` column (added by
 `migrate_secondaries_table_for_auth_callout`) has no `UNIQUE` constraint —
@@ -146,14 +174,26 @@ only `name` (PK) and `consumer_name` are unique. `authorize_secondary_with_conn`
 does `SELECT nats_password_hash FROM secondaries WHERE nats_user = ?1` with
 no `ORDER BY`/uniqueness assumption enforced at the schema level; `rusqlite`'s
 `query_row` silently uses whichever row SQLite returns first if more than one
-row shares the same `nats_user`. Today this is only reachable if the
-(out-of-scope, `routes/secondaries.rs`) generation logic ever produced a
-collision, but the schema itself provides no defense-in-depth against that —
-uniqueness is a purely application-level invariant, unenforced by SQLite.
+row shares the same `nats_user`.
 
-**Severity estimate**: minor / info (defense-in-depth gap, not a currently
-demonstrated exploit path — the generator is presumed to use a CSPRNG-derived
-unique value, but that code is out of this pass's file list).
+**Corrected 2026-07-18** (was: presumed the registration write path used an
+independently-generated, CSPRNG-derived `nats_user` and left it out of
+scope — checked `routes/secondaries.rs` directly instead of presuming).
+Registration sets `nats_user = form.name.clone()`; only
+`generate_nats_password()` (32 CSPRNG-random bytes) is independently
+generated. `nats_user` is not a separately-generated value at all — it is
+literally the table's own primary key (`name`). Because `name` already
+carries a PK constraint, this write path cannot produce a `nats_user`
+collision: two rows can never share a `name`, and therefore never share the
+`nats_user` derived from it. This changes the finding from a possible
+username-generator collision into a pure schema-level defense-in-depth gap
+— the missing `UNIQUE` constraint only matters if some other or future
+writer ever sets `nats_user` independently of `name`, which nothing in the
+current codebase does.
+
+**Severity estimate**: minor / info (defense-in-depth gap only; not
+reachable through any current write path, since `nats_user` is tied 1:1 to
+the `name` primary key rather than independently generated).
 
 ---
 
