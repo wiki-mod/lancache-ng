@@ -25,6 +25,16 @@ time of this audit — see "Branch divergence" at the end.
 > allowlist does not cover the standard-mode stream listener. Everything
 > else in this doc remains accurate; no merged commit in that range touches
 > `services/proxy`'s code paths.
+>
+> **Review-triage update (2026-07-18):** four PR-review findings were
+> verified against current code and fixed here: the full-setup bind-mount
+> claim (§3), dev's distinct port mapping (§5), the
+> `PROXY_SECURITY_MODE=strict` 403 scope (§4), and the stale
+> `cdn-ssl-domains.txt` threat-model reference (§7 — `docs/threat-model.md`
+> itself was corrected, not just flagged). This file is now ahead of the
+> mirrored public comment on issue #843
+> (https://github.com/wiki-mod/lancache-ng/issues/843#issuecomment-4977019630);
+> that comment has not been separately updated to match.
 
 ---
 
@@ -84,10 +94,17 @@ time of this audit — see "Branch divergence" at the end.
   Debian's own package) for `libnginx-mod-stream` availability.
 - Uses a **named additional build context** (`dns-domains` →
   `services/dns/`) to bake a **build-time snapshot** of `cdn-domains.txt`
-  into the image as a fallback for deployments with no live bind-mount
-  (`deploy/quickstart`, which has no local repo checkout). dev/prod/full-setup
-  always shadow this with a live bind-mount of the real file at container
-  start.
+  into the image as a fallback for deployments with no live bind-mount.
+  dev/prod shadow this with a live bind-mount of the real file
+  (`services/dns/cdn-domains.txt` → `/etc/nginx/cdn-domains.txt`) at
+  container start. **`deploy/quickstart` and `deploy/full-setup` do not**
+  (corrected 2026-07-18) — quickstart pulls a published image with no local
+  repo checkout to bind-mount from, and full-setup's `proxy` service only
+  mounts `proxy-cache:/var/cache/nginx/lancache` (no domain-list mount at
+  all), so both fall back to the image-baked snapshot for the domain list.
+  Anyone using full-setup's SSL-MITM harness to exercise a local
+  `cdn-domains.txt` edit is actually exercising the image-baked snapshot,
+  not the live file.
 - `public_suffix_list.dat` (vendored, MPL-2.0) is baked in as static,
   non-user-editable data — not runtime-managed, not part of the
   known-good-snapshot mechanism.
@@ -99,18 +116,28 @@ time of this audit — see "Branch divergence" at the end.
 | `IP_STANDARD`, `IP_SSL`, `SSL_ENABLED` | compose `environment:` | Mode selection, cert IP SAN, required-var gating |
 | `CACHE_MAX_SIZE`, `CACHE_MEM_MB`, `CACHE_SLICE_SIZE`, `CACHE_VALID_HIT`, `CACHE_VALID_ANY`, `CACHE_INACTIVE` | `config/{dev,prod}/proxy.env` | Cache sizing/retention tuning, templated into `nginx.conf`/`proxy-params.conf` |
 | `NGINX_UPSTREAM_RESOLVER` | `config/{dev,prod}/proxy.env` | Real upstream DNS for origin lookups (dual-stack default incl. bracketed IPv6 Google DNS) |
-| `PROXY_SECURITY_MODE` (`lazy`\|`strict`) | `config/{dev,prod}/proxy.env` | `lazy` (default): proxy any host that reaches the cache. `strict`: 403 anything not derived from `cdn-domains.txt` |
+| `PROXY_SECURITY_MODE` (`lazy`\|`strict`) | `config/{dev,prod}/proxy.env` | `lazy` (default): proxy any host that reaches the cache. `strict`: for the `http{}`/`https{}` `location /` blocks, returns HTTP 403 for any host not derived from `cdn-domains.txt` (`$cdn_host_allowed`, `conf.d/http.conf`/`https.conf`). **Scope gap (confirmed 2026-07-18):** the standard-mode `stream{}` SNI-passthrough listener (`:8443`) enforces the same domain list differently — `entrypoint.sh` routes an unlisted SNI to a closed `127.0.0.1:9`, producing a failed/refused TCP connection, never an HTTP 403. Do not assume a 403 for strict-mode denials on the standard-mode listener. |
 | `PROXY_ALLOWED_CLIENT_CIDRS` | `config/{dev,prod}/proxy.env` | Source-IP allowlist (`geo $lancache_client_allowed` block); empty = allow all reachable clients. **Scope gap (confirmed 2026-07-18):** the `geo` variable is only checked in `conf.d/http.conf` and `conf.d/https.conf` (both `http{}` context) — the standard-mode SNI-passthrough `stream{}` listener (`:8443`) never references it, so this allowlist is **not enforced** for standard-mode clients regardless of configuration. See `bughunt-proxy` finding N1. |
 | `KEEP_KNOWN_GOOD_CONFIGS` (default 3) | `config/{dev,prod}/proxy.env` | Snapshot retention depth for #415 rollback |
 | `PROXY_CONFIG_SNAPSHOT_DIR` | entrypoint default (`/var/lib/lancache-proxy/config-snapshots`), volume `proxy-config-snapshots` per `docs/known-good-config-snapshots.md` | Where rollback snapshots persist across container recreation |
 
 ## 5. Docker Compose wiring across environments
 
-- **dev/prod/quickstart**: identical port-mapping trick —
+- **prod/quickstart**: identical port-mapping trick —
   `IP_STANDARD:443→container:8443` (stream/SNI-passthrough),
-  `IP_SSL:443→container:443` (interception). Healthcheck always checks
-  `http://127.0.0.1/healthz`, and additionally `https://127.0.0.1/healthz`
-  only when `SSL_ENABLED=1`.
+  `IP_SSL:443→container:443` (interception), HTTP on host port 80 for both
+  IPs.
+- **dev** (corrected 2026-07-18 — this is *not* identical to prod/quickstart):
+  same *container*-side ports, different *host*-side ports to dodge
+  conflicts on a dev workstation — `IP_STANDARD:8080→container:80` (HTTP,
+  not port 80) and `IP_STANDARD:8443→container:8443` (stream/SNI-passthrough,
+  not `443→8443`); `IP_SSL:80→container:80` / `IP_SSL:443→container:443`
+  match prod. Anyone reproducing standard-mode port-routing against a dev
+  stack must target `8443`, not `443`.
+
+  Healthcheck always checks `http://127.0.0.1/healthz`, and additionally
+  `https://127.0.0.1/healthz` only when `SSL_ENABLED=1` — same script across
+  dev/prod/quickstart.
 - **`deploy/full-setup/`** (validation-only harness, not production):
   reproduces the same dual-listener architecture on a single bridge network
   via a `standard-passthrough-shim` (profile-gated `alpine`+`socat`
@@ -174,16 +201,21 @@ time of this audit — see "Branch divergence" at the end.
   `WARNING`/`ERROR` log line, no separate health/status indicator, no open
   issue found specifically tracking "surface known-good-snapshot fallback
   state to the Admin UI or watchdog."
-- **Stale doc cross-reference**: `docs/threat-model.md`'s "T2: LAN client
-  poisons the cache" mitigation still names `cdn-ssl-domains.txt` as what
-  `PROXY_SECURITY_MODE=strict` restricts to. That file was **retired in the
-  v0.2.0 refactor** (`entrypoint.sh`'s own comment: *"Before v0.2.0,
-  cdn-ssl-domains.txt was a SEPARATE, hand-maintained list... it never was
-  [kept in sync]... missing root coverage for at least one real DNS-listed
-  domain"*) — strict mode now derives roots from `services/dns/cdn-domains.txt`
-  via the vendored Public Suffix List. No functional impact, but the doc
-  should be corrected to avoid an operator looking for a file that no
-  longer exists.
+- **Stale doc cross-reference — fixed in this PR (2026-07-18)**:
+  `docs/threat-model.md`'s "T2: LAN client poisons the cache" mitigation
+  named `cdn-ssl-domains.txt` as what `PROXY_SECURITY_MODE=strict`
+  restricts to. That file was **retired in the v0.2.0 refactor**
+  (`entrypoint.sh`'s own comment: *"Before v0.2.0, cdn-ssl-domains.txt was a
+  SEPARATE, hand-maintained list... it never was [kept in sync]... missing
+  root coverage for at least one real DNS-listed domain"*) — strict mode now
+  derives roots from `services/dns/cdn-domains.txt` via the vendored Public
+  Suffix List. Per AG-DOC-001 (documentation drift is a defect, not
+  follow-up work), `docs/threat-model.md`'s T2 section was updated in this
+  PR to name `cdn-domains.txt` and the PSL-derivation mechanism instead of
+  recording the mismatch only here, and its `PROXY_ALLOWED_CLIENT_CIDRS`
+  line was scoped to name the same standard-mode stream-listener
+  enforcement gap this inventory documents above (§4), so the two documents
+  no longer contradict each other.
 - **Closed but worth citing for history**: #668 (ssl-mitm-cache-simulation
   couldn't prove SSL-mode reaches a distinct MITM endpoint — fixed via the
   `standard-passthrough-shim`) and #655 (the two

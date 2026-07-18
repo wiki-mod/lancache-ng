@@ -179,11 +179,20 @@ proxy into caching attacker-controlled content under a legitimate key.
 **Mitigations**:
 - Cache key includes the `Host` header (`$host$uri`); responses are only cached
   after the origin fetch succeeds over verified TLS.
-- `PROXY_SECURITY_MODE=strict` limits proxied hosts to those in
-  `cdn-ssl-domains.txt` (deny-by-default `$cdn_host_allowed` map), removing the
-  "proxy anything" behaviour of the default `lazy` mode.
+- `PROXY_SECURITY_MODE=strict` limits proxied hosts to those derived from
+  `cdn-domains.txt` (deny-by-default `$cdn_host_allowed` map, rooted via the
+  vendored Public Suffix List — see `services/proxy/entrypoint.sh`),
+  removing the "proxy anything" behaviour of the default `lazy` mode. This
+  enforcement applies to the `http{}`/`https{}` `location /` blocks (HTTP
+  403 response); the standard-mode `stream{}` SNI-passthrough listener
+  enforces the same domain list differently — an unlisted SNI is routed to
+  a closed `127.0.0.1:9`, not a 403.
 - `PROXY_ALLOWED_CLIENT_CIDRS` optionally restricts which client networks the
-  proxy will answer at all (`$lancache_client_allowed` → 403).
+  proxy will answer at all for HTTP/HTTPS traffic (`$lancache_client_allowed`
+  → 403 in `conf.d/http.conf`/`https.conf`). This allowlist is **not**
+  enforced for the standard-mode `stream{}` listener (`:8443`) — it never
+  references `$lancache_client_allowed`, so client-CIDR restriction only
+  applies to HTTP/HTTPS traffic, not SNI-passthrough.
 
 **Residual risk**: Medium — `lazy` mode (the default) will proxy any requested
 host; strict mode and client CIDR limits are opt-in. Ultimately bounded by the
