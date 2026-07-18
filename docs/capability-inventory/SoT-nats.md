@@ -11,6 +11,22 @@ language rule). This file is the working copy / durable backup of that
 research, kept in its own branch (`docs/inventory-nats`) per the umbrella
 issue's parallel-audit workflow.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6`; see corrections below. Net change since this file was written:
+> **PR #828 is now merged** (merge commit `4a5e0c11`, 2026-07-15T20:35Z), so
+> the monitor-port/healthcheck gap this file describes as "pending that PR's
+> merge" is now actually closed on `v0.2.0` — `http_port: 8222` and the real
+> `wget .../healthz` probe are present in all four stacks today (verified by
+> `git grep` on `origin/v0.2.0`). The one paragraph that still read the gap as
+> "still fully unaddressed … nothing fixes it yet" (an internal contradiction
+> with this file's own UPDATE/Section 3/Summary) was written before that merge
+> and is corrected inline below. Note: the dev-branch commit `83567a8` cited
+> throughout landed its *content* via the squashed/rebased merge commit
+> `4a5e0c11`; the literal `83567a8` SHA is not in `v0.2.0` history. The
+> full-setup dns-writer/replica JetStream-permission observation and the
+> plaintext-`nats://`-to-remote-secondary finding are unchanged and remain
+> valid.
+
 ## Correction to this issue's own body (superseded — see UPDATE below)
 
 Issue #843's body says the "nats/ui missing-healthcheck finding" is
@@ -57,11 +73,22 @@ original pass, not stale claims invented after the fact. The plaintext
 websocket/mqtt findings, and the full-setup JetStream-permission question
 are all unaffected by this commit and remain valid as written below.
 - Repo-wide `git grep` for `8222|http_port|monitor_port` across
-  `*.conf`/`*.yml`/`*.rs`/`*.sh`/`*.md` on `origin/v0.2.0`: **zero matches**.
+  `*.conf`/`*.yml`/`*.rs`/`*.sh`/`*.md` on `origin/v0.2.0`: this returned
+  **zero matches at the time this file was first written** (before PR #828
+  merged).
 
-So the monitor-port (`8222`) gap is real and **still fully unaddressed** —
-nothing fixes it yet. Noting this so the umbrella tracking doesn't drift into
-believing it's already resolved.
+**Corrected 2026-07-18 (was: "the monitor-port gap is still fully
+unaddressed — nothing fixes it yet"):** that sentence was written while PR
+#828 was still open on `v0.2.0`, and it contradicted this same file's own
+UPDATE note, Section 3, and Summary. PR #828 has since merged (merge commit
+`4a5e0c11`, 2026-07-15T20:35Z). Re-running the same `git grep` on
+`origin/v0.2.0` @ `dc8d79c6` now returns matches in all four
+`deploy/*/docker-compose.yml` files: `http_port: 8222` is set in every
+generated `nats.conf`, and each `nats` healthcheck is
+`wget -q -O /dev/null http://127.0.0.1:8222/healthz`. **The monitor-port
+(`8222`) / real-healthcheck gap is therefore now closed on `v0.2.0`**, as the
+UPDATE/Section 3/Summary below already state — this paragraph is retained only
+to record and correct the transient contradiction.
 
 ## 1. Structural comparison of the four `nats:` service blocks
 
