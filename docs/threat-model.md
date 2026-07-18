@@ -513,8 +513,9 @@ unaffected, only HTTP gets cached).
   known to have no consoles.
 
 **Residual risk**: Low — safe by default; only an explicit operator opt-in, and
-even then only ssl-mode DNS carries real breakage risk.
-re-introduces the risk.
+even then only ssl-mode DNS carries real breakage risk. Opting into Xbox-PC
+(Game Pass) caching on a LAN that still has consoles present re-introduces
+the risk for that specific CDN.
 
 ---
 

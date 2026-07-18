@@ -8,7 +8,7 @@
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
 | Kea DHCP / DHCP modes | off | — | Configurable tri-state: `disabled` / `kea` / `dnsmasq-proxy`; requires PowerDNS (DDNS via nsupdate). See [docs/dhcp-modes.md](dhcp-modes.md). |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
-| syslog-ng | off (`--profile logging`) | — | Central log receiver; fluent-bit forwards proxy access logs to it (#453) |
+| syslog-ng | off (`--profile logging`) | — | Central log receiver; fluent-bit forwards logs from every wired service to it (#453) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
 | Cache Warmer | off | — | steamcmd, startable on demand |
 
@@ -78,14 +78,11 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ENABLE_ROOT_MIRROR` | `false` | Root zone mirror (AXFR from root servers) |
-| `FILTER_AAAA_V4` | `false` | Filter AAAA records for IPv4 clients |
-| `FILTER_AAAA_V6` | `false` | Filter AAAA records for IPv6 clients |
-| `ENABLE_SECONDARY` | `false` | Enable secondary zones. When set to `true` for remote secondaries, also include `deploy/prod/docker-compose.nats-secondary.yml` so NATS is bound only to the trusted interface specified by `NATS_BIND_IP`. |
+| `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/dev/dns-*.env` explicitly override it to `0`, `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
+| Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) |
+| `ENABLE_SECONDARY` | — | Not read by any code — a documentation-only narrative convention for when to include `deploy/prod/docker-compose.nats-secondary.yml`. The actual secondary-sync mechanism is NATS-based (see `NATS_BIND_IP`/`NATS_ADVERTISE_URL` below and `docs/dns-admin-ui-scope.md` §3); PowerDNS's own native secondary/AXFR mode is not implemented at all — `SECONDARY_MASTERS`/`SECONDARY_ZONES` (previously listed here) appear nowhere in this repository. |
 | `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
 | `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
-| `SECONDARY_MASTERS` | — | Primary DNS IP |
-| `SECONDARY_ZONES` | — | Comma-separated zone list |
 
 **allow-query / allow-recursion:** open to all RFC-1918 + IPv6 ULA by default
 
@@ -209,23 +206,37 @@ verified against `services/watchdog/watchdog.sh`: the daemon's own
 `check_and_maybe_restart` loop only polls and auto-restarts `proxy`,
 `dns-standard`, and (when `SSL_ENABLED=1`) `dns-ssl` -- the three container
 names it takes via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
-`CONTAINER_DNS_SSL`, feeding the Admin UI's dashboard traffic-light status.
+`CONTAINER_DNS_SSL`. `watchdog.sh` writes this state to a `status.json` file
+every 30 seconds, but as of this writing the Admin UI has no route or
+template that reads that file -- there is no per-service dashboard status
+indicator today (UI delivery debt; see "Status" below).
 Kea, syslog-ng, fluent-bit, `nats`, and `ui` all have a real Docker
 healthcheck too (so `docker inspect`/`docker compose ps` and CI's own
 wait-for-healthy scripts can see it), but the watchdog daemon does not poll
 or restart any of those five itself.
 
 **Scheduled purge (cron, daily):**
-- Remove cache entries older than `CACHE_VALID_HIT` (`find -mtime`)
+- Remove cache entries older than `CACHE_VALID_DAYS` (`config/{dev,prod}/watchdog.env`, `find -mtime`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `config/{dev,prod}/proxy.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
 - Complements nginx `inactive` (which works by access time)
 - Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
 
 **Disk monitoring:**
-- Warning in UI at 85% full (yellow)
-- Alarm at 95% (red)
-- Monitors actual disk usage, not just nginx `max_size`
+- `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
+  color and writes it into `status.json` every 30 seconds, monitoring actual
+  disk usage, not just nginx `max_size` -- but, same gap as "Status" above,
+  nothing in the Admin UI reads or renders that file, so this warning/alarm
+  is not currently operator-visible in the UI (see #849 observability
+  finding #3). The dashboard's own cache-usage bar (`cache_pct` in
+  `services/ui/src/routes/dashboard.rs`) is a separate, independently
+  computed value (used cache bytes vs. `CACHE_MAX_GB`), not this disk-usage
+  color.
 
-**Status:** displayed as traffic light bar in Admin UI (green/yellow/red per service)
+**Status:** `watchdog.sh` computes per-service health and disk-usage color
+(green/yellow/red) into `status.json` every 30 seconds, but nothing in the
+Admin UI (`services/ui/src/routes/dashboard.rs`, `templates/dashboard.html`)
+reads or renders that file as of this writing -- there is no per-service
+"traffic light" indicator in the UI today. Treat this as unfinished Admin UI
+delivery, not a shipped feature (see "Feature Completeness" in `AGENTS.md`).
 
 ## syslog-ng
 
@@ -242,7 +253,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - `scripts/check-logging-matrix.sh`, run in CI's `validate-compose` job, fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
 - Admin UI log reading from the central path: `services/ui/src/syslog_client.rs` (opt-in via `SYSLOG_ENABLED=true`, same 4-variable contract watchdog's retention engine uses) reads `/logs` and a dashboard tile from `SYSLOG_LOG_ROOT` directly, transparently decompressing rotated `.zst`/`.gz` files, instead of the `STANDARD_LOG`/`SSL_LOG` direct-nginx-read path. Disabled installs keep the old direct-nginx-read behavior unchanged.
 
-**Not implemented yet (tracked in follow-up #633):**
+**Not implemented yet (no open tracking issue as of this writing — #633, which used to be cited here, closed 2026-07-13 once its own four listed sub-items landed; these two were never actually part of that list):**
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
 
@@ -260,7 +271,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | nats | Via fluent-bit → syslog-ng | Like dnsmasq, nats-server logs to exactly one destination — no dual-output mode exists — so `log_file: /var/log/lancache-nats/nats.log` (set both in the compose-generated boot config and, authoritatively, by the Admin UI's `update_nats_conf`) means `docker logs` goes quiet on this container while the `logging` profile is active; same accepted trade-off as dhcp-proxy |
 | netdata | Via fluent-bit → syslog-ng | The pinned netdata image ships its default `/var/log/netdata/*.log` paths as symlinks to `/dev/stdout`/`/dev/stderr` (nothing for fluent-bit to tail), so — same "no local repo checkout to bind-mount a config file from" constraint as `syslog`/`syslog-ng` below — an inline `entrypoint` override writes a `netdata.conf` that redirects the `[logs]` `collector`/`daemon`/`health` sources to real files at `/var/log/netdata/*.file.log`, then `exec`s the image's own `/usr/sbin/run.sh`; that path is mounted onto the `netdata-logs` volume, which fluent-bit tails read-only. `access`/`debug` stay on their stdout defaults (high-rate/empty). netdata v2 has no separate `error` log key — error-level events land in `daemon`/`collector` |
 | dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
-| fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet (follow-up #633); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build) |
+| fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet (no open tracking issue as of this writing — see the "Not implemented yet" note above); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build) |
 | syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
 | docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
 
@@ -287,7 +298,7 @@ Epic / GOG: not supported.
 | Mechanism | Trigger | Basis |
 |---|---|---|
 | nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
-| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_HIT` |
+| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` |
 | Manual purge | Admin UI on-demand | freely selectable |
 
 **Manual purging in Admin UI:**
@@ -307,7 +318,9 @@ Epic / GOG: not supported.
 - Netdata integrated (proxy via `/api/netdata`)
 - Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
 - Dashboard: cache fill level, hit/miss rate, active connections
-- Watchdog traffic light bar: one indicator per service, persistently visible
+- Watchdog per-service traffic light bar: **not yet implemented** -- `watchdog.sh`
+  computes the underlying `status.json` state, but the Admin UI does not read
+  or render it (see the "Status" note under Watchdog above)
 
 ## Admin UI
 
@@ -317,8 +330,8 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 - DNS: create zones, host entries, PTR checkbox for LAN IPs
 - Kea: lease overview, create/edit static assignments
 - Cache: start warming, progress, purging, retention + slice/size settings
-- Logs: filtered by service, level selectable (not yet implemented against the central syslog-ng path; see follow-up #633)
-- Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced" (syslog forwarding configuration is not yet exposed in the UI; see follow-up #633)
+- Logs: filtered by host/service (implemented against the central syslog-ng path, #848); level-selectable filtering is not yet implemented (no open tracking issue as of this writing)
+- Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced" (syslog forwarding configuration is not yet exposed in the UI; no open tracking issue as of this writing — see the syslog-ng section's "Not implemented yet" note above)
 
 ## IPv6
 

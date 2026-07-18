@@ -17,7 +17,7 @@ document says "planned but unbuilt," treat the referenced code (or its
 absence) as intentional, not as something to "clean up."
 
 Related: #415/#616 (known-good config snapshots, implemented), #628 (PowerDNS
-zone/record rollback, scoped but not implemented — see
+zone/record rollback, implemented via PR #788 — see
 [known-good-config-snapshots.md](known-good-config-snapshots.md)'s "Zones,
 records, and TSIG/DDNS metadata" section), #630 (a live-verification bug class
 found while building the Kea snapshot adapter, fixed in #614; the PowerDNS
@@ -74,17 +74,12 @@ made once at deploy time, not tuned routinely.
 | Secondary node registration, credential rotation, removal | `services/ui/src/routes/secondaries.rs` (`/secondaries` page + `POST /api/secondary/register`, `POST /api/secondary/{name}/rotate-token`, `DELETE /api/secondary/{name}`) | Per-secondary NATS auth-callout credential (issue #583); `nats.conf` itself is static and never rewritten per secondary, so revocation works by `authorize_secondary` re-checking the `secondaries` table on every connection attempt — a removed/rotated credential is rejected starting from that node's *next* reconnect, not on its already-established connection (see `services/ui/src/nats_auth_callout.rs` module docs) |
 | Recursor cache flush for a specific name | Internal helper (`flush_recursor_cache`, called by the add/remove routes above) | PowerDNS Recursor `cache/flush?domain=` API call, plus a NATS `lancache.dns.flush` broadcast so every recursor instance (not just the one this UI process talks to) drops its cached answer for that exact name |
 
-**Doc-drift note found during this investigation:** `docs/architecture-ng.md`'s
-PowerDNS table currently lists `FILTER_AAAA_V4` and `FILTER_AAAA_V6` as two
-separate env vars ("Filter AAAA records for IPv4 clients" / "...for IPv6
-clients"). Neither name appears anywhere in `services/dns/` or
-`services/ui/src` — the real, shipped mechanism is the single global marker
-file described in the table above, filtering AAAA answers for every client
-regardless of address family, toggled live via the Admin UI rather than by
-env var/restart. This document reflects the real, current mechanism; the
-architecture doc's table entry is stale and should be corrected in a small
-follow-up doc fix (out of scope here to avoid mixing a correction into a
-scoping decision, per this project's usual one-topic-per-PR convention).
+**Doc-drift note, resolved:** `docs/architecture-ng.md`'s PowerDNS table used
+to list `FILTER_AAAA_V4` and `FILTER_AAAA_V6` as two separate env vars —
+neither name ever appeared anywhere in `services/dns/` or `services/ui/src`.
+That table has since been corrected to describe the real, single global
+marker-file mechanism documented above (toggled live via the Admin UI, not by
+env var/restart), matching this document.
 
 ### 1c. Not settings — read-only status surfaces
 
@@ -159,8 +154,8 @@ secondary reconciliation does *not* cover any of these 19 zones today, only
   point above — that part was never intended to mean arbitrary zone
   creation, based on the fixed-zone design described throughout this
   document and `docs/architecture-ng.md`'s own zone table.)
-- Zone/record-level rollback UI — see #628 and section 4 below; the design
-  exists (PR #730), no code does yet.
+- ~~Zone/record-level rollback UI~~ — implemented, see #628 and section 4
+  below (PR #788, merged 2026-07-13). No longer planned-but-unbuilt.
 
 ## 3. Secondary / DDNS / NATS sync
 
@@ -247,28 +242,40 @@ re-scoped as a DNS-only ask here; a shared "config snapshot rollback
 happened" status surface across all three adapters (nginx/dnsmasq/PowerDNS)
 would be the natural way to close it, candidate v0.3.0 scope, not started.
 
-**Scoped design, not yet implemented:** zone/record data rollback (#628) —
-covered by PR #730's rewrite of
+**Implemented:** zone/record data rollback (#628) — shipped via PR #788
+(merged 2026-07-13), which rewrote
 [known-good-config-snapshots.md](known-good-config-snapshots.md)'s "Zones,
-records, and TSIG/DDNS metadata" section. **PR #730 is open, not yet merged
-into `v0.2.0`, as of this writing** — following the link above today lands on
-that section's current merged text, which still says the topic is deferred
-and does not contain the design summarized in this paragraph; the design
-only exists in PR #730's diff until it merges. What follows is a summary of
-that pending design, checked against PR #730's diff at review time. Unlike
-the file-based adapters above, this design explicitly calls for an
-**Admin UI-visible, operator-selected rollback**
+records, and TSIG/DDNS metadata" section from a scoped design into a
+description of running behavior; that section is the authoritative detail,
+this is only the Admin UI-facing summary. Unlike the file-based adapters
+above, this is an **Admin UI-visible, operator-selected rollback**
 (analogous to the existing `/dhcp` page's Kea snapshot picker) rather than an
 automatic startup-time rollback, because a stale zone snapshot can silently
-undo real client DHCP leases or hostnames. Nothing here exists in code yet —
-no snapshot creation in `nats-subscriber`, no `/domains`-page (or new page)
-snapshot list, no rollback route. This is the single largest concrete gap
-between "what #645 asks the Admin UI to eventually cover" and "what exists
-today," and per PR #730's own design doc, an implementation PR still needs to
-resolve one open question before it can be built: how a primary-side rollback
+undo real client DHCP leases or hostnames. `services/dns/nats-subscriber`
+snapshots the data rrsets (SOA/NS excluded) of `lan.`, `local.lan.`, and the
+private reverse zones after every NATS-applied write and on a 60-second
+periodic watcher (covering Kea's direct-to-PowerDNS DDNS writes, which bypass
+NATS entirely); a new `X-API-Key`-authenticated HTTP listener
+(`rollback_listener.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, default
+`0.0.0.0:8083`) exposes `GET /snapshots` and `POST /rollback`;
+`services/ui/src/routes/dns_snapshots.rs` is a thin HTTP forwarder to that
+listener; and `/domains`' "Zone-Snapshots & Rollback" tab
+(`templates/domains.html`) is the operator-facing picker. This closed the
+largest concrete gap between "what #645 asks the Admin UI to eventually
+cover" and "what exists today." The one open design question the original
+proposal (then PR #730) left unresolved — how a primary-side rollback
 re-publishes onto the NATS stream so secondaries (3b above) converge to the
-same restored records, rather than silently diverging from the rolled-back
-primary.
+same restored records — was resolved as part of PR #788: for `lan.` only
+(the one zone with existing NATS replication), a rollback re-publishes the
+restored REPLACE/DELETE entries onto `lancache.dns.record` under a
+rollback-specific message id, immediately after applying the patch and
+before flushing recursor caches. `local.lan.`/the private reverse zones are
+not NATS-replicated at all today (see 3b above), so a rollback there has no
+secondary-convergence step to perform. See
+[known-good-config-snapshots.md](known-good-config-snapshots.md)'s
+"NATS permission dependency (#906...)" note for the one permission-grant
+follow-up this republish needed (`NATS_DNS_REPLICA_USER` publish on
+`lancache.dns.record`, since fixed).
 
 **Kea, for contrast (already Admin UI-visible):** the `/dhcp` page's
 operator-selected snapshot list (#614) is the existing precedent the #628
@@ -292,7 +299,7 @@ UI-visible PowerDNS zone rollback" should eventually look like.
 | NATS-based secondary registration/rotate/remove | Admin UI, implemented | `services/ui/src/routes/secondaries.rs`, `/secondaries` |
 | NATS secondary replication-health indicator | Not built | Planned, v0.3.0 candidate |
 | Static config snapshot/rollback status indicator | Not built (log-only today) | Planned, v0.3.0 candidate, not DNS-specific |
-| Zone/record snapshot/rollback (#628) | Design scoped (PR #730), zero code | Planned, v0.3.0 candidate, blocked on the NATS-replication design question above |
+| Zone/record snapshot/rollback (#628) | Admin UI, implemented (PR #788) | `services/ui/src/routes/dns_snapshots.rs`, `services/dns/nats-subscriber/src/{zone_snapshots,rollback_listener}.rs`, `/domains` "Zone-Snapshots & Rollback" tab |
 
 ## How to use this document
 

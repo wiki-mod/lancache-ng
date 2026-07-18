@@ -126,13 +126,13 @@ undocumented per-Dockerfile fallback logic.
 
 - `services/dns/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder`
   - ARG default (line 6): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback
-  - **Rationale**: This is a documented, overridable ARG default. Production release builds pass a pinned digest via `--build-arg BUILD_TOOLS_IMAGE=<digest>`. Actual digest pinning for the default is tracked in issue #508.
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
+  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s **AG-CI-008** for the codified rule.
 
 - `services/ui/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS builder`
   - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback
-  - **Rationale**: This is a documented, overridable ARG default. Production release builds pass a pinned digest via `--build-arg BUILD_TOOLS_IMAGE=<digest>`. Actual digest pinning for the default is tracked in issue #508.
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
+  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s **AG-CI-008**.
 
 ### Workflow Build-Tools References
 
@@ -148,15 +148,16 @@ undocumented per-Dockerfile fallback logic.
 
 ## Known Mutable References and Decision Summary
 
-### Pending Digest Pinning (Issue #508)
+### Resolved: Issue #508 (closed as already-resolved-by-design, not "pending")
 
-The following references use mutable tags and are planned for actual digest replacement:
-
-1. **`BUILD_TOOLS_IMAGE` ARG defaults** in:
-   - `services/dns/Dockerfile` line 6
-   - `services/ui/Dockerfile` line 12
-   - **Decision**: Keep as documented fallback ARGs (overridable at build time). Real digest pinning is owned by issue #508.
-   - **Why**: These are intentional ARG defaults that allow override at build time. Release builds must explicitly pass `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` to ensure reproducibility.
+Issue #508 asked to actually pin `BUILD_TOOLS_IMAGE` ARG defaults in
+`services/dns/Dockerfile` and `services/ui/Dockerfile` to a real digest. It
+was closed **without** implementing that pinning: the ARG default only
+matters for a manual `docker build` invocation without `--build-arg`; every
+real CI build always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>`
+explicitly and never falls back to it, so pinning the default would only add
+a manually-maintained value that goes stale with no real build path
+depending on it. This decision is codified as `AGENTS.md`'s **AG-CI-008**.
 
 ### Intentional Mutable Fallbacks (Documented)
 
@@ -170,9 +171,13 @@ The following references use mutable tags and are intentionally kept as fallback
    - **Decision**: Keep as `:latest` because the script immediately resolves it to a pinned digest (line 98: `printf '%s@%s\n' "${image%:*}" "$digest"`).
    - **Why**: Callers of this script receive a digest-qualified reference, never the mutable tag.
 
-## Remediation Steps
+## Remediation Steps (general reference)
 
-To pin these remaining references, perform the following in order:
+The `BUILD_TOOLS_IMAGE` ARG defaults above are intentionally **not** pinned
+(see "Resolved: Issue #508" above) — the steps below are kept as general
+guidance for pinning a `build-tools` image reference elsewhere (e.g. a real
+CI consumption point resolved through `scripts/select-build-tools-image.sh`),
+not an open task against those two ARG defaults:
 
 1. **Determine the target build-tools version**:
    - Identify the stable release tag (e.g., `v0.2.0`) or sha-* tag you wish to use.

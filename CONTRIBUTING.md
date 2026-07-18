@@ -241,12 +241,15 @@ instead.
 
 Rust code coverage has a per-crate minimum threshold, not one shared number:
 `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
-of this writing), and `services/dns/nats-subscriber` currently has a 0%
-threshold because its existing tests only cover its data model, not its
-subscribe/forward logic (tracked in #504). Raise each crate's threshold
-independently as that crate gains real coverage — do not average or share a
-single "minimum" number across both, since their coverage levels differ by
-an order of magnitude for unrelated reasons.
+of this writing), and `services/dns/nats-subscriber`'s threshold is still set
+at 0% in the workflow. Issue #504 (closed via PR #515) already added real
+unit tests for `dns_record_to_zone_update()`'s subscribe/forward logic
+(extracted as a pure, testable function), so the crate's tests are no longer
+data-model-only, but the `rust_coverage` job's threshold was deliberately
+left at 0% pending a real tarpaulin measurement and hasn't been raised since.
+Raise each crate's threshold independently as that crate gains real coverage
+— do not average or share a single "minimum" number across both, since their
+coverage levels differ by an order of magnitude for unrelated reasons.
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
 say so in the pull request and explain why.

@@ -187,7 +187,7 @@ than rendering an empty or invalid one.
 | `DHCP_PROXY_DOMAIN` | Domain name option (DHCP option 15), PXE-scoped. | `lan.local` |
 | `DHCP_PROXY_BOOT_FILENAME` | PXE boot filename, via dnsmasq's `dhcp-boot` directive — the directive the dnsmasq man page documents as intended for this exact "ProxyDHCP server alongside a real DHCP server" case. | `pxelinux.0` |
 | `DHCP_PROXY_BOOT_SERVER` | Boot server address for `dhcp-boot`. Requires `DHCP_PROXY_BOOT_FILENAME`; defaults to dnsmasq's own address if left empty while a filename is set. | `10.0.0.5` |
-| `DHCP_PROXY_CUSTOM_OPTIONS` | Additional safe custom options as `CODE:VALUE`, one per line in the Admin UI (stored as `;`-separated `CODE:VALUE` pairs). Codes already covered by the dedicated fields above (3, 6, 15, 42) are rejected here to avoid two conflicting ways to set the same option. | `60:PXEClient` |
+| `DHCP_PROXY_CUSTOM_OPTIONS` | Additional safe custom options as `CODE:VALUE`, one per line in the Admin UI (stored as `;`-separated `CODE:VALUE` pairs). The **Admin UI form** rejects codes already covered by the dedicated fields above (3, 6, 15, 42) plus 119 (domain-search), to avoid two conflicting ways to set the same option; the container `entrypoint.sh` itself only range-checks the code (1-254) and does not re-enforce this exclusion, so a value hand-edited directly into the env file bypasses the UI's check and can render a duplicate, conflicting `dhcp-option-pxe` line. | `60:PXEClient` |
 
 `setup.sh update` and the container entrypoint both fail closed for the
 *required* values: if any is missing or invalid, setup refuses to continue

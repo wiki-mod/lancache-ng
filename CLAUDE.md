@@ -190,7 +190,7 @@ cross-reference rather than treating the two IDs as one and the same rule.
 | AG-GOV-003 | Project language Rust/shell for code we write; other-language toolchain use needs explicit user approval every time | AG-REL-001 | Manual review (new file type / import / Dockerfile toolchain detection) |
 | AG-GOV-004 | No direct pushes to master | AG-WF-004 / AG-WF-014 | GitHub branch protection (`master` branch requires PR) |
 | AG-KD-001 | Upstream nginx resolver must be real DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | AG-OP-002 | Code review (nginx resolver config inspection) |
-| AG-KD-002 | OpenSSL serial file always written to `/tmp/lancache-ca.srl`, never the certs directory | — | Code review (`entrypoint.sh` cert-generation inspection) |
+| AG-KD-002 | OpenSSL serial file (`ca.srl`) is stored alongside the CA certificate/key in the certs directory, not in `/tmp`, so it survives container restarts | — | Code review (`entrypoint.sh` cert-generation inspection) |
 | AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | — | Manual review (`tools/build-tools/Dockerfile` inspection) |
 | AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | — | Manual review (repo inspection — no second domain file exists) |
 | AG-SETUP-001 | Prod deployment requires two LAN IPs | — | Manual review (documentation only; no CI check for external LAN IP provisioning) |
