@@ -180,8 +180,17 @@ running"):
 3. `git pull`-sync the repo if `.git` exists (`sync_repo_to_default_branch`).
 4. Refresh quickstart compose assets (`install_quickstart_compose_assets`).
 5. Pre-update rollback backup: `cmd_backup --config "$install_dir"` — if this
-   fails, resumes convergence and dies (no mutation happened yet, so nothing
-   to roll back).
+   fails, resumes convergence and dies. The `die()` message here says "no
+   update mutations were applied," but that is only true for the
+   *containers/stack* (nothing has been pulled, migrated, or recreated yet);
+   steps 3 and 4 above (`sync_repo_to_default_branch`, a hard reset of the
+   install dir's git checkout to `origin/<default_branch>`, and
+   `install_quickstart_compose_assets`, an unconditional overwrite of
+   `docker-compose.yml` and the copied helper scripts) have already run and
+   already mutated local files by this point. If the backup then fails,
+   those two already-mutated files are not restored by anything in this
+   flow — there is no "nothing to roll back" state for them, only for the
+   deployed stack itself.
 6. `migrate_env_for_update "$install_dir"` (see below) then
    `validate_compose_config`.
 7. `docker compose pull`; `validate_compose_config` again.
