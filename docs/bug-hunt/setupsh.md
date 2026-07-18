@@ -363,12 +363,20 @@ real protection object (no 404), with required status checks `shellcheck`,
 carries the same list (`strict:true`). So a PR can no longer be merged into
 `v0.2.0` with those checks red.
 
-Sub-finding 1 **still holds**: the setup-CLI E2E aggregate (the
-`full-setup-deep-validate` "Full-Setup Deep Validate" job that runs
-`scripts/setup-cli-simulation.sh`) is **not** in either branch's
-required-status-checks list — `validate full-setup image` is the image build,
-not the CLI simulation. The real end-to-end exerciser of
-`setup.sh install`/`update`/`restore` is still not a required merge gate.
+Sub-finding 1 **still holds**, but name it precisely: `full-setup-deep-validate.yml`
+is the workflow *file*, `Full-Setup Deep Validate` is that workflow's `name:`,
+and `setup.sh CLI simulation` is one individual dependency *job* in it (the one
+that actually runs `scripts/setup-cli-simulation.sh`) — none of those three is
+the always-run aggregate gate. That aggregate is a separate job,
+`deep-full-setup-validation`, whose own `name:` is literally
+`deep full-setup validation` (lowercase, no branding) — this is the exact
+check-run name branch protection would need to require, since it always
+produces a real pass/fail conclusion even when the individual simulation jobs
+are skipped for a docs-only PR. Neither `deep full-setup validation` nor
+`setup.sh CLI simulation` is in either branch's required-status-checks list —
+`validate full-setup image` is the image build, not the CLI simulation. The
+real end-to-end exerciser of `setup.sh install`/`update`/`restore` is still
+not a required merge gate.
 
 ---
 
