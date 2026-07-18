@@ -20,9 +20,29 @@ particular #583's auth-callout work) actually shipped on.
 Exact per-file `#[test]` counts below were produced with
 `grep -c '#\[test\]' <file>` against each file, not hand-counted.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6`; see corrections below. Three files grew substantially since
+> this document was first written (68 commits landed on `v0.2.0` in the
+> interim, several touching this exact file list): `main.rs` (1156 → 1751
+> lines, 12 → 15 tests), `config.rs` (1393 → 2133 lines, 24 → 40 tests), and
+> `syslog_client.rs` (698 → 1046 lines, 12 → 18 tests) — driven by
+> `e7f2a06d` (AG-CODE-010 WHY-comments on ~52 test functions), `f29b3fe9`
+> (#951, basic_auth integration tests), `dc8d79c6` (#988, case-insensitive
+> placeholder detection + parity fixture), `afa3bbf9` (#881, NATS-URL
+> reachability check), `020904a6` (#855, auto-generated registration token),
+> `73a4fe00` (#877, SYSLOG_ENABLED/SYSLOG_MAX_GB parsing parity), `4a5e0c11`
+> (#828, syslog E2E simulation test), and `2137157f`/`88b429d6` (#865/#861,
+> syslog host-filter wiring). All test/line counts below are corrected to
+> match current `origin/v0.2.0`. Everything else in this document —
+> `nats_auth_callout.rs`, `nats_config.rs`, `session.rs`, `docker_client.rs`,
+> `nginx_client.rs`, `routes/mod.rs`, the CI-gap analysis, and every
+> narrative/behavioral claim — was independently re-verified against current
+> code and remains accurate; only the counts and two leftover
+> pre-retraction sentences below needed correction.
+
 ---
 
-## 1. `main.rs` (1156 lines, 12 tests) — process entry point, wiring, security middleware
+## 1. `main.rs` (1751 lines, 15 tests) — process entry point, wiring, security middleware
 
 **`AppState`** (shared, `Arc`-wrapped): `templates` (Tera), `config`, `docker`
 (bollard client), `http_client` (reqwest), `file_lock`/`kea_config_lock`/
@@ -110,7 +130,7 @@ Explicitly documented as intentionally *shallow*: mirrors the proxy service's
 unauthenticated `/healthz`. This is the exact endpoint
 `scripts/ui-reachability-crash-loop-simulation.sh` polls to prove the Admin UI
 answers HTTP while `proxy` is crash-looping (issue #763's requirement) — see
-section 9.
+section 11.
 
 **Security middleware**:
 - `security_headers` — CSP (`ADMIN_UI_CSP` const: `default-src 'self'` +
@@ -139,17 +159,19 @@ section 9.
   `deploy/quickstart/.env`'s distinct placeholder, and README.md's own
   code-block example is itself pasteable verbatim.
 
-**Tests in `main.rs`** (12 `#[test]` functions, all `#[cfg(test)]`, i.e. **not
-compiled or run by any automated CI workflow** — see section 9's CI-gap
-finding): migration idempotence (2 tests), `x-forwarded-proto` HTTPS
-detection, CSP self-hosted-only assertion, Basic Auth accept/reject, session-
+**Tests in `main.rs`** (15 `#[test]` functions, all `#[cfg(test)]` — these
+**are** compiled and run automatically in CI via the `ui_test` job, see
+section 11): migration idempotence (2 tests), `x-forwarded-proto` HTTPS
+detection, CSP self-hosted-only assertion, Basic Auth accept/reject
+(including the full-chain integration tests added by #951), session-
 cookie-never-substitutes-for-auth, insecure-mode opt-in gate, placeholder-token
-rejection, TTL bounds, startup preflight ordering, template function
-rendering, session/CSRF header helper.
+rejection (now case-insensitive with hyphen/underscore normalization, plus a
+cross-implementation parity-fixture test — #988), TTL bounds, startup
+preflight ordering, template function rendering, session/CSRF header helper.
 
 ---
 
-## 2. `config.rs` (1393 lines, 24 tests) — env-driven runtime config
+## 2. `config.rs` (2133 lines, 40 tests) — env-driven runtime config
 
 `Config::from_env()` reads **~55 distinct env vars** into a typed struct
 (full field list below is exhaustive from the struct definition). Two custom
@@ -229,10 +251,12 @@ take effect from the Admin UI without a container restart — but two of these
 take effect inside this container at all; they're polled by `setup.sh`'s
 host-side `lancache-converge.service` on its next 5-minute tick.
 
-**Tests**: 24 `#[test]` functions, all gated behind a shared `env_test_lock()`
+**Tests**: 40 `#[test]` functions, all gated behind a shared `env_test_lock()`
 mutex (since `cargo test` runs in parallel threads and `std::env::set_var` is
-process-global) — a genuinely careful pattern, but again subject to the
-CI-gap finding in section 9.
+process-global) — a genuinely careful pattern; these run automatically in CI
+via the `ui_test` job (section 11), not a gap. The increase from the
+original 24 is mostly new NATS-URL-reachability and syslog-parsing-parity
+coverage added by #881/#877/#828 since this document was first written.
 
 ---
 
@@ -520,7 +544,7 @@ test.
 
 ---
 
-## 8. `syslog_client.rs` (698 lines, 12 tests) — central syslog-ng store reader
+## 8. `syslog_client.rs` (1046 lines, 18 tests) — central syslog-ng store reader
 
 Sibling to `nginx_client.rs` per its own doc comment ("not a patch to it: the
 two log formats are unrelated"). Part of the #633 central-logging-pipeline
@@ -544,14 +568,26 @@ budget pruning — that pruning itself lives in `watchdog.sh`, not here).
   `nginx_client::parse_log_tail`, but a fundamentally different algorithm
   since compressed streams have no random byte-seek access: lists candidate
   files, sorts newest-mtime-first, decodes whole files starting from the
-  newest until `limit` lines are collected. **Multi-host starvation guard**
-  (regression test for #758 review): the early-break condition requires
-  *every* host directory with candidate files to have contributed at least
-  one file before stopping, not just "enough total lines collected" —
-  otherwise a single very-recently-touched host's newest file alone
-  satisfying `limit` would silently starve every other host out of a merged
-  multi-host tail. A final sort-by-timestamp pass makes the merge exact
-  regardless of file-open order.
+  newest until `limit` lines are collected. Now takes an optional `host`
+  filter (`?host=` on `/logs` in syslog mode, #865/#848) restricted to a
+  single bare directory-name segment (`is_safe_host_component`) — rejects
+  anything else outright rather than trusting `routes/logs.rs` to have
+  pre-validated against `list_syslog_hosts()`, since `host` can come straight
+  from an HTTP query parameter. **Multi-host starvation guard, corrected
+  twice**: the original #758 fix only guaranteed every host directory with
+  candidate files gets at least one file *opened* before the file-listing
+  loop's early break fires — it did not stop a later global sort-by-
+  timestamp-then-truncate-to-`limit` step from still fully evicting a quiet
+  host's lines once a noisier host produced enough newer lines to fill the
+  whole budget on its own (issue #859). **#861 replaced that global
+  sort+truncate with a per-host floor merge**: `PER_HOST_FLOOR = 10`, and
+  each host with data is round-robin-guaranteed
+  `(limit / hosts_with_data).clamp(1, PER_HOST_FLOOR)` of its own most recent
+  lines first, with any remaining budget filled from the globally most
+  recent leftover lines — a quiet host (e.g. watchdog's handful of startup
+  lines) can no longer be fully starved by a high-volume host (e.g.
+  netdata), while a genuinely more-recent/active host still dominates the
+  fill-in pass when it isn't competing for the guaranteed floor.
 - `get_syslog_stats(log_root) -> SyslogStats` — metadata-only aggregation
   (`fs::read_dir` + `Metadata::len()`, no file content read at all) across
   every file under the root; deliberately not a bounded tail read like
@@ -705,11 +741,13 @@ history at the bottom of this document for the full account).
 - **`ui_test`** (job `test (ui)`) runs `cargo test --locked --manifest-path
   services/ui/Cargo.toml` via `./.github/actions/cargo-with-sccache-fallback`,
   on `[self-hosted, linux, lancache, lancache-heavy]`. This is exactly the
-  ~91 `#[test]` functions across `main.rs` (12), `config.rs` (24),
+  ~130 `#[test]` functions across `main.rs` (15), `config.rs` (40),
   `nats_auth_callout.rs` (15), `nats_config.rs` (27), `session.rs` (3),
-  `docker_client.rs` (0), `nginx_client.rs` (8), `syslog_client.rs` (12),
+  `docker_client.rs` (0), `nginx_client.rs` (8), `syslog_client.rs` (18),
   `routes/mod.rs` (4), plus `kea_snapshots.rs`'s own 8 (compiled from the
-  same crate, scoped to the other agent).
+  same crate, scoped to the other agent). (Original count at first writing
+  was ~91; the growth reflects 68 commits landed on `v0.2.0` since, per the
+  currency-check note at the top of this document, not a miscount.)
 - **`dns_test`** (job `test (dns/nats-subscriber)`) runs the identical
   pattern for `services/dns/nats-subscriber/Cargo.toml`.
 - Both are gated by `detect-changes` outputs (`ui`/`dns_rust`/`workflow` ==
@@ -816,3 +854,21 @@ retracted "no CI test coverage" claim above.
   11 and the summary table above are corrected; this is recorded here as a
   durable methodology note for any future `git show <ref>:<path>` loop run
   on this host.
+- **Currency re-verification (2026-07-18)**, against `origin/v0.2.0` @
+  `dc8d79c6` (68 commits landed since this document's `3f53ac3b` baseline):
+  re-ran `grep -c '#\[test\]'` and `wc -l` against every in-scope file.
+  `main.rs`, `config.rs`, and `syslog_client.rs` grew substantially (test/line
+  counts corrected in their respective sections and in section 11's per-file
+  list); `nats_auth_callout.rs`, `nats_config.rs`, `session.rs`,
+  `docker_client.rs`, `nginx_client.rs`, and `routes/mod.rs` were unchanged.
+  Also found and fixed two leftover sentences (main.rs's and config.rs's own
+  "Tests" paragraphs) that still asserted the already-retracted "not compiled
+  or run by any CI workflow" claim and pointed at a stale "section 9" —
+  section numbering shifted to 11 when sections 7/8/10 were added in the
+  prior revision, and those two paragraphs were missed at the time. Updated
+  `syslog_client.rs`'s multi-host-starvation-guard description: #861/#859
+  replaced the original #758 file-open-level guard with a per-host floor
+  merge (`PER_HOST_FLOOR = 10`), since the original guard only ensured every
+  host's file got *opened*, not that its lines survived the final truncate.
+  Every other narrative/behavioral claim in this document was independently
+  re-checked against current code and found accurate.
