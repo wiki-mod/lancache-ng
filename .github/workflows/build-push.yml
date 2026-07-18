@@ -654,6 +654,27 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-validation-subnet-wrapper-coverage.sh
 
+      - name: Check executable bits on bare-path script invocations (#1019)
+        # Standing guard for #822 Pattern B: a repo script committed 100644
+        # but invoked by a bare path (scripts/foo.sh, not bash scripts/foo.sh)
+        # fails in CI with exit 126, a defect invisible from a Windows /
+        # core.filemode=false author host (Rule-Ref: AG-VAL-024). The class
+        # recurred four times (#617/#711/PR #804) with only a single
+        # hardcoded test -x watchdog.sh guarding it. This scans every
+        # workflow + composite-action file for bare-path invocations and
+        # every .githooks/ hook, asserting each is committed 100755 -- a pure
+        # git-metadata/YAML check, same class as the checks above. Runs in
+        # the build-tools container because it reads committed modes via git
+        # (AG-VAL-016).
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-executable-bits.sh
+
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -712,6 +733,20 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-validation-subnet-wrapper-coverage.sh
+
+      - name: Check executable bits on bare-path script invocations (#1019)
+        # Same guard as the self-hosted shellcheck job's own step above (see
+        # its comment for the full rationale); duplicated here so the
+        # GitHub-hosted fallback path enforces it too when self-hosted
+        # runners are unavailable.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-executable-bits.sh
 
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
