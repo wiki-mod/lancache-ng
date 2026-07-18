@@ -21,6 +21,15 @@ pipeline as wired in `deploy/{dev,prod,quickstart,full-setup}/docker-compose.yml
 Read against `origin/v0.2.0` in a dedicated clone (`bughunt-observability`
 branch based on `origin/v0.2.0`), not the maintainer's main checkout.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). Four
+> findings are now FIXED and marked in place below: #4 and #5 (SYSLOG_ENABLED/
+> SYSLOG_MAX_GB parity gaps) by PR #877 (`73a4fe00`); #9 and #10 (logs.rs
+> host=None + the path-traversal landmine that would have followed a naive
+> fix) by PR #865 (`2137157f`). All other findings (#1-#3, #6-#8, #11-#20)
+> remain accurate; no other merged commit in that range touches this
+> component's code paths.
+
 ---
 
 ## Findings
@@ -111,7 +120,13 @@ without manually running `df`/`docker exec`-ing into containers. Moderate
 severity: a visibility gap in a named threat-model mitigation, not an
 exploitable vulnerability by itself.
 
-### 4. `SYSLOG_ENABLED` boolean-parsing mismatch between the Admin UI and watchdog.sh
+### 4. `SYSLOG_ENABLED` boolean-parsing mismatch between the Admin UI and watchdog.sh — FIXED by PR #877 (2026-07-16)
+
+**Status update (2026-07-18): FIXED.** PR #877 (`73a4fe00`, closes #874) adds
+`is_truthy()` to `watchdog.sh` mirroring the Admin UI's `env_bool()` exact
+truthy set, confirmed directly against current `origin/v0.2.0`'s
+`maybe_prune_syslog()` (`if ! is_truthy "$SYSLOG_ENABLED"`). Original finding
+kept below for the historical record.
 
 - `services/ui/src/config.rs`'s `env_bool()` (used for `Config::syslog_enabled`)
   accepts, case-insensitively: `"1"`, `"true"`, `"yes"`, `"on"` as true and
@@ -142,7 +157,16 @@ literal `false`/unset no-op case, never a truthy-but-not-`"true"` value, so
 there is no test that would have caught this cross-component mismatch
 either.
 
-### 5. `SYSLOG_MAX_GB` numeric-clamp mismatch between the Admin UI and watchdog.sh
+### 5. `SYSLOG_MAX_GB` numeric-clamp mismatch between the Admin UI and watchdog.sh — FIXED by PR #877 (2026-07-16)
+
+**Status update (2026-07-18): FIXED.** The same PR #877 adds
+`env_u32_clamped_with_max` (Admin UI side, `SYSLOG_MAX_GB_CEILING = 1_048_576`)
+so both sides now converge on an identical clamped ceiling, plus a Rust unit
+test and a bats test asserting parity for oversized inputs. Original finding
+kept below for the historical record. (Aside, not independently verified as
+still present: PR #877's own commit message notes `watchdog.sh` ended up with
+two identical `is_truthy()` definitions after its edits -- a possible small
+follow-up, out of scope for this currency check.)
 
 `watchdog.sh`'s `maybe_prune_syslog()` explicitly clamps an oversized
 `SYSLOG_MAX_GB` to 1,048,576 GiB (1 PiB) with a logged warning, specifically
@@ -213,7 +237,18 @@ container-alive check but its control socket hangs) would sit reporting
 action from anything in this project, and (per Finding 2) no UI surface to
 even notice the status short of manually running `docker inspect`.
 
-### 9. `logs.rs` hardcodes `host=None` and silently drops `?filter=` in syslog mode (reverified directly in current code, not taken from the prior inventory on faith)
+### 9. `logs.rs` hardcodes `host=None` and silently drops `?filter=` in syslog mode (reverified directly in current code, not taken from the prior inventory on faith) — PARTIALLY FIXED by PR #865 (2026-07-16)
+
+**Status update (2026-07-18): the `host=None` half is FIXED.** PR #865
+(`2137157f`, closes #848) wires a real `?host=` query parameter through to
+`parse_syslog_tail` and adds `list_syslog_hosts()` for a UI dropdown,
+confirmed directly against current `origin/v0.2.0`'s
+`services/ui/src/routes/logs.rs`. The `?filter=`-silently-ignored-in-syslog-
+mode half was not independently re-verified this pass -- current code
+documents `filter` and `host` as intentionally distinct, mode-specific
+parameters, which may or may not fully resolve the original UX concern;
+flagged as unconfirmed rather than asserted either way. Original finding
+kept below for the historical record.
 
 `services/ui/src/routes/logs.rs`, `logs_page()`:
 ```rust
@@ -235,7 +270,16 @@ buttons) — consistent with the backend gap, but meaning there is currently
 no way, UI or API, to view one service's logs in isolation once syslog mode
 is on.
 
-### 10. Latent path-traversal landmine for whoever fixes Finding 9
+### 10. Latent path-traversal landmine for whoever fixes Finding 9 — CONFIRMED PREDICTIVE, PRE-EMPTIVELY FIXED by PR #865 (2026-07-16)
+
+**Status update (2026-07-18): the predicted landmine was avoided.** PR #865's
+own commit message explicitly says it "closes a path-traversal/arbitrary-
+file-read regression this change would otherwise have introduced (caught in
+review before commit)" -- confirming this finding correctly predicted the
+exact risk, and the fix PR addressed it directly rather than shipping the
+naive version. Original finding kept below for the historical record as
+confirmation that vacuum-first, unfiltered collection caught a real
+forward-looking risk before it happened.
 
 `syslog_client::parse_syslog_tail(log_root: &str, host: Option<&str>, ...)`:
 ```rust
@@ -412,28 +456,28 @@ does not currently call out.
 
 ## Summary table
 
-| # | Area | Severity (this pass's own estimate, not yet independently verified) |
-|---|---|---|
-| 1 | Docs vs. code: "traffic light bar" doesn't exist | Serious |
-| 2 | watchdog status.json never rendered to an operator | Moderate |
-| 3 | Threat-model T9 mitigation not operator-visible | Moderate |
-| 4 | `SYSLOG_ENABLED` bool-parsing mismatch (UI vs watchdog) | Serious |
-| 5 | `SYSLOG_MAX_GB` clamp mismatch (UI vs watchdog) | Minor |
-| 6 | netdata web_log wiring inconsistent dev/quickstart/prod | Moderate |
-| 7 | netdata no healthcheck in real deploys (CI proves it's fixable) | Minor |
-| 8 | syslog-ng healthcheck orphaned, nothing consumes it | Moderate |
-| 9 | `logs.rs` host=None / dropped `?filter=` in syslog mode | Serious |
-| 10 | Path-traversal landmine in `parse_syslog_tail`'s host param | Minor |
-| 11 | netdata_proxy hardcodes Content-Type: application/json | Minor |
-| 12 | `stats.html` error banner only shows once per page load | Minor |
-| 13 | Dashboard per-host syslog stats computed, never rendered | Minor |
-| 14 | architecture-ng.md stale summary line (internal drift) | Info |
-| 15 | architecture-ng.md cites closed #633 for open gap | Info |
-| 16 | check-logging-matrix.sh structurally can't catch Finding 6 | Info |
-| 17 | syslog-ng zstd install repeats every restart, no retry later | Info |
-| 18 | write_status() comment claims an unenforced guarantee | Info |
-| 19 | Dashboard vs /logs disagree on log source in syslog mode | Info |
-| 20 | netdata's full API reachable by any container on the network | Info |
+| # | Area | Severity (this pass's own estimate, not yet independently verified) | Status (currency check, 2026-07-18) |
+|---|---|---|---|
+| 1 | Docs vs. code: "traffic light bar" doesn't exist | Serious | Open |
+| 2 | watchdog status.json never rendered to an operator | Moderate | Open |
+| 3 | Threat-model T9 mitigation not operator-visible | Moderate | Open |
+| 4 | `SYSLOG_ENABLED` bool-parsing mismatch (UI vs watchdog) | Serious | **FIXED** by PR #877 (2026-07-16) |
+| 5 | `SYSLOG_MAX_GB` clamp mismatch (UI vs watchdog) | Minor | **FIXED** by PR #877 (2026-07-16) |
+| 6 | netdata web_log wiring inconsistent dev/quickstart/prod | Moderate | Open |
+| 7 | netdata no healthcheck in real deploys (CI proves it's fixable) | Minor | Open |
+| 8 | syslog-ng healthcheck orphaned, nothing consumes it | Moderate | Open |
+| 9 | `logs.rs` host=None / dropped `?filter=` in syslog mode | Serious | **PARTIALLY FIXED** (host=None) by PR #865 (2026-07-16); `?filter=` half unconfirmed |
+| 10 | Path-traversal landmine in `parse_syslog_tail`'s host param | Minor | **Pre-emptively fixed** by PR #865 (prediction confirmed correct) |
+| 11 | netdata_proxy hardcodes Content-Type: application/json | Minor | Open |
+| 12 | `stats.html` error banner only shows once per page load | Minor | Open |
+| 13 | Dashboard per-host syslog stats computed, never rendered | Minor | Open |
+| 14 | architecture-ng.md stale summary line (internal drift) | Info | Open |
+| 15 | architecture-ng.md cites closed #633 for open gap | Info | Open |
+| 16 | check-logging-matrix.sh structurally can't catch Finding 6 | Info | Open |
+| 17 | syslog-ng zstd install repeats every restart, no retry later | Info | Open |
+| 18 | write_status() comment claims an unenforced guarantee | Info | Open |
+| 19 | Dashboard vs /logs disagree on log source in syslog mode | Info | Open |
+| 20 | netdata's full API reachable by any container on the network | Info | Open |
 
 All findings above were derived by directly reading the current code/config/
 docs on `origin/v0.2.0` in a dedicated clone this session. None have been
