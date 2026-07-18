@@ -928,6 +928,11 @@ async fn main() -> Result<()> {
             "/dhcp/snapshot/rollback",
             post(routes::dhcp::rollback_kea_snapshot),
         )
+        // POST, not GET: this route has a real side effect (starts/stops the
+        // DHCP conflict-probe container) and CSRF protection in this app's
+        // basic_auth middleware only covers mutating methods -- see
+        // check_dhcp_conflict's own comment for the header-based CSRF check
+        // that pairs with this route now being a mutating method.
         .route("/api/dhcp/check", post(routes::dhcp::check_dhcp_conflict))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
