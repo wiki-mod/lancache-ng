@@ -448,15 +448,15 @@ jobs:
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Job-level concurrency (#891, extending #888/#892's proven build/
-    # container-scan pattern): a superseded commit's line-endings run gets
-    # reclaimed instead of running to completion. Safe to cancel mid-flight:
-    # nothing asserts this job's result with a hard-failing script (unlike
-    # detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit, deliberately
-    # excluded from this pattern -- see ci_scope_policy's comment below). The
-    # only consumers are build/build-arm64's own `if:` gates
-    # (`needs['line-endings'].result == 'success'`), which cleanly skip rather
-    # than error when this job shows cancelled.
+    # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
+    # see `build`'s group comment for the full #979 rationale. build/
+    # build-arm64 require `needs['line-endings'].result == 'success'`
+    # unconditionally (on every event), so on push this is a hard gate on the
+    # dev-channel publish path: a cancelled line-endings run makes build skip
+    # and publishes no dev image, starving the channel in a merge cascade. It
+    # must survive to completion on push. On a PR that same cancelled result
+    # cleanly skips build/build-arm64 via their `if:` gates, so cancelling a
+    # superseded run there just reclaims a lancache-light slot.
     concurrency:
       group: >-
         ${{
@@ -464,7 +464,7 @@ jobs:
           format('{0}-line-endings-{1}-{2}', github.workflow, github.ref, github.run_id) ||
           format('{0}-line-endings-{1}', github.workflow, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
@@ -518,15 +518,15 @@ jobs:
     # to be installed on the runner host.
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Job-level concurrency (#891, extending #888/#892's proven build/
-    # container-scan pattern): a superseded commit's shellcheck run gets
-    # reclaimed instead of running to completion. Safe to cancel mid-flight:
-    # nothing asserts this job's result with a hard-failing script (unlike
-    # detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit, deliberately
-    # excluded from this pattern -- see ci_scope_policy's comment below). The
-    # only consumers are build/build-arm64's own `if:` gates
-    # (`needs.shellcheck.result == 'success'`), which cleanly skip rather than
-    # error when this job shows cancelled.
+    # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
+    # see `build`'s group comment for the full #979 rationale. build/
+    # build-arm64 require `needs.shellcheck.result == 'success'`
+    # unconditionally (on every event), so on push this is a hard gate on the
+    # dev-channel publish path: a cancelled shellcheck makes build skip and
+    # publishes no dev image, starving the channel in a merge cascade. It must
+    # survive to completion on push. On a PR that same cancelled result cleanly
+    # skips build/build-arm64 via their `if:` gates, so cancelling a superseded
+    # run there just reclaims a lancache-light slot.
     concurrency:
       group: >-
         ${{
@@ -534,7 +534,7 @@ jobs:
           format('{0}-shellcheck-{1}-{2}', github.workflow, github.ref, github.run_id) ||
           format('{0}-shellcheck-{1}', github.workflow, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # pull-requests: read is required for the "Run governance guardrails" step
     # below to fetch the PR title/body live via `gh pr view` (issue #805).
     # contents: read is restated here too, matching the pr-template-check
@@ -718,20 +718,29 @@ jobs:
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Job-level concurrency (#891 follow-up, extending #888/#892/#915's
-    # proven pattern): validate-compose is a shared `needs:` root for
-    # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit (and,
-    # via their soft `if:` gates, rust_coverage/build/build-arm64 too), so
-    # reclaiming a superseded commit's run here matters more than for most
-    # lancache-light jobs. Safe to cancel mid-flight: every consumer either
-    # uses a soft `if:`-gate that cleanly skips on a non-success result
-    # (`build`/`build-arm64`/`rust_coverage`, or the automatic
-    # `needs:`-skip default for `shellcheck`/`file-headers`/`line-endings`/
-    # `pr-tracking-metadata-check`) or is `ci_scope_policy`, whose push-branch
-    # checks on the jobs this cascades through
-    # (dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit) were
-    # updated in the same change to tolerate that cascade -- see
-    # ci_scope_policy's own comment.
+    # Job-level concurrency (#891 follow-up): cancel-in-progress is
+    # pull_request-only -- see `build`'s group comment for the full #979
+    # rationale. validate-compose is the shared `needs:` root that exports the
+    # smoke-tested build-tools image for the whole workflow, and it is an
+    # unconditional `needs:`-success gate for build/build-arm64 (their `if:`
+    # requires `needs['validate-compose'].result == 'success'` on every
+    # event). So on push it is the sharpest gate on the dev-channel publish
+    # path: cancelling it in a merge cascade makes the entire build path skip
+    # and starves the channel. It must therefore survive to completion on
+    # push. On a PR every consumer cleanly skips a cancelled result (the soft
+    # `if:`-gates on build/build-arm64/rust_coverage, the automatic
+    # `needs:`-skip default for shellcheck/file-headers/line-endings, and
+    # ci_scope_policy's tolerance logic), so reclaiming a superseded run there
+    # is pure benefit.
+    #
+    # NOTE: because validate-compose no longer cancels on push, its downstream
+    # `skipped` cascade onto dns_test/ui_test/watchdog_test/dns_cargo_audit/
+    # ui_cargo_audit can no longer fire on push. dns_test/ui_test/
+    # dns_cargo_audit/ui_cargo_audit still keep their own cancel-on-push
+    # groups (deliberately unchanged -- they are NOT on the publish path, so
+    # cancelling a superseded push's copy saves scarce runners at no
+    # freshness cost), so ci_scope_policy still needs its direct-cancellation
+    # tolerance for them; see ci_scope_policy's comment.
     concurrency:
       group: >-
         ${{
@@ -739,7 +748,7 @@ jobs:
           format('{0}-validate-compose-{1}-{2}', github.workflow, github.ref, github.run_id) ||
           format('{0}-validate-compose-{1}', github.workflow, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
@@ -3597,24 +3606,31 @@ jobs:
     # collides -- see that group's own comment), so rapid pushes to
     # master/v0.2.0 genuinely run fully in parallel with no top-level
     # throttle at all. THAT is where a job-level cancel-in-progress group on
-    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit/validate-compose lets a
-    # newer push cancel an older, still in-progress push's copy of that job
-    # mid-flight -- validate-compose is an especially sharp case: cancelling
-    # IT (not dns_test/etc. directly) forces dns_test/ui_test/watchdog_test/
-    # dns_cargo_audit/ui_cargo_audit to `skipped` via their own
-    # `needs['validate-compose'].result == 'success'` guard, since a job
-    # whose `if:` evaluates false is marked `skipped`, not `cancelled`.
+    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit lets a newer push cancel
+    # an older, still in-progress push's copy of that job mid-flight. Those
+    # four jobs are deliberately NOT on the dev-channel publish path (nothing
+    # in `build`'s `if:` needs them), so #979 left their cancel-on-push groups
+    # in place: reclaiming a superseded push's copy saves scarce runners at no
+    # freshness cost, and this job just has to tolerate the resulting
+    # `cancelled` result.
+    #
+    # (#979 update) validate-compose used to be the sharpest case here --
+    # cancelling IT forced dns_test/ui_test/watchdog_test/dns_cargo_audit/
+    # ui_cargo_audit to `skipped` via their `needs['validate-compose'].result
+    # == 'success'` guard. It is now pull_request-only for cancellation (it is
+    # a hard publish-path gate; see its own comment), so on push it always
+    # completes and that `skipped` cascade can no longer fire on push.
     #
     # Fix: on the push-event branch below, dns_test/ui_test/dns_cargo_audit/
-    # ui_cargo_audit (each now has its own group, so they can show either a
-    # direct `cancelled` from their own group or a `skipped` cascade from
-    # validate-compose) use the new require_success_or_intentional_cancellation()
-    # helper (success|skipped|cancelled). watchdog_test also needs
-    # validate-compose but does NOT get its own group -- nothing forces one,
-    # and #891 never named it as a candidate -- so it can only ever show the
-    # `skipped` cascade, never a direct `cancelled`; it keeps using the
-    # existing require_success_or_intentional_skip() helper instead, which is
-    # the precise (not over-broad) tolerance for what it can actually produce.
+    # ui_cargo_audit still use require_success_or_intentional_cancellation()
+    # (success|skipped|cancelled) because they can still show a direct
+    # `cancelled` from their own cancel-on-push groups. watchdog_test does NOT
+    # get its own group, and with validate-compose no longer cancelling on
+    # push it can no longer be `skipped` on push either, so on a push it now
+    # only ever shows `success` (or a real failure); its
+    # require_success_or_intentional_skip() helper stays as defensive tolerance
+    # for the pull_request path, where the validate-compose skip-cascade still
+    # applies.
     #
     # dns_rust_quality/ui_rust_quality are deliberately left on strict
     # require_success(): they are not in #891's enumerated candidate list
@@ -3648,6 +3664,16 @@ jobs:
       - ui_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # cancel-in-progress is pull_request-only -- see `build`'s group comment
+    # for the full #979 rationale. build/build-arm64 require
+    # `needs.ci_scope_policy.result == 'success'` unconditionally, so on push
+    # this is a hard gate on the dev-channel publish path: cancelling it in a
+    # merge cascade makes the build path skip and starves the channel. The
+    # push-branch tolerance logic below already lets THIS job reach `success`
+    # despite its upstream test jobs being superseded, so it stays a reliable
+    # gate as long as it is not itself cancelled -- which is exactly what
+    # cancel false on push guarantees. On a PR, build/build-arm64 cleanly skip
+    # a cancelled ci_scope_policy, so cancelling a superseded run there is safe.
     concurrency:
       group: >-
         ${{
@@ -3655,7 +3681,7 @@ jobs:
           format('{0}-ci-scope-policy-{1}-{2}', github.workflow, github.ref, github.run_id) ||
           format('{0}-ci-scope-policy-{1}', github.workflow, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       # This job never checked out the repo itself (#901): its only file read
       # (the grep below) relied entirely on whatever another job on the same
@@ -3873,27 +3899,20 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: validate-compose
     # Job-level concurrency (#888): keyed per matrix row (service + platform)
-    # and per ref, so a newer push's scan for the same service/platform
-    # cancels an older, now-superseded one instead of both queueing behind
-    # the top-level group the way the whole run used to. Safe to cancel
-    # mid-scan: this job only reads/builds a local image to scan it, it
-    # never pushes anything to GHCR, so there is no partial registry state
-    # to worry about -- worst case is a wasted Trivy run. `build` below
-    # requires this job's success on non-PR events, so a cancelled scan
-    # cleanly stops the pipeline there via that `needs` gate rather than
-    # racing it.
+    # and per ref. cancel-in-progress is pull_request-only -- see `build`'s
+    # group comment for the full #979 rationale. On push, `build`'s `if:`
+    # requires `needs['container-scan'].result == 'success'` (the non-PR
+    # branch), so this scan is a hard gate on the dev-channel publish path:
+    # cancelling it in a merge cascade makes `build` skip and publishes no dev
+    # image for that commit, starving the channel. On a PR it is safe to
+    # cancel a superseded scan -- it only reads/builds a local image to scan
+    # (never pushes to GHCR, worst case a wasted Trivy run) and `build` cleanly
+    # skips a cancelled scan there via its `needs` gate.
     #
-    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) get
-    # their own run_id-suffixed key instead of sharing the plain
-    # service+platform+ref one: a plain ref-only key would let two manual
-    # dispatches of the same ref (e.g. spot-checking `channel=dev` then
-    # `channel=edge` minutes apart) or a rerun of an old, already-superseded
-    # run cancel each other's or a currently-running newer push's scan --
-    # cancel-in-progress cancels whatever already holds the group
-    # regardless of which commit is actually newer, so a ref-only key has no
-    # way to tell "genuinely superseded" apart from "unrelated manual
-    # retrigger". Ordinary push/tag events keep the plain key so consecutive
-    # pushes to the same ref still get the intended fast supersession.
+    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) keep
+    # their own run_id-suffixed key so a manual retrigger or rerun cannot be
+    # confused with a genuinely superseded push; on push/tag the flag is false
+    # anyway, so the plain service+platform+ref key never triggers a cancel.
     concurrency:
       group: >-
         ${{
@@ -3901,7 +3920,7 @@ jobs:
           format('{0}-container-scan-{1}-{2}-{3}-{4}', github.workflow, matrix.service, matrix.platform_tag, github.ref, github.run_id) ||
           format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # Each matrix row carries its own JSON-encoded runner selector so amd64
     # rows stay on the self-hosted pool (with LAN acceleration available) and
     # arm64 rows run natively on a GitHub-hosted arm64 runner -- QEMU on the
@@ -4521,31 +4540,42 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
-    # Job-level concurrency (#888): keyed per matrix service and per ref, so
-    # a newer push's build for the same service cancels an older,
-    # now-superseded one instead of both queueing behind the top-level
-    # group the way the whole run used to (which also meant the scarce
-    # self-hosted `lancache-heavy` runners stayed pinned to a superseded
-    # commit's build for its full ~150-minute timeout). Safe to cancel
-    # mid-push: GHCR tag writes are atomic (a cancelled push simply never
-    # completes the final manifest PUT for its sha-<short>-{amd64,arm64}
-    # tag, it never leaves a corrupt or partially-visible one), and
-    # `merge-manifests` below already requires `needs.build.result ==
-    # 'success'`, so a cancelled build cleanly stops the pipeline there via
-    # that `needs` gate rather than racing a partial image.
+    # Job-level concurrency (#888, keyed per matrix service and per ref).
+    # CANONICAL RATIONALE for this whole workflow's dev-channel publish path
+    # -- container-scan/build-arm64 and the shellcheck/validate-compose/
+    # line-endings/ci_scope_policy gates all point here for the full story.
     #
-    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) get
-    # their own run_id-suffixed key instead of sharing the plain
-    # service+ref one, for the same reason as container-scan just above:
-    # two manual dispatches of the same ref with different `channel` inputs
-    # (or a rerun of an old, already-superseded run) would otherwise share
-    # this group with each other and with any currently-running fresh push
-    # build, and cancel-in-progress cancels whoever already holds the group
-    # regardless of which commit is actually newer -- silently dropping the
-    # earlier dispatch's requested channel promotion, or killing a
-    # legitimately newer push's build in favor of rebuilding a stale rerun.
-    # Ordinary push/tag events keep the plain key so consecutive pushes to
-    # the same ref still get the intended fast supersession.
+    # cancel-in-progress is scoped to pull_request events ONLY (issue #979).
+    # On a PR, a newer push to the same branch supersedes the older commit,
+    # so cancelling the older service build reclaims a scarce lancache-heavy
+    # slot (otherwise pinned for the full ~150-minute timeout) with no
+    # downside: a PR's own commits are never promoted to a channel, GHCR tag
+    # writes are atomic (a cancelled build never completes its final manifest
+    # PUT, so it leaves no corrupt or partially-visible sha-* tag), and
+    # merge-manifests already requires `needs.build.result == 'success'`, so a
+    # cancelled build cleanly stops the pipeline via that gate.
+    #
+    # On push/tag it must NOT cancel. This branch build is what publishes the
+    # commit's sha-* images that promote turns into the dev/edge channel. The
+    # top-level group uses a run_id-scoped key for push (never collides -- see
+    # top of file), so a rapid v0.2.0/master merge cascade runs every push's
+    # build fully in parallel with no throttle. With cancel-in-progress:true
+    # each new push tore down the previous push's in-progress build before it
+    # finished; in a fast enough cascade NO build completed for 90+ minutes,
+    # starving the dev channel and failing #808's freshness gate on unrelated
+    # PRs that backfill an untouched service from `dev` (issue #979 -- a
+    # recurrence of #777's starvation one layer below the promote job). With
+    # cancel false on push the in-progress build always survives to
+    # completion; the channel still advances toward HEAD because GitHub keeps
+    # only the newest *pending* run per group and drops older pending ones
+    # regardless of this flag (see promote's #897 comment), and #808 needs
+    # `dev` built at-or-after a PR's base commit, not exactly at it. Release
+    # (tag) builds are unaffected: a tag ref never collides, so there was
+    # never a cancellation to suppress there.
+    #
+    # The group key still isolates workflow_dispatch and reruns
+    # (`github.run_attempt != '1'`) with a run_id suffix so a PR rerun cannot
+    # cancel the original PR run's build; on push/tag the flag is false anyway.
     concurrency:
       group: >-
         ${{
@@ -4553,7 +4583,7 @@ jobs:
           format('{0}-build-{1}-{2}-{3}', github.workflow, matrix.service, github.ref, github.run_id) ||
           format('{0}-build-{1}-{2}', github.workflow, matrix.service, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     permissions:
@@ -5232,15 +5262,15 @@ jobs:
       }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
-    # Job-level concurrency, mirroring `build` (the amd64 leg) exactly: without
-    # this, a newer push's `build` job for a service gets cancelled by its own
-    # service+ref group, but this native arm64 leg for the SAME now-superseded
-    # commit had nothing cancelling it and would run to completion (up to the
-    # full 120-minute timeout above), wasting arm64 runner capacity on a build
-    # `merge-manifests` can never use once `build`'s result for that commit is
-    # `cancelled` rather than `success`. Same `workflow_dispatch`/rerun
-    # isolation as `build`'s group, for the same reason: see that job's
-    # comment for the full rationale.
+    # Job-level concurrency, mirroring `build` (the amd64 leg) exactly, and
+    # for the same reasons -- see `build`'s group comment for the full #979
+    # rationale. cancel-in-progress is pull_request-only: merge-manifests
+    # needs this native arm64 leg's success, so on push it is on the
+    # dev-channel publish path and must survive to completion (cancelling it
+    # in a merge cascade starves `dev` exactly like cancelling `build`). On a
+    # PR, a superseded commit's arm64 leg is wasted work merge-manifests can
+    # never use, so cancelling it there reclaims arm64 runner capacity. Same
+    # `workflow_dispatch`/rerun run_id isolation as `build`'s group.
     concurrency:
       group: >-
         ${{
@@ -5248,7 +5278,7 @@ jobs:
           format('{0}-build-arm64-{1}-{2}-{3}', github.workflow, matrix.service, github.ref, github.run_id) ||
           format('{0}-build-arm64-{1}-{2}', github.workflow, matrix.service, github.ref)
         }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     permissions:
