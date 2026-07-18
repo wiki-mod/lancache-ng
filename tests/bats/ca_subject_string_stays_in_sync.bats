@@ -14,19 +14,27 @@ setup() {
 }
 
 @test "CA subject string stays in sync between generate-ca.sh and services/proxy/entrypoint.sh" {
-    # Extract the -subj argument value from both files using grep.
-    # Both use the form: -subj "/CN=...../O=...../C=DE"
+    # Extract the CA -subj argument value from both files using grep.
+    # The CA distinguished name has the form: -subj "/CN=...../O=...../C=DE"
+    #
+    # services/proxy/entrypoint.sh has TWO `-subj` invocations: the CA cert
+    # (full DN with /O= and /C=) and a per-domain wildcard cert that is CN-only
+    # (`-subj "/CN=${cn}"`). A bare `grep -oP` for `-subj` therefore returns two
+    # lines for the proxy entrypoint, which never string-equals generate-ca.sh's
+    # single CA line. Filter to the /O= line to isolate the CA DN and exclude the
+    # CN-only per-domain template. Do not drop this filter or the sync check will
+    # always compare a two-line value against a one-line value and fail.
 
     local generate_ca_subj
     local proxy_subj
 
-    # Extract from generate-ca.sh: grep for the line with -subj, extract the quoted string
-    generate_ca_subj=$(grep -oP '(?<=-subj ")[^"]*' "$generate_ca_script")
-    [ -n "$generate_ca_subj" ] || skip "Could not extract -subj from generate-ca.sh"
+    # Extract the CA subject from generate-ca.sh (its only -subj is the CA DN).
+    generate_ca_subj=$(grep -oP '(?<=-subj ")[^"]*' "$generate_ca_script" | grep -F '/O=')
+    [ -n "$generate_ca_subj" ] || skip "Could not extract CA -subj from generate-ca.sh"
 
-    # Extract from proxy entrypoint: same pattern
-    proxy_subj=$(grep -oP '(?<=-subj ")[^"]*' "$proxy_entrypoint")
-    [ -n "$proxy_subj" ] || skip "Could not extract -subj from proxy entrypoint.sh"
+    # Extract only the CA-DN -subj from the proxy entrypoint, skipping the CN-only per-domain cert.
+    proxy_subj=$(grep -oP '(?<=-subj ")[^"]*' "$proxy_entrypoint" | grep -F '/O=')
+    [ -n "$proxy_subj" ] || skip "Could not extract CA -subj from proxy entrypoint.sh"
 
     # They must match exactly
     [ "$generate_ca_subj" = "$proxy_subj" ] || {
