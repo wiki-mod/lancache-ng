@@ -18,6 +18,14 @@ base), since that is materially different (and considerably more
 feature-complete) than what's on `master`/other integration branches at the
 time of this audit — see "Branch divergence" at the end.
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). One
+> clarification below (`PROXY_ALLOWED_CLIENT_CIDRS` enforcement scope) was
+> sharpened after the sibling `bughunt-proxy` pass (issue #849) found the
+> allowlist does not cover the standard-mode stream listener. Everything
+> else in this doc remains accurate; no merged commit in that range touches
+> `services/proxy`'s code paths.
+
 ---
 
 ## 1. Startup / `entrypoint.sh` — function-by-function
@@ -92,7 +100,7 @@ time of this audit — see "Branch divergence" at the end.
 | `CACHE_MAX_SIZE`, `CACHE_MEM_MB`, `CACHE_SLICE_SIZE`, `CACHE_VALID_HIT`, `CACHE_VALID_ANY`, `CACHE_INACTIVE` | `config/{dev,prod}/proxy.env` | Cache sizing/retention tuning, templated into `nginx.conf`/`proxy-params.conf` |
 | `NGINX_UPSTREAM_RESOLVER` | `config/{dev,prod}/proxy.env` | Real upstream DNS for origin lookups (dual-stack default incl. bracketed IPv6 Google DNS) |
 | `PROXY_SECURITY_MODE` (`lazy`\|`strict`) | `config/{dev,prod}/proxy.env` | `lazy` (default): proxy any host that reaches the cache. `strict`: 403 anything not derived from `cdn-domains.txt` |
-| `PROXY_ALLOWED_CLIENT_CIDRS` | `config/{dev,prod}/proxy.env` | Source-IP allowlist (`geo` block); empty = allow all reachable clients |
+| `PROXY_ALLOWED_CLIENT_CIDRS` | `config/{dev,prod}/proxy.env` | Source-IP allowlist (`geo $lancache_client_allowed` block); empty = allow all reachable clients. **Scope gap (confirmed 2026-07-18):** the `geo` variable is only checked in `conf.d/http.conf` and `conf.d/https.conf` (both `http{}` context) — the standard-mode SNI-passthrough `stream{}` listener (`:8443`) never references it, so this allowlist is **not enforced** for standard-mode clients regardless of configuration. See `bughunt-proxy` finding N1. |
 | `KEEP_KNOWN_GOOD_CONFIGS` (default 3) | `config/{dev,prod}/proxy.env` | Snapshot retention depth for #415 rollback |
 | `PROXY_CONFIG_SNAPSHOT_DIR` | entrypoint default (`/var/lib/lancache-proxy/config-snapshots`), volume `proxy-config-snapshots` per `docs/known-good-config-snapshots.md` | Where rollback snapshots persist across container recreation |
 
@@ -136,7 +144,10 @@ time of this audit — see "Branch divergence" at the end.
   `cdn-domains.txt`.
 - `PROXY_SECURITY_MODE=strict` and `PROXY_ALLOWED_CLIENT_CIDRS` (403 paths)
   have no automated test — no simulation script or bats test drives a
-  request through the strict/CIDR-denied code paths and asserts a 403.
+  request through the strict/CIDR-denied code paths and asserts a 403. This
+  gap is compounded by the scope issue above: even a test targeting the
+  `http{}` paths would not catch the stream-listener's total lack of
+  enforcement, since that's a missing code path, not just missing coverage.
 - `/nginx_status`'s ACL and the Admin UI's consumption of it
   (`nginx_client.rs`) have no test found on either side.
 
