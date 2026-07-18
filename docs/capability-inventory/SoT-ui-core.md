@@ -60,9 +60,10 @@ baked into nats.conf's `auth_callout { issuer: ... }`).
    (installs without the `logging` compose profile still start, stdout-only).
 2. `config::Config::from_env()` — see section 2.
 3. `preflight_startup_config(cfg)` → validates `ui_session_ttl_seconds`
-   (1..=1 year), `secondary_registration_token` (non-empty, non-placeholder),
-   and `nats_config::validate_runtime_nats_credentials` (all four NATS role
-   username/password pairs). Returns the parsed TTL `Duration`.
+   (1..=1 year) and `nats_config::validate_runtime_nats_credentials` (all four
+   NATS role username/password pairs). Returns the parsed TTL `Duration`. Note
+   `secondary_registration_token` is **not** checked here — see step 10 below
+   for where it's actually resolved and validated.
 4. `resolve_admin_ui_auth_mode(auth_user, auth_password, allow_insecure_ui)` —
    both-or-neither gate for `UI_AUTH_USER`/`UI_AUTH_PASSWORD`;
    `ALLOW_INSECURE_UI=true` is the only way to start with neither set, and
@@ -86,27 +87,34 @@ baked into nats.conf's `auth_callout { issuer: ... }`).
    `/data/lancache-ui-session.secret` (hex, `create_new` for atomicity/no-lost-
    update-race, mode 0600 on unix). Survives container recreate so sessions
    aren't invalidated every restart.
-10. Issuer keypair resolution: `NATS_ISSUER_SEED` (literal seed, env var)
+10. `load_or_create_secondary_registration_token(cfg.secondary_registration_token,
+    SECONDARY_REGISTRATION_TOKEN_FILE)`, then
+    `validate_secondary_registration_token()` — resolves and validates the
+    token (non-empty, non-placeholder) alongside the other durable `/data`
+    secrets, running only *after* `connect_nats_with_retry` (step 8) and
+    `load_or_create_session_secret` (step 9), not inside the preflight gate in
+    step 3.
+11. Issuer keypair resolution: `NATS_ISSUER_SEED` (literal seed, env var)
     takes precedence over `nats_auth_callout::load_or_create_issuer_keypair
     (nats_issuer_seed_path)` (file-based, default
     `/data/lancache-nats-issuer.seed`). The literal-seed path exists *only*
     for the full-setup validation harness (no persistent `/data` volume, needs
     a deterministic pre-known keypair) — not used in dev/prod.
-11. SQLite open at `/data/lancache-ui.db`, `CREATE TABLE IF NOT EXISTS
+12. SQLite open at `/data/lancache-ui.db`, `CREATE TABLE IF NOT EXISTS
     secondaries (name PK, nats_token, consumer_name UNIQUE, registered_at,
     last_seen)`, then `migrate_secondaries_table_for_auth_callout()` —
     additive ALTER TABLE adding `nats_user`/`nats_password_hash` (idempotent,
     checks `PRAGMA table_info` first; legacy `nats_token` column kept as
     inert dead weight rather than dropped, since SQLite `DROP COLUMN` needs a
     table rebuild).
-12. Build `AppState`, then `routes::secondaries::reload_nats_conf(&state)`
+13. Build `AppState`, then `routes::secondaries::reload_nats_conf(&state)`
     (best-effort, only `tracing::warn!`s on failure — writes the initial
     `auth_callout.conf` fragment; deep-dive is the other agent's scope, noted
     here only as an integration point).
-13. `tokio::spawn(nats_auth_callout::run_auth_callout(state, issuer_keypair))`
+14. `tokio::spawn(nats_auth_callout::run_auth_callout(state, issuer_keypair))`
     — runs for the process lifetime, no supervision beyond its own internal
     reconnect loop (see section 3).
-14. Router assembly (public vs. protected — see below), `security_headers`
+15. Router assembly (public vs. protected — see below), `security_headers`
     middleware applied to the whole merged router, bind `0.0.0.0:8080`.
 
 **Public routes** (no Basic Auth): `GET /health`, `POST /api/secondary/register`
@@ -118,12 +126,14 @@ response already marked publicly cacheable, letting a shared cache replay one
 client's session cookie to another (flagged on PR #553's review) — the
 browser's own Basic Auth prompt still gates the origin regardless.
 
-**Protected routes** (behind `basic_auth` middleware, ~20 routes): `/`,
-`/dhcp` + 9 DHCP mutation endpoints, `/domains` + 4 mutation endpoints + zone
-rollback, `/stats`, `/logs`, `/setup` + update, `/api/metrics`,
-`/api/netdata/{*path}`, static CSS/JS, `/secondaries`, secondary
-delete/rotate. (Handler bodies for dhcp/domains/logs/secondaries/setup/
-stats/dashboard/netdata_proxy/dns_snapshots are the other agent's scope.)
+**Protected routes** (behind `basic_auth` middleware, ~30 routes): `/`,
+`/dhcp` + 12 DHCP mutation endpoints (mode, proxy, 3 subnet CRUD, 2 subnet
+option CRUD, 2 static-reservation CRUD, lease release, snapshot rollback, and
+`/api/dhcp/check`), `/domains` + 4 mutation endpoints + zone rollback,
+`/stats`, `/logs`, `/setup` + update, `/api/metrics`, `/api/netdata/{*path}`,
+static CSS/JS, `/secondaries`, secondary delete/rotate. (Handler bodies for
+dhcp/domains/logs/secondaries/setup/stats/dashboard/netdata_proxy/
+dns_snapshots are the other agent's scope.)
 
 **`health()`** — literal `"ok"`, no NATS/Docker/DNS reachability check.
 Explicitly documented as intentionally *shallow*: mirrors the proxy service's
@@ -211,7 +221,11 @@ bind DHCP :67/udp).
   identity), `NATS_ISSUER_SEED_PATH`, `NATS_ISSUER_SEED` (literal override),
   `NATS_CONF_PATH`, `NATS_AUTH_CALLOUT_PATH` (must match the nats
   entrypoint's `include` target — issue #811), `NATS_SERVICE`,
-  `NATS_LOG_FILE`.
+  `NATS_LOG_FILE`, `NATS_BIND_IP` (mirrors the Compose port `HOST` field this
+  container listens on), `NATS_ADVERTISE_URL` (explicit override for the
+  externally-reachable NATS URL; both feed `advertised_nats_url()`, which a
+  remote secondary's registration flow depends on — see issue #866 and
+  `routes/secondaries.rs`).
 - Secondary registration: `SECONDARY_REGISTRATION_TOKEN`.
 - Release/update: `LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
   `LANCACHE_IMAGE_CHANNEL` (auto-derived from tag via
@@ -222,7 +236,8 @@ bind DHCP :67/udp).
   `ui_settings_file`, since this container can't flip a host-level timer
   synchronously).
 - Misc: `TEMPLATE_DIR`, `UI_SETTINGS_FILE`, `LANCACHE_DEV_MODE`,
-  `SYSLOG_ENABLED`, `SYSLOG_LOG_ROOT`, `SYSLOG_MAX_GB`,
+  `UI_LOGS_MAX_ENTRIES` (caps how many lines `routes/logs.rs` returns per
+  request), `SYSLOG_ENABLED`, `SYSLOG_LOG_ROOT`, `SYSLOG_MAX_GB`,
   `SYSLOG_RETENTION_DAYS` (#633/#757 — display/reporting only, the UI never
   enforces the budget, `watchdog.sh` does).
 
@@ -243,9 +258,18 @@ optional fields, image channel override, auto-update-enabled) each check
 `ui_settings_file` (default `/data/lancache-ui-settings.env`, a plain
 unescaped `KEY=value` line format, first-match-wins, no full env-file parser)
 before falling back to the env-var value captured at process start.
-`ui_override_lines()` renders the *current effective* values back into that
+`ui_override_lines()` renders only the 12 DHCP-related effective values
+(`DHCP_MODE` + the 11 optional subnet/DNS/NTP/proxy fields) back into that
 same line format (omitting empty values so a cleared override reverts to the
-env default rather than pinning `""`). This is how DHCP-mode/settings changes
+env default rather than pinning `""`) — it does **not** write
+`lancache_image_channel`/`auto_update_enabled`. Those two are instead
+persisted by a separate function, `routes/dhcp.rs`'s
+`persist_stack_settings()` (called from `routes/setup.rs`'s
+`update_stack_settings`), which writes the full 14-key set — the same 12
+DHCP-related keys plus `LANCACHE_IMAGE_CHANNEL`/`AUTO_UPDATE_ENABLED` — through
+the shared `write_ui_settings_file()` helper so there is exactly one
+authoritative whitelist for the settings file's contents even though two
+different call sites populate it. This is how DHCP-mode/settings changes
 take effect from the Admin UI without a container restart — but two of these
 (`lancache_image_channel`/`auto_update_enabled`, #819) explicitly do **not**
 take effect inside this container at all; they're polled by `setup.sh`'s
@@ -612,14 +636,19 @@ budget pruning — that pruning itself lives in `watchdog.sh`, not here).
   filename for the per-host distinct-day count; returns `None` (not a
   guess) for anything not exactly 8 ASCII digits.
 
-**Tests**: 12 `#[test]` functions — plain-text tail-in-order, zst
+**Tests**: 18 `#[test]` functions — plain-text tail-in-order, zst
 transparent decompress, gz transparent decompress, multi-host
-interleave-by-timestamp, the #758 starvation-guard regression test, limit-
-respecting/most-recent-kept, unparseable-lines-kept-not-dropped,
-missing-root-returns-empty, stats aggregation across mixed
-plain/rotated files, compressed-files-counted-by-metadata-only (a second
-#758-review regression test), stats-on-missing-root, and syslog-allowlist
-rejection (mirrors `nginx_client`'s path-traversal guard tests).
+interleave-by-timestamp, four #758 starvation-guard regression tests
+(newest-file-alone-satisfies-limit doesn't starve other hosts, a quiet host
+isn't starved at the final merge step, high-volume activity dominates when
+uncontested, recent activity wins the shared budget across multiple active
+hosts), limit-respecting/most-recent-kept, unparseable-lines-kept-not-dropped,
+path-traversal-rejected, missing-root-returns-empty, stats aggregation across
+mixed plain/rotated files, compressed-files-counted-by-metadata-only (a second
+#758-review regression test), stats-on-missing-root, two `list_syslog_hosts`
+tests (sorted host directory names, empty for a missing root), and
+syslog-allowlist rejection (mirrors `nginx_client`'s path-traversal guard
+tests).
 
 ---
 
