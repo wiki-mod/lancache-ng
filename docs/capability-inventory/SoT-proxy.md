@@ -26,12 +26,24 @@ time of this audit — see "Branch divergence" at the end.
 > else in this doc remains accurate; no merged commit in that range touches
 > `services/proxy`'s code paths.
 >
-> **Review-triage update (2026-07-18):** four PR-review findings were
-> verified against current code and fixed here: the full-setup bind-mount
-> claim (§3), dev's distinct port mapping (§5), the
+> **Review-triage update (2026-07-18, round 1):** four PR-review findings
+> were verified against current code and fixed here: the full-setup
+> bind-mount claim (§3), dev's distinct port mapping (§5), the
 > `PROXY_SECURITY_MODE=strict` 403 scope (§4), and the stale
 > `cdn-ssl-domains.txt` threat-model reference (§7 — `docs/threat-model.md`
-> itself was corrected, not just flagged). This file is now ahead of the
+> itself was corrected, not just flagged).
+>
+> **Review-triage update (2026-07-18, round 2 — after Codex re-reviewed the
+> round-1 push):** five more findings verified and fixed: strict-mode
+> stream's target-selection gap, forwarding to the derived root rather than
+> the literal SNI (§1); the rollback adapter's overstated "fully
+> unit-tested" claim, missing both the degraded-domain-skip branch and the
+> real 4-file candidate set (§1); strict mode's wildcard-root allowlist
+> scope, which admits any subdomain of a derived root, not just the literal
+> `cdn-domains.txt` entries (§4); and two more unscoped
+> `PROXY_ALLOWED_CLIENT_CIDRS`/domain-allowlist claims plus a second stale
+> `services/proxy-standard` reference in `docs/threat-model.md`'s
+> architecture summary, T9, and T11 (§7). This file is now ahead of the
 > mirrored public comment on issue #843
 > (https://github.com/wiki-mod/lancache-ng/issues/843#issuecomment-4977019630);
 > that comment has not been separately updated to match.
@@ -52,10 +64,10 @@ time of this audit — see "Branch divergence" at the end.
 | `_sign_cert` (2048-bit per-domain cert, CSR via `/tmp/lancache-cert.csr`, cleans up key **and** partial crt on signing failure, not just the CSR — fix for #655) | Issues one wildcard cert per derived root domain | **Fully unit-tested**: cert creation, correct CN, chain-of-trust via `openssl verify`, correct wildcard+bare SAN, 3650-day validity window, monotonic serial counter, serial-file survival across many signings, orphaned-CSR/key/crt cleanup on both the CSR-step and the sign-step failure paths |
 | `_default_cert_needs_regen` (anchored IP-SAN match, fix for #655) | Regenerates the fallback `default.crt` if missing, key-less, SAN-less (old CN-only certs), or if `IP_SSL` changed — previously used an **unanchored substring match** that would keep serving a stale cert if the new IP was a textual prefix of the old one (e.g. `192.168.1.11`→`192.168.1.1`) | **Fully unit-tested**, including the exact prefix-collision regression case |
 | Request-policy map generation → `00-ssl-map.conf` | `map $ssl_server_name $ssl_cert_name` (per-root wildcard + bare-domain cert selection), `map $host $cdn_host_allowed` (lazy=allow-all vs strict=allowlist-only, derived from the same PSL-rooted domain list), `geo $lancache_client_allowed` (source-IP CIDR allowlist) | Indirectly proven by `ssl-mitm-cache-simulation.sh`; no unit test isolates the generated map syntax itself |
-| Stream-target map generation → `stream.d/00-stream-targets.conf` | `map $ssl_preread_server_name $stream_backend` for SNI passthrough — lazy mode forwards blind to whatever SNI the client sent, strict mode only forwards to domains in the allowlist (else routes to a closed `127.0.0.1:9`) | Same as above — no isolated unit test |
+| Stream-target map generation → `stream.d/00-stream-targets.conf` | `map $ssl_preread_server_name $stream_backend` for SNI passthrough — lazy mode forwards blind to whatever SNI the client sent, strict mode only forwards to domains in the allowlist (else routes to a closed `127.0.0.1:9`). **Target-selection gap (confirmed 2026-07-18):** for an allowed match, `entrypoint.sh` forwards to `${domain}:443` — the *derived root* domain — not to the literal `$ssl_preread_server_name` the client requested. E.g. a listed `drivers.amd.com` (PSL root `amd.com`) forwards to `amd.com:443`, not `drivers.amd.com:443`, which can break strict-mode standard-mode traffic for any listed subdomain whose real origin doesn't serve that traffic from the root domain's IP. | Same as above — no isolated unit test |
 | `https.conf` removal when `SSL_ENABLED=0` | Standard-mode-only installs never load the interception server block | Not unit-tested; would surface as a missing 443 SSL listener if broken |
 | Template rendering (`envsubst` for `nginx.conf`, `proxy-params.conf`) | Cache size/mem/slice/inactive/valid + upstream resolver substitution | Covered by `tests/bats/proxy_known_good_snapshot.bats`'s stub-nginx flow (validates the *rendered* file, not the substitution itself) |
-| `_proxy_validate_snapshot_or_rollback` (#415) | `nginx -t` → snapshot on success (skipped if domain rows were skipped) → on failure, roll back newest-to-oldest through stored snapshots, re-validating each; fatal exit if nothing validates | **Fully unit-tested** via a stubbed `nginx` binary: valid-config snapshot creation, invalid-config rollback to last-known-good, exhausted-snapshots refusal, retention pruning to `KEEP_KNOWN_GOOD_CONFIGS` |
+| `_proxy_validate_snapshot_or_rollback` (#415) | `nginx -t` → snapshot on success (skipped if domain rows were skipped) → on failure, roll back newest-to-oldest through stored snapshots, re-validating each; fatal exit if nothing validates | **Corrected 2026-07-18 (was overstated as "Fully unit-tested"):** `tests/bats/proxy_known_good_snapshot.bats` covers valid-config snapshot creation, invalid-config rollback to last-known-good, exhausted-snapshots refusal, and retention pruning to `KEEP_KNOWN_GOOD_CONFIGS` — but only ever against a single `nginx_conf` candidate file, not the real 4-file candidate set (`PROXY_CANDIDATE_FILES` = `nginx.conf`, `proxy-params.conf`, the SSL map, the stream-target map) the entrypoint actually passes. No test sets `_DOMAIN_ROWS_SKIPPED=1` to exercise the degraded-domain-list skip-snapshot branch in `entrypoint.sh` (the one that logs `WARNING: ... NOT snapshotting`). Both gaps are real, not just theoretical. |
 
 ## 2. nginx configuration surface
 
@@ -116,7 +128,7 @@ time of this audit — see "Branch divergence" at the end.
 | `IP_STANDARD`, `IP_SSL`, `SSL_ENABLED` | compose `environment:` | Mode selection, cert IP SAN, required-var gating |
 | `CACHE_MAX_SIZE`, `CACHE_MEM_MB`, `CACHE_SLICE_SIZE`, `CACHE_VALID_HIT`, `CACHE_VALID_ANY`, `CACHE_INACTIVE` | `config/{dev,prod}/proxy.env` | Cache sizing/retention tuning, templated into `nginx.conf`/`proxy-params.conf` |
 | `NGINX_UPSTREAM_RESOLVER` | `config/{dev,prod}/proxy.env` | Real upstream DNS for origin lookups (dual-stack default incl. bracketed IPv6 Google DNS) |
-| `PROXY_SECURITY_MODE` (`lazy`\|`strict`) | `config/{dev,prod}/proxy.env` | `lazy` (default): proxy any host that reaches the cache. `strict`: for the `http{}`/`https{}` `location /` blocks, returns HTTP 403 for any host not derived from `cdn-domains.txt` (`$cdn_host_allowed`, `conf.d/http.conf`/`https.conf`). **Scope gap (confirmed 2026-07-18):** the standard-mode `stream{}` SNI-passthrough listener (`:8443`) enforces the same domain list differently — `entrypoint.sh` routes an unlisted SNI to a closed `127.0.0.1:9`, producing a failed/refused TCP connection, never an HTTP 403. Do not assume a 403 for strict-mode denials on the standard-mode listener. |
+| `PROXY_SECURITY_MODE` (`lazy`\|`strict`) | `config/{dev,prod}/proxy.env` | `lazy` (default): proxy any host that reaches the cache. `strict`: for the `http{}`/`https{}` `location /` blocks, returns HTTP 403 for any host not derived from `cdn-domains.txt` (`$cdn_host_allowed`, `conf.d/http.conf`/`https.conf`). **Scope gap (confirmed 2026-07-18):** the standard-mode `stream{}` SNI-passthrough listener (`:8443`) enforces the same domain list differently — `entrypoint.sh` routes an unlisted SNI to a closed `127.0.0.1:9`, producing a failed/refused TCP connection, never an HTTP 403. Do not assume a 403 for strict-mode denials on the standard-mode listener. **Wildcard-root allowlist (confirmed 2026-07-18):** "not derived from `cdn-domains.txt`" is broader than the literal listed hostnames — for every derived root, `entrypoint.sh` emits both the bare root and `*.${root}` into the allow map (`conf.d/00-ssl-map.conf`'s `$cdn_host_allowed` and the stream target map alike), so a listed `drivers.amd.com` (PSL root `amd.com`) admits *any* `*.amd.com` host, and since the PSL derivation is ICANN-section-only, a listed CDN hostname under a broad platform root (e.g. `*.akamaized.net`) admits that entire platform root too. Strict mode allowlists by *derived root*, not by the exact hostnames in `cdn-domains.txt`. |
 | `PROXY_ALLOWED_CLIENT_CIDRS` | `config/{dev,prod}/proxy.env` | Source-IP allowlist (`geo $lancache_client_allowed` block); empty = allow all reachable clients. **Scope gap (confirmed 2026-07-18):** the `geo` variable is only checked in `conf.d/http.conf` and `conf.d/https.conf` (both `http{}` context) — the standard-mode SNI-passthrough `stream{}` listener (`:8443`) never references it, so this allowlist is **not enforced** for standard-mode clients regardless of configuration. See `bughunt-proxy` finding N1. |
 | `KEEP_KNOWN_GOOD_CONFIGS` (default 3) | `config/{dev,prod}/proxy.env` | Snapshot retention depth for #415 rollback |
 | `PROXY_CONFIG_SNAPSHOT_DIR` | entrypoint default (`/var/lib/lancache-proxy/config-snapshots`), volume `proxy-config-snapshots` per `docs/known-good-config-snapshots.md` | Where rollback snapshots persist across container recreation |
@@ -212,10 +224,13 @@ time of this audit — see "Branch divergence" at the end.
   Suffix List. Per AG-DOC-001 (documentation drift is a defect, not
   follow-up work), `docs/threat-model.md`'s T2 section was updated in this
   PR to name `cdn-domains.txt` and the PSL-derivation mechanism instead of
-  recording the mismatch only here, and its `PROXY_ALLOWED_CLIENT_CIDRS`
-  line was scoped to name the same standard-mode stream-listener
-  enforcement gap this inventory documents above (§4), so the two documents
-  no longer contradict each other.
+  recording the mismatch only here. A second review pass (2026-07-18) found
+  the same class of unscoped `PROXY_ALLOWED_CLIENT_CIDRS`/strict-mode claim
+  repeated in `docs/threat-model.md`'s architecture summary and T9, plus a
+  second stale `services/proxy-standard` reference in T11 — all three were
+  fixed in the same commit as this update, so the two documents (this
+  inventory's §4 scope notes and `docs/threat-model.md`'s T2/T9/architecture
+  sections) no longer contradict each other anywhere.
 - **Closed but worth citing for history**: #668 (ssl-mitm-cache-simulation
   couldn't prove SSL-mode reaches a distinct MITM endpoint — fixed via the
   `standard-passthrough-shim`) and #655 (the two

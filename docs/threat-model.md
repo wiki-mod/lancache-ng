@@ -131,7 +131,11 @@ inventory table.
 - **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default / `strict`)
   controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
   optionally restricts which client source networks the proxy answers at all
-  (returns 403 otherwise).
+  for HTTP/HTTPS traffic (returns 403 otherwise). Both are `http{}`/`https{}`
+  controls: the standard-mode `stream{}` SNI-passthrough listener (`:8443`)
+  enforces `PROXY_SECURITY_MODE=strict`'s domain allowlist differently (an
+  unlisted SNI is routed to a closed `127.0.0.1:9`, not a 403) and does not
+  enforce `PROXY_ALLOWED_CLIENT_CIDRS` at all — see T2.
 - **Admin UI** — Rust/axum service. Fail-closed auth (see T3). Reaches Docker
   only through the scoped `docker-socket-proxy`.
 - **DHCP** — optional, three mutually-exclusive modes (`disabled` / `kea` /
@@ -447,7 +451,10 @@ or saturating the proxy.
 **Mitigations**:
 - Configurable cache size limits; `proxy_cache_use_stale` keeps serving under
   pressure.
-- `PROXY_ALLOWED_CLIENT_CIDRS` can restrict which clients may drive the proxy.
+- `PROXY_ALLOWED_CLIENT_CIDRS` can restrict which clients may drive the proxy
+  over HTTP/HTTPS — it is not enforced for the standard-mode `stream{}`
+  SNI-passthrough listener (`:8443`), so a flood over that listener is not
+  mitigated by this control (see T2).
 - Disk-usage warnings/alarms via the watchdog and Netdata.
 
 **Residual risk**: Medium — there is no per-client request rate limiting by
@@ -484,8 +491,10 @@ to the real CDN. The failure is immediate and obvious (the console cannot reach
 that CDN at all), not a silent degradation.
 
 Pointed at **standard-mode DNS** instead, the same spoofed domain is harmless for
-HTTPS: `services/proxy-standard`'s `ssl_preread`-based SNI passthrough forwards
-the TLS connection to the real CDN blind, with no interception and no CA
+HTTPS: the unified `services/proxy`'s `ssl_preread`-based SNI passthrough
+(`stream{}` block, `:8443` — `services/proxy-standard` was retired and merged
+into this single service in the v0.2.0 refactor) forwards the TLS connection
+to the real CDN blind, with no interception and no CA
 involved, so the console's handshake succeeds normally. Only HTTP traffic for
 that domain would be cached — the default, low-impact behavior this appliance is
 built around, with no other restriction on the console.
