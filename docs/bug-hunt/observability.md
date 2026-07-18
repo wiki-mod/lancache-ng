@@ -22,13 +22,16 @@ Read against `origin/v0.2.0` in a dedicated clone (`bughunt-observability`
 branch based on `origin/v0.2.0`), not the maintainer's main checkout.
 
 > **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
-> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). Four
-> findings are now FIXED and marked in place below: #4 and #5 (SYSLOG_ENABLED/
-> SYSLOG_MAX_GB parity gaps) by PR #877 (`73a4fe00`); #9 and #10 (logs.rs
-> host=None + the path-traversal landmine that would have followed a naive
-> fix) by PR #865 (`2137157f`). All other findings (#1-#3, #6-#8, #11-#20)
-> remain accurate; no other merged commit in that range touches this
-> component's code paths.
+> `dc8d79c6` (68 commits merged since this doc's `3f53ac3b` base). #4 and #5
+> (SYSLOG_ENABLED/SYSLOG_MAX_GB parity gaps) are now FIXED by PR #877
+> (`73a4fe00`); #10 (the path-traversal landmine that would have followed a
+> naive fix to #9) is FIXED by PR #865 (`2137157f`). #9 (logs.rs host=None +
+> dropped `?filter=` in syslog mode) is only PARTIALLY FIXED by the same
+> PR #865: the `host=None` half is fixed, but the `?filter=` half was not
+> independently re-verified this pass (see finding #9's own status update
+> below) — do not read #9 as fully closed. All other findings (#1-#3, #6-#8,
+> #11-#20) remain accurate; no other merged commit in that range touches
+> this component's code paths.
 
 ---
 
@@ -452,6 +455,40 @@ Docker-socket access as a residual risk concentrated in netdata (see
 applied to netdata's own HTTP surface specifically, which the threat model
 does not currently call out.
 
+### 21. `maybe_prune_syslog()` stamps a 24h cooldown even when the size budget is still exceeded, delaying the retry it explicitly logs (added during the 2026-07-18 currency check, confirmed directly against current `origin/v0.2.0`, not present in the doc's original collection pass)
+
+Confirmed in `services/watchdog/watchdog.sh`'s `maybe_prune_syslog()`: today's
+active per-host `$YEAR$MONTH$DAY.log` file is deliberately skipped by the
+size-based pruning pass (it may still be open for writing by syslog-ng), so
+if the tree remains over budget purely because of oversized *active* files,
+the function logs `"WARNING: syslog size budget still exceeded after
+pruning ... will retry once they age out or syslog-ng rotates them"` -- but
+then unconditionally writes `SYSLOG_PRUNE_STAMP` anyway, the same as the
+success path. Since the rate-limit check at the top of the function skips
+any run within 86400 seconds of that stamp, the very retry the warning
+promises does not actually happen until the next daily window, even if
+syslog-ng rotates the oversized active file (making it deletable) minutes
+later. In a syslog-enabled install that is genuinely over its configured
+`SYSLOG_MAX_GB` budget, this can leave an oversized, now-prunable file on
+disk for up to 24h longer than the retry message implies.
+
+### 22. Malformed/non-matching syslog lines are *not* actually lost by the tail-window merge (checked directly against `select_fair_window` in current `origin/v0.2.0`; recorded here only to close out a reviewer question, not as an open finding)
+
+`services/ui/src/syslog_client.rs`'s `parse_syslog_line` does assign an empty
+`timestamp` to a line that doesn't match `SYSLOG_LINE_REGEX`, and empty
+strings do sort as "oldest" under a plain lexicographic `String` comparison.
+However, `parse_syslog_tail` does not do a plain global
+sort-by-timestamp-then-truncate; it calls `select_fair_window` (added by
+#859), which groups entries per host *before* sorting, guarantees every host
+with data keeps at least `per_host_floor` of its own most recent lines
+(clamped to a small constant), and only fills the remaining budget with the
+globally most recent leftovers. A malformed line's empty timestamp affects
+its position *within its own host's queue*, but `select_fair_window`'s own
+code comment (lines 209-213) explicitly documents that such lines are kept,
+not dropped, as a deliberate design choice -- there is no `collected[start..]`
+truncation anywhere in this file. This is not a live bug in the current
+codebase.
+
 ---
 
 ## Summary table
@@ -478,6 +515,8 @@ does not currently call out.
 | 18 | write_status() comment claims an unenforced guarantee | Info | Open |
 | 19 | Dashboard vs /logs disagree on log source in syslog mode | Info | Open |
 | 20 | netdata's full API reachable by any container on the network | Info | Open |
+| 21 | `maybe_prune_syslog()` stamps 24h cooldown despite still-exceeded budget | Minor | Open |
+| 22 | Malformed syslog lines dropped by tail-window merge (reviewer question) | N/A | Not applicable -- `select_fair_window` (post-#859) already retains them |
 
 All findings above were derived by directly reading the current code/config/
 docs on `origin/v0.2.0` in a dedicated clone this session. None have been
