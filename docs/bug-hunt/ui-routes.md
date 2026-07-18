@@ -11,6 +11,24 @@ and `services/ui/src/templates/`.
 
 Audited against a fresh clone of `origin/v0.2.0` (branch `bughunt-ui-routes`).
 
+> **Currency check (2026-07-18):** re-verified against `origin/v0.2.0` @
+> `dc8d79c6` (68 commits landed since this document's `3f53ac3b` baseline);
+> see corrections below. Two commits directly fix findings recorded here:
+> `53a5ba7f` (#878) fixed finding #11's `add_dns`/`remove_dns` silent-
+> success-on-failed-write bug (verdict updated to FIXED below; finding #12,
+> `restart_ssl`'s own failure still being swallowed, remains unfixed --
+> that fire-and-log path was deliberately left alone by #878 as a
+> downstream side effect, not the request's own mutation). `d971063c`
+> (#978) closed the CSRF-exemption half of finding #21 (converted
+> `GET /api/dhcp/check` to `POST` with an explicit CSRF check) but did
+> **not** address the finding's core behavioral claim -- `dhcp.html`'s
+> `DOMContentLoaded` handler still auto-fires this endpoint unconditionally
+> on every page load, still restarting the dhcp-probe container and running
+> a real nmap broadcast scan with no caching or cooldown; verdict updated
+> to PARTIALLY FIXED below. Every other finding in this document was
+> independently re-checked against current code and remains accurate/
+> unfixed as originally recorded.
+
 Methodology: vacuum-first, unscoped, exhaustive -- every finding is collected as observed, with
 no pre-filtering or self-verification during collection (verification is a later, separate
 phase per the maintainer-agreed workflow for issue #849). Starting point was
@@ -94,12 +112,21 @@ findings that overlap with it are still listed (for completeness) with a note.
    split-log setup gets a `/logs` page whose ordering does not reflect actual chronological
    order across the two sources.
 
-6. The `?filter=<cache_status>` query param is only applied in the nginx branch
-   (`routes/logs.rs:94-96`); the syslog branch (`state.config.syslog_enabled == true`) has no
-   equivalent filter, silently ignoring the parameter if present in the URL rather than
-   rejecting it or documenting the limitation in the UI itself (already flagged in the SoT
-   inventory; repeated here as it's a genuine asymmetry with no code-level TODO/comment marking
-   it as deliberate vs. accidental).
+6. **PARTIALLY ADDRESSED, re-verified against current code.** The `?filter=<cache_status>` query
+   param is still only applied in the nginx branch (`routes/logs.rs:94-96` at original writing);
+   the syslog branch (`state.config.syslog_enabled == true`) still silently ignores it if present
+   in the URL. What changed since original writing: #865/#848 (commit `2137157f`) gave the
+   syslog branch its own, differently-shaped `?host=` filter (restricting the tail to one wired
+   host's subdirectory, backed by a real dropdown in `logs.html`'s syslog-mode branch and a new
+   `list_syslog_hosts()` helper), and the code's own comment now explicitly documents the
+   `?filter`/`?host` split as intentional ("kept separate from the nginx branch's `?filter=`,
+   which filters by cache_status and has no meaning for syslog lines"). So the specific
+   *cache-status* filter is still nginx-only and still silently ignored in syslog mode (the
+   original claim), but this is no longer an *unflagged* asymmetry with no code-level marker --
+   it is now an explicitly documented, deliberate design split, with a real (if different) filter
+   mechanism on the syslog side. Originally flagged in the SoT inventory as an unflagged
+   asymmetry; that characterization needed correcting there too (see the sibling
+   `docs/inventory-ui-routes` PR in this same review pass).
 
 ---
 
@@ -169,9 +196,10 @@ findings that overlap with it are still listed (for completeness) with a note.
 
 ## domains.rs -- CDN domain list, LAN DNS records, AAAA filter
 
-11. **Same silent-failure-on-write pattern as finding #10, twice more in this file, and
-    inconsistently applied within the same file.** (`routes/domains.rs:94-158`) `add_dns` and
-    `remove_dns` both do:
+11. **~~Same silent-failure-on-write pattern as finding #10, twice more in this file, and
+    inconsistently applied within the same file.~~ FIXED by #878 (commit `53a5ba7f`).**
+    (`routes/domains.rs`, originally cited at `:94-158`, now shifted by the fix's own +182-line
+    diff) `add_dns` and `remove_dns` previously did:
     ```rust
     if let Err(e) = wrote {
         tracing::error!("Failed to write dns domain: {}", e);
@@ -183,26 +211,35 @@ findings that overlap with it are still listed (for completeness) with a note.
     }
     Ok(Redirect::to("/domains"))
     ```
-    -- the `Ok(Redirect::to("/domains"))` is unconditional; a failed file write (disk full,
-    permission error, or the bind-mount EBUSY fallback path itself failing) produces the exact
-    same response as success. The SoT inventory already flags this specific route pair as "the
-    most operationally significant untested path" in the file because it also triggers a Docker
-    restart -- this finding is the sharper edge of that: even with hypothetical E2E coverage
-    added, the route as written cannot report a write failure to the operator's browser.
-    Notably, `toggle_aaaa_filter` in this exact same file (`routes/domains.rs:250-278`) gets this
-    right -- it returns `Err(StatusCode::INTERNAL_SERVER_ERROR)` if any marker write fails, with
-    an explicit comment explaining why ("The UI must not report success if any DNS instance
-    cannot observe the requested marker state.") -- making the silent-failure behavior in
-    `add_dns`/`remove_dns` (and `add_lan_record`/`remove_lan_record`'s NATS-publish-failure
-    logging two functions down) look like an inconsistency within the same file rather than a
-    deliberate, uniformly-applied design choice.
+    -- the `Ok(Redirect::to("/domains"))` was unconditional; a failed file write (disk full,
+    permission error, or the bind-mount EBUSY fallback path itself failing) produced the exact
+    same response as success. **Confirmed fixed against current `origin/v0.2.0`**: both handlers
+    now call a shared `dns_write_result_to_response(wrote, "write"|"remove")` helper immediately
+    after the write, which maps a write failure to `Err(StatusCode::INTERNAL_SERVER_ERROR)` via
+    `?` before the function ever reaches the recursor-flush/SSL-restart/redirect steps -- verified
+    directly in the current source (`dns_write_result_to_response` at line 342, called from both
+    `add_dns` line 114 and `remove_dns` line 144), plus the two new regression tests
+    `add_dns_write_failure_maps_to_error_not_success` and
+    `remove_dns_write_failure_maps_to_error_not_success`. The fix's own commit message confirms
+    this mirrors `toggle_aaaa_filter`'s existing convention (see finding #12's original text,
+    still applicable) rather than introducing a new pattern. The SoT inventory's separate
+    E2E-*coverage*-gap claim for this route pair (no simulation script exercises
+    `/domains/dns/add`/`/domains/dns/remove`) is **not** addressed by this fix and still stands --
+    #878 only changed the failure-mapping logic, it did not add an E2E test.
 
-12. **`restart_ssl`'s own failure is swallowed too** (`routes/domains.rs:326-332`): if the domain
-    file write in finding #11 succeeds but the subsequent SSL proxy restart fails (Docker socket
+12. **`restart_ssl`'s own failure is still swallowed -- NOT addressed by #878, remains a live
+    finding.** (`routes/domains.rs:327-333` in current `origin/v0.2.0`) If the domain file write
+    (finding #11, now fixed) succeeds but the subsequent SSL proxy restart fails (Docker socket
     proxy unreachable, container already restarting, etc.), the operator still gets redirected
     to `/domains` with no error -- meaning TLS interception for the domain they just added will
     silently not take effect until a manual restart, with the Admin UI's own page implying the
-    change is live.
+    change is live. Confirmed in current code: `restart_ssl` still only `tracing::error!`s and
+    returns `()`, called with `.await` (result discarded) from both `add_dns` and `remove_dns`
+    after the (now-checked) file write succeeds. #878's own commit message explicitly scopes this
+    as deliberately out of scope ("the best-effort recursor-flush/proxy-restart calls that follow
+    a successful write stay fire-and-log, since they are downstream side effects, not the
+    request's own mutation") -- so this is a known, accepted gap rather than an oversight, but it
+    remains unfixed and operator-visible.
 
 13. **`normalize_lan_name` cannot produce the exact zone-apex name `"lan."` from the bare input
     `"lan"` (no trailing dot) -- it mangles it into `"lan.lan."` instead.**
@@ -313,22 +350,41 @@ lines 1-3317, read in full; test module, lines 3318-5568, scanned by test-name c
     server-side (which would fail this request loudly rather than silently) was not traced
     further outside this file.
 
-21. **`GET /dhcp` silently triggers a real, disruptive Docker container restart plus a broadcast
-    DHCP-conflict scan on the LAN on every single page load, with no caching, cooldown, or
-    opt-out.** (`templates/dhcp.html:656-657`, calling `check_dhcp_conflict` /
-    `routes/dhcp.rs:1604-1611, 2100-2185`) `document.addEventListener('DOMContentLoaded',
-    checkDhcpConflict)` means every browser load (or reload) of `/dhcp` fires `GET /api/dhcp/
-    check`, which (`check_dhcp_probe` -> `run_dhcp_probe`) stops and restarts the predeclared
-    `dhcp-probe` container and runs a real `nmap broadcast-dhcp-discover` scan plus a `dhclient`
-    dry-run on the LAN. `state.dhcp_probe_lock` serializes concurrent runs so they queue rather
-    than corrupt each other's output, but nothing throttles or caches the result across page
-    loads -- an operator who refreshes the page repeatedly (or has a browser
-    extension/monitoring tool auto-refreshing an open `/dhcp` tab) queues a fresh
-    stop/start/scan cycle every single time, each one taking real wall-clock time (a full nmap
-    broadcast scan plus a dhclient dry-run) and each one emitting a real DHCPDISCOVER onto the
-    LAN. This is a meaningful operational side-effect for what looks, from the URL, like a plain
-    read-only settings page. Not present in the SoT inventory (which covers `/api/dhcp/check`'s
-    own coverage but not this auto-trigger-on-page-load behavior).
+21. **PARTIALLY FIXED by #978 (commit `d971063c`) -- the CSRF-exemption half is closed, the
+    disruptive auto-trigger-on-every-page-load behavior itself is NOT.** Originally: "`GET /dhcp`
+    silently triggers a real, disruptive Docker container restart plus a broadcast DHCP-conflict
+    scan on the LAN on every single page load, with no caching, cooldown, or opt-out."
+    (`templates/dhcp.html:656-657` at original writing, calling `check_dhcp_conflict` /
+    `routes/dhcp.rs:1604-1611, 2100-2185` at original writing)
+    `document.addEventListener('DOMContentLoaded', checkDhcpConflict)` means every browser load
+    (or reload) of `/dhcp` fires a request to `/api/dhcp/check`, which (`check_dhcp_probe` ->
+    `run_dhcp_probe`) stops and restarts the predeclared `dhcp-probe` container and runs a real
+    `nmap broadcast-dhcp-discover` scan plus a `dhclient` dry-run on the LAN. `state.
+    dhcp_probe_lock` serializes concurrent runs so they queue rather than corrupt each other's
+    output, but nothing throttles or caches the result across page loads -- an operator who
+    refreshes the page repeatedly (or has a browser extension/monitoring tool auto-refreshing an
+    open `/dhcp` tab) queues a fresh stop/start/scan cycle every single time, each one taking real
+    wall-clock time (a full nmap broadcast scan plus a dhclient dry-run) and each one emitting a
+    real DHCPDISCOVER onto the LAN. This is a meaningful operational side-effect for what looks,
+    from the URL, like a plain read-only settings page.
+
+    **What #978 actually changed, confirmed against current `origin/v0.2.0`**: the request was
+    previously a plain `GET`, CSRF-exempt because this app's CSRF protection only ever covers
+    mutating HTTP methods -- a real security gap, since this "read" silently mutates server state.
+    #978 converted the route to `POST /api/dhcp/check` (confirmed in `main.rs`'s route table) with
+    an explicit `verify_csrf_header` check inside `check_dhcp_conflict` (mirroring
+    `secondaries::remove_secondary`/`rotate_token`), and updated `dhcp.html`'s `fetch()` call to
+    `POST` with an `X-CSRF-Token` header sourced from the page's own rendered CSRF token. **The
+    CSRF-exemption gap is genuinely closed.** But `dhcp.html`'s
+    `document.addEventListener('DOMContentLoaded', checkDhcpConflict)` line is untouched by #978
+    -- confirmed still present verbatim in current `templates/dhcp.html` -- so the endpoint still
+    fires automatically, unconditionally, on every single page load, exactly as before; only the
+    HTTP method and the presence of a CSRF token changed, not the auto-fire behavior or the
+    absence of any caching/cooldown/opt-out. #978's own commit message and PR scope confirm this
+    was a CSRF-hardening fix (closing issue #947) and made no claim about addressing the
+    auto-trigger behavior -- so this is not a regression in the fix, just a distinct problem it
+    was never meant to solve. Not present in the SoT inventory (which now documents the CSRF fix
+    but not, and never claimed to cover, the auto-trigger-on-page-load behavior).
 
 22. **`remove_subnet_option`'s "nothing matched" case surfaces as a 500 Internal Server Error,
     not a 404, unlike `release_lease`'s explicit not-found handling in the very same file.**
