@@ -1407,7 +1407,7 @@ mod tests {
 
         std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
         std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
 
         let cfg = config::Config::from_env().unwrap();
@@ -1425,7 +1425,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             rendered,
-            "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [edge]"
+            "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [nightly]"
         );
 
         std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
@@ -1446,7 +1446,7 @@ mod tests {
 
         std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
         std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
         std::env::set_var(
             "TEMPLATE_DIR",

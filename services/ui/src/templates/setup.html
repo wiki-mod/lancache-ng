@@ -32,12 +32,12 @@
         <select name="lancache_image_channel"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
           <option value="stable" {% if lancache_image_channel == "stable" %}selected{% endif %}>stable</option>
-          <option value="edge" {% if lancache_image_channel == "edge" %}selected{% endif %}>edge</option>
+          <option value="nightly" {% if lancache_image_channel == "nightly" %}selected{% endif %}>nightly</option>
         </select>
         <p class="text-xs text-slate-500 mt-1">
           <strong>stable</strong>: getestete Releases, empfohlen für die meisten Installationen.
-          <strong>edge</strong>: neueste Änderungen direkt von master, vor jedem stable-Release —
-          kann gelegentlich instabil sein.
+          <strong>nightly</strong>: neueste Änderungen direkt von master, täglich vor jedem
+          stable-Release gebaut — kann gelegentlich instabil sein.
         </p>
       </div>
       <div class="flex items-center gap-2">

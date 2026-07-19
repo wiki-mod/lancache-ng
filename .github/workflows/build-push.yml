@@ -13,8 +13,26 @@ on:
       channel:
         description: Also promote this channel from the dispatched ref, in addition to the automatic branch/tag rule below (e.g. spot-check a feature branch as "dev" without merging it first).
         type: choice
-        options: [none, dev, edge]
+        options: [none, dev, nightly]
         default: none
+  schedule:
+    # Daily nightly-channel refresh (issues #1035, #1056). The `promote` job
+    # only moves the `nightly` stack channel on a push to master, so between
+    # master pushes the channel's images can silently go stale (exactly #1035's
+    # failure mode for the old `edge` name). A `schedule` event runs from the
+    # default branch (master), and because `detect-changes` only gates
+    # pull_request events -- every non-PR event builds all services
+    # unconditionally -- this rebuilds the full stack and re-runs `promote`,
+    # whose `refs/heads/master -> nightly` case then re-points the channel. So
+    # `nightly` can never drift more than ~24h behind master even with no push.
+    #
+    # 01:00 UTC == 02:00 CET (the intended local refresh time). GitHub Actions
+    # cron has no timezone concept and always fires in UTC, so during CEST
+    # (European summer DST, UTC+2) this lands at 03:00 local instead. That
+    # one-hour seasonal drift is deliberately accepted rather than worked around
+    # -- there is no DST-aware cron here to match, and an off-by-one-hour nightly
+    # rebuild has no correctness impact.
+    - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
@@ -1505,8 +1523,8 @@ jobs:
             echo "::error::Default branch builds must not publish latest; latest is stable-release only."
             exit 1
           fi
-          grep -F 'channel_tags+=(edge)' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Master promotion must publish the edge channel."; exit 1; }
+          grep -F 'channel_tags+=(nightly)' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Master promotion must publish the nightly channel."; exit 1; }
           grep -F 'channel_tags+=(latest)' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Stable release promotion must publish the latest channel."; exit 1; }
           grep -F 'elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
@@ -2056,11 +2074,11 @@ jobs:
           grep -F 'derive_release_archive_image_tag()' setup.sh >/dev/null \
             || { echo "::error::setup.sh must preserve release archive image tags before defaulting to latest."; exit 1; }
           grep -F 'channel="${channel:-latest}"' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must keep latest as the normal stable default; edge must be explicit."; exit 1; }
+            || { echo "::error::setup.sh must keep latest as the normal stable default; nightly must be explicit."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=latest' README.md >/dev/null \
             || { echo "::error::README must document latest as the normal install default."; exit 1; }
-          grep -F 'edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`' docs/release-versioning.md >/dev/null \
-            || { echo "::error::Release docs must keep edge opt-in, not default."; exit 1; }
+          grep -F 'nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`' docs/release-versioning.md >/dev/null \
+            || { echo "::error::Release docs must keep nightly opt-in, not default."; exit 1; }
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
@@ -2525,7 +2543,7 @@ jobs:
           # re-run, or this job simply running twice for the same commit) may
           # already have back-filled an untouched service's pr-<N>-sha-<short>
           # tag from whatever the base channel pointed at THEN. If the base
-          # channel (edge/dev) has since moved -- another PR merged in the
+          # channel (nightly/dev) has since moved -- another PR merged in the
           # meantime -- an existence check alone would see the stale alias,
           # assume it's still correct, and `continue` without refreshing it:
           # this job would then validate a deploy/workflow-only PR that
@@ -4671,7 +4689,7 @@ jobs:
     # cancelled build cleanly stops the pipeline via that gate.
     #
     # On push/tag it must NOT cancel. This branch build is what publishes the
-    # commit's sha-* images that promote turns into the dev/edge channel. The
+    # commit's sha-* images that promote turns into the dev/nightly channel. The
     # top-level group uses a run_id-scoped key for push (never collides -- see
     # top of file), so a rapid v0.2.0/master merge cascade runs every push's
     # build fully in parallel with no throttle. With cancel-in-progress:true
@@ -6085,7 +6103,7 @@ jobs:
     # check silently evaluated false and this job never ran, even though
     # `build` itself completed successfully (confirmed directly: run
     # 28958519247 on v0.2.0, all 7 build matrix legs succeeded, promote still
-    # skipped). This is why dev/edge were never actually promoted despite the
+    # skipped). This is why dev/nightly were never actually promoted despite the
     # channel-resolution logic in this job being correct (see issue #532).
     #
     # Use `!cancelled()`, not `always()`, as the status function: `always()`
@@ -6292,7 +6310,7 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          # Debounce/coalesce (#777): mutable channel tags (dev/edge) are
+          # Debounce/coalesce (#777): mutable channel tags (dev/nightly) are
           # branch-driven, and giving promote its own concurrency group above
           # only stops it competing for the SAME slot as the rest of this
           # workflow -- it does not stop several of these runs from queuing
@@ -6302,7 +6320,7 @@ jobs:
           # current tip directly from the remote and bail out as a no-op if
           # a newer commit already landed: that later commit's own promote
           # run (already queued or about to be) will move the tag correctly,
-          # so this run briefly (and pointlessly) setting dev/edge to an
+          # so this run briefly (and pointlessly) setting dev/nightly to an
           # already-stale commit would only add churn, not value. This only
           # applies to branch refs -- a release/rc tag push targets one
           # fixed, immutable ref that cannot "move out from under" this run,
@@ -6320,7 +6338,7 @@ jobs:
           fi
 
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
-            channel_tags+=(edge)
+            channel_tags+=(nightly)
           elif [[ "$GITHUB_REF" = refs/heads/v[0-9]* ]]; then
             # Any version-numbered integration branch (v0.2.0, v0.3.0, v0.2.x,
             # ...), not just whichever one happens to be active right now.

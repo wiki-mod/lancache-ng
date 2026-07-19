@@ -15,10 +15,10 @@ setup() {
     source "$repo_root/scripts/lib/validation-image-tag.sh"
 }
 
-@test "base channel: master publishes edge" {
+@test "base channel: master publishes nightly" {
     run vit_base_channel_tag "master"
     [ "$status" -eq 0 ]
-    [ "$output" = "edge" ]
+    [ "$output" = "nightly" ]
 }
 
 @test "base channel: vX.Y.Z pre-release branch publishes dev" {
@@ -67,7 +67,7 @@ setup() {
 @test "resolve tag: Dependabot PR falls back to the base channel" {
     run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
         "dependabot[bot]" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""
-    [ "$output" = "edge" ]
+    [ "$output" = "nightly" ]
 }
 
 @test "resolve tag: fork PR against v0.2.0 falls back to dev" {
@@ -77,13 +77,13 @@ setup() {
 }
 
 @test "resolve tag: workflow_dispatch honours the operator's chosen tag" {
-    run vit_resolve_tag "workflow_dispatch" "" "" "" "someuser" "" "wiki-mod/lancache-ng" "edge"
-    [ "$output" = "edge" ]
+    run vit_resolve_tag "workflow_dispatch" "" "" "" "someuser" "" "wiki-mod/lancache-ng" "nightly"
+    [ "$output" = "nightly" ]
 }
 
-@test "resolve tag: workflow_dispatch with no input defaults to edge" {
+@test "resolve tag: workflow_dispatch with no input defaults to nightly" {
     run vit_resolve_tag "workflow_dispatch" "" "" "" "someuser" "" "wiki-mod/lancache-ng" ""
-    [ "$output" = "edge" ]
+    [ "$output" = "nightly" ]
 }
 
 @test "should-have-staging: a touched service is expected to have a tag" {
@@ -124,6 +124,6 @@ setup() {
     # The old inline reimplementation used this exact conditional shape for
     # the base-channel mapping -- if it reappears, someone re-duplicated the
     # logic instead of calling vit_base_channel_tag.
-    ! grep -qF 'base_channel_tag=edge' "$workflow_file" \
+    ! grep -qF 'base_channel_tag=nightly' "$workflow_file" \
         || fail "build-push.yml appears to reimplement the base-channel mapping inline again"
 }

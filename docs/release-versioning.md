@@ -27,7 +27,7 @@ The first-party metadata package is:
 - `stack`
 
 `stack` is not a runtime service. It is the single mutable channel pointer used
-by setup/update to resolve `latest`, `edge`, or `dev` to one immutable `sha-*`
+by setup/update to resolve `latest`, `nightly`, or `dev` to one immutable `sha-*`
 runtime image set.
 
 The authoritative machine-readable inventory is
@@ -40,19 +40,24 @@ must stay consistent with that file.
 | --- | --- | --- | --- |
 | `sha-<commit>` | Immutable build identity for a source commit | Immutable | Debugging, rollback, provenance, and promotion source |
 | `dev` | Explicit development/test channel | Mutable | Maintainer-triggered development checks only |
-| `edge` | Tested pre-stable integration channel from `master` | Mutable | Operators who explicitly opt into pre-stable builds |
+| `nightly` | Tested pre-stable integration channel built continuously from `master` (renamed from `edge` in v0.3.0, #1056) | Mutable | Operators who explicitly opt into pre-stable builds |
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
 | `latest` | Latest stable release only | Mutable | Default stable install path |
 | `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stack:stable` GHCR tag exists -- `stable` and `latest` resolve to the identical pointer image |
 
 `latest` must not be moved by a normal `master` build. The `master` branch
-publishes `edge` after the required checks pass. Stable release tags publish the
-matching `vX.Y.Z` tag and may move `latest` (and, being the same pointer,
+publishes `nightly` after the required checks pass. Stable release tags publish
+the matching `vX.Y.Z` tag and may move `latest` (and, being the same pointer,
 `stable`) to the same digest.
 
+The `nightly` channel was named `edge` before v0.3.0 (#1056). The rename is a
+deliberate breaking change with no alias: an install still carrying
+`LANCACHE_IMAGE_CHANNEL=edge` is rejected with a clear error telling the
+operator to switch to `nightly`, rather than being silently accepted.
+
 `setup.sh`'s interactive install flow offers exactly two operator-facing
-channel names: `stable` (default) and `edge`, each with an inline explanation
+channel names: `stable` (default) and `nightly`, each with an inline explanation
 of what it means. `stable` is not a new GHCR tag -- `resolve_lancache_stack_channel_tag`
 maps it onto the existing `latest` pointer before pulling, so introducing it
 required no change to the promotion/release pipeline. `dev` and `pinned`
@@ -64,7 +69,7 @@ end-user choice.
 `dev` publishes automatically on every push to a branch matching `vX.Y.Z`
 (not a hardcoded branch name, so this keeps working as the active
 integration branch changes over time), mirroring how `master` publishes
-`edge`. It can
+`nightly`. It can
 additionally be requested from any other ref via the `channel` input on a
 manual `workflow_dispatch` run of `Build & Push` -- e.g. to spot-check a
 feature branch as `dev` without merging it into the integration branch
@@ -87,7 +92,7 @@ The promotion flow is:
 1. build and scan the full package set
 2. publish immutable `sha-<commit>` images
 3. verify that every required image exists for the same commit
-4. promote `edge`, `vX.Y.Z-rc.N`, `vX.Y.Z`, or `latest` according to the event
+4. promote `nightly`, `vX.Y.Z-rc.N`, `vX.Y.Z`, or `latest` according to the event
 5. create or update release notes from the same package set
 
 If one required image is missing, the channel must not be promoted.
@@ -106,8 +111,8 @@ Default behavior:
 - fresh stable installs use `LANCACHE_IMAGE_CHANNEL=stable` (written by
   `setup.sh`'s interactive picker); `LANCACHE_IMAGE_CHANNEL=latest` remains
   valid and resolves identically for existing installs and manual overrides
-- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`, or choose
-  `edge` at `setup.sh`'s interactive channel prompt
+- nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`, or choose
+  `nightly` at `setup.sh`'s interactive channel prompt
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`
@@ -120,7 +125,7 @@ ghcr.io/wiki-mod/lancache-ng/stack:<channel>
 ```
 
 That image contains `stack.env`, including the immutable `sha-*` tag for the
-coherent first-party image set. Setup resolves `latest`, `edge`, and `dev`
+coherent first-party image set. Setup resolves `latest`, `nightly`, and `dev`
 through this pointer before `docker compose pull`, so a user install/update does
 not consume per-service mutable tags while a promotion is in progress.
 
@@ -227,7 +232,7 @@ at least the current stable release and two previous stable releases for the
 full first-party image set. Release digests, rollback digests, and `sha-*` tags
 referenced by supported releases must not be deleted.
 
-Mutable channels such as `latest` and `edge` may move, but the digests they
+Mutable channels such as `latest` and `nightly` may move, but the digests they
 pointed to remain protected when they are also referenced by a supported
 release, rollback path, or published deployment document.
 

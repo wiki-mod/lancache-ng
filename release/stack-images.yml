@@ -2,7 +2,7 @@
 # Release manifest: declares the first-party runtime/tooling/metadata images,
 # their supported platforms and source Dockerfiles, the external
 # (third-party) images used by supported deploy profiles, the mutable/
-# immutable tag channels (sha, dev, edge, release candidate, stable, latest),
+# immutable tag channels (sha, dev, nightly, release candidate, stable, latest),
 # and the image retention policy. Consumed by the release/promotion CI
 # workflow and validated by scripts/validate-stack-images.sh.
 schema: stack-images/v1
@@ -13,7 +13,7 @@ retention:
   minimum_stable_releases: 3
   keep_mutable_channels:
     - latest
-    - edge
+    - nightly
   keep_sha_tags_for_supported_releases: true
   protect_release_and_rollback_digests: true
   deletion_policy: manual-or-approved-automation-only
@@ -26,10 +26,10 @@ channels:
     tag: dev
     mutable: true
     description: Explicit development and test channel only.
-  edge:
-    tag: edge
+  nightly:
+    tag: nightly
     mutable: true
-    description: Tested pre-stable integration channel produced from master.
+    description: Tested pre-stable integration channel built continuously from master.
   release_candidate:
     tag: vX.Y.Z-rc.N
     mutable: false
@@ -41,7 +41,7 @@ channels:
   latest:
     tag: latest
     mutable: true
-    description: Latest stable release only. Master and edge builds must not move this tag.
+    description: Latest stable release only. Master and nightly builds must not move this tag.
 runtime:
   - name: proxy
     image: ghcr.io/wiki-mod/lancache-ng/proxy

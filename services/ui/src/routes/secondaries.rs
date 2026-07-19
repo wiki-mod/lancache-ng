@@ -477,14 +477,14 @@ mod tests {
             pdns_api_key: "pdns-secret".to_string(),
             image_registry: "registry.example.test:5000".to_string(),
             image_prefix: "mirror/lancache-ng".to_string(),
-            image_channel: "edge".to_string(),
+            image_channel: "nightly".to_string(),
             image_tag: "v1.2.3".to_string(),
         };
 
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["image_registry"], "registry.example.test:5000");
         assert_eq!(value["image_prefix"], "mirror/lancache-ng");
-        assert_eq!(value["image_channel"], "edge");
+        assert_eq!(value["image_channel"], "nightly");
         assert_eq!(value["image_tag"], "v1.2.3");
     }
 

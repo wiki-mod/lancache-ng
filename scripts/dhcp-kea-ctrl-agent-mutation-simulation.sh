@@ -73,7 +73,7 @@ cd "$repo_root"
 source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 
 client_tool_image="${DHCP_CTRL_AGENT_CLIENT_IMAGE:?DHCP_CTRL_AGENT_CLIENT_IMAGE is required (an image providing dhclient/curl/jq, e.g. the build-tools image)}"
-image_tag="${LANCACHE_IMAGE_TAG:-edge}"
+image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 
 # COMPOSE_PROJECT_NAME/VALIDATION_SUBNET/VALIDATION_GATEWAY/VALIDATION_UI_IP
 # are exported by scripts/lib/run-in-validation-subnet.sh (issue #820),

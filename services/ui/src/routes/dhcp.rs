@@ -5763,7 +5763,7 @@ mod tests {
         let result = write_ui_settings_file(
             &target,
             &[
-                ("LANCACHE_IMAGE_CHANNEL", "edge".to_string()),
+                ("LANCACHE_IMAGE_CHANNEL", "nightly".to_string()),
                 ("AUTO_UPDATE_ENABLED", "1".to_string()),
             ],
         );
@@ -5772,7 +5772,7 @@ mod tests {
         let content = fs::read_to_string(&target).expect("settings file must exist");
         assert_eq!(
             content,
-            "LANCACHE_IMAGE_CHANNEL=edge\nAUTO_UPDATE_ENABLED=1\n"
+            "LANCACHE_IMAGE_CHANNEL=nightly\nAUTO_UPDATE_ENABLED=1\n"
         );
 
         fs::remove_dir_all(&dir).ok();

@@ -360,7 +360,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        default: edge
+        default: nightly
 jobs:
   compute-validation-network:
     runs-on: ubuntu-latest

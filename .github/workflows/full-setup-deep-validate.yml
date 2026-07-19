@@ -67,12 +67,12 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        # Same rationale as full-setup-validate.yml: edge (not latest) is the
+        # Same rationale as full-setup-validate.yml: nightly (not latest) is the
         # channel actually promoted from master; latest is a stale pre-release
         # leftover. Operators can point an ad-hoc run at any published tag.
         description: Stack image tag to validate against (manual runs only).
         required: false
-        default: edge
+        default: nightly
 
 # Cancel superseded runs for the same PR/ref: a new push makes an in-flight
 # deep run obsolete, and these are expensive serial suites on a shared runner
@@ -670,7 +670,7 @@ jobs:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
     # LANCACHE_IMAGE_TAG here is the direct fix for the inconsistency #715
     # calls out: the manual full-setup-validate.yml never passed its image_tag
-    # through to this job, so it always tested "edge" regardless of intent.
+    # through to this job, so it always tested "nightly" regardless of intent.
     name: UI/NATS/DNS integration simulation
     needs: [plan, compute-validation-network, ensure-pr-staging-images, ssl-mitm-cache-simulation]
     if: >-
@@ -729,12 +729,12 @@ jobs:
     # CLI/migration/rollback logic -- but doing so still brings a real stack up
     # on real images, so WHICH images matters.
     #
-    # This used to hardcode the `edge` channel inside setup-cli-simulation.sh,
+    # This used to hardcode the `nightly` channel inside setup-cli-simulation.sh,
     # on the rationale that the job was "independent of PR image content." That
     # coupled a per-PR gate to a mutable channel tag refreshed far more slowly
-    # than the gate runs: `edge` only moves on a push to master, which has sat
+    # than the gate runs: `nightly` only moves on a push to master, which has sat
     # frozen for a long time, so every PR revalidated stale, months-old images
-    # (and a v0.2.0 PR tested master's frozen edge, not v0.2.0's own line at
+    # (and a v0.2.0 PR tested master's frozen nightly, not v0.2.0's own line at
     # all). It is the same "blocking check coupled to a slow-moving channel tag"
     # class of bug as #775 (build-tools :latest) and #777 (promote starvation).
     #
@@ -823,7 +823,7 @@ jobs:
           # pr-<N>-sha tag (plan.image_tag) so the gate tests THIS PR's code and
           # can never go stale. Otherwise (dispatch/fork/Dependabot, where
           # image_tag is already a channel word): install the base-ref channel
-          # -- resolved by plan, never hardcoded edge -- which also keeps
+          # -- resolved by plan, never hardcoded nightly -- which also keeps
           # setup.sh's channel->stack-pointer->sha resolution path covered.
           SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}

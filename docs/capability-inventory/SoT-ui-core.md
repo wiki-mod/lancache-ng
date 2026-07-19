@@ -237,8 +237,10 @@ bind DHCP :67/udp).
 - Secondary registration: `SECONDARY_REGISTRATION_TOKEN`.
 - Release/update: `LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
   `LANCACHE_IMAGE_CHANNEL` (auto-derived from tag via
-  `derive_lancache_image_channel` if unset — `dev`/`edge`/`latest` pass
-  through, `v*`/`sha-*` → `pinned`, else `latest`), `LANCACHE_IMAGE_TAG`,
+  `derive_lancache_image_channel` if unset — `dev`/`nightly`/`latest` pass
+  through, `v*`/`sha-*` → `pinned`, else `latest`; the old `edge` name was
+  hard-cut in v0.3.0 (#1056) and now falls through to `latest`),
+  `LANCACHE_IMAGE_TAG`,
   `AUTO_UPDATE_ENABLED` (#819 — this field is a *display mirror* only; the
   actual effective toggle for the host systemd timer goes through
   `ui_settings_file`, since this container can't flip a host-level timer

@@ -6,7 +6,7 @@
 # (full-setup-deep-validate.yml) and build-push.yml's own "Ensure PR staging
 # tags exist for full-setup services" step both back-fill any full-setup
 # service a PR did NOT touch by re-pointing that PR's staging tag at whatever
-# the base channel (dev/edge/latest) resolves to AT THE MOMENT THE JOB RUNS --
+# the base channel (dev/nightly/latest) resolves to AT THE MOMENT THE JOB RUNS --
 # with no check that the base branch's own post-merge build for the exact
 # base commit has actually finished. Confirmed live (#808): PRs #911/#914 each
 # backfilled `dns` from a `dev` tag that was still ~41 minutes stale relative
@@ -22,7 +22,7 @@
 # `base.sha`. Labels live in the image config blob, which `docker buildx
 # imagetools create` (used by both `promote` and this back-fill) copies
 # byte-for-byte when moving a tag -- retagging never rewrites them, so the
-# label on a `dev`/`edge`/`latest` tag always reflects the real commit that
+# label on a `dev`/`nightly`/`latest` tag always reflects the real commit that
 # channel image's underlying build actually compiled.
 #
 # Pure-ish functions (one intentional side effect: sif_image_revision shells
@@ -48,7 +48,7 @@
 # output if the image doesn't exist, the registry call fails, or the label is
 # absent.
 #
-# EVERY full-setup service's dev/edge/latest/pr-<N>-sha-<short> tag is a
+# EVERY full-setup service's dev/nightly/latest/pr-<N>-sha-<short> tag is a
 # multi-platform OCI index (amd64+arm64, combined by merge-manifests) --
 # confirmed live against ghcr.io/wiki-mod/lancache-ng/dns:dev via the plain
 # registry HTTP API while building this fix: its manifest has a top-level

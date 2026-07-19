@@ -97,7 +97,7 @@ STUB
     export BASE_FRESHNESS_POLL_INTERVAL_SECONDS=0
     export REPOSITORY="wiki-mod/lancache-ng"
     export PR_TAG="pr-715-sha-abcdef0"
-    export BASE_CHANNEL_TAG="edge"
+    export BASE_CHANNEL_TAG="nightly"
 }
 
 @test "untouched services are all back-filled from the base channel" {
@@ -108,7 +108,7 @@ STUB
     [ "$status" -eq 0 ]
     # All five full-setup services get a base-channel back-fill.
     [ "$(wc -l < "$backfill_log")" -eq 5 ]
-    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:edge" "$backfill_log"
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:nightly" "$backfill_log"
 }
 
 @test "a touched service already present passes without a back-fill" {
