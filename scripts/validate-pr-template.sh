@@ -35,6 +35,18 @@ else
     exit 1
 fi
 
+# `gh pr view --json body` (and GitHub's API generally) returns issue/PR
+# body text with CRLF line endings. Left in place, the trailing `\r` stays
+# part of awk's `$0` for every line, so section_exists_with_content()'s
+# end-anchored pattern (`$0 ~ ("^## " sec "$")`) never matches any section
+# heading on an awk build that doesn't itself normalize CRLF (e.g. `mawk`,
+# the default `/usr/bin/awk` on both this project's Debian self-hosted
+# runners and GitHub-hosted Ubuntu runners) -- confirmed live on PR #881:
+# a correctly fetched, fully-filled 9833-byte body was reported as missing
+# all 10 required sections. Stripping `\r` here fixes it at the source
+# instead of depending on a specific awk implementation's behavior.
+pr_body="${pr_body//$'\r'/}"
+
 # Determine if PR is a draft (default to false/non-draft for CI if not specified).
 pr_draft="${PR_DRAFT:-false}"
 
@@ -67,18 +79,26 @@ section_exists_with_content() {
     local body="$2"
 
     # Look for the section heading "## <Section>".
-    if ! echo "$body" | grep -qF "## $section"; then
+    # Here-string, not `echo "$body" | grep`: with `set -o pipefail`, a large
+    # $body plus awk's `exit` below closing its stdin early can make the
+    # `echo` on the left side of a pipe receive SIGPIPE before it finishes
+    # writing, failing the whole pipeline non-deterministically depending on
+    # body size and where the target section falls -- confirmed this exact
+    # failure live in CI (PR #627) as a false "missing section" report. A
+    # here-string has no such race: the shell writes it out before awk/grep
+    # ever start reading.
+    if ! grep -qF "## $section" <<<"$body"; then
         return 1
     fi
 
     # Extract content after the section heading until the next ## heading using awk.
     # This avoids sed delimiter issues with sections containing "/" characters.
     local section_content
-    section_content=$(echo "$body" | awk -v sec="$section" '
+    section_content=$(awk -v sec="$section" '
         /^## / && $0 ~ ("^## " sec "$") {found=1; next}
         found && /^## / {exit}
         found {print}
-    ')
+    ' <<<"$body")
 
     # Remove leading/trailing whitespace and check if empty.
     local trimmed

@@ -38,6 +38,14 @@ The build-tools image does not replace the baseline runner requirements below.
 The GitHub workflows still need a working self-hosted runner, Docker daemon,
 Buildx support, outbound network access, and CodeQL action setup.
 
+## Job concurrency serialization
+
+`build-push.yml`'s `promote` job and `backfill-stack-latest.yml`'s `backfill-latest` job both move mutable GHCR channel tags (`latest`/`edge`) for the same images and must never run their tag-moving critical section at the same time as each other. This used to be enforced with a shared GitHub Actions job-level `concurrency:` group (`"Build & Push-promote"`), but that primitive was removed per issue #897: GitHub's concurrency admission can silently cancel a run that is still *queued* (not yet running) the moment another run requests the same group, which is exactly the failure #892 hit once multiple `promote`-reaching runs were able to build in parallel.
+
+Real mutual exclusion now comes from `scripts/lib/promote-lock.sh`, a cross-host, cross-workflow lock backed by a dedicated non-branch/non-tag git ref (`refs/promote-lock/...`) on the shared GHCR-adjacent remote both workflows already push to — not a host-local `flock`, since the `lancache-heavy` runner label both jobs use is held by runners on multiple distinct physical hosts, so a `/tmp`-based lock would give each host its own, independently "uncontested" lock. Both jobs acquire/release this lock as explicit steps (see `promote`'s own step comments in `build-push.yml` and the "Acquire the cross-workflow promote lock" step in `backfill-stack-latest.yml`), giving the same any-promote-vs-any-backfill, any-ref exclusion the old concurrency group provided, without the queued-run-cancellation risk.
+
+This lock applies only to the tag-moving critical section in these two jobs; it does not block routine CI runs or any other job.
+
 ## Acceleration contract
 
 Build acceleration is a CI optimization, not a runtime requirement. Jobs that
@@ -51,6 +59,40 @@ As a rule of thumb:
 - optional: the job stays green without the accelerator
 - preferred: use the accelerator when available, but keep a documented fallback
 - gate: the job must have the accelerator or fail closed before doing work
+
+## Native arm64 builds on GitHub-hosted runners
+
+Prebuilt service images (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ui`,
+`build-tools`) publish both `linux/amd64` and `linux/arm64` under one coherent
+multi-platform tag per service. The two platforms are built natively in
+separate lanes, never through QEMU emulation for these images:
+
+- `linux/amd64` still builds on the self-hosted `lancache-heavy` runner pool
+  described above, with the same Redis/sccache-dist/distcc acceleration
+  contract.
+- `linux/arm64` builds natively on GitHub-hosted `ubuntu-24.04-arm` runners (or
+  a newer non-EOL arm64 hosted image — never pin to a runner image GitHub has
+  marked for retirement). These runners are free for public repositories and
+  give real arm64 CPUs, so `ui` and `dns` (the two services that compile Rust
+  from source) build at native speed instead of under QEMU emulation, which
+  was judged too slow and too failure-prone for real `cargo build --release`
+  runs when this was last evaluated (issues #348 / #395).
+
+Each platform lane pushes its image by digest only (no mutable tag). A
+separate merge step combines the two digests into the real `sha-<commit>` tag
+per service with `docker buildx imagetools create` -- the same tool the
+`promote` job already uses to move channel tags without rebuilding anything.
+This keeps the amd64 and arm64 build lanes fully independent: either one can
+fail, retry, or take longer without racing the other for the same tag.
+
+GitHub-hosted arm64 runners are outside the self-hosted LAN, so they cannot
+reach the Redis-backed `sccache` cache, the `sccache-dist` scheduler, or the
+`distcc` hosts described in the Acceleration contract above. The arm64 lane
+therefore always builds as an uncached, optional-acceleration `cargo build
+--release` -- slower per build than the accelerated amd64 lane, but still a
+native compile, not an emulated one. This is a deliberate, documented
+tradeoff and not a bug: extending the LAN-only acceleration infrastructure to
+a transient cloud runner is out of scope here.
 
 ## Debian runner packages
 
@@ -95,6 +137,16 @@ Heavy runners use the same base labels with `lancache-heavy` instead:
 sudo ./svc.sh install
 sudo ./svc.sh start
 ```
+
+If the runner will also execute CodeQL workflows, add the `codeql` label:
+
+```bash
+./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-heavy,codeql
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+CodeQL requires the `codeql` label to match the `runs-on` configuration in `.github/workflows/codeql.yml`.
 
 ## Local Docker build cache
 

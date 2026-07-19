@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Optional local pre-push hook (issue #801): runs
+# scripts/check-action-node-versions.sh before a push that touches any
+# .github/workflows/*.yml (or *.yaml) file, so a pinned action declaring a
+# deprecated Node runtime surfaces to the person pushing before CI does, not
+# only after a run comes back red.
+#
+# This is an ADDITIONAL, OPTIONAL local convenience layer, not the actual
+# enforcement -- the real, non-bypassable gate is the "Check pinned GitHub
+# Actions for deprecated Node runtimes (#801)" step wired into
+# build-push.yml's shellcheck/shellcheck-hosted jobs, which run the exact
+# same script inside the pinned build-tools container (per AG-VAL-016). This
+# hook deliberately calls the script with whatever curl/bash happen to be on
+# the local machine instead of the containerized toolchain: it is an opt-in
+# nicety, not required for correctness, and a lot of this project's actual
+# contributors are AI agents working in freshly created worktrees with no
+# persistent `core.hooksPath` configured at all -- for that audience,
+# reusing the same logic locally is more valuable than perfectly matching
+# CI's environment.
+#
+# Enable it once per checkout with:
+#   git config core.hooksPath .githooks
+#
+# Degrades cleanly -- never blocking the push -- when the hook simply cannot
+# run in the current environment (repo root not discoverable, no bash/curl
+# on PATH, etc.), printing a clear message either way. It DOES block the
+# push (non-zero exit) when the check actually runs and finds a real
+# deprecated-runtime pin, since catching that before push is this hook's
+# entire reason to exist; that can be bypassed the normal git way
+# (`git push --no-verify`) same as any other pre-push hook, and CI still
+# enforces it either way.
+set -uo pipefail
+
+remote_name="${1:-origin}"
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "pre-push (check-action-node-versions): could not determine repo root; skipping this local check (not blocking push)." >&2
+  exit 0
+}
+
+script="$repo_root/scripts/check-action-node-versions.sh"
+if [ ! -f "$script" ]; then
+  echo "pre-push (check-action-node-versions): $script not found; skipping this local check (not blocking push)." >&2
+  exit 0
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "pre-push (check-action-node-versions): curl not found on PATH; skipping this local check (CI still enforces it)." >&2
+  exit 0
+fi
+
+is_zero_sha() {
+  [ "$1" = "0000000000000000000000000000000000000000" ]
+}
+
+# Only bother running the (network-calling) check if this push actually
+# touches a workflow file -- every other push is a guaranteed no-op for it,
+# and this hook otherwise runs synchronously before every single push.
+workflow_changed=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  is_zero_sha "$local_sha" && continue # branch/tag deletion: nothing to scan
+
+  if is_zero_sha "${remote_sha:-}"; then
+    # New branch/ref on the remote: there is no remote_sha to diff against.
+    # Fall back to the merge-base with that same branch name on the remote
+    # we're pushing to (covers the common "already exists upstream under
+    # another name, this is just a new local branch for it" case), or --
+    # failing that -- this branch's own root commit. If neither can be
+    # found, err toward running the check rather than silently skipping it;
+    # this is a soft convenience check, not the authoritative gate.
+    base=$(git merge-base HEAD "${remote_name}/${remote_ref#refs/heads/}" 2>/dev/null) || base=""
+    if [ -z "$base" ]; then
+      base=$(git rev-list --max-parents=0 "$local_sha" 2>/dev/null | tail -n1) || base=""
+    fi
+  else
+    base="$remote_sha"
+  fi
+
+  if [ -n "$base" ]; then
+    if git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null | grep -q .; then
+      workflow_changed=1
+    fi
+  else
+    workflow_changed=1
+  fi
+done
+
+if [ "$workflow_changed" -eq 0 ]; then
+  exit 0
+fi
+
+echo "pre-push: .github/workflows changed -- running scripts/check-action-node-versions.sh (#801) as an early local warning (CI enforces this authoritatively either way)..." >&2
+
+if ! bash "$script" "$repo_root"; then
+  echo "pre-push: check-action-node-versions.sh found a problem (see above) -- push blocked." >&2
+  echo "This is an optional local check; if you believe this is a false positive or an infrastructure hiccup (rate limit, network), you can bypass it with 'git push --no-verify' -- CI runs the same check authoritatively regardless." >&2
+  exit 1
+fi
+
+exit 0

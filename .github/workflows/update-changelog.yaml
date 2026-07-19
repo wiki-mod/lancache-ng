@@ -1,0 +1,49 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Writes a published GitHub Release's name+body into CHANGELOG.md and commits
+# it back, closing the loop release-drafter.yml starts (#899, decided on
+# #894): merge PR -> release-drafter drafts/updates a release -> this fires
+# when that release is published -> CHANGELOG.md updates itself. No step in
+# that chain needs a human to remember to run anything.
+name: Update Changelog
+
+on:
+  release:
+    types: [released]
+
+permissions:
+  # Workflow-level floor: a job's own `permissions:` block can only NARROW
+  # this, never widen it -- contents:write is needed here because the job
+  # actually pushes a commit. Found live (2026-07-16) while root-causing the
+  # same mistake in build-push.yml's pr-template-check job and this repo's
+  # own release-drafter.yml.
+  contents: write
+
+jobs:
+  update:
+    name: write release notes into CHANGELOG.md
+    runs-on: ubuntu-latest
+    permissions:
+      # Both this job's own git-auto-commit-action push and the default
+      # checkout need write access to commit CHANGELOG.md back.
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Check out the branch the release was actually cut from, not
+          # whatever ref triggered this event, so the commit below lands on
+          # the right branch.
+          ref: ${{ github.event.release.target_commitish }}
+
+      - name: Update Changelog
+        uses: stefanzweifel/changelog-updater-action@a938690fad7edf25368f37e43a1ed1b34303eb36 # v1.12.0
+        with:
+          latest-version: ${{ github.event.release.tag_name }}
+          release-notes: ${{ github.event.release.body }}
+
+      - name: Commit updated CHANGELOG
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
+        with:
+          branch: ${{ github.event.release.target_commitish }}
+          commit_message: "docs: update CHANGELOG.md for ${{ github.event.release.tag_name }}"
+          file_pattern: CHANGELOG.md

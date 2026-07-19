@@ -1,10 +1,28 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Dependabot configuration for automated dependency updates (GitHub Actions, Rust, Docker, npm)
+#
+# Every ecosystem is duplicated once per target-branch. Dependabot's own
+# target-branch key accepts exactly one branch per update entry -- there is
+# no way to list multiple branches for a single block -- and defaults to the
+# repo's default branch (master) when omitted. All real feature/dependency
+# work currently lands on the long-lived v0.2.0 branch, not master (which
+# only receives occasional direct housekeeping commits), so relying on the
+# implicit default silently left v0.2.0 with zero automated dependency
+# scanning. master keeps its own entries too rather than losing coverage.
 version: 2
 updates:
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: v0.2.0
     schedule:
       interval: weekly
     groups:
@@ -14,14 +32,33 @@ updates:
   # Rust (Admin UI)
   - package-ecosystem: cargo
     directory: /services/ui
+    target-branch: master
     schedule:
       interval: weekly
     groups:
       rust-deps:
         patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /services/ui
+    target-branch: v0.2.0
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns: ["*"]
+
   # Rust (DNS NATS subscriber)
   - package-ecosystem: cargo
     directory: /services/dns/nats-subscriber
+    target-branch: master
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /services/dns/nats-subscriber
+    target-branch: v0.2.0
     schedule:
       interval: weekly
     groups:
@@ -31,30 +68,66 @@ updates:
   # Docker base images
   - package-ecosystem: docker
     directory: /services/proxy
+    target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/proxy
+    target-branch: v0.2.0
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
     directory: /services/dns
+    target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dns
+    target-branch: v0.2.0
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
     directory: /services/watchdog
+    target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/watchdog
+    target-branch: v0.2.0
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
     directory: /services/dhcp
+    target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dhcp
+    target-branch: v0.2.0
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
     directory: /services/dhcp-proxy
+    target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dhcp-proxy
+    target-branch: v0.2.0
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
     directory: /services/ui
+    target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/ui
+    target-branch: v0.2.0
     schedule:
       interval: weekly

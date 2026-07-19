@@ -20,7 +20,7 @@ fi
 openssl genrsa -out "$CA_KEY" 4096
 openssl req -new -x509 -days 3650 \
     -key "$CA_KEY" \
-    -subj "/CN=LanCache CA/O=LanCache/C=DE" \
+    -subj "/CN=LanCache-NG CA/O=LanCache-NG/C=DE" \
     -out "$CA_CRT"
 
 chmod 600 "$CA_KEY"

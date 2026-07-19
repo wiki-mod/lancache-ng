@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+source "$SCRIPT_DIR/lib/reserve-validation-subnet.sh"
 UI_MANIFEST="services/ui/Cargo.toml"
 # Intentional developer/check default: use the repository build-tools image.
 # That image is the contract for local and CI-style UI checks and preinstalls
@@ -73,7 +75,14 @@ cleanup() {
   fi
 
   if [[ -n "${NETWORK_NAME}" ]]; then
-    docker network rm "${NETWORK_NAME}" >/dev/null 2>&1 || true
+    # A blind `docker network rm` right after `docker rm -f` can lose the
+    # "has active endpoints" race (see validation_project_networks_
+    # teardown's own comment in reserve-validation-subnet.sh); this
+    # network's name is unique per run (see the `${SUFFIX}` it's created
+    # with below), so a lost race here only leaks one orphaned network on
+    # the runner host, but it still needs a real wait+retry instead of
+    # silently leaking it forever.
+    validation_network_teardown "${NETWORK_NAME}" || true
   fi
 }
 trap cleanup EXIT

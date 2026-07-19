@@ -28,13 +28,9 @@
   </div>
 
   <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
-    <button type="button" data-dns-tab="http"
+    <button type="button" data-dns-tab="cdn"
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
-      HTTP
-    </button>
-    <button type="button" data-dns-tab="https"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
-      HTTPS
+      CDN-Domains
     </button>
     <button type="button" data-dns-tab="lan"
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
@@ -44,17 +40,23 @@
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
       Settings
     </button>
+    <button type="button" data-dns-tab="zones"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      Zone-Snapshots
+    </button>
   </div>
 
   <div class="space-y-6">
-    <section data-dns-panel="http" class="card flex flex-col gap-4">
+    <section data-dns-panel="cdn" class="card flex flex-col gap-4">
       <div>
-        <h2 class="font-semibold text-slate-200">HTTP / DNS-Liste</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen</p>
+        <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
+        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. SSL-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
       </div>
 
       <form action="/domains/dns/add" method="post" class="flex gap-2">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# CDN-domain writes update the authoritative DNS source list and can
+           trigger proxy reload behavior; keep this form scoped to one domain. #}
         <input type="text" name="domain" placeholder="z.B. steamcontent.com"
                required
                class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -71,9 +73,11 @@
           <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
           <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {# The hidden value must be the exact file entry so removal is
+               deterministic even when display sorting/filtering changes later. #}
             <input type="hidden" name="domain" value="{{ domain }}">
             <button type="submit"
-                    onclick="return confirm('{{ domain }} aus der DNS-Liste entfernen?')"
+                    onclick="return confirm('{{ domain }} aus der Domain-Liste entfernen?\nDer SSL-Proxy wird ggf. neu gestartet, falls SSL-Modus aktiv ist.')"
                     class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
               Entfernen
             </button>
@@ -88,47 +92,6 @@
       <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
     </section>
 
-    <section data-dns-panel="https" class="card flex flex-col gap-4 hidden">
-      <div>
-        <h2 class="font-semibold text-slate-200">HTTPS / SSL-Zertifikat-Liste</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-ssl-domains.txt · Root-Domains für Wildcard-Certs</p>
-      </div>
-
-      <form action="/domains/ssl/add" method="post" class="flex gap-2">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="text" name="domain" placeholder="z.B. steampowered.com"
-               required
-               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500">
-        <button type="submit"
-                class="bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-          Hinzufügen
-        </button>
-      </form>
-
-      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
-        {% if ssl_domains %}
-        {% for domain in ssl_domains %}
-        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
-          <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
-          <form action="/domains/ssl/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="domain" value="{{ domain }}">
-            <button type="submit"
-                    onclick="return confirm('{{ domain }} aus der SSL-Liste entfernen?\nDer SSL-Proxy wird neu gestartet.')"
-                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
-              Entfernen
-            </button>
-          </form>
-        </div>
-        {% endfor %}
-        {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Liste ist leer.</p>
-        {% endif %}
-      </div>
-
-      <p class="text-xs text-slate-500">{{ ssl_domains | length }} Einträge · Wildcard-Cert pro Root-Domain</p>
-    </section>
-
     <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
@@ -137,6 +100,8 @@
 
       <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# LAN records are written through PowerDNS, not the CDN domain file;
+           record type and content stay separate to avoid stringly typed parsing. #}
         <div class="flex gap-2">
           <input type="text" name="name" placeholder="z.B. myserver.lan."
                  required
@@ -179,6 +144,8 @@
           </div>
           <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {# Include name, type, and joined content so the backend can remove
+               the intended RRset without relying on table row position. #}
             <input type="hidden" name="name" value="{{ record.name }}">
             <input type="hidden" name="record_type" value="{{ record.type }}">
             <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
@@ -211,6 +178,8 @@
 
       <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# This setting toggles Recursor-side AAAA suppression globally; it does
+           not edit individual domain rows above. #}
         <div class="flex items-center gap-2">
           <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
                  {% if aaaa_filter_enabled %}checked{% endif %}
@@ -232,6 +201,82 @@
         Status: <span class="text-slate-400">Deaktiviert</span>
         {% endif %}
       </p>
+    </section>
+
+    {# Zone/record known-good snapshot rollback (#628). Populated by
+       routes/dns_snapshots.rs::fetch_zone_snapshot_groups, a thin HTTP call
+       to nats-subscriber's own listener -- the actual snapshot storage/
+       retention/rollback logic all lives there, not in the Admin UI. Mirrors
+       templates/dhcp.html's Kea snapshot table. #}
+    <section data-dns-panel="zones" class="card flex flex-col gap-4 hidden">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="font-semibold text-slate-200">Zone-Snapshots &amp; Rollback</h2>
+          <p class="text-xs text-slate-500 mt-0.5">
+            PowerDNS-Zonen (lan., local.lan., private Reverse-Zonen) werden nach jeder
+            Änderung automatisch gesichert. Ein Rollback ersetzt den aktuellen Stand
+            einer Zone durch einen früheren Snapshot -- danach seit dem Snapshot
+            hinzugekommene Records können verloren gehen.
+          </p>
+        </div>
+        <span class="text-xs text-slate-400 flex-shrink-0">Aufbewahrung: {{ zone_snapshot_retention }}</span>
+      </div>
+
+      {% if zone_snapshot_groups %}
+      <div class="space-y-4">
+        {% for group in zone_snapshot_groups %}
+        <div class="border border-slate-700 rounded-lg p-3">
+          <h3 class="font-mono text-sm text-slate-300 mb-2">{{ group.zone }}</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="border-b border-slate-700">
+                <tr>
+                  <th class="text-left py-2 text-slate-300">Erstellt</th>
+                  <th class="text-left py-2 text-slate-300">Aktion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for snapshot in group.snapshots %}
+                <tr class="border-b border-slate-700 hover:bg-slate-700">
+                  <td class="py-2 text-white">
+                    <time class="js-epoch" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</time>
+                  </td>
+                  <td class="py-2">
+                    {# group.zone only ever comes from the fixed ROLLBACK_ZONES
+                       whitelist (services/dns/nats-subscriber/src/
+                       zone_snapshots.rs) -- letters/digits/dots/hyphens only,
+                       so direct interpolation into this JS string literal is
+                       safe (no quote/escaping concerns, unlike arbitrary
+                       operator input). #}
+                    <form method="POST" action="/domains/zones/rollback" class="inline"
+                          onsubmit="return confirm('Zone {{ group.zone }} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Records können dabei verloren gehen.')">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <input type="hidden" name="zone" value="{{ group.zone }}">
+                      <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
+                      <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                        Zurückrollen
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+                {% endfor %}
+                {% if group.snapshots | length == 0 %}
+                <tr>
+                  <td colspan="2" class="py-3 text-slate-500 text-center">Noch keine Snapshots für diese Zone</td>
+                </tr>
+                {% endif %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-slate-500 text-sm px-3 py-2">
+        Keine Zonen-Snapshots verfügbar (nats-subscriber momentan nicht erreichbar, oder
+        noch kein Snapshot erstellt).
+      </p>
+      {% endif %}
     </section>
   </div>
 
@@ -267,10 +312,38 @@
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
   }
 
+  // Zone-snapshot timestamps (#628): same Intl.DateTimeFormat-based helper
+  // as templates/secondaries.html's own .js-epoch handling -- each template
+  // keeps its own small copy rather than a shared JS file, matching this
+  // project's existing per-template convention (no shared static JS asset
+  // exists for this yet).
+  function formatEpochSeconds(epochSeconds) {
+    const date = new Date(Number(epochSeconds) * 1000);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    return new Intl.DateTimeFormat('de-DE', {
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+      hour12: false,
+    }).format(date);
+  }
+
+  function formatEpochCells() {
+    document.querySelectorAll('.js-epoch').forEach((element) => {
+      const formatted = formatEpochSeconds(element.dataset.epoch);
+      if (formatted) {
+        element.textContent = formatted;
+      }
+    });
+  }
+
   document.querySelectorAll('.dns-tab-btn').forEach((button) => {
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
 
-  setActiveDnsTab('http');
+  setActiveDnsTab('cdn');
+  formatEpochCells();
 </script>
 {% endblock %}

@@ -73,12 +73,15 @@ runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
   require_manifest_platform "$image" linux/amd64
+  require_manifest_platform "$image" linux/arm64
 done
 require_name "$tooling_names" build-tools tooling
 require_manifest_platform build-tools linux/amd64
+require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
-for image in docker-socket-proxy nats fluent-bit netdata watchtower busybox; do
+require_manifest_platform stack linux/arm64
+for image in docker-socket-proxy nats fluent-bit syslog-ng netdata busybox; do
   require_name "$external_names" "$image" external
 done
 
@@ -150,9 +153,24 @@ require_grep 'description: .+' \
 require_grep 'org\.opencontainers\.image\.description=\$\{\{ matrix\.description \}\}' \
   .github/workflows/build-push.yml \
   'build workflow must publish OCI image description labels'
-require_grep 'annotations:' \
+require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-push.yml \
-  'build workflow must publish OCI image description annotations'
+  'build workflow must publish OCI image description index annotations'
+require_grep 'outputs: type=image,oci-mediatypes=true' \
+  .github/workflows/build-push.yml \
+  'per-platform service builds must force OCI mediatypes so downstream imagetools create can actually attach index annotations'
+# build-tools.yml is a second, independent publisher of the build-tools
+# image (weekly cron/push/dispatch, moving build-tools:latest and mutable
+# branch tags) -- most CI/dev paths actually consume its tags, not
+# build-push.yml's own build-tools matrix row's sha-<commit>-only output.
+# It needs the identical OCI-mediatype/annotation fix, not just
+# build-push.yml (issue #620).
+require_grep 'outputs: type=image,oci-mediatypes=true' \
+  .github/workflows/build-tools.yml \
+  'build-tools.yml per-platform builds must force OCI mediatypes so its own merge step can actually attach index annotations'
+require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
+  .github/workflows/build-tools.yml \
+  'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
 require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
@@ -204,13 +222,26 @@ require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_
 require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must preserve single-platform service image metadata when moving channel tags'
+# #822: every actions/attest invocation now goes through the
+# ghcr-attest-retry composite action (retry + fresh re-login on a transient
+# GHCR 401) instead of a bare `uses: actions/attest@...` step, so the literal
+# "actions/attest@" pin and its `push-to-registry: true` input live in that
+# composite action's own action.yml, not in build-push.yml.
+require_grep 'uses: \./\.github/actions/ghcr-attest-retry' \
+  .github/workflows/build-push.yml \
+  'release workflow must create provenance attestations for published first-party images through the shared GHCR retry wrapper'
 require_grep 'actions/attest@' \
-  .github/workflows/build-push.yml \
-  'release workflow must create provenance attestations for published first-party images'
+  .github/actions/ghcr-attest-retry/action.yml \
+  'the attestation retry wrapper must still call the real actions/attest action'
 require_grep 'push-to-registry: true' \
-  .github/workflows/build-push.yml \
+  .github/actions/ghcr-attest-retry/action.yml \
   'provenance attestations must be pushed to the registry'
-require_grep 'subject-digest: \$\{\{ steps.retry-build.outputs.digest \|\| steps.build.outputs.digest \}\}' \
+# build/build-arm64's "Build and push" step (#822) now runs through
+# ghcr-build-push-retry instead of a bare docker/build-push-action + inline
+# "retry-build" sibling step, so steps.build.outputs.digest already resolves
+# to whichever internal attempt succeeded -- there is no separate
+# "retry-build" step id left to fall back to.
+require_grep 'subject-digest: \$\{\{ steps\.build\.outputs\.digest \}\}' \
   .github/workflows/build-push.yml \
   'provenance attestations must bind to the pushed image digest'
 require_grep 'digest_for_image\(\)' \
@@ -231,7 +262,7 @@ require_grep 'Stack channel pointer' \
 require_grep 'Provenance and SBOM status' \
   .github/workflows/build-push.yml \
   'release notes must explicitly state provenance and SBOM status'
-require_grep 'Provenance attestations are pushed to GHCR for every first-party image digest' \
+require_grep 'Provenance attestations are pushed to GHCR for every first-party' \
   .github/workflows/build-push.yml \
   'release notes must state where first-party provenance attestations are published'
 require_grep 'SBOM artifacts are not generated by this workflow yet' \
@@ -252,7 +283,7 @@ require_grep 'bash scripts/check-stable-external-images.sh' \
 require_grep 'expected_prerelease=' \
   .github/workflows/build-push.yml \
   'release job must derive RC prerelease status from the tag'
-require_grep '^  RELEASE_PLATFORMS: linux/amd64$' \
+require_grep '^  RELEASE_PLATFORMS: linux/amd64,linux/arm64$' \
   .github/workflows/build-push.yml \
   'build workflow must publish every platform declared by the stack manifest'
 require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLATFORMS"' \
@@ -261,9 +292,24 @@ require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLA
 require_grep 'is missing required platform' \
   scripts/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-require_grep 'cache-dir: /var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}' \
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
-  'container scans must use platform-specific Trivy cache directories'
+  'container scans must use platform- and ref-specific Trivy cache directories (see #904 -- ref-parallel scans must never share a cache dir)'
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-\$\{sanitized_ref\}"' \
+  .github/workflows/build-push.yml \
+  'the pushed build-tools digest scan must use a ref-specific Trivy cache directory too (see #904)'
+# #904 follow-through: a cache-dir key only needs to be as fine as its job's
+# own concurrency-group key, but must be at least that fine -- container-scan
+# and build's build-tools-pushed step both suffix run_id onto the cache dir
+# in exactly the workflow_dispatch/rerun condition their own concurrency
+# groups already use that suffix for (see those groups' `group:` expressions
+# a few checks up). An earlier revision of the #904 fix keyed the cache dir
+# on ref alone, which was still coarser than the concurrency-group key for
+# the dispatch/rerun case and left that race open; this guard exists so that
+# specific regression can't come back silently.
+require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
+  .github/workflows/build-push.yml \
+  'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
 require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'

@@ -1,7 +1,18 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # PowerDNS authoritative server config template: SQLite backend, API, DDNS support.
 
-local-address=127.0.0.1
+# Bound to two addresses, not one (issue #706): 127.0.0.1 is required
+# because pdns_recursor (recursor.conf.template's forward_zones) forwards
+# every LAN/reverse zone lookup to 127.0.0.1:5300 -- dropping the loopback
+# listener here would break DNS spoofing itself, not just DDNS.
+# ${PDNS_LOCAL_ADDRESS} (entrypoint.sh's detect_pdns_local_address) is this
+# container's own real, non-loopback IPv4 address, detected fresh at every
+# start -- needed so DNS UPDATE packets from the separate `dhcp`
+# container/host (dnsupdate=yes below) can actually reach this daemon at
+# all; the old loopback-only bind made it unreachable from outside this
+# container. A specific-address bind (not 0.0.0.0) keeps the port's attack
+# surface to exactly the addresses this service is meant to answer on.
+local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}
 local-port=5300
 launch=gsqlite3
 gsqlite3-database=/var/lib/powerdns/pdns.sqlite3
@@ -12,7 +23,12 @@ allow-dnsupdate-from=${DDNS_ALLOW_FROM}
 webserver=yes
 webserver-address=0.0.0.0
 webserver-port=8081
-webserver-allow-from=127.0.0.1,172.16.0.0/12
+# Full RFC1918 range, not just Docker's default address-pool (172.16.0.0/12):
+# operators can set custom default-address-pools in daemon.json (e.g.
+# 10.0.0.0/8 or 192.168.0.0/16 bridge networks), and the UI container's calls
+# to this authoritative API must still be allowed through. Matches the
+# already-widened allow_from in recursor.conf.template's own REST API.
+webserver-allow-from=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 api=yes
 api-key=${PDNS_API_KEY}
 

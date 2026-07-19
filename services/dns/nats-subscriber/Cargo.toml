@@ -17,3 +17,25 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+axum = "0.8"
+
+# Deliberate release-profile tuning: fat LTO (not thin) for maximum
+# cross-crate inlining, and codegen-units=2 (down from Cargo's default 16)
+# to trade some build parallelism for better whole-program optimization.
+# Builds run on the project's own sccache/distcc build farm, which has
+# spare capacity for the extra link-time cost this adds.
+#
+# Deliberately NOT set here, each considered and rejected for a concrete
+# reason rather than omitted by oversight:
+# - `strip`: current unstripped binary sizes are not large enough to force
+#   the issue, and stripping would remove symbol names needed for a real
+#   crash backtrace.
+# - `panic = "abort"`: this is a long-running Tokio service; abort-on-panic
+#   changes per-task panic isolation behavior and has not been evaluated
+#   deeply enough to adopt casually.
+# - `target-cpu=native`: this binary ships in Docker images to end-users'
+#   arbitrary hardware, so baking in host-specific CPU instructions would
+#   risk "illegal instruction" crashes on different silicon.
+[profile.release]
+lto = "fat"
+codegen-units = 2

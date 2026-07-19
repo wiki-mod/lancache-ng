@@ -1,13 +1,47 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # dnsmasq proxy-mode config template, rendered by entrypoint.sh via envsubst.
-# Disables DNS (port=0) and runs dnsmasq purely as a DHCP proxy that injects
-# the lancache-ng DNS servers via PXE option 6 alongside an existing DHCP server.
+# Disables DNS (port=0) and runs dnsmasq purely as a ProxyDHCP/PXE helper that
+# injects the lancache-ng DNS servers via PXE option 6 alongside an existing
+# DHCP server.
+#
+# `dhcp-range=...,proxy` (RFC 4388 ProxyDHCP) is deliberately passive: dnsmasq
+# answers the supplemental PXE exchange without ever needing to know which
+# server issues the real lease (confirmed against the dnsmasq man page and a
+# live `dnsmasq --test`/`--help` run). UPSTREAM_DHCP_IP is therefore *not*
+# fed into a dnsmasq directive here -- it is operator documentation only (see
+# entrypoint.sh and docs/dhcp-modes.md for what it is used for instead).
+#
+# A previous revision of this template set the directive named "dhcp-proxy"
+# to the value of UPSTREAM_DHCP_IP. That is deliberately not spelled out
+# here using dollar-brace variable syntax: this file is rendered with
+# envsubst, which substitutes every dollar-brace reference it finds,
+# including ones inside comments, so writing the old directive literally
+# here would silently mangle this comment on every render.
+# Per `dnsmasq --help`, that flag is "[u]se these DHCP relays as full
+# proxies" (RFC 5107 serverid-override) -- it only does anything when paired
+# with `--dhcp-relay=`, which this service never configures. It was a no-op,
+# not a functioning link to the upstream server, so it has been removed
+# rather than carried forward into the option surface added by issue #450.
+#
+# Additional optional directives (router/NTP/domain via dhcp-option-pxe,
+# dhcp-boot, interface, and custom safe options) are appended by
+# entrypoint.sh after this template is rendered, not templated here, because
+# they must be omitted entirely (not rendered as empty/invalid lines) when
+# unset. See entrypoint.sh's `_dhcp_proxy_render_optional_directives`.
 
 port=0
 no-resolv
 no-poll
 dhcp-range=${DHCP_SUBNET_START},proxy
 dhcp-option-pxe=6,${DHCP_DNS_PRIMARY},${DHCP_DNS_SECONDARY}
-dhcp-proxy=${UPSTREAM_DHCP_IP}
 log-dhcp
 no-daemon
+# Central logging pipeline (#633): dnsmasq supports only one logging
+# destination at a time (confirmed against `dnsmasq --help`'s
+# `-l, --log-facility=<file>` -- there is no dual stdout+file mode the way
+# Kea's "output-options" array offers), so pointing this at a file means
+# `docker logs` on this container stops showing DHCP transaction lines --
+# an accepted, documented trade-off (the file is what fluent-bit tails
+# instead; entrypoint.sh's own startup diagnostics still reach `docker logs`
+# since they run before dnsmasq is exec'd).
+log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log

@@ -37,7 +37,19 @@ RUN mkdir -p \
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
 COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
-COPY cdn-ssl-domains.txt /etc/nginx/cdn-ssl-domains.txt
+# Static third-party data (not user-editable, unlike cdn-domains.txt below),
+# so it's baked into the image rather than volume-mounted. See entrypoint.sh
+# for how it's used to derive wildcard cert root domains.
+COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
+# Build-time snapshot fallback for deployments with no live bind-mount (see
+# deploy/quickstart, which has no local repo checkout to mount from). The
+# "dns-domains" name is a named additional build context — services/dns/ is
+# outside this Dockerfile's own build context (services/proxy/), and Docker
+# build contexts can't reach outside their own tree without one (see
+# deploy/dev/docker-compose.yml's additional_contexts, or --build-context
+# for a plain `docker build`). dev/prod always shadow this baked default
+# with a live bind-mount of the real file at container start.
+COPY --from=dns-domains cdn-domains.txt /etc/nginx/cdn-domains.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

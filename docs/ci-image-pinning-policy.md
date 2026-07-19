@@ -84,7 +84,7 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 
 - `.github/workflows/build-tools.yml`:
   - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
-  - `docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0` ✅ Pinned by commit SHA
+  - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
 
 - `.github/workflows/codeql.yml`:
   - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
@@ -100,6 +100,19 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 
 All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 digests:
 
+The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
+for Debian runtime bases, including `services/ui/Dockerfile`. This is a
+project-wide cache decision, not a one-off oversight in the Admin UI image:
+the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
+configured pull source for these public Docker Hub bases. If Google evicts a
+cached digest and a build can no longer pull it, the build must fail closed and
+the base reference must be refreshed in a reviewed PR; Dockerfiles must not
+carry a second fallback `FROM` path because Dockerfile syntax cannot express a
+trusted registry-fallback chain without changing the built image provenance.
+Operators or CI runners that require Docker Hub as the source should configure
+that at the Docker daemon or build infrastructure layer, not by adding
+undocumented per-Dockerfile fallback logic.
+
 - `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
@@ -113,13 +126,13 @@ All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 
 
 - `services/dns/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder`
   - ARG default (line 6): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback
-  - **Rationale**: This is a documented, overridable ARG default. Production release builds pass a pinned digest via `--build-arg BUILD_TOOLS_IMAGE=<digest>`. Actual digest pinning for the default is tracked in issue #508.
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
+  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s **AG-CI-008** for the codified rule.
 
 - `services/ui/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS builder`
   - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback
-  - **Rationale**: This is a documented, overridable ARG default. Production release builds pass a pinned digest via `--build-arg BUILD_TOOLS_IMAGE=<digest>`. Actual digest pinning for the default is tracked in issue #508.
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
+  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s **AG-CI-008**.
 
 ### Workflow Build-Tools References
 
@@ -135,15 +148,16 @@ All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 
 
 ## Known Mutable References and Decision Summary
 
-### Pending Digest Pinning (Issue #508)
+### Resolved: Issue #508 (closed as already-resolved-by-design, not "pending")
 
-The following references use mutable tags and are planned for actual digest replacement:
-
-1. **`BUILD_TOOLS_IMAGE` ARG defaults** in:
-   - `services/dns/Dockerfile` line 6
-   - `services/ui/Dockerfile` line 12
-   - **Decision**: Keep as documented fallback ARGs (overridable at build time). Real digest pinning is owned by issue #508.
-   - **Why**: These are intentional ARG defaults that allow override at build time. Release builds must explicitly pass `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` to ensure reproducibility.
+Issue #508 asked to actually pin `BUILD_TOOLS_IMAGE` ARG defaults in
+`services/dns/Dockerfile` and `services/ui/Dockerfile` to a real digest. It
+was closed **without** implementing that pinning: the ARG default only
+matters for a manual `docker build` invocation without `--build-arg`; every
+real CI build always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>`
+explicitly and never falls back to it, so pinning the default would only add
+a manually-maintained value that goes stale with no real build path
+depending on it. This decision is codified as `AGENTS.md`'s **AG-CI-008**.
 
 ### Intentional Mutable Fallbacks (Documented)
 
@@ -157,9 +171,13 @@ The following references use mutable tags and are intentionally kept as fallback
    - **Decision**: Keep as `:latest` because the script immediately resolves it to a pinned digest (line 98: `printf '%s@%s\n' "${image%:*}" "$digest"`).
    - **Why**: Callers of this script receive a digest-qualified reference, never the mutable tag.
 
-## Remediation Steps
+## Remediation Steps (general reference)
 
-To pin these remaining references, perform the following in order:
+The `BUILD_TOOLS_IMAGE` ARG defaults above are intentionally **not** pinned
+(see "Resolved: Issue #508" above) — the steps below are kept as general
+guidance for pinning a `build-tools` image reference elsewhere (e.g. a real
+CI consumption point resolved through `scripts/select-build-tools-image.sh`),
+not an open task against those two ARG defaults:
 
 1. **Determine the target build-tools version**:
    - Identify the stable release tag (e.g., `v0.2.0`) or sha-* tag you wish to use.
@@ -208,10 +226,10 @@ This script checks for floating-tag patterns in workflows and Dockerfiles and re
 
 ## CONTRIBUTING.md Alignment
 
-This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations" (line 111):
+This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations":
 
-> Keep workflow action references pinned to explicit versions or SHAs; avoid floating tags such as `@v4` in project PRs.
+> Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
 
-And reinforces (line 256):
+And reinforces:
 
 > release-capable paths must not depend on mutable `build-tools:latest`

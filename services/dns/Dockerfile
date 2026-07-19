@@ -200,6 +200,6 @@ COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 53/udp 53/tcp 8081 8082
+EXPOSE 53/udp 53/tcp 8081 8082 8083
 
 ENTRYPOINT ["/entrypoint.sh"]

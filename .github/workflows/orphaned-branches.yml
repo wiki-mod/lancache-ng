@@ -1,0 +1,104 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Automated companion to AGENTS.md's AG-GH-017 (issue #990): periodically
+# scans every remote branch older than 1 hour for one that has neither an
+# associated pull request (open, closed, or merged) nor a reference in any
+# open issue's body or comments, and reports it. This is a scheduled sweep,
+# not a per-push gate -- the problem it guards against (branches quietly
+# accumulating over days with no written trace anywhere) only shows up by
+# looking at the whole repository's branch state periodically, not by
+# reacting to any single push. See scripts/check-orphaned-branches.sh for the
+# full detection logic and its documented design decisions.
+#
+# Deliberately advisory, not blocking: there is no pull request here for a
+# failure to gate, so findings are posted as `::warning::`/`::notice::`
+# workflow annotations rather than failing the job. The job itself still
+# fails on a genuine tool/configuration problem (missing token, unresolvable
+# build-tools image, not a git work tree) -- see the script's own
+# fail-closed-on-real-errors / warn-and-skip-on-ambiguous-lookups split.
+#
+# KNOWN LIMITATION (see #990's WIP comment and this PR's own body): GitHub
+# only fires a workflow's `schedule:` trigger from the copy of the workflow
+# file present on the repository's *default* branch (currently `master`),
+# not from whichever branch a PR adding it merges into. This repo's active
+# development currently lands on `v0.2.0` (see e.g. PR #974's "backport
+# missing required checks into master" precedent for the same class of gap).
+# Until this workflow is promoted/backported to `master`, its `schedule:`
+# trigger will not actually fire on a cron -- but `workflow_dispatch` still
+# works immediately from `v0.2.0` (manually selectable per-branch in the
+# Actions UI), so the guard is usable right away, just not yet on autopilot.
+name: Orphaned Branch Guard
+
+on:
+  schedule:
+    # Daily (not weekly, unlike build-tools.yml/gc-pr-staging-images.yml's
+    # own periodic sweeps): the maintainer's explicit requirement for #990 is
+    # a short 1-hour orphan threshold so a newly-pushed untracked branch
+    # surfaces almost immediately, which only holds if this sweep itself also
+    # runs frequently -- a weekly cadence would let an orphaned branch sit
+    # unreported for up to a week even though the per-branch threshold is an
+    # hour. Time-of-day offset (38 5, i.e. 05:38 UTC) is chosen only to avoid
+    # exact-top-of-hour contention with other scheduled jobs; it carries no
+    # other significance.
+    - cron: "38 5 * * *"
+  workflow_dispatch: {}
+
+# Read-only: this job only lists/reads branches, pull requests, and issues.
+# No PAT is needed (unlike check-pr-tracking-metadata.sh's project-board
+# check) -- the default GITHUB_TOKEN's repo-scoped read access covers every
+# API call scripts/check-orphaned-branches.sh makes.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: orphaned-branch-guard
+  cancel-in-progress: false
+
+jobs:
+  orphaned-branches:
+    name: scan for orphaned branches
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Fetch every remote branch's tip
+        # actions/checkout only fetches the ref that triggered this workflow
+        # (even with fetch-depth: 0, per its own docs) -- it does not
+        # populate refs/remotes/origin/* for every branch. This guard needs
+        # to see every branch, so it fetches them explicitly. --depth=1 is
+        # sufficient: only each branch's tip commit (for its committer date)
+        # is needed, not full history, and this repo currently carries well
+        # over a hundred branches (see #990's own motivating incident) where
+        # a full-history fetch of all of them would be needlessly slow.
+        run: |
+          set -euo pipefail
+          git fetch --prune --depth=1 origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Resolve build-tools image
+        # Strict mode (BUILD_TOOLS_REQUIRE_PUBLISHED=true): this check only
+        # needs bash/curl/jq/git, already present in the published :dev/:edge
+        # channel image, and this workflow has no PR of its own whose
+        # Dockerfile changes would need a branch-local rebuild to validate
+        # against -- so there is no reason to pay a local `docker build` on
+        # every scheduled run the way a trusted-ref PR/push job would. Same
+        # pattern as pr-tracking-metadata-check-hosted in build-push.yml.
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+
+      - name: Scan for orphaned branches
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e REPO \
+            -e GH_TOKEN \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-orphaned-branches.sh

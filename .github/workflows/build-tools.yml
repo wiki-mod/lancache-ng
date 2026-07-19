@@ -4,6 +4,18 @@
 # weekly schedule, on relevant pushes to master, and on manual dispatch. This
 # image is CI infrastructure for acceleration checks, not a product runtime
 # dependency.
+#
+# arm64 builds natively on a GitHub-hosted ubuntu-24.04-arm runner (same
+# pattern as build-push.yml's build-arm64/merge-manifests, added by #592)
+# instead of QEMU emulation on the self-hosted amd64 pool. Confirmed directly
+# on #606: emulating tools/build-tools/Dockerfile's docker-compose source
+# build (a large dependency tree pulling in github.com/moby/moby/client) under
+# QEMU fails reproducibly with a Go compiler "bufio: buffer full" error while
+# reading export data -- not a transient flake, a genuine emulation resource
+# limit that the small pre-#606 actionlint-only arm64 build never hit. The
+# same Dockerfile change built cleanly in ~6m37s on ubuntu-24.04-arm in the
+# same PR's build-push.yml run, confirming native arm64 is the fix, not a
+# tuning knob on the emulated build.
 name: Build Tools Image
 
 on:
@@ -17,49 +29,220 @@ on:
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "certs/**"
       - "tests/bats/**"
       - "tests/shellspec/**"
+      - "tests/fixtures/**"
       - "setup.sh"
+      - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/check-validation-subnet-wrapper-coverage.sh"
+      - "scripts/check-bats-path-filter-coverage.sh"
+      - "scripts/check-build-tools-smoke-coverage.sh"
+      - "scripts/select-build-tools-image.sh"
+      - "scripts/lib/**"
+      - "scripts/classify-image-impact.sh"
+      - "scripts/compute-next-release-tag.sh"
+      - "scripts/detect-full-setup-changes.sh"
+      - "scripts/ensure-pr-staging-images.sh"
+      - "scripts/plan-deep-validation.sh"
+      - "scripts/docker-socket-proxy.sh"
+      - "scripts/check-action-node-versions.sh"
+      - "scripts/check-executable-bits.sh"
+      - "scripts/check-workflow-service-lists.sh"
+      - "scripts/check-orphaned-branches.sh"
+      - "scripts/setup-cli-simulation.sh"
+      - "scripts/syslog-forwarding-simulation.sh"
+      - ".github/workflows/gc-pr-staging-images.yml"
+      - ".github/workflows/backfill-stack-latest.yml"
+      - ".github/workflows/build-push.yml"
+      - ".github/workflows/full-setup-validate.yml"
+      - ".github/workflows/full-setup-deep-validate.yml"
+      - ".github/actions/derive-validation-network/action.yml"
+      - "services/dns/**"
+      - "services/dhcp/**"
+      - "services/dhcp-proxy/**"
+      - "services/proxy/**"
+      - "services/watchdog/**"
+      - "services/ui/dhcp-probe.sh"
+      - "services/ui/docker-entrypoint.sh"
+      - "deploy/dev/docker-compose.yml"
+      - "deploy/prod/docker-compose.yml"
+      - "deploy/quickstart/docker-compose.yml"
+      - "deploy/secondary/docker-compose.yml"
   pull_request:
     branches: [master, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
+      - "certs/**"
       - "tests/bats/**"
       - "tests/shellspec/**"
+      - "tests/fixtures/**"
       - "setup.sh"
+      - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/check-validation-subnet-wrapper-coverage.sh"
+      - "scripts/check-bats-path-filter-coverage.sh"
+      - "scripts/check-build-tools-smoke-coverage.sh"
+      - "scripts/select-build-tools-image.sh"
+      - "scripts/lib/**"
+      - "scripts/classify-image-impact.sh"
+      - "scripts/compute-next-release-tag.sh"
+      - "scripts/detect-full-setup-changes.sh"
+      - "scripts/ensure-pr-staging-images.sh"
+      - "scripts/plan-deep-validation.sh"
+      - "scripts/docker-socket-proxy.sh"
+      - "scripts/check-action-node-versions.sh"
+      - "scripts/check-executable-bits.sh"
+      - "scripts/check-workflow-service-lists.sh"
+      - "scripts/check-orphaned-branches.sh"
+      - "scripts/setup-cli-simulation.sh"
+      - "scripts/syslog-forwarding-simulation.sh"
+      - ".github/workflows/gc-pr-staging-images.yml"
+      - ".github/workflows/backfill-stack-latest.yml"
+      - ".github/workflows/build-push.yml"
+      - ".github/workflows/full-setup-validate.yml"
+      - ".github/workflows/full-setup-deep-validate.yml"
+      - ".github/actions/derive-validation-network/action.yml"
+      - "services/dns/**"
+      - "services/dhcp/**"
+      - "services/dhcp-proxy/**"
+      - "services/proxy/**"
+      - "services/watchdog/**"
+      - "services/ui/dhcp-probe.sh"
+      - "services/ui/docker-entrypoint.sh"
+      - "deploy/dev/docker-compose.yml"
+      - "deploy/prod/docker-compose.yml"
+      - "deploy/quickstart/docker-compose.yml"
+      - "deploy/secondary/docker-compose.yml"
 
 permissions:
   contents: read
   packages: write
+  # id-token/attestations/artifact-metadata are needed at the workflow level
+  # (not just on the individual publish/merge jobs below) because GitHub only
+  # lets a job narrow the workflow-level default, never widen it -- any job
+  # that signs or reads build provenance for this image needs all three
+  # already granted here, or its own `permissions:` block would be capped at
+  # `none` for that scope regardless of what it declares locally.
   id-token: write
   attestations: write
   artifact-metadata: write
 
+# Serializes overlapping runs the same way build-push.yml's own concurrency
+# group does: the weekly schedule, a manual workflow_dispatch, and a
+# qualifying push can all trigger this workflow for the same commit, and
+# every one of those non-pull_request triggers can reach the mutable
+# sha-<short_sha>/branch/latest tags this workflow writes below. Queuing
+# them behind one "<workflow>-publish" group (rather than cancelling, so a
+# publish never gets torn down mid-write) keeps two runs from ever
+# interleaving their reads and writes of those tags. pull_request runs never
+# touch those tags, so they get their own per-ref group instead of queuing
+# behind publish runs they have no interaction with.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  cancel-in-progress: false
+
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
-  BUILD_TOOLS_PLATFORMS: linux/amd64,linux/arm64
-  BUILD_TOOLS_SCAN_IMAGE: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}
+  # run_id-run_attempt suffixed, not a fixed name: build-tools and
+  # build-tools-arm64 each load a *local* scan image onto their own runner's
+  # Docker daemon, and the self-hosted amd64 runner in particular is reused
+  # across overlapping/retried runs -- a fixed local tag could let one run's
+  # cleanup ("Remove local scan image") delete or overwrite an image a
+  # concurrently-running job on the same host is still scanning.
+  BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
+  BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  build-tools:
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 120
+  determine-publish-scope:
+    # Computes should-publish exactly once so build-tools and
+    # build-tools-arm64 cannot disagree on it (they used to each compute
+    # their own copy independently -- both intentionally fall back to `true`
+    # when `github.event.before` can't be resolved, so a test-only push could
+    # in principle hit that fallback on only one of the two runners and have
+    # them publish/skip inconsistently). Cheap git-diff-only check, so this
+    # runs on a GitHub-hosted runner rather than spending self-hosted
+    # capacity on it.
+    name: determine build-tools publish scope
+    runs-on: ubuntu-latest
+    outputs:
+      should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # tests/bats/**, tests/shellspec/**, and setup.sh are in this workflow's
-      # path filter so the local smoke-test/Bats/ShellSpec steps below
-      # actually run when setup.sh changes, but a setup.sh-only change must
-      # not also rebuild and publish the build-tools image itself -- that
-      # stays tied to build-tools inputs (tools/build-tools/** or this
+      # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
+      # every other test-only path below (scripts/check-idempotence-test-
+      # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries,
+      # services/dns/**, services/dhcp/**, services/dhcp-proxy/**,
+      # services/proxy/**, services/watchdog/**, services/ui/dhcp-probe.sh,
+      # services/ui/docker-entrypoint.sh, and the deploy/*/docker-compose.yml
+      # files) are in this workflow's path filter so the local smoke-test/
+      # Bats/ShellSpec steps below actually run when one of those changes --
+      # each one is a real dependency of at least one tests/bats/*.bats suite
+      # (#873: the filter previously covered only setup.sh and the
+      # idempotence-coverage guard, so a PR touching any of these other
+      # tested files never ran the bats suite written for it). Such a change
+      # must not also rebuild and publish the build-tools image itself --
+      # that stays tied to build-tools inputs (tools/build-tools/** or this
       # workflow file), per the "routine PRs must not rebuild the build-tools
-      # image unless build-tools inputs changed" contract.
+      # image unless build-tools inputs changed" contract. This entire list
+      # is kept in sync automatically by scripts/check-bats-path-filter-
+      # coverage.sh (#879), which fails the light-tier static-check step in
+      # build-push.yml if any tests/bats/*.bats or tests/bats/helpers/*.sh
+      # dependency is not covered by an entry in this list (or its
+      # pull_request twin below) -- this comment documents WHY specific
+      # entries exist, the guard is what stops the list from silently
+      # drifting out of sync again.
+      #
+      # scripts/check-idempotence-test-coverage.sh specifically (#732 review):
+      # its own tests/bats/check_idempotence_test_coverage.bats fixture suite
+      # is what actually proves the guard *catches* a regression (unlike
+      # build-push.yml's step, which only runs the guard once against
+      # today's real repo -- a happy-path check that can't detect the guard
+      # itself silently breaking). Without this entry, a PR touching only
+      # the guard script would not already match tests/bats/** and so would
+      # never run that suite. scripts/check-validation-subnet-wrapper-
+      # coverage.sh (#896) and scripts/check-bats-path-filter-coverage.sh
+      # itself (#879) are listed for the identical reason -- each one's own
+      # fixture suite (tests/bats/check_validation_subnet_wrapper_coverage.
+      # bats, tests/bats/check_bats_path_filter_coverage.bats) is what proves
+      # THAT guard catches a real regression, not just that it currently
+      # passes against today's tree.
+      #
+      # .github/workflows/build-push.yml, .github/workflows/
+      # full-setup-validate.yml, .github/workflows/full-setup-deep-
+      # validate.yml, and .github/actions/derive-validation-network/
+      # action.yml (#879): an earlier version of this comment argued full-
+      # setup-validate.yml/full-setup-deep-validate.yml did not need to be
+      # listed here, since an unwrapped job added to either file is already
+      # blocked by build-push.yml's unconditional (no-path-filter)
+      # shellcheck jobs. That reasoning covered only the validation-subnet-
+      # wrapper class of regression -- it did not account for
+      # tests/bats/healthcheck_service_lists.bats (byte-for-byte parity of
+      # services_with_healthcheck across build-push.yml, full-setup-
+      # validate.yml, and full-setup-deep-validate.yml, and its subset check
+      # against scripts/setup-cli-simulation.sh and scripts/syslog-
+      # forwarding-simulation.sh), tests/bats/validation_image_tag.bats
+      # (build-push.yml must keep calling scripts/lib/validation-image-
+      # tag.sh's functions instead of reimplementing them), or
+      # tests/bats/reserve_validation_subnet.bats (derive-validation-
+      # network/action.yml must keep sourcing scripts/lib/reserve-validation-
+      # subnet.sh instead of reimplementing its formula) -- none of which
+      # shellcheck can catch, since they assert cross-file content agreement,
+      # not shell syntax. scripts/check-bats-path-filter-coverage.sh's own
+      # existence-filtered dependency scan found this gap directly against
+      # the real repo tree; these four files are added here to close it.
+      # scripts/setup-cli-simulation.sh and scripts/syslog-forwarding-
+      # simulation.sh (also real healthcheck_service_lists.bats dependencies)
+      # and deploy/secondary/docker-compose.yml (tests/bats/
+      # setup_secondary_docker_compose.bats's checked-in reference file for
+      # its cmd_secondary heredoc sync-guard, #946) are added alongside them
+      # for the same reason.
       - name: Determine whether build-tools inputs actually changed
         id: should-publish
         run: |
@@ -102,13 +285,28 @@ jobs:
             echo "should-publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+  build-tools:
+    name: build amd64 build-tools image
+    needs: determine-publish-scope
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      # BUILDX_CACHE_ROOT is a fixed path shared by every run on this
+      # self-hosted amd64 runner (Buildx cache only pays off if it persists
+      # across runs), so a snapshot-then-copy without locking could read a
+      # half-written cache_dir from a concurrently-running job's own "Rotate
+      # local Buildx cache" step. The read-side copy happens under the same
+      # flock a rotation takes, so a read always sees either the pre- or
+      # post-rotation cache, never a partial one; BUILDX_CACHE_READ/DEST
+      # themselves live under runner.temp (already per-job-unique) so the
+      # actual build step's cache-from/cache-to never need locking.
       - name: Prepare local Buildx cache
         id: buildx-cache
         env:
@@ -123,8 +321,8 @@ jobs:
             exit 1
           fi
 
-          cache_dir="$BUILDX_CACHE_ROOT/build-tools"
-          lock_file="$BUILDX_CACHE_ROOT/build-tools.lock"
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools-amd64"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools-amd64.lock"
 
           mkdir -p "$BUILDX_CACHE_ROOT"
           rm -rf "$BUILDX_CACHE_READ" "$BUILDX_CACHE_DEST"
@@ -142,7 +340,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
@@ -150,26 +348,37 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
+        # Deliberately "-standalone-<arch>", not build-push.yml's own
+        # "-<arch>" per-platform build-tools tags: build-push.yml's build/
+        # build-arm64 matrix also builds and pushes a build-tools image under
+        # sha-<commit>-amd64/-arm64 for the same commit, on the same push
+        # event. Reusing that exact tag name here would let either workflow
+        # overwrite the other's staging tag between this job's Trivy scan and
+        # merge-build-tools-manifests reading it -- a private tag namespace
+        # for this workflow's own staging tags avoids that race entirely.
+        # This job never writes the real sha-<commit> tag directly --
+        # merge-build-tools-manifests combines this with build-tools-arm64's
+        # linux/arm64 tag into that tag.
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
           tags: |
-            type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=short,suffix=-standalone-amd64
 
       - name: Compute immutable pushed source tag
         id: source-tag
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         run: |
           set -euo pipefail
 
           short_sha="${GITHUB_SHA::7}"
-          printf 'image=%s:sha-%s\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
-      # Pull requests cannot push to GHCR, so they build a local amd64 image and
-      # run the same smoke/Trivy checks before the workflow can pass.
-      - name: Build local scan image
-        id: local-build
+      # Pull requests cannot push to GHCR, so they build a local scan image
+      # and run the smoke/Trivy checks before the workflow can pass.
+      - name: Build local amd64 scan image
+        id: local-build-amd64
         timeout-minutes: 60
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -177,60 +386,76 @@ jobs:
           context: tools/build-tools
           load: true
           pull: true
-          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           platforms: linux/amd64
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      # This tool list mirrors AG-VAL-017's (.github/AGENTS.md) required
+      # build-tools contents exactly -- this step is the executable check
+      # that enforces that governance rule, not an arbitrary sanity list.
+      # `command -v` catches a tool missing from PATH; the `--version`/
+      # `--help` calls below additionally catch one that's on PATH but
+      # broken/mis-linked (e.g. a dynamic library the image forgot to
+      # install), which `command -v` alone would not.
       - name: Smoke-test acceleration-infrastructure tools
         run: |
           set -euo pipefail
 
-          docker run --rm "${BUILD_TOOLS_SCAN_IMAGE}" bash -c '
-            set -euo pipefail
+          docker run --rm --platform linux/amd64 "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" bash -c '
+          set -euo pipefail
 
-            required_tools=(
-              actionlint
-              bash
-              bats
-              cargo
-              cargo-audit
-              cargo-tarpaulin
-              clippy-driver
-              dig
-              distcc
-              distcc-pump
-              docker
-              envsubst
-              jq
-              rustc
-              rustfmt
-              sccache
-              shellspec
-              shellcheck
-            )
+          required_tools=(
+            actionlint
+            bash
+            bats
+            cargo
+            cargo-audit
+            cargo-tarpaulin
+            clippy-driver
+            dig
+            distcc
+            distcc-pump
+            docker
+            envsubst
+            jq
+            rustc
+            rustfmt
+            sccache
+            shellspec
+            shellcheck
+          )
 
-            for tool in "${required_tools[@]}"; do
-              command -v "$tool" >/dev/null
-            done
+          for tool in "${required_tools[@]}"; do
+            command -v "$tool" >/dev/null
+          done
 
-            cargo --version
-            cargo audit --version
-            cargo-audit --version
-            cargo tarpaulin --version
-            cargo-tarpaulin --version
-            sccache --version
-            actionlint --version
-            bats --version
-            shellspec --version
-            shellcheck --version
-            distcc --version
-            distcc-pump --help >/dev/null
-            docker --version
-            docker compose version
+          cargo --version
+          cargo audit --version
+          cargo-audit --version
+          cargo tarpaulin --version
+          cargo-tarpaulin --version
+          sccache --version
+          actionlint --version
+          bats --version
+          shellspec --version
+          shellcheck --version
+          distcc --version
+          distcc-pump --help >/dev/null
+          docker --version
+          docker compose version
           '
 
+      # This build-tools workflow is the only place bats/shellspec ever run
+      # against the LOCALLY built candidate image before it's published --
+      # build-push.yml's own dns_test/ui_test/etc. jobs pull the already-
+      # published build-tools:edge, so they'd never catch a fixture
+      # regression introduced by a change to this Dockerfile itself. Running
+      # the project's real test suites here doubles as this job's own proof
+      # that the image it just built can actually execute them, not just
+      # that `bats`/`shellspec` are present on PATH (which "Smoke-test
+      # acceleration-infrastructure tools" above already checked).
       - name: Run Bats setup fixtures
         run: |
           set -euo pipefail
@@ -239,7 +464,7 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" \
             bash -lc 'set -euo pipefail; bats tests/bats'
 
       - name: Run ShellSpec setup fixtures
@@ -250,19 +475,93 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            "${BUILD_TOOLS_SCAN_IMAGE:?BUILD_TOOLS_SCAN_IMAGE is required}" \
+            "${BUILD_TOOLS_SCAN_IMAGE_AMD64:?BUILD_TOOLS_SCAN_IMAGE_AMD64 is required}" \
             bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
 
       - name: Prepare local Trivy cache
+        # Was a fixed /var/tmp/lancache-ng-trivy-cache/build-tools directory
+        # shared by every run of this job regardless of ref (#912, flagged as
+        # a deferred follow-up when #913/#925 closed the equivalent race in
+        # build-push.yml's container-scan). Real, narrower-but-live
+        # reachability here: this workflow's own top-level `concurrency:`
+        # block (see above) only serializes runs *within* one group --
+        # pull_request runs are grouped per-PR-ref, and every
+        # push/schedule/workflow_dispatch run instead shares one single
+        # `<workflow>-publish` group. Two different PRs' build-tools jobs
+        # (different groups, hence genuinely concurrent with each other), or
+        # a PR run overlapping the publish-group's run, both land on the
+        # `[self-hosted, linux, lancache, lancache-heavy]` pool and, if
+        # scheduled onto the same host, used to race on this exact directory
+        # -- Trivy's BoltDB cache backend only tolerates one writer.
+        #
+        # Fix: key the directory by sanitized ref (the same sanitization
+        # this file's own "Promote mutable tags" step already applies to its
+        # branch tag, and the same one build-push.yml's container-scan
+        # Trivy-cache fix uses for the identical race class), which is at
+        # least as fine as the concurrency-group key above, so two runs that
+        # could ever execute concurrently never share a directory.
+        #
+        # Retention (#912: a populated dir is >99.9% redundant copies of the
+        # two global Trivy vulnerability/Java DBs, ~1.3 GB on-disk; the
+        # actually image-specific part is ~100 KB) -- only directories a
+        # *future* run can legitimately reuse are worth keeping:
+        #   - Push to master/v0.2.0, and the weekly schedule (which always
+        #     runs against the default branch): the ref persists and is
+        #     reused on every subsequent run, exactly like build-push.yml's
+        #     branch dirs -- bounded at one directory per persistent branch,
+        #     safe to leave for the fleet's standing 3-day /var/tmp aging to
+        #     evict only if a branch ever goes idle (aging is a backstop for
+        #     an orphaned/abandoned branch here, not the primary bound).
+        #   - pull_request runs: unlike build-push.yml's container-scan
+        #     (gated `if: github.event_name != 'pull_request'`, so it never
+        #     creates a PR-ref directory at all), this step is ungated and
+        #     runs on every PR touching this workflow's path filter. A PR
+        #     ref (`refs/pull/N/merge`) is reused only while that PR stays
+        #     open -- once it closes or merges, the ref is never triggered
+        #     again and the directory is permanently cold. Left unmanaged,
+        #     that is the same "one directory per one-time-use ref,
+        #     accumulating without bound as PRs accumulate" class as
+        #     build-push.yml's release-tag directories, not the bounded
+        #     branch case -- relying on host-level aging to bound an
+        #     unbounded-by-PR-count population is exactly what "must not
+        #     rely on host-level time-based cleanup" rules out. So PR runs
+        #     are marked ephemeral and self-cleaned below immediately,
+        #     rather than left to expire on the host's clock.
+        #   - workflow_dispatch and reruns (`run_attempt != '1'`): also
+        #     marked ephemeral, mirroring build-push.yml's identical
+        #     carve-out -- a manual dispatch or a rerun is a one-off, not a
+        #     routine part of a ref's push cadence, so it gets its own
+        #     run_id-suffixed, self-cleaned directory instead of colliding
+        #     with (or permanently occupying) that ref's normal persistent
+        #     slot. This is unrelated to concurrency-race-safety (the
+        #     top-level `-publish` group already fully serializes these
+        #     events against each other) -- run_id here exists purely so
+        #     the directory is uniquely identifiable for the self-clean step
+        #     below, not to prevent a race.
+        id: trivy-cache-local
         run: |
           set -euo pipefail
-          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
+            exit 1
+          fi
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] \
+            || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
-      - name: Scan local build-tools image with Trivy
+      - name: Scan local build-tools amd64 image with Trivy
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE }}
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -270,42 +569,101 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools
+          cache-dir: ${{ steps.trivy-cache-local.outputs.dir }}
           timeout: 10m
           exit-code: "1"
 
-      - name: Note arm64 scan coverage deferral
+      - name: Remove ephemeral local Trivy cache
+        # PR/dispatch/rerun directories are cold-by-design (see the prepare
+        # step's own comment above) -- self-clean immediately instead of
+        # leaving an unbounded, one-per-PR population for host-level aging
+        # to eventually catch up on. `always()` so a failed or cancelled
+        # scan still cleans up: a later step in this same job failing must
+        # not skip this cleanup (the exact `always()` omission mistake found
+        # and fixed elsewhere tonight in build-push.yml's equivalent step).
+        # Fails closed on an unexpected path rather than trusting an
+        # interpolated step output blindly, same guard as build-push.yml's
+        # "Remove ephemeral Trivy cache" step.
+        if: ${{ always() && steps.trivy-cache-local.outputs.ephemeral == 'true' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache-local.outputs.dir }}
         run: |
           set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*)
+              rm -rf -- "$TRIVY_CACHE_DIR"
+              ;;
+            *)
+              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
 
-          echo "::notice::The build-tools workflow validates the amd64 scan image before publishing multi-architecture tags. Arm64 scan coverage is deferred for v0.1.0-alpha."
-
-      # Trusted refs publish only an immutable sha-* source tag first. Mutable
-      # branch/latest tags are promoted after the exact pushed digest has passed
-      # Trivy and provenance attestation.
-      - name: Build and push multi-architecture build-tools image
+      # Trusted refs publish only an immutable sha-*-amd64 source tag first.
+      # merge-build-tools-manifests combines this with build-tools-arm64's tag
+      # into the real sha-<commit> tag; mutable branch/latest tags are
+      # promoted only after that combined tag exists.
+      # #822: unlike build-push.yml's build/build-arm64 (fixed by #541), this
+      # publish step had ZERO retry -- a single bare docker/build-push-action
+      # attempt. Now shares the same ghcr-build-push-retry composite action
+      # (4 total attempts) build-push.yml uses, instead of staying an
+      # unguarded copy of the same push pattern.
+      - name: Build and push amd64 build-tools image
         id: build
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
-        timeout-minutes: 90
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 60
+        uses: ./.github/actions/ghcr-build-push-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ env.BUILD_TOOLS_PLATFORMS }}
+          # No index-level annotation set here on purpose (issue #620): a
+          # genuinely single-platform push with provenance disabled has no
+          # index to attach one to. Forcing OCI mediatypes is still required
+          # groundwork so merge-build-tools-manifests below has a real index
+          # to actually attach org.opencontainers.image.description to --
+          # same reasoning as build-push.yml's build/build-arm64 jobs.
+          outputs: type=image,oci-mediatypes=true
+          platforms: linux/amd64
           provenance: false
+          pull: true
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-to }}
 
       - name: Prepare pushed build-tools Trivy cache
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+        # Same fixed-shared-directory race and fix as "Prepare local Trivy
+        # cache" above -- see that step's comment for the full reasoning.
+        # This step's own `if:` already excludes pull_request (the pushed
+        # digest only exists on trusted-ref publish runs, since PRs never
+        # push to GHCR), so the PR arm of that reasoning does not apply
+        # here: only workflow_dispatch and reruns need the ephemeral,
+        # self-cleaned treatment. Ordinary push/schedule runs against
+        # master/v0.2.0 persist and reuse their directory exactly like the
+        # local-scan cache does.
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        id: trivy-cache-pushed
         run: |
           set -euo pipefail
-          mkdir -p /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
+            exit 1
+          fi
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
-      - name: Scan pushed build-tools digest with Trivy
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+      - name: Scan pushed amd64 build-tools digest with Trivy
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -317,44 +675,55 @@ jobs:
           skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
-          cache-dir: /var/tmp/lancache-ng-trivy-cache/build-tools-pushed
+          cache-dir: ${{ steps.trivy-cache-pushed.outputs.dir }}
           timeout: 10m
           exit-code: "1"
 
-      - name: Attest build-tools image provenance
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
-        with:
-          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-
-      - name: Promote build-tools mutable tags
-        if: github.event_name != 'pull_request' && steps.should-publish.outputs.should-publish == 'true'
+      - name: Remove ephemeral pushed Trivy cache
+        # Same self-clean reasoning as "Remove ephemeral local Trivy cache"
+        # above. `always()` so a failed pushed-digest scan still cleans up;
+        # when the prepare step above was skipped (pull_request, or
+        # should-publish false) its output is empty and this step correctly
+        # skips too.
+        if: ${{ always() && steps.trivy-cache-pushed.outputs.ephemeral == 'true' }}
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          PUSHED_DIGEST: ${{ steps.build.outputs.digest }}
-          REF_NAME: ${{ github.ref_name }}
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache-pushed.outputs.dir }}
         run: |
           set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*)
+              rm -rf -- "$TRIVY_CACHE_DIR"
+              ;;
+            *)
+              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
+              exit 1
+              ;;
+          esac
 
-          source_image="${BUILD_TOOLS_IMAGE}@${PUSHED_DIGEST}"
-          branch_tag="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
-          if [ -z "$branch_tag" ]; then
-            echo "::error::Could not derive a safe mutable build-tools branch tag from '$REF_NAME'."
-            exit 1
-          fi
+      - name: Attest amd64 build-tools image provenance
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
 
-          docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_image"
-          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_image"
-          fi
-
+      # `always()` so a later, unrelated step failing (e.g. a Trivy finding)
+      # doesn't throw away cache from a build that itself succeeded --
+      # the cache's own validity only depends on local-build-amd64, not on
+      # anything downstream of it. `steps.build` only runs at all on
+      # non-pull_request (see its own `if:` above), so gating on its outcome
+      # unconditionally would make this step never rotate on pull_request
+      # runs even though those runs did real, cacheable compilation via
+      # local-build-amd64 -- the `github.event_name == 'pull_request'` arm
+      # accepts that local build's own cache instead of requiring a `build`
+      # step outcome that pull_request never produces.
       - name: Rotate local Buildx cache
         if: >-
           ${{
             always() &&
-            steps.local-build.outcome == 'success' &&
+            steps.local-build-amd64.outcome == 'success' &&
             (
               github.event_name == 'pull_request' ||
               steps.build.outcome == 'success'
@@ -370,8 +739,8 @@ jobs:
             exit 0
           fi
 
-          cache_dir="$BUILDX_CACHE_ROOT/build-tools"
-          lock_file="$BUILDX_CACHE_ROOT/build-tools.lock"
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools-amd64"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools-amd64.lock"
 
           mkdir -p "$BUILDX_CACHE_ROOT"
           (
@@ -382,4 +751,406 @@ jobs:
 
       - name: Remove local scan image
         if: always()
-        run: docker rmi "${BUILD_TOOLS_SCAN_IMAGE}" || true
+        run: |
+          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
+
+  build-tools-arm64:
+    # Native linux/arm64 leg, same rationale as build-push.yml's build-arm64
+    # (added by #592): a GitHub-hosted arm64 runner instead of QEMU on the
+    # self-hosted amd64 pool. Runs independently of build-tools above (no
+    # `needs:` between them, mirroring build/build-arm64's parallel
+    # structure) -- only merge-build-tools-manifests below needs both.
+    # This runner is outside the self-hosted LAN and cannot reach the local
+    # Buildx cache volume, so it uses the GitHub Actions cache backend
+    # (type=gha) instead, same as build-push.yml's build-arm64.
+    name: build arm64 build-tools image (native)
+    needs: determine-publish-scope
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        # Issue #930: retried via .github/actions/buildx-setup-retry -- this
+        # GitHub-hosted arm64 runner is a fresh VM every run and has hit
+        # Docker Hub's anonymous-pull rate limit (surfacing as
+        # "unauthorized: authentication required") while bootstrapping
+        # moby/buildkit:buildx-stable-1. Confirmed transient in build-push.yml's
+        # equivalent build-arm64 job: a rerun with zero code changes
+        # succeeded. build-tools above (self-hosted amd64) keeps the plain,
+        # unretried action -- it persists its local Buildx cache/image pulls
+        # across runs and has never shown this symptom.
+        id: buildx
+        uses: ./.github/actions/buildx-setup-retry
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.BUILD_TOOLS_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short,suffix=-standalone-arm64
+
+      - name: Compute immutable pushed source tag
+        id: source-tag
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build local arm64 scan image
+        id: local-build-arm64
+        timeout-minutes: 60
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          load: true
+          pull: true
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          platforms: linux/arm64
+          provenance: false
+          cache-from: type=gha,scope=build-tools-arm64
+          cache-to: type=gha,scope=build-tools-arm64,mode=max
+
+      # Same tool list and same AG-VAL-017 rationale as build-tools's own
+      # identically-named step above -- kept as two copies rather than one
+      # shared step because this job runs on a separate GitHub-hosted
+      # runner with no access to that job's local image/cache.
+      - name: Smoke-test acceleration-infrastructure tools
+        run: |
+          set -euo pipefail
+
+          docker run --rm --platform linux/arm64 "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}" bash -c '
+          set -euo pipefail
+
+          required_tools=(
+            actionlint
+            bash
+            bats
+            cargo
+            cargo-audit
+            cargo-tarpaulin
+            clippy-driver
+            dig
+            distcc
+            distcc-pump
+            docker
+            envsubst
+            jq
+            rustc
+            rustfmt
+            sccache
+            shellspec
+            shellcheck
+          )
+
+          for tool in "${required_tools[@]}"; do
+            command -v "$tool" >/dev/null
+          done
+
+          cargo --version
+          cargo audit --version
+          cargo-audit --version
+          cargo tarpaulin --version
+          cargo-tarpaulin --version
+          sccache --version
+          actionlint --version
+          bats --version
+          shellspec --version
+          shellcheck --version
+          distcc --version
+          distcc-pump --help >/dev/null
+          docker --version
+          docker compose version
+          '
+
+      - name: Scan local build-tools arm64 image with Trivy
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      # #822: same shared retry wrapper as build-tools's amd64 leg -- see that
+      # step's comment.
+      - name: Build and push arm64 build-tools image
+        id: build
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 60
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          push: true
+          tags: ${{ steps.source-tag.outputs.image }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # See build-tools's equivalent step for why there is no index-level
+          # annotation here and why outputs: oci-mediatypes=true is still
+          # required groundwork for issue #620.
+          outputs: type=image,oci-mediatypes=true
+          platforms: linux/arm64
+          provenance: false
+          pull: true
+          cache-from: type=gha,scope=build-tools-arm64
+          cache-to: type=gha,scope=build-tools-arm64,mode=max
+
+      - name: Scan pushed arm64 build-tools digest with Trivy
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Attest arm64 build-tools image provenance
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Remove local scan image
+        if: always()
+        run: |
+          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
+
+  merge-build-tools-manifests:
+    # Combines build-tools's linux/amd64 tag with build-tools-arm64's
+    # linux/arm64 tag into the real sha-<commit> multi-platform tag that
+    # scripts/select-build-tools-image.sh and setup.sh consume -- same
+    # imagetools create pattern as build-push.yml's merge-manifests, no image
+    # is rebuilt here, only a manifest list assembled from two already-pushed
+    # digests.
+    name: merge build-tools multi-platform manifest
+    needs: [determine-publish-scope, build-tools, build-tools-arm64]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs['build-tools'].result == 'success' &&
+        needs['build-tools-arm64'].result == 'success' &&
+        github.event_name != 'pull_request' &&
+        needs['determine-publish-scope'].outputs.should-publish == 'true'
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # A job-level permissions block replaces the workflow-level default
+    # above entirely rather than merging with it, so artifact-metadata:
+    # write has to be repeated here too -- omitting it left this job with
+    # only `none` for that scope, same as build-push.yml's own
+    # attest-performing jobs already carry both scopes together.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-platform manifest
+        id: merge
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          short_sha="${GITHUB_SHA::7}"
+          amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-amd64"
+          arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-arm64"
+          source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"
+
+          # Same description text as build-push.yml's own build-tools
+          # matrix.description entry -- kept in sync manually, not sourced
+          # from one shared place, same reasoning as that file's
+          # merge-manifests job. This is where the index-level
+          # org.opencontainers.image.description annotation actually gets
+          # attached (issue #620): the per-platform build-tools/
+          # build-tools-arm64 jobs above stay unannotated on purpose (see
+          # their "Build and push" step comments), and "Promote mutable
+          # tags" below carbon-copies this index annotation forward
+          # untouched rather than re-declaring it, same pattern as
+          # build-push.yml's promote job.
+          build_tools_description="Prebuilt lancache-ng CI and developer validation toolchain image."
+
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create -t "$source_tag" "$amd64_image" "$arm64_image" \
+            --annotation "index:org.opencontainers.image.description=${build_tools_description}"
+
+          printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
+
+      # Mirrors the guard build-push.yml's own merge-manifests job runs via
+      # scripts/require-image-platforms.sh: a manual `imagetools create` can
+      # still produce a tag missing a required platform if either staging tag
+      # silently resolved to the wrong architecture, and that would only
+      # surface later as a confusing per-runner-class failure downstream.
+      - name: Verify merged manifest exposes both platforms
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
+
+      - name: Resolve merged manifest digest
+        id: merged-digest
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "${{ steps.merge.outputs.source-tag }}" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"
+          digest="${digest#\"}"
+          if [[ -z "$digest" || "$digest" = "null" ]]; then
+            echo "::error::Could not read digest for merged manifest ${{ steps.merge.outputs.source-tag }}."
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      # The per-platform digests were each attested in build-tools/
+      # build-tools-arm64, but the merged sha-<commit> manifest this creates
+      # is a distinct digest -- and it's the one build-tools:latest and every
+      # other mutable/branch tag actually points at, so it needs its own
+      # attestation before anything is promoted to it.
+      - name: Attest merged build-tools manifest provenance
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.merged-digest.outputs.digest }}
+
+      - name: Promote mutable tags
+        # Promotes from the digest resolved and attested by the two steps
+        # above (merged-digest / "Attest merged build-tools manifest
+        # provenance"), not from the mutable $SOURCE_TAG
+        # (sha-<short_sha>) tag itself: build-push.yml's own merge-manifests
+        # job writes that exact same ghcr.io/<repo>/build-tools:sha-<short_sha>
+        # tag for the same commit whenever its build/build-arm64 matrix
+        # includes a build-tools leg. If that write lands between this job's
+        # attestation and this promotion step, reading the mutable tag here
+        # could carbon-copy a manifest this job never verified onto the
+        # branch/latest tags. Pinning to the digest this job itself just
+        # attested closes that window regardless of what else touches the
+        # mutable tag afterward.
+        #
+        # Neither imagetools create below passes --annotation. The digest
+        # already carries the org.opencontainers.image.description index
+        # annotation from the merge step above, and a plain
+        # --prefer-index=false carbon copy of an already-annotated OCI index
+        # preserves that annotation and produces a byte-identical digest to
+        # the source -- confirmed live while fixing issue #620 (same
+        # reasoning as build-push.yml's promote job).
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
+          MERGED_DIGEST: ${{ steps.merged-digest.outputs.digest }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          if [ -z "$sanitized_ref" ]; then
+            echo "::error::Could not derive a safe mutable build-tools branch tag from '$REF_NAME'."
+            exit 1
+          fi
+
+          # Always "-tc"-suffixed ("test candidate"), never the bare
+          # sanitized ref name: this job runs for whichever ref triggered
+          # the workflow, and this repo already has a branch literally
+          # named "v0.2.0" (the long-lived integration branch touched on
+          # every patch/hotfix). A bare branch tag from that branch would
+          # publish ghcr.io/<repo>/build-tools:v0.2.0 -- the exact same tag
+          # string build-push.yml's own promote job writes as the real,
+          # immutable vX.Y.Z stable-release tag for this same GHCR package
+          # the moment that version is actually tagged
+          # (release/stack-images.yml declares that tag `mutable: false`),
+          # silently overwriting it on the next
+          # tools/build-tools/**-touching commit. None of this project's
+          # real release-channel tags for build-tools (`edge`, `dev`,
+          # `latest`, `vX.Y.Z`, `vX.Y.Z-rc.N` -- see build-push.yml's
+          # promote job) end with "-tc", so suffixing every branch-triggered
+          # tag this way is collision-proof by construction against the
+          # whole channel-tag shape, not just today's `v0.2.0` branch name.
+          # A "-dev" suffix was considered and rejected: `dev` is already a
+          # real, standalone channel tag written by build-push.yml's promote
+          # job (release/stack-images.yml's `dev` channel), so appending
+          # "-dev" here would create a second, different thing that also
+          # reads as "dev"-something and could be mistaken for that real
+          # channel. An "-rc" suffix was rejected for the same reason:
+          # `vX.Y.Z-rc.N` is already this project's real, reserved release-
+          # candidate tag shape (release/stack-images.yml's
+          # `release_candidate` channel), so reusing "-rc" here would make a
+          # branch-triggered ad-hoc build look like an actual release
+          # candidate. "-tc" doesn't collide with any of this project's
+          # reserved tag shapes. build-push.yml's "Validate compose files"
+          # step asserts this derivation can never emit a release-shaped
+          # tag, so this can't silently regress.
+          branch_tag="${sanitized_ref}-tc"
+
+          source_ref="${BUILD_TOOLS_IMAGE}@${MERGED_DIGEST}"
+
+          # Deliberately one line each (no backslash continuation): the
+          # validate-compose contract job in build-push.yml extracts this
+          # step's derivation logic verbatim by scanning up to (but not
+          # including) the first line containing "docker buildx imagetools
+          # create" -- a continued line here would splice into whatever that
+          # extraction appends next. See that job's own comment.
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
+          fi

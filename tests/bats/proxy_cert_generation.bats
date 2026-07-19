@@ -345,10 +345,6 @@ teardown() {
 # this is the regression case for a serial file that gets truncated,
 # corrupted, or replaced instead of updated in place.
 @test "serial file survives multiple certificate generations" {
-    local domain1="domain1.example.com"
-    local domain2="domain2.example.com"
-    local domain3="domain3.example.com"
-
     # Generate three certificates
     for i in 1 2 3; do
         domain="domain${i}.example.com"
@@ -428,4 +424,116 @@ teardown() {
 
     # Check that no orphaned CSR files remain
     [ ! -f "/tmp/lancache-cert.csr" ]
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# Regression tests for #655
+#
+# Two latent bugs, both originally flagged in the PR #172/#173 reviews and
+# re-verified still present on v0.2.0 before this fix:
+#   1. _default_cert_needs_regen's IP SAN check used an unanchored substring
+#      match, so a migrated IP_SSL could still "match" a longer stale IP.
+#   2. _sign_cert only removed the CSR temp file on a failed sign, leaving
+#      the private key (and any partially-written $crt) behind on disk.
+# ────────────────────────────────────────────────────────────────────────────
+
+# _sign_cert's key-generation step (`openssl req`) always writes $key before
+# the later `openssl x509` signing step can fail, so any signing failure
+# necessarily leaves an orphaned private key unless _sign_cert cleans it up
+# itself. This forces that second step to fail (an unwritable $crt path)
+# while leaving the first step's inputs otherwise valid, so the failure is
+# specifically in signing, not key/CSR generation.
+@test "signing failure cleans up the orphaned private key, not just the CSR" {
+    local domain="sign-fail.example.com"
+    local key="$test_cert_dir/${domain}.key"
+    # A directory can never be openssl's -out target, forcing the sign step
+    # (not the earlier req/CSR step) to fail.
+    local crt="$test_cert_dir/${domain}.crt.d"
+    mkdir -p "$crt"
+
+    run _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain}"
+
+    [ "$status" -ne 0 ]
+    # Before the #655 fix, the key from the successful `openssl req` step
+    # would still be sitting on disk here even though signing failed.
+    [ ! -f "$key" ]
+    [ ! -f "/tmp/lancache-cert.csr" ]
+
+    rmdir "$crt"
+}
+
+# Same failure path as above, but for a partially-written $crt rather than
+# the key: pre-seed $crt with leftover bytes from a hypothetically
+# interrupted prior write, then force the sign step to fail, and check the
+# partial file doesn't survive as a false "certificate exists" signal for
+# whatever next reads it.
+@test "signing failure removes a partially-written crt output file" {
+    local domain="partial-crt.example.com"
+    local key="$test_cert_dir/${domain}.key"
+    local crt="$test_cert_dir/${domain}.crt"
+    printf 'partial garbage from an interrupted write' > "$crt"
+
+    # An invalid CN (over OpenSSL's 64-byte ASN.1 string limit, per the
+    # "generation fails gracefully" test above) fails at the CSR step, not
+    # the sign step, so it can't exercise this path. Instead, force the sign
+    # step itself to fail by pointing -CA at a CA file that doesn't exist,
+    # which openssl x509 rejects only once it actually attempts to sign.
+    CA_DIR="$BATS_TEST_TMPDIR/missing-ca-dir"
+    run _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain}"
+
+    [ "$status" -ne 0 ]
+    [ ! -f "$crt" ]
+    [ ! -f "/tmp/lancache-cert.csr" ]
+}
+
+# Reproduces #655's exact scenario: IP_SSL migrates from 192.168.1.11 to
+# 192.168.1.1, a prefix of the old address. An unanchored
+# `grep -q "IP Address:${IP_SSL}"` still finds the old, longer IP inside the
+# stale SAN and wrongly reports "no regen needed", so a client connecting to
+# the new IP would keep getting served a cert without that IP in its SAN.
+@test "default cert needs regen when IP_SSL is a prefix of the stale SAN IP" {
+    local domain="lancache-default"
+    local key="$test_cert_dir/default.key"
+    local crt="$test_cert_dir/default.crt"
+
+    IP_SSL="192.168.1.11"
+    _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain},IP:${IP_SSL}"
+
+    # Operator migrates to a shorter IP that is a textual prefix of the old one.
+    IP_SSL="192.168.1.1"
+    run _default_cert_needs_regen
+    [ "$status" -eq 0 ]
+}
+
+# Inverse of the above: once the cert is actually regenerated for the new
+# IP, _default_cert_needs_regen must recognize the exact match and report
+# "no regen needed" -- otherwise the anchoring fix would just be trading a
+# false negative for a false positive that regenerates on every start.
+@test "default cert does not need regen when SAN IP exactly matches IP_SSL" {
+    local domain="lancache-default"
+    local key="$test_cert_dir/default.key"
+    local crt="$test_cert_dir/default.crt"
+
+    IP_SSL="192.168.1.1"
+    _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain},IP:${IP_SSL}"
+
+    run _default_cert_needs_regen
+    [ "$status" -eq 1 ]
+}
+
+# A cert whose SAN doesn't contain the new IP_SSL at all (not even as a
+# prefix/substring collision) must also be flagged for regen -- this is the
+# baseline "obviously different IP" case the anchoring fix must not break
+# while fixing the more subtle prefix-collision case above.
+@test "default cert needs regen when SAN IP is unrelated to IP_SSL" {
+    local domain="lancache-default"
+    local key="$test_cert_dir/default.key"
+    local crt="$test_cert_dir/default.crt"
+
+    IP_SSL="10.0.0.5"
+    _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain},IP:${IP_SSL}"
+
+    IP_SSL="192.168.1.1"
+    run _default_cert_needs_regen
+    [ "$status" -eq 0 ]
 }

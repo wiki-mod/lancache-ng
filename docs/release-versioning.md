@@ -44,10 +44,22 @@ must stay consistent with that file.
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
 | `latest` | Latest stable release only | Mutable | Default stable install path |
+| `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stack:stable` GHCR tag exists -- `stable` and `latest` resolve to the identical pointer image |
 
 `latest` must not be moved by a normal `master` build. The `master` branch
 publishes `edge` after the required checks pass. Stable release tags publish the
-matching `vX.Y.Z` tag and may move `latest` to the same digest.
+matching `vX.Y.Z` tag and may move `latest` (and, being the same pointer,
+`stable`) to the same digest.
+
+`setup.sh`'s interactive install flow offers exactly two operator-facing
+channel names: `stable` (default) and `edge`, each with an inline explanation
+of what it means. `stable` is not a new GHCR tag -- `resolve_lancache_stack_channel_tag`
+maps it onto the existing `latest` pointer before pulling, so introducing it
+required no change to the promotion/release pipeline. `dev` and `pinned`
+remain valid `LANCACHE_IMAGE_CHANNEL` values (env var / `.env`, or the
+secondary-node registration flow) but are not offered by the interactive
+picker -- `dev` is an internal maintainer-triggered channel (see below), not an
+end-user choice.
 
 `dev` publishes automatically on every push to a branch matching `vX.Y.Z`
 (not a hardcoded branch name, so this keeps working as the active
@@ -91,8 +103,11 @@ the install contract.
 
 Default behavior:
 
-- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=latest`
-- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`
+- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=stable` (written by
+  `setup.sh`'s interactive picker); `LANCACHE_IMAGE_CHANNEL=latest` remains
+  valid and resolves identically for existing installs and manual overrides
+- edge installs must explicitly set `LANCACHE_IMAGE_CHANNEL=edge`, or choose
+  `edge` at `setup.sh`'s interactive channel prompt
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`
@@ -122,6 +137,46 @@ LANCACHE_IMAGE_TAG=sha-<commit>
 They exist so operators can later point the stack at a private mirror without
 editing every compose file.
 
+## Automated Patch (Z) Tagging
+
+The `promote` job in `build-push.yml` computes and cuts patch releases
+automatically; it does not wait for a maintainer to push a `vX.Y.Z` tag by
+hand for ordinary image-affecting changes.
+
+On every push to the release-bearing branch (`master`), after the existing
+channel-tag promotion and its `#777` debounce/coalesce check both succeed,
+`promote` additionally:
+
+1. resolves the current release with `git describe --tags --match
+   'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0`;
+2. classifies every change since that tag's commit with
+   `scripts/classify-image-impact.sh` -- the same classifier `detect-changes`
+   uses, not a second copy;
+3. if that diff is image-affecting (`IMAGE_IMPACT=true`), computes the next
+   patch version with `scripts/compute-next-release-tag.sh` and pushes an
+   annotated `vX.Y.Z` tag using the `PROJECT_AUTOMATION_PAT` secret;
+4. otherwise cuts nothing and moves on.
+
+Diffing from the last release's own commit (not "the previous push") means a
+burst of several merges landing on `master` between two `promote` runs still
+produces exactly one patch bump reflecting the whole burst, matching the
+`#777` debounce this step runs after.
+
+The tag is pushed with `PROJECT_AUTOMATION_PAT`, not `GITHUB_TOKEN`, because
+GitHub does not re-trigger workflow runs for tags pushed by the default
+`GITHUB_TOKEN` (a documented anti-recursion behavior). Pushing with a PAT
+means the tag genuinely re-triggers `build-push.yml` on `refs/tags/v*`, so the
+existing tag-triggered `release` job (GitHub release, `latest` move) runs
+exactly as it does for a manually pushed tag -- this step never performs the
+release itself, only cuts and pushes the tag.
+
+Minor (`X`) and major (`Y`) bumps stay a deliberate, manual maintainer tag
+push; nothing in this mechanism ever chooses to bump past a patch on its own.
+
+This mechanism requires at least one real `vX.Y.Z` tag to already exist as its
+starting point. Until that first tag is bootstrapped, the step is a documented
+no-op (`::notice::`, not a failure) rather than guessing a starting version.
+
 ## Release Candidates
 
 Tags matching `vX.Y.Z-rc.N` are release candidates. They must create or update a
@@ -135,13 +190,20 @@ release gate.
 
 ## Platform Support
 
-The current supported prebuilt production platform is `linux/amd64`.
-`release/stack-images.yml`, the build workflow, and `setup.sh` must agree on
-that platform. Until the project deliberately enables another platform, setup
-fails closed on non-amd64 hosts before pulling prebuilt production images.
+The currently supported prebuilt production platforms are `linux/amd64` and
+`linux/arm64`. `release/stack-images.yml`, the build workflow, and `setup.sh`
+must agree on that platform list. `setup.sh` fails closed before pulling
+prebuilt production images if either:
 
-Adding `linux/arm64` or another platform requires updating the manifest, build
-workflow, setup platform guard, release notes, and validation together.
+- the host architecture is not one setup.sh recognizes (only x86_64/amd64 and
+  aarch64/arm64 are supported), or
+- the specific tag/channel this install resolved to does not actually publish
+  a manifest for this host's architecture (checked via `docker buildx
+  imagetools inspect`, mirroring `scripts/require-image-platforms.sh`'s
+  release/promotion guard).
+
+Adding another platform beyond amd64/arm64 requires updating the manifest,
+build workflow, setup platform guards, release notes, and validation together.
 
 ## External Images
 

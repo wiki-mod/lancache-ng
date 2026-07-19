@@ -100,7 +100,14 @@ runs:
             return 0
           fi
 
-          grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$output_file"
+          # "sccache: Job failed on server ..." covers sccache-dist remote-build
+          # failures (e.g. a dist server's sandbox rejecting the build, as seen
+          # with a bwrap mount-namespace error on one compile-farm host) that
+          # cc-rs surfaces as a generic ToolExecError/exit-254 with no other
+          # sccache-recognizable string, and which the prior pattern missed
+          # entirely (issue #783: 4 identical failures on one PR never
+          # triggered this fallback because none of them matched).
+          grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_|sccache: Job failed on server' "$output_file"
         }
 
         output_file="$(mktemp)"

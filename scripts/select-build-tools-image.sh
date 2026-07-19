@@ -6,14 +6,49 @@
 # refs (pushes, or same-repo pull requests) — untrusted forked pull requests
 # never trigger a fallback build. Prints the chosen image reference on stdout.
 #
-# IMPORTANT: This script resolves mutable `:latest` tags to their immutable
-# digest-qualified references before returning. Do not call this script
-# expecting a mutable tag in the output; the returned reference is always
-# pinned to a digest or a branch-local validation image.
+# IMPORTANT: This script resolves the mutable channel tag it selects (`:dev`
+# or `:edge`, see channel_ref below) to its immutable digest-qualified
+# reference before returning. Do not call this script expecting a mutable tag
+# in the output; the returned reference is always pinned to a digest or a
+# branch-local validation image.
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$script_dir/lib/ghcr-retry.sh"
+
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
-published_image="ghcr.io/${repository}/build-tools:latest"
+
+# Resolves to the mutable channel tag build-push.yml's own promote job would
+# have just written for this exact ref, instead of hardcoding `:latest`.
+# `:latest` only moves on a stable vX.Y.Z release tag (release/stack-
+# images.yml) -- and this project has not cut one yet (see
+# full-setup-validate.yml's own image_tag comment) -- so it can sit stale for
+# weeks while `:dev` (written on every push to a v[0-9]* integration branch
+# such as v0.2.0) and `:edge` (written on every push to master) stay current.
+# Confirmed directly during issue #775's investigation: `:latest` was still
+# pinned to a build predating the Dockerfile's dhclient/expect additions
+# while `:dev` already had them, which is exactly why a job asking for
+# `BUILD_TOOLS_REQUIRE_PUBLISHED=true` kept silently getting a stale image.
+# GITHUB_BASE_REF (set only for pull_request events, to the PR's target
+# branch) takes priority over GITHUB_REF_NAME so a PR opened from a feature
+# branch still resolves against what it will actually merge into, not the
+# feature branch's own name.
+channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
+case "$channel_ref" in
+  master)
+    build_tools_channel="edge"
+    ;;
+  *)
+    # Every other ref this script is realistically invoked against --
+    # v0.2.0 itself, or a feature/claude/* branch forked from it without an
+    # open PR yet (e.g. a manual workflow_dispatch run) -- is v0.2.0-line
+    # work, so `dev` (the channel v0.2.0 pushes actually promote) is the
+    # correct default rather than the stable-only `latest`.
+    build_tools_channel="dev"
+    ;;
+esac
+published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 event_name="${GITHUB_EVENT_NAME:-${EVENT_NAME:-}}"
@@ -33,9 +68,9 @@ fail() {
 }
 
 # smoke_test_image verifies the provided image contains all required CI tools (cargo,
-# rustc, distcc, docker, etc.) before it is trusted. The published :latest tag is
-# mutable and could become stale, broken, or missing tools between publication and use,
-# so explicit verification is preferable to assuming the tag is current and valid.
+# rustc, distcc, docker, etc.) before it is trusted. The published channel tag (:dev or
+# :edge) is mutable and could become stale, broken, or missing tools between publication
+# and use, so explicit verification is preferable to assuming the tag is current and valid.
 smoke_test_image() {
   local image="$1"
 
@@ -57,6 +92,8 @@ smoke_test_image() {
       cargo-audit
       shellcheck
       actionlint
+      bats
+      shellspec
       distcc
       distcc-pump
       docker
@@ -66,6 +103,9 @@ smoke_test_image() {
       openssl
       rsync
       envsubst
+      dhclient
+      expect
+      tcpdump
     )
 
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
@@ -79,12 +119,41 @@ smoke_test_image() {
 
     docker --version >/dev/null
     docker compose version >/dev/null
+    # docker buildx is verified here now (issue #791). It was deliberately
+    # deferred while #789 first added buildx to tools/build-tools/Dockerfile,
+    # because this strict path (BUILD_TOOLS_REQUIRE_PUBLISHED callers have no
+    # local-build fallback -- see the strict-mode branch below) trusts the
+    # already-published :dev/:edge image, which could not contain buildx
+    # until after #789 merged and republished it. That has since happened, so
+    # gating on it now no longer creates the chicken-and-egg failure #791
+    # documents. The setup.sh assert_resolved_image_tag_platform_supported
+    # check hard-requires buildx (issue #787), so a published image silently
+    # missing it must fail this smoke test rather than surface deeper.
+    # (No apostrophes in these comments: this whole block is a single-quoted
+    # bash -lc argument, so a stray quote would terminate it -- see #833.)
+    docker buildx version >/dev/null
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
+    # bats and shellspec are the two test-runner tools real consumer suites
+    # depend on (tests/bats/*.bats via `bats tests/bats`; tests/shellspec via
+    # shellspec). #790: the smoke test asserted neither, even though both are
+    # installed and build-time-verified in tools/build-tools/Dockerfile --
+    # exactly the derive-not-from-real-requirements drift #822 Pattern G
+    # names. scripts/check-build-tools-smoke-coverage.sh now guards against
+    # this list drifting from the Dockerfile verification list again.
+    bats --version >/dev/null
+    shellspec --version >/dev/null
     cargo-audit --version >/dev/null
     sccache --version >/dev/null
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
+    expect -v >/dev/null
+
+    # python3-scapy has no standalone binary worth checking via command -v
+    # (see tools/build-tools/Dockerfile'\''s own verification step for the
+    # same caveat) -- verify the importable module scripts/dhcp-proxy-pxe-
+    # simulation.sh actually depends on instead.
+    python3 -c "import scapy.all"
   '
 }
 
@@ -118,7 +187,12 @@ fi
 # image or fail outright — no silent fallback to a branch-local build. This is the right
 # trade-off for jobs where an unvalidated fallback image would be worse than a hard failure.
 if [[ "$require_published" = "true" ]]; then
-  if docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
+  # #822: strict mode has no fallback below (a failed pull here hard-fails
+  # the whole caller job), so this pull is the highest-value retry candidate
+  # in this script. GHCR_RETRY_USERNAME/PASSWORD are optional -- most of this
+  # script's many callers don't set them, and ghcr_retry still backs off and
+  # retries without them, just without a fresh relogin between attempts.
+  if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
     exit 0
   fi
@@ -140,7 +214,7 @@ if [[ "$event_name" != "pull_request" ]]; then
   exit 0
 fi
 
-if docker pull "$published_image" >"$pull_log" 2>&1; then
+if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1; then
   if smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
     exit 0
