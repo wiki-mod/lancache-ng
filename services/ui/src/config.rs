@@ -1837,8 +1837,10 @@ mod tests {
 
         // Test unknown tags default to "latest" to maintain compatibility
         // with image registries that may introduce new tag formats in the future.
+        // ("nightly" is intentionally NOT here anymore -- it is a recognized
+        // channel now, asserted above; before #1056 it was an unknown tag that
+        // fell through to "latest".)
         assert_eq!(derive_lancache_image_channel("custom-tag"), "latest");
-        assert_eq!(derive_lancache_image_channel("nightly"), "latest");
         assert_eq!(derive_lancache_image_channel("main"), "latest");
     }
 
