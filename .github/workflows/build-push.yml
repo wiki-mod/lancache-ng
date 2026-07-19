@@ -223,6 +223,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
+          # Dependabot's own PR author identity -- see
+          # validate-pr-template.sh's dependabot[bot] exemption.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           # Temporary diagnostics (2026-07-16): this fetch has failed to
@@ -263,6 +266,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
+          # Dependabot's own PR author identity -- see
+          # validate-pr-template.sh's dependabot[bot] exemption.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
@@ -331,6 +337,9 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          # Dependabot's own PR author identity -- see
+          # check-pr-tracking-metadata.sh's dependabot[bot] exemption.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           # PR_LABELS_JSON now names a live-fetched file (mounted below),
@@ -349,6 +358,7 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
+            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
