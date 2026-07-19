@@ -6503,7 +6503,13 @@ jobs:
             echo "::notice::No vX.Y.Z release tag exists yet on this history; skipping automated patch tagging until the first release tag is bootstrapped (see #819 Point 4)."
             exit 0
           fi
-          base_commit="$(git rev-list -n1 "$base_tag")"
+          # Qualified as refs/tags/ explicitly (#1054): this repo has both a
+          # branch and a tag named identically for a version like v0.2.0 (the
+          # long-lived integration branch vs. the release cut from it), so a
+          # bare ref lookup here is genuinely ambiguous, not just
+          # theoretically so -- confirmed live via a "refname ... is
+          # ambiguous" warning on this exact line.
+          base_commit="$(git rev-list -n1 "refs/tags/$base_tag")"
 
           # Reuse the SAME classifier detect-changes and the earlier channel
           # promotion above both rely on (#819 Point 1: do not invent a
@@ -6547,6 +6553,13 @@ jobs:
             exit 0
           fi
 
+          # An annotated tag (-a) requires a committer identity, which this
+          # self-hosted runner has no default for (#1054: confirmed live,
+          # "Committer identity unknown" / "empty ident name"). Same bot
+          # identity this file already uses for its other automated commit
+          # (the publish_coverage_badge job).
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$next_tag" "$COMMIT_SHA" -m "Automated patch release ${next_tag}"
           # PROJECT_AUTOMATION_PAT (not secrets.GITHUB_TOKEN) authors this
           # push so the tag push actually re-triggers build-push.yml on
