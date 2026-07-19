@@ -16,7 +16,22 @@
 # Environment variables (for CI):
 #   PR_BODY         - PR body content (used if no file argument)
 #   PR_DRAFT        - "true" or "false" (if not set, defaults to non-draft enforcement)
+#   PR_AUTHOR       - github.event.pull_request.user.login; a literal
+#                     "dependabot[bot]" short-circuits this check entirely
+#                     (see the exemption below for why)
 set -euo pipefail
+
+# Dependabot only ever writes its own fixed dependency-bump description, and
+# has no way to fill in this repo's custom .github/pull_request_template.md
+# sections -- this check could never pass on one of its PRs regardless of
+# content. Exiting 0 here (an explicit pass) rather than skipping the whole
+# CI job keeps this a real reported success for the branch-protection
+# required-status-check gate, instead of relying on a skipped job being
+# treated as passing.
+if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+    echo "PR template validation skipped: PR authored by dependabot[bot], which cannot fill in this repo's custom template body."
+    exit 0
+fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
