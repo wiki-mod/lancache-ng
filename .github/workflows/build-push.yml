@@ -16,10 +16,10 @@ on:
         options: [none, dev, edge]
         default: none
   push:
-    branches: [master, "v[0-9]*"]
+    branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
   pull_request:
-    branches: [master, "v[0-9]*"]
+    branches: [master, current_dev, "v[0-9]*"]
     # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
     # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
     # the github.event.pull_request webhook snapshot for this run (see that job's
