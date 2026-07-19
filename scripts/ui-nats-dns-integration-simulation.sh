@@ -36,7 +36,7 @@ ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-image_tag="${LANCACHE_IMAGE_TAG:-edge}"
+image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 
 cleanup() {
     local status=$?

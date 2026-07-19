@@ -349,8 +349,9 @@ Compose. The interactive installer asks which channel to use, defaulting to
 - `stable` (default) is the channel promoted after the full release
   validation gate. `LANCACHE_IMAGE_CHANNEL=latest` is the same channel under
   its original name — both resolve to the identical published image.
-- `edge` is the most recently built, less tested pre-stable channel promoted
-  from `master`. Opt in only if you want the newest changes.
+- `nightly` is the most recently built, less tested pre-stable channel promoted
+  from `master` (built daily; renamed from `edge` in v0.3.0). Opt in only if you
+  want the newest changes.
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
@@ -360,7 +361,7 @@ Recommended for production:
 
 - Use `latest` for normal stable deployments.
 - Use a tagged release value (for example `v1.2.3`) for pinned deployments.
-- Use `edge`, branch tags, or `sha-*` tags only for temporary test environments
+- Use `nightly`, branch tags, or `sha-*` tags only for temporary test environments
   where intentional drift is acceptable.
 
 The release workflow publishes service images with branch, tag, and SHA tags and keeps release source notes in GitHub releases.
@@ -686,8 +687,8 @@ CACHE_MAX_GB=50
 # First-party service image selector.
 # stable is the channel promoted after the full release validation gate
 # (latest is the same channel under its original name -- both resolve
-# identically). Use edge only when you explicitly want the most recently
-# built, less tested pre-stable channel.
+# identically). Use nightly only when you explicitly want the most recently
+# built, less tested pre-stable channel (formerly called edge).
 # setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
 # Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
@@ -710,8 +711,9 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `stable` (default)
 and `latest` both mean the same released channel — `stable` is the friendlier
 name `setup.sh`'s interactive picker offers, `latest` is the original name and
-remains valid. Use `edge` only when you explicitly want the most recently
-built, less tested pre-stable channel. `setup.sh` resolves mutable channels
+remains valid. Use `nightly` only when you explicitly want the most recently
+built, less tested pre-stable channel (renamed from `edge` in v0.3.0).
+`setup.sh` resolves mutable channels
 through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG`
 that Docker Compose pulls. If you install from a tagged release archive or a
 checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned`

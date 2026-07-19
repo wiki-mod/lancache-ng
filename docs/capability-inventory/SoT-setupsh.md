@@ -84,9 +84,9 @@ after the dispatcher's `case` falls through (only `install|""` has no
 3. Install directory (`INSTALL_DIR`, default `/opt/lancache-ng`); copies
    quickstart compose assets (`install_quickstart_compose_assets`).
 4. Cache configuration: `CACHE_DIR`, cache size in GiB, `CACHE_MEM_MB`.
-5. Release channel: prompts `stable`/`edge` UNLESS `LANCACHE_IMAGE_CHANNEL` is
+5. Release channel: prompts `stable`/`nightly` UNLESS `LANCACHE_IMAGE_CHANNEL` is
    already set in the environment — that case is respected outright with no
-   prompt (documented non-interactive path: `LANCACHE_IMAGE_CHANNEL=edge
+   prompt (documented non-interactive path: `LANCACHE_IMAGE_CHANNEL=nightly
    ./setup.sh install`, and `scripts/setup-cli-simulation.sh`'s own
    `LANCACHE_IMAGE_CHANNEL=pinned` + explicit tag for CI's own just-built
    images — comment explicitly calls out both real callers).
@@ -152,10 +152,10 @@ CLI via `expect` end-to-end (fresh install, all prompts, waits for a healthy
 running stack, asserts `.env` contains the expected `IP_STANDARD`/
 `UI_AUTH_USER`). This is real CLI E2E coverage, not just an extracted
 function. `tests/bats/setup_dhcp_mode.bats`, `setup_image_platform_guard.bats`,
-`setup_quickstart_assets.bats`, `setup_channel_stable_edge.bats` cover
+`setup_quickstart_assets.bats`, `setup_channel_stable_nightly.bats` cover
 individual helpers this flow calls, at the function level (no `bash setup.sh`
 subprocess). The scheduled channel-install smoke check for the *published*
-channels (`dev`/`edge`) is a separate, currently open gap — see issue #785
+channels (`dev`/`nightly`) is a separate, currently open gap — see issue #785
 below (the per-PR gate now installs the PR's own pinned images, so ongoing
 channel-pointer-resolution health is no longer implicitly checked by every
 PR).
@@ -329,7 +329,7 @@ completes.
 Only two keys are ever pulled from the UI's settings file:
 `LANCACHE_IMAGE_CHANNEL` (validated by a narrower, silently-no-op-on-
 unexpected-value gate, `lancache_ui_channel_override_is_valid` — only
-`stable`/`edge`, deliberately narrower than `validate_lancache_image_channel`
+`stable`/`nightly`, deliberately narrower than `validate_lancache_image_channel`
 which `die()`s and would abort the whole systemd service run) and
 `AUTO_UPDATE_ENABLED` (`0`/`1`). If either differs from the current `.env`
 value, writes it via `set_env_key`, then unconditionally calls
@@ -741,7 +741,7 @@ its coverage claim is narrower than the file's actual test suite.
 
 | Subcommand | Real CLI E2E (`*-simulation.sh` / `expect`) | Function-level bats (real function, mocked I/O) | Text/regex-only test | No coverage found |
 |---|---|---|---|---|
-| `install` | ✅ `setup-cli-simulation.sh` Phase 1 | ✅ (dhcp_mode, image_platform_guard, quickstart_assets, channel_stable_edge) | — | — |
+| `install` | ✅ `setup-cli-simulation.sh` Phase 1 | ✅ (dhcp_mode, image_platform_guard, quickstart_assets, channel_stable_nightly) | — | — |
 | `update` | ✅ Phase 2, 2b, 3 | ✅ (env_migration, update_idempotence, nats_secondary_override) | — | — |
 | `auto-update` | — (only inherits `update`'s coverage via shared `perform_stack_update_flow`) | ✅ (`setup_auto_update_gate.bats`, pure gate function only) | — | partial — the `cmd_auto_update` wrapper itself |
 | `converge-reconcile` | — | ✅ (`setup_ui_channel_override.bats`, one helper only) | — | mostly — volume-read + systemd-sync + the command body |
@@ -785,7 +785,7 @@ its coverage claim is narrower than the file's actual test suite.
   produced AG-OP-006..013 and the Convergence/Idempotence Checklist this
   whole inventory cross-references.
 - **#785** (OPEN) — scheduled channel-install smoke check gap (published
-  `dev`/`edge` channel installability no longer implicitly checked by the
+  `dev`/`nightly` channel installability no longer implicitly checked by the
   per-PR gate).
 - **#843** (this umbrella issue) — project-wide capability inventory.
 

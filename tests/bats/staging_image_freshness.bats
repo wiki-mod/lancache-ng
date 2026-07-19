@@ -139,13 +139,13 @@ echo "<no value>"
 STUB
     chmod +x "$stub"
     export STAGING_IMAGE_REVISION_CMD="$stub"
-    run sif_image_revision "ghcr.io/x/dns:edge"
+    run sif_image_revision "ghcr.io/x/dns:nightly"
     [ "$status" -ne 0 ]
 }
 
 @test "sif_wait_for_fresh_base_image: already-fresh image resolves on the first poll" {
     revision_stub "$c3"
-    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:edge" "$c2" "dns" 900 5400 1
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "$c2" "dns" 900 5400 1
     [ "$status" -eq 0 ]
     printf '%s\n' "$output" | grep -q "Safe to back-fill from"
 }
@@ -160,7 +160,7 @@ STUB
     # `$output`, which would hide such a regression -- this test explicitly
     # separates the two streams instead.
     revision_stub "$c3"
-    stdout_only="$(sif_wait_for_fresh_base_image "ghcr.io/x/dns:edge" "$c2" "dns" 900 5400 1 2>/dev/null)"
+    stdout_only="$(sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "$c2" "dns" 900 5400 1 2>/dev/null)"
     [ "$stdout_only" = "$c3" ]
 }
 
@@ -183,7 +183,7 @@ fi
 STUB
     chmod +x "$stub"
     export STAGING_IMAGE_REVISION_CMD="$stub"
-    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:edge" "$c2" "dns" 900 5400 1
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "$c2" "dns" 900 5400 1
     [ "$status" -eq 0 ]
     printf '%s\n' "$output" | grep -q "predates base commit"
     printf '%s\n' "$output" | grep -q "Safe to back-fill from"
@@ -191,7 +191,7 @@ STUB
 
 @test "sif_wait_for_fresh_base_image: permanently stale fails closed at the hard ceiling" {
     revision_stub "$c1"
-    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:edge" "$c2" "dns" 1 2 1
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "$c2" "dns" 1 2 1
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q "never became fresh enough"
     printf '%s\n' "$output" | grep -q "#808"
@@ -217,7 +217,7 @@ STUB
     # resolve.
     revision_stub "$c3"
     start_epoch="$(date +%s)"
-    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:edge" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "dns" 1 100 1
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "dns" 1 100 1
     end_epoch="$(date +%s)"
     [ "$status" -eq 2 ]
     printf '%s\n' "$output" | grep -q "configuration bug, not staleness"
@@ -231,7 +231,7 @@ STUB
     # regular #808 message), NOT like the BASE_SHA-missing config-error case
     # above. Proves the two are not conflated in the wait loop.
     revision_stub "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:edge" "$c2" "dns" 1 2 1
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "$c2" "dns" 1 2 1
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q "never became fresh enough"
     printf '%s\n' "$output" | grep -q "recovery fetch"

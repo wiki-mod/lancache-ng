@@ -1886,7 +1886,7 @@ resume_lancache_convergence_after_failed_update() {
 }
 
 # Image selection is part of the release safety contract: mutable channels such
-# as latest/edge/dev must resolve to one immutable stack tag before the compose
+# as latest/nightly/dev must resolve to one immutable stack tag before the compose
 # pull, so one installation cannot accidentally mix image versions.
 validate_lancache_image_tag() {
     local tag="$1"
@@ -1926,14 +1926,23 @@ validate_lancache_image_tag() {
 # so existing installs' .env files and any external tooling/docs that already
 # say LANCACHE_IMAGE_CHANNEL=latest keep working unchanged. The two are
 # resolved identically; see resolve_lancache_stack_channel_tag below.
+#
+# "edge" was the OLD name of the "nightly" channel (renamed in v0.3.0, #1056).
+# It is a HARD CUT, not an alias: an install still carrying
+# LANCACHE_IMAGE_CHANNEL=edge is rejected with a clear, actionable error telling
+# the operator to switch to "nightly", rather than being silently accepted as a
+# synonym. This is an intentional v0.3.0 breaking change.
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
-        stable|latest|dev|edge|pinned)
+        stable|latest|dev|nightly|pinned)
             return 0
             ;;
+        edge)
+            die "LANCACHE_IMAGE_CHANNEL=edge is no longer supported: the 'edge' channel was renamed to 'nightly' in v0.3.0 (#1056). Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly and re-run setup.sh."
+            ;;
     esac
-    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, dev, edge, or pinned."
+    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, dev, nightly, or pinned."
 }
 
 # Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
@@ -2097,16 +2106,16 @@ resolve_lancache_image_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# Resolves which release channel (latest/dev/edge/pinned) this install should
+# Resolves which release channel (latest/dev/nightly/pinned) this install should
 # track, in this precedence order:
 #   1. An explicit LANCACHE_IMAGE_CHANNEL (shell env, then .env).
 #   2. If no channel was set but LANCACHE_IMAGE_TAG names a moving channel
-#      word (latest/dev/edge), infer that as the channel; if it names an
+#      word (latest/dev/nightly), infer that as the channel; if it names an
 #      immutable tag (sha-*/vX.Y.Z), infer channel=pinned.
 #   3. If still unresolved and this is a git checkout/release archive with a
 #      derivable release tag, infer channel=pinned so that exact release is used.
 #   4. Otherwise default to "latest" — deliberately the stable channel, never
-#      silently "edge" or "master", so a plain install never opts a production
+#      silently "nightly" or "master", so a plain install never opts a production
 #      host into a moving pre-release channel without saying so explicitly.
 # The result is always validated before being returned.
 resolve_lancache_image_channel() {
@@ -2121,7 +2130,7 @@ resolve_lancache_image_channel() {
     fi
 
     case "$tag" in
-        stable|latest|dev|edge)
+        stable|latest|dev|nightly)
             channel="${channel:-$tag}"
             ;;
         sha-*|v[0-9]*)
@@ -2139,7 +2148,7 @@ resolve_lancache_image_channel() {
     fi
 
     # Normal installs default to the stable channel. Untagged development or
-    # pre-stable testing must opt into edge explicitly so production users do
+    # pre-stable testing must opt into nightly explicitly so production users do
     # not drift onto a moving integration channel by accident. "latest", not
     # "stable", stays the hardcoded fallback here so an install with genuinely
     # nothing configured lands on the name that has existed the whole time
@@ -2157,6 +2166,11 @@ resolve_lancache_image_channel() {
 # other channel name passes through unchanged. Kept as its own tiny function
 # (rather than inlined where it's used) specifically so this one mapping can
 # be unit-tested with zero docker/tar involved.
+#
+# Note there is deliberately no "edge -> nightly" mapping here: the old "edge"
+# channel was hard-cut, not aliased, in v0.3.0 (#1056) -- an edge value is
+# rejected by validate_lancache_image_channel long before this function, so it
+# never reaches this pointer resolution.
 lancache_stack_pointer_channel_for() {
     local channel="$1"
     if [[ "$channel" = "stable" ]]; then
@@ -2166,14 +2180,14 @@ lancache_stack_pointer_channel_for() {
     fi
 }
 
-# Turns a mutable channel name (latest/dev/edge) into one immutable sha-* tag.
+# Turns a mutable channel name (latest/dev/nightly) into one immutable sha-* tag.
 # Channels are published as a tiny "stack:<channel>" pointer image whose only
 # content is a stack.env file naming the current immutable LANCACHE_IMAGE_TAG
 # for that channel; this pulls that pointer image, reads stack.env out of it
 # via `docker cp` + tar (no local container run needed), and validates the
 # extracted tag really is a sha-* value before trusting it. This indirection
-# is what lets `LANCACHE_IMAGE_CHANNEL=edge` resolve to one fixed, reproducible
-# stack version instead of "whatever :edge happens to mean when you docker pull".
+# is what lets `LANCACHE_IMAGE_CHANNEL=nightly` resolve to one fixed, reproducible
+# stack version instead of "whatever :nightly happens to mean when you docker pull".
 # A pull failure on the "latest" channel gets a dedicated explanation (this
 # project is pre-1.0 and has not cut a stable release yet) instead of a raw
 # Docker error.
@@ -2201,13 +2215,13 @@ resolve_lancache_stack_channel_tag() {
 ${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'edge' testing channel daily from master, a formal stable release with a
+to the 'nightly' testing channel daily from master, a formal stable release with a
 published 'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
-  1. Use the 'edge' testing channel (pre-release, may change frequently):
-     LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install
+  1. Use the 'nightly' testing channel (pre-release, may change frequently):
+     LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install
 
   2. Pin to a specific release version or commit (immutable):
      LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
@@ -2251,14 +2265,14 @@ EOF
 #   4. Otherwise, for a git checkout/release archive, derive the release tag
 #      straight from the tag/VERSION file.
 #   5. Otherwise fall back to resolving the default channel (see
-#      resolve_lancache_image_channel — "latest", never silently "edge").
+#      resolve_lancache_image_channel — "latest", never silently "nightly").
 # Every path validates the final value before returning it.
 resolve_lancache_image_tag() {
     local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel=""
 
     if [[ -n "$tag" ]]; then
         case "$tag" in
-            stable|latest|dev|edge)
+            stable|latest|dev|nightly)
                 resolve_lancache_stack_channel_tag "$env_file" "$tag"
                 return 0
                 ;;
@@ -2276,7 +2290,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$channel" in
-        stable|latest|dev|edge)
+        stable|latest|dev|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$channel"
             return 0
             ;;
@@ -2306,7 +2320,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$tag" in
-        stable|latest|dev|edge)
+        stable|latest|dev|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$tag"
             return 0
             ;;
@@ -2346,7 +2360,7 @@ migrate_env_for_update() {
     # channel-tracking install picks up a new image on every update. restore
     # passes 1: restoring an old backup to roll back a bad channel image must
     # keep the archived immutable tag, not silently re-resolve back to
-    # whatever the channel (e.g. edge/latest) currently points to -- which,
+    # whatever the channel (e.g. nightly/latest) currently points to -- which,
     # right after a bad release, is likely still the same bad tag.
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
@@ -2389,7 +2403,7 @@ migrate_env_for_update() {
         && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
         # Restoring a backup to roll back a bad channel-tracked image: keep
         # the archived immutable tag as-is instead of re-resolving it below,
-        # which would silently pull whatever the channel (edge/latest)
+        # which would silently pull whatever the channel (nightly/latest)
         # currently points to -- right after a bad release that is likely
         # still the same bad tag, defeating the whole point of the restore.
         validate_lancache_image_tag "$existing_image_tag"
@@ -3943,14 +3957,19 @@ cmd_auto_update() {
 # AUTO_UPDATE_ENABLED, validated independently of the wider
 # validate_lancache_image_channel (which `die`s on an unrecognized value --
 # unsuitable here, since an unexpected value from the UI must be a silent
-# no-op tick, not an aborted systemd service run). Only "stable"/"edge" are
-# accepted, matching exactly what routes/setup.rs's is_valid_ui_channel
+# no-op tick, not an aborted systemd service run). Only "stable"/"nightly" are
+# accepted, matching exactly what routes/setup.rs's is_valid_ui_channel now
 # offers the operator; this intentionally does not widen to "dev"/"pinned"
 # even once another codepath's validator learns those, since this control was
-# never meant to set them.
+# never meant to set them. "edge" (the old name of "nightly", renamed in v0.3.0
+# #1056) is deliberately NOT accepted -- consistent with the hard cut elsewhere.
+# A settings volume still holding "edge" from a pre-rename Admin UI is treated
+# as an unrecognized value and no-op'd here (this must not `die` -- see above --
+# because it runs inside the auto-update service tick); the operator re-picks a
+# valid channel in the current UI.
 lancache_ui_channel_override_is_valid() {
     case "$1" in
-        stable|edge) return 0 ;;
+        stable|nightly) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -5112,7 +5131,7 @@ EOF
     if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
         lancache_image_channel="$response_image_channel"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|dev|edge)$ ]]; then
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|dev|nightly)$ ]]; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -5125,7 +5144,7 @@ EOF
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
         LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|dev|edge)$ ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|dev|nightly)$ ]]; then
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -5506,12 +5525,12 @@ print_step "Release channel"
 # Unlike the other prompts in this flow (INSTALL_DIR, detected_ip, ...), an
 # already-set LANCACHE_IMAGE_CHANNEL is NOT just a default to confirm -- it is
 # respected outright and the prompt is skipped entirely. Two real callers rely
-# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install`
+# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install`
 # non-interactive invocation (see resolve_lancache_stack_channel_tag's own
 # die() message), and (2) scripts/setup-cli-simulation.sh, which exports
 # LANCACHE_IMAGE_CHANNEL=pinned (plus an explicit LANCACHE_IMAGE_TAG) so CI
 # installs THIS commit's own just-built images rather than any published
-# channel. "pinned" is not a stable/edge choice at all -- it is a request for
+# channel. "pinned" is not a stable/nightly choice at all -- it is a request for
 # one specific immutable tag -- so re-prompting and overwriting it with
 # whatever the operator/simulation answers here would silently discard that
 # request (a real regression caught in CI, not a hypothetical). Respecting any
@@ -5525,10 +5544,10 @@ else
     printf "  stable — the channel promoted after the full release validation gate.\n"
     printf "           Recommended for most installs. This is what './setup.sh update'\n"
     printf "           tracks by default, and what most operators should stay on.\n"
-    printf "  edge   — the most recently built channel from active development.\n"
-    printf "           Refreshes more often, may be less tested than stable. Opt in\n"
-    printf "           only if you specifically want the newest changes and accept\n"
-    printf "           the extra risk.\n\n"
+    printf "  nightly — the most recently built channel from active development.\n"
+    printf "            Refreshes more often (daily from master), may be less tested\n"
+    printf "            than stable. Opt in only if you specifically want the newest\n"
+    printf "            changes and accept the extra risk.\n\n"
 
     # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
     # resolve_lancache_image_channel already checks first (see its precedence
@@ -5537,20 +5556,26 @@ else
     # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
     # friendlier, self-explanatory name this prompt writes for new installs.
     while true; do
-        ask "Release channel [stable/edge]" "stable"
+        ask "Release channel [stable/nightly]" "stable"
         case "${REPLY,,}" in
             stable)
                 LANCACHE_IMAGE_CHANNEL="stable"
                 print_ok "Using the stable channel (recommended)."
                 break
                 ;;
-            edge)
-                LANCACHE_IMAGE_CHANNEL="edge"
-                print_warn "Using the edge channel — more recent, less tested than stable."
+            nightly)
+                LANCACHE_IMAGE_CHANNEL="nightly"
+                print_warn "Using the nightly channel — more recent, less tested than stable."
                 break
                 ;;
+            # "edge" was the old name of the nightly channel (renamed in v0.3.0,
+            # #1056) and is intentionally NOT accepted as a synonym here -- point
+            # the operator at the new name rather than silently substituting it.
+            edge)
+                print_error "The 'edge' channel was renamed to 'nightly' in v0.3.0. Please answer 'nightly'."
+                ;;
             *)
-                print_error "Please answer 'stable' or 'edge'."
+                print_error "Please answer 'stable' or 'nightly'."
                 ;;
         esac
     done
@@ -5971,7 +5996,8 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 CACHE_MAX_GB=${cache_gb}
 
 # First-party service image selector. "latest" is the stable default.
-# Use "edge" only when you explicitly want the tested pre-stable channel.
+# Use "nightly" only when you explicitly want the tested pre-stable channel,
+# built continuously from master (this was formerly called "edge").
 # setup.sh resolves mutable channels to an immutable sha-* service tag before
 # pulling images so one install cannot consume a mixed stack during promotion.
 # Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.

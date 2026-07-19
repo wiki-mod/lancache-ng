@@ -11,7 +11,7 @@
 #
 # Required env: EVENT_NAME, REPOSITORY, GITHUB_OUTPUT. For a pull_request:
 # BASE_REF, BASE_SHA, PR_NUMBER, BUILD_SHA (github.sha), ACTOR, HEAD_REPO. For
-# workflow_dispatch: DISPATCH_TAG (the image_tag input; defaults to edge).
+# workflow_dispatch: DISPATCH_TAG (the image_tag input; defaults to nightly).
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

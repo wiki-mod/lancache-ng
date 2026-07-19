@@ -155,7 +155,7 @@ echo "== Phase 1: fresh install via the real setup.sh CLI (expect-driven, mirror
 # "Add now? (ip addr add ...)" is always answered "" (default N): this
 # script must never mutate the runner host's real network configuration,
 # only ever bind to already-existing loopback addresses.
-LANCACHE_IMAGE_CHANNEL="${SETUP_SIM_IMAGE_CHANNEL:-edge}" \
+LANCACHE_IMAGE_CHANNEL="${SETUP_SIM_IMAGE_CHANNEL:-nightly}" \
 LANCACHE_IMAGE_TAG="${SETUP_SIM_IMAGE_TAG:-}" \
 SETUP_SIM_INSTALL_DIR="$install_dir" \
 expect -f - <<EXPECT_SCRIPT

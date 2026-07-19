@@ -130,7 +130,7 @@ setup() {
     # `rev-parse --is-inside-work-tree` was indistinguishable from "no .git
     # at all", so this fell through to the VERSION file and produced a
     # confusing `v1.0.1` tag/404 instead of the caller correctly seeing "no
-    # tag available" and defaulting to the latest/edge channel. Once trusted
+    # tag available" and defaulting to the latest/nightly channel. Once trusted
     # via the scoped override, git itself has a real, correct answer here
     # ("no tag matches HEAD exactly") -- the function must surface that
     # (return 1, no output) rather than reach for the unrelated VERSION file.

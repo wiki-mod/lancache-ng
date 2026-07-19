@@ -40,7 +40,7 @@ network_name="${compose_project}_validation"
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 registration_token="validation-secondary-registration-token"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-image_tag="${LANCACHE_IMAGE_TAG:-edge}"
+image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 dns_image="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${image_tag}"
 
 cleanup() {

@@ -209,7 +209,7 @@ not an open task against those two ARG defaults:
 This project defines several mutable channels in `release/stack-images.yml` for development and release purposes:
 
 - `dev`: development/test channel (mutable)
-- `edge`: pre-stable integration channel from master (mutable)
+- `nightly`: pre-stable integration channel from master (mutable; formerly `edge`)
 - `latest`: stable releases only (mutable, must not be moved by non-release workflows)
 
 These channels are documented in `release/stack-images.yml` and are intended to be mutable. References to these channels are exempt from the pinning requirement, provided they are explicitly documented as intentional. See `docs/release-versioning.md` for details on the channel model.

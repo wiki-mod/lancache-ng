@@ -18,11 +18,11 @@ on:
         # is an untouched leftover from before the promote/versioning
         # contract existed (confirmed directly: ui/proxy/dns/watchdog/dhcp/
         # dhcp-proxy:latest are all 1-2 weeks stale, and stack:latest --
-        # the coherent multi-service pointer -- does not exist at all). edge
+        # the coherent multi-service pointer -- does not exist at all). nightly
         # is the channel actually promoted daily from master.
         description: Stack image tag to validate against.
         required: false
-        default: edge
+        default: nightly
 
 permissions:
   contents: read
@@ -952,7 +952,7 @@ jobs:
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
         # dhcp-kea-lease-flow-simulation's own reasoning: confirmed directly
-        # (both the published :latest and :edge build-tools images) that
+        # (both the published :latest and :nightly build-tools images) that
         # isc-dhcp-client (dhclient) is not yet present in any published
         # build-tools image, only in this checkout's
         # tools/build-tools/Dockerfile. This workflow only ever runs via

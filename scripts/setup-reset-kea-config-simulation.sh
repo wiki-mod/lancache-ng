@@ -46,7 +46,7 @@ cd "$repo_root"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
-image_tag="${LANCACHE_IMAGE_TAG:-edge}"
+image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required (an image providing curl, e.g. the build-tools image)}"
 
 # full-setup-deep-validate.yml's compute-validation-network job derives a

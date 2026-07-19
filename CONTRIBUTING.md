@@ -279,7 +279,7 @@ Required rules:
 
 - first-party runtime images are promoted as one stack package set
 - `latest` means the latest stable release only
-- `edge` is the tested pre-stable channel from `master`
+- `nightly` is the tested pre-stable channel built continuously from `master` (formerly `edge`)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
 - stable releases use `vX.Y.Z` and may move `latest`
 - release-capable paths must not depend on mutable `build-tools:latest`

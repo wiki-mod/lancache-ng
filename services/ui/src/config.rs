@@ -788,13 +788,17 @@ impl Config {
 // Guesses which release channel (see docs/release-versioning.md) the
 // currently-running image tag belongs to, for display in the Admin UI only
 // (LANCACHE_IMAGE_CHANNEL should normally be set explicitly by the deploy
-// tooling; this is a best-effort fallback when it isn't). `dev`/`edge`/
-// `latest` tags map straight to their channel name. A `v`- or `sha-`-prefixed
-// tag means a specific release or commit was pinned deliberately, which this
-// function can't distinguish from any other channel, so it reports "pinned"
-// rather than guessing wrong. Anything else defaults to "latest".
+// tooling; this is a best-effort fallback when it isn't). `dev`/`nightly`/
+// `latest` tags map straight to their channel name. The old `edge` channel was
+// renamed to `nightly` in v0.3.0 (#1056) and hard-cut, not aliased -- `edge` is
+// deliberately NOT recognized here, so an image somehow still tagged `edge`
+// falls through to the generic "latest" default rather than being silently
+// treated as a synonym for `nightly`. A `v`- or `sha-`-prefixed tag means a
+// specific release or commit was pinned deliberately, which this function can't
+// distinguish from any other channel, so it reports "pinned" rather than
+// guessing wrong. Anything else defaults to "latest".
 fn derive_lancache_image_channel(tag: &str) -> String {
-    if tag == "dev" || tag == "edge" || tag == "latest" {
+    if tag == "dev" || tag == "nightly" || tag == "latest" {
         tag.to_string()
     } else if tag.starts_with("sha-") || tag.starts_with('v') {
         "pinned".to_string()
@@ -1332,12 +1336,12 @@ mod tests {
 
         env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
         env::set_var("LANCACHE_IMAGE_TAG", "v1.2.3");
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_registry, "registry.example.test:5000");
         assert_eq!(cfg.lancache_image_prefix, "mirror/lancache-ng");
-        assert_eq!(cfg.lancache_image_channel, "edge");
+        assert_eq!(cfg.lancache_image_channel, "nightly");
         assert_eq!(cfg.lancache_image_tag, "v1.2.3");
 
         env::remove_var("LANCACHE_IMAGE_REGISTRY");
@@ -1809,11 +1813,17 @@ mod tests {
     // defaults to "latest".
     #[test]
     fn derive_lancache_image_channel_resolves_semantic_tags() {
-        // Test mutable channel tags: "dev", "edge", and "latest"
+        // Test mutable channel tags: "dev", "nightly", and "latest"
         // are passed through unchanged.
         assert_eq!(derive_lancache_image_channel("dev"), "dev");
-        assert_eq!(derive_lancache_image_channel("edge"), "edge");
+        assert_eq!(derive_lancache_image_channel("nightly"), "nightly");
         assert_eq!(derive_lancache_image_channel("latest"), "latest");
+
+        // The old "edge" channel was renamed to "nightly" and hard-cut in
+        // v0.3.0 (#1056): "edge" is deliberately not recognized as a channel
+        // anymore, so an image somehow still tagged "edge" falls through to the
+        // generic "latest" default rather than being aliased back to "nightly".
+        assert_eq!(derive_lancache_image_channel("edge"), "latest");
 
         // Test immutable pinned references: tags starting with "sha-"
         // (commit SHAs) or "v" (semantic versions) resolve to "pinned".

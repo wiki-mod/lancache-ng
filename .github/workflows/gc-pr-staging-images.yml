@@ -173,7 +173,7 @@ jobs:
             # A "version" in GHCR is keyed by digest, not by tag -- a
             # back-filled service (see full-setup-validate's own "Ensure PR
             # staging tags exist" step) shares its digest with a live
-            # edge/dev/latest/sha-* channel tag. Deleting that version would
+            # nightly/dev/latest/sha-* channel tag. Deleting that version would
             # delete the channel tag too. So this only considers a version
             # safe to delete when EVERY tag on it is a pr-<N>-sha-* tag
             # (optionally -amd64/-arm64 suffixed) for a PR that is not open
@@ -232,7 +232,7 @@ jobs:
                   esac
                   [[ "$protected" == "1" ]] && break
                 else
-                  # Any non pr-* tag (edge, dev, latest, vX.Y.Z, sha-*, ...)
+                  # Any non pr-* tag (nightly, dev, latest, vX.Y.Z, sha-*, ...)
                   # is a real published channel/source tag. Never delete it.
                   protected=1
                   break
