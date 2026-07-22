@@ -38,7 +38,14 @@ setup() {
 }
 
 @test "render_ntp_config renders a pool line for a hostname entry" {
+    # shellcheck disable=SC2034 # NTP_UPSTREAM_SERVERS/NTP_ALLOWED_CLIENT_CIDRS
+    # are read as globals inside render_ntp_config(), which this test loads
+    # from services/ntp/entrypoint.sh at runtime via load_ntp_entrypoint_helpers
+    # (see setup() above) -- shellcheck analyzes this .bats file in isolation
+    # and cannot see that dynamically-sourced function body, so it cannot trace
+    # the read and reports these assignments as unused.
     NTP_UPSTREAM_SERVERS="0.debian.pool.ntp.org"
+    # shellcheck disable=SC2034 # see NTP_UPSTREAM_SERVERS comment above
     NTP_ALLOWED_CLIENT_CIDRS=""
 
     render_ntp_config "$target" "$template"
@@ -49,7 +56,9 @@ setup() {
 }
 
 @test "render_ntp_config renders a server line for an IPv4/IPv6 literal entry" {
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_UPSTREAM_SERVERS="192.0.2.1 2606:4700:f1::1"
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_ALLOWED_CLIENT_CIDRS=""
 
     render_ntp_config "$target" "$template"
@@ -65,7 +74,9 @@ setup() {
 # `allow`, which would silently defeat requirement 3 (LAN exposure) for any
 # operator who never touches this setting.
 @test "render_ntp_config defaults to allow-all when NTP_ALLOWED_CLIENT_CIDRS is empty" {
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_UPSTREAM_SERVERS="192.0.2.1"
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_ALLOWED_CLIENT_CIDRS=""
 
     render_ntp_config "$target" "$template"
@@ -76,7 +87,9 @@ setup() {
 }
 
 @test "render_ntp_config scopes allow to each configured CIDR when set" {
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_UPSTREAM_SERVERS="192.0.2.1"
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_ALLOWED_CLIENT_CIDRS="192.168.0.0/16 10.0.0.0/8"
 
     render_ntp_config "$target" "$template"
@@ -104,7 +117,9 @@ setup() {
 }
 
 @test "validate_ntp_config accepts a fully rendered config" {
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_UPSTREAM_SERVERS="192.0.2.1"
+    # shellcheck disable=SC2034 # see the "renders a pool line" test above
     NTP_ALLOWED_CLIENT_CIDRS=""
     render_ntp_config "$target" "$template"
 
