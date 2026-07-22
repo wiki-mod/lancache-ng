@@ -964,6 +964,10 @@ async fn main() -> Result<()> {
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
+        .route(
+            "/domains/dns/toggle",
+            post(routes::domains::toggle_default_domain),
+        )
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
         .route(
             "/domains/lan/remove",

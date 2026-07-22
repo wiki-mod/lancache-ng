@@ -494,6 +494,15 @@ _collect_domain_rows() {
         domain="${domain%"${domain##*[![:space:]]}"}"
         [[ -z "$domain" || "$domain" == \#* ]] && continue
 
+        # A leading "!" marks an entry the Admin UI's per-domain toggle has
+        # deliberately disabled (#1073) -- skip it silently (no
+        # _DOMAIN_ROWS_SKIPPED, no WARNING): this is an intentional operator
+        # choice, not a malformed or degraded cdn-domains.txt row, so it must
+        # not block known-good config snapshotting the way a genuinely bad
+        # row does. Mirrors services/dns/entrypoint.sh's RPZ generation
+        # handling of the same marker on the same file.
+        [[ "$domain" == !* ]] && continue
+
         # Validate and normalize domain before using it anywhere
         if ! _is_valid_domain "$domain"; then
             echo "[lancache] WARNING: skipping invalid domain entry: $domain" >&2

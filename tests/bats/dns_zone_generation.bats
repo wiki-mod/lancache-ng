@@ -388,3 +388,44 @@ count_record_type() {
     [[ "$output" == *"WARNING: skipping invalid domain entry in RPZ zone: com"* ]]
     run ! grep -q '\*\.com ' "$zone_file"
 }
+
+# #1073: the Admin UI's per-domain toggle disables an entry by prefixing it
+# with "!" instead of deleting the line. RPZ generation must skip such a row
+# entirely -- no A/AAAA record at all, and (unlike a genuinely malformed
+# entry) no WARNING, since this is a deliberate operator choice, not a
+# degraded config.
+@test "generate_rpz_zone skips a disabled ('!'-prefixed) entry without emitting a WARNING" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' '!disabled.example.com' 'enabled.example.com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    # Checked right after generate_rpz_zone's own run, before any further
+    # `run` command -- `run` (including a negated `run !`) always overwrites
+    # $output with its own command's output, so asserting this any later
+    # would silently check the wrong command's output instead of actually
+    # verifying generate_rpz_zone stayed quiet for a disabled entry.
+    [[ "$output" != *"WARNING"* ]]
+    run ! grep -q 'disabled\.example\.com' "$zone_file"
+    grep -qx 'enabled\.example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+}
+
+# Same skip, for a disabled wildcard-only entry ("!." combination) -- the
+# disabled check must run before the wildcard-dot marker is stripped, so a
+# disabled wildcard entry is skipped just like a disabled plain one, not
+# misread as a plain domain literally named "!.disabled-wild.example.com".
+@test "generate_rpz_zone skips a disabled wildcard-only ('!.') entry" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' '!.disabled-wild.example.com' 'still-enabled.example.com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    run ! grep -q 'disabled-wild' "$zone_file"
+    grep -qx '\*\.still-enabled\.example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+}

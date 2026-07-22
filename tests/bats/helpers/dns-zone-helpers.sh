@@ -10,9 +10,10 @@
 # hand-extracted test copy, not a sourced file) -- including the
 # _is_valid_domain/_normalize_domain validation call added for the #822
 # pattern audit (a malformed or overly-broad cdn-domains.txt entry must not
-# silently become an overly-broad RPZ wildcard rule). Requires
-# scripts/lib/domain-validation.sh to already be sourced by the caller (see
-# tests/bats/dns_zone_generation.bats's setup()).
+# silently become an overly-broad RPZ wildcard rule), and the leading-"!"
+# disabled-entry skip added for #1073 (the Admin UI's per-domain toggle).
+# Requires scripts/lib/domain-validation.sh to already be sourced by the
+# caller (see tests/bats/dns_zone_generation.bats's setup()).
 
 generate_rpz_zone() {
     local domains_file="$1" output_file="$2" proxy_ip="$3" proxy_ipv6="${4:-}"
@@ -48,6 +49,10 @@ generate_rpz_zone() {
             domain="${domain%"${domain##*[![:space:]]}"}"
             # Skip empty lines and comments
             [[ -z "$domain" || "$domain" == \#* ]] && continue
+            # A leading "!" marks a deliberately disabled entry (#1073) --
+            # skip it silently, same as services/dns/entrypoint.sh's real
+            # loop.
+            [[ "$domain" == !* ]] && continue
             # Check if domain starts with . (wildcard-only flag)
             local is_wildcard_only=0
             if [[ "$domain" == .* ]]; then
