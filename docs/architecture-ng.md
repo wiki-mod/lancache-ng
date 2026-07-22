@@ -36,11 +36,14 @@ aio         threads=default;
 directio    4m;
 ```
 
-**Cache configuration (all values as env var + configurable in Admin UI):**
+**Cache configuration (env vars set at `setup.sh` install time; see "Cache
+Retention & Cleanup" below for what the Admin UI does and does not yet expose
+for these — it currently only displays cache usage, it does not let an
+operator edit any of these values after initial setup):**
 
 | Variable | Default | Description |
 |---|---|---|
-| `CACHE_MAX_SIZE` | `50g` | Max cache size — UI checks against available disk space |
+| `CACHE_MAX_SIZE` | `50g` | Max cache size — `setup.sh` validates the requested value against real free disk space at `CACHE_DIR` (issue #1069); no Admin UI resize exists yet |
 | `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
@@ -293,25 +296,33 @@ Epic / GOG: not supported.
 
 ## Cache Retention & Cleanup
 
-**Three mechanisms combined:**
+**Two mechanisms implemented today:**
 
 | Mechanism | Trigger | Basis |
 |---|---|---|
 | nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
-| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` |
-| Manual purge | Admin UI on-demand | freely selectable |
+| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` (`services/watchdog/watchdog.sh`'s `maybe_purge()`) |
 
-**Manual purging in Admin UI:**
+`setup.sh`'s initial "Cache size in GiB" prompt validates the requested size
+against real free disk space at `CACHE_DIR`, with a safety buffer that scales
+with the requested size (issue #1069). `CACHE_INACTIVE` is likewise a real
+setup-time prompt now, not just a silent default.
+
+**Not yet implemented — planned Admin UI cache-management surface (issue
+#1069), tracked separately from the setup-time work above:** the Admin UI
+dashboard (`services/ui/src/routes/dashboard.rs`) only reads and displays
+cache usage (used GB, max GB, percentage); it has no route or template that
+writes `CACHE_MAX_SIZE`, re-validates disk space at resize time, or triggers
+any purge. None of the following exists in code yet:
 
 | Action | Granularity |
 |---|---|
+| Live resize of `CACHE_MAX_SIZE` (re-checking disk space at resize time, not just at initial setup) | — |
 | Clear entire cache | Everything |
 | Purge by age | Older than X days — preview "~X GB freed" before confirmation |
 | Purge by access | Not accessed for X days |
 | Delete single title | All chunks of a warmed app ID |
 | Pinning | Protect app ID from LRU + automatic purge |
-
-**Size validation:** Admin UI checks available disk space when saving `CACHE_MAX_SIZE`. Warning > 90% of available space, error if exceeded.
 
 ## Monitoring (Admin UI)
 

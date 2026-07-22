@@ -91,6 +91,95 @@ is_absolute_path() {
     [[ -n "${1:-}" && "$1" == /* ]]
 }
 
+# True for an nginx-style time value (e.g. "365d", "1h30m", "600") as accepted
+# by directives like proxy_cache_path's inactive= parameter. nginx's own time
+# grammar is a run of <number><unit> pairs (ms, s, m, h, d, w, M, y); a bare
+# number with no suffix means seconds. This mirrors that grammar closely
+# enough to catch a typo before it reaches envsubst/nginx config generation,
+# without needing nginx itself available at setup time to validate it.
+is_valid_nginx_time_value() {
+    [[ "${1:-}" =~ ^([0-9]+(ms|[smhdwMy])?)+$ ]]
+}
+
+# Walks up from $1 to the nearest existing ancestor directory. Used for disk
+# free-space checks against CACHE_DIR: at the point the cache-size prompt
+# runs, CACHE_DIR itself does not exist yet (it is only created later via
+# `mkdir -p "$CACHE_DIR"`, near the end of the install flow), so `df` would
+# otherwise fail with "No such file or directory" on the path as typed.
+nearest_existing_ancestor_dir() {
+    local path="$1"
+    while [[ ! -d "$path" ]]; do
+        path="$(dirname "$path")"
+    done
+    printf '%s\n' "$path"
+}
+
+# Free space, in whole MiB, on the filesystem that would back directory $1
+# once created (see nearest_existing_ancestor_dir above). Uses `df -Pk`
+# (POSIX output format, 1024-byte blocks) rather than plain `df`, since
+# plain df's column layout wraps onto a second line for long device/mount
+# source strings (e.g. some overlay mounts), which would otherwise shift
+# the field this awk expression reads.
+available_space_mib_at() {
+    local dir avail_kib
+    dir="$(nearest_existing_ancestor_dir "$1")"
+    # `|| true` keeps a failing `df` (permission issue, exotic filesystem)
+    # from tripping `set -e`/`pipefail` before the explicit die() below can
+    # produce a clear message -- the same guard-then-validate pattern used
+    # elsewhere in this script (e.g. detect_secondary_listen_ip's route lookup).
+    avail_kib=$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)
+    [[ "$avail_kib" =~ ^[0-9]+$ ]] \
+        || die "Could not determine free disk space at $dir (df failed or returned unexpected output)."
+    echo $(( avail_kib / 1024 ))
+}
+
+# Maintainer-directed safety buffer (issue #1069): reserve more headroom for a
+# larger requested cache. nginx's cache manager sweeps periodically rather
+# than enforcing max_size instantaneously (manager_sleep/manager_threshold on
+# proxy_cache_path), so actual disk usage can transiently overshoot max_size
+# by roughly one sweep's worth of writes before cleanup catches up -- and a
+# larger declared cache means more concurrent downloads can land in that
+# window before the manager gets to them.
+cache_size_buffer_mib() {
+    local cache_gb="$1"
+    if (( cache_gb > 6 )); then
+        echo 2048
+    elif (( cache_gb > 4 )); then
+        echo 1024
+    else
+        echo 512
+    fi
+}
+
+# True if requesting cache_gb GiB still leaves cache_size_buffer_mib's
+# required buffer free on a filesystem with avail_mib MiB currently free.
+cache_size_fits_available_mib() {
+    local cache_gb="$1" avail_mib="$2" buffer_mib
+    buffer_mib=$(cache_size_buffer_mib "$cache_gb")
+    (( avail_mib - buffer_mib >= cache_gb * 1024 ))
+}
+
+# Largest whole-GiB cache size that currently passes
+# cache_size_fits_available_mib, for the rejection message. Scans downward
+# from the free-space ceiling rather than solving the step-function buffer
+# bands in closed form: the buffer only grows as the requested size grows, so
+# the scan is short (bounded by the disk's own size in GiB) and this stays
+# obviously correct instead of clever. Prints 0 and returns failure if even a
+# 1 GiB cache would not leave a buffer.
+largest_valid_cache_gb() {
+    local avail_mib="$1" candidate
+    candidate=$(( avail_mib / 1024 ))
+    while (( candidate >= 1 )); do
+        if cache_size_fits_available_mib "$candidate" "$avail_mib"; then
+            echo "$candidate"
+            return 0
+        fi
+        candidate=$(( candidate - 1 ))
+    done
+    echo 0
+    return 1
+}
+
 # Proxy-DHCP (dnsmasq) needs a subnet *base* address, not an arbitrary host IP,
 # so it must be a valid IPv4 address ending in ".0".
 is_dnsmasq_subnet_start() {
@@ -5486,11 +5575,36 @@ while true; do
     print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache)."
 done
 
+# Checked against the nearest existing ancestor of CACHE_DIR (see
+# nearest_existing_ancestor_dir) since CACHE_DIR itself is only created later
+# via `mkdir -p`. Computed once, before the loop: the operator's answer to
+# this prompt cannot change which filesystem CACHE_DIR lives on.
+cache_dir_avail_mib=$(available_space_mib_at "$CACHE_DIR")
+
 while true; do
     ask "Cache size in GiB" "50"
     cache_gb="$REPLY"
-    [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
-    print_error "Please enter a positive integer (e.g. 50)."
+    if ! is_positive_integer "$cache_gb"; then
+        print_error "Please enter a positive integer (e.g. 50)."
+        continue
+    fi
+    # Canonicalize away any leading zero (e.g. "008") before this value is
+    # used in bash arithmetic below: without the 10# base prefix, an
+    # unnormalized leading-zero string is parsed as octal by `((...))`, and
+    # digits 8/9 in that string would abort the script with a bash
+    # arithmetic error rather than a clean validation message.
+    cache_gb=$(( 10#$cache_gb ))
+    cache_size_fits_available_mib "$cache_gb" "$cache_dir_avail_mib" && break
+    # Issue #1069: reject a cache size that would not leave a safety buffer on
+    # the real disk backing CACHE_DIR, instead of silently writing a
+    # CACHE_MAX_SIZE the disk cannot possibly satisfy. Buffer scales with the
+    # requested size -- see cache_size_buffer_mib.
+    largest_valid_gb=$(largest_valid_cache_gb "$cache_dir_avail_mib" || true)
+    if (( largest_valid_gb >= 1 )); then
+        print_error "$cache_gb GiB would not leave a safety buffer at $CACHE_DIR (only $(( cache_dir_avail_mib / 1024 )) GiB free there). The largest value that currently passes is ${largest_valid_gb} GiB."
+    else
+        print_error "Not enough free space at $CACHE_DIR for any cache size with a safety buffer (only $(( cache_dir_avail_mib / 1024 )) GiB free there). Free up disk space or choose a different cache directory."
+    fi
 done
 
 while true; do
@@ -5498,6 +5612,13 @@ while true; do
     CACHE_MEM_MB="$REPLY"
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
+done
+
+while true; do
+    ask "Cache entry max age (inactive; e.g. 365d, 30d, 12h)" "365d"
+    cache_inactive="$REPLY"
+    is_valid_nginx_time_value "$cache_inactive" && break
+    print_error "Please enter an nginx-style time value (e.g. 365d, 30d, 12h)."
 done
 
 # ── 5. Release channel ────────────────────────────────────────────────────────
@@ -5883,7 +6004,7 @@ validate_env_values_for_initial_write \
     "CACHE_SLICE_SIZE=8m" \
     "CACHE_VALID_HIT=365d" \
     "CACHE_VALID_ANY=1m" \
-    "CACHE_INACTIVE=365d" \
+    "CACHE_INACTIVE=${cache_inactive}" \
     "NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" \
     "PROXY_SECURITY_MODE=lazy" \
     "PROXY_ALLOWED_CLIENT_CIDRS=" \
@@ -5949,7 +6070,7 @@ CACHE_MEM_MB=${CACHE_MEM_MB}
 CACHE_SLICE_SIZE=8m
 CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
-CACHE_INACTIVE=365d
+CACHE_INACTIVE=${cache_inactive}
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
 # Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
@@ -6197,6 +6318,7 @@ printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
 printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
+printf "  %-26s %s\n"    "Cache entry max age:"     "$cache_inactive"
 printf "  %-26s %s\n"    "DHCP mode:"               "$DHCP_MODE"
 if [[ "$DHCP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "DHCP server:"             "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
