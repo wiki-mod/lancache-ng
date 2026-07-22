@@ -647,6 +647,53 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
+      # Warn-only guard (#893): flags a PR that edits CHANGELOG.md directly,
+      # since #899 that file is normally written by an automated bot commit
+      # (.github/workflows/update-changelog.yaml on release publish), never
+      # through a PR -- see CONTRIBUTING.md's "Releasing Changes to
+      # CHANGELOG.md". This step is deliberately independent of the
+      # governance-guardrails step above rather than extending it: that
+      # step's own $changed_files tempfile is already deleted by its EXIT
+      # trap before this step starts (each `run:` block is its own shell
+      # process), so a self-contained fetch here is simpler than threading
+      # state between steps. This can NEVER fail the job: the script itself
+      # always exits 0 (see its header), and `|| true` below is a deliberate,
+      # documented fallback (not a hidden failure per AG-VAL-004) covering
+      # the unlikely case where the docker run invocation itself errors for
+      # an infra reason -- a warn-only check must never become a hard gate
+      # by accident.
+      - name: Warn on direct CHANGELOG.md edits outside a release PR
+        if: github.event_name == 'pull_request'
+        env:
+          GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -uo pipefail
+
+          changelog_guard_changed_files="$(mktemp "$PWD/.changelog-guard-changed-files.XXXXXX")"
+          trap 'rm -f "$changelog_guard_changed_files"' EXIT
+
+          if git fetch --no-tags --depth=1 origin \
+               "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}" \
+             && git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA" \
+             && git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}" \
+             && git cat-file -e "${GITHUB_SHA}^{commit}"; then
+            git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changelog_guard_changed_files"
+          else
+            echo "::warning::check-changelog-direct-edit: could not compute this PR's changed-files diff; skipping the CHANGELOG.md direct-edit check for this run."
+            : > "$changelog_guard_changed_files"
+          fi
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
+          || true
+
       - name: Run setup migration semantics tests
         run: |
           set -euo pipefail
