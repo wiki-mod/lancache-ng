@@ -26,6 +26,16 @@ setup() {
     source "$BATS_TEST_DIRNAME/helpers/setup-env-helpers.sh"
     load_setup_env_helpers "$repo_root" "$helper_file"
 
+    # setup-env-helpers.sh's shared die() stub uses `return 1` (safe for the
+    # other suites sharing that file, which only guard-clause-check as their
+    # function's last statement). sync_repo_to_ref's dirty-tree guard is NOT
+    # the last statement, so a `return`-based die would let execution fall
+    # through to the real fetch/checkout below it, masking the guard. `run`
+    # (bats-core) executes each command in a forked subshell, so a real
+    # `exit 1` here only terminates that subshell -- not the bats test
+    # runner -- matching production die()'s real semantics safely.
+    die() { printf "%s\n" "$*" >&2; exit 1; }
+
     unset LANCACHE_SETUP_GIT_REF
 
     remote="$BATS_TEST_TMPDIR/origin.git"
