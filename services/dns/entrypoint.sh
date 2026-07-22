@@ -987,6 +987,13 @@ fi
         domain="${domain#"${domain%%[![:space:]]*}"}"
         domain="${domain%"${domain##*[![:space:]]}"}"
         [[ -z "$domain" || "$domain" == \#* ]] && continue
+        # A leading "!" marks an entry the Admin UI's per-domain toggle has
+        # deliberately disabled (#1073) -- skip it silently, with no WARNING
+        # and no effect on the RPZ zone, since this is an intentional
+        # operator choice rather than a malformed or degraded
+        # cdn-domains.txt row. Mirrors services/proxy/entrypoint.sh's
+        # _collect_domain_rows handling of the same marker on the same file.
+        [[ "$domain" == !* ]] && continue
         is_wildcard_only=0
         if [[ "$domain" == .* ]]; then
             is_wildcard_only=1
