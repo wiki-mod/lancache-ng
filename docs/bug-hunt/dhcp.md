@@ -435,7 +435,7 @@ This pass re-read `services/dhcp/entrypoint.sh` and its compose wiring
 against current `origin/v0.2.0` while building `docs/capability-inventory/SoT-dhcp.md`,
 which post-dates issue #858 (shared-secret bootstrap, merged 2026-07-16) and
 issue #967/PR #988 (case-insensitive placeholder-detection parity, merged
-2026-07-18) — both landed after this file's original collection pass. One
+2026-07-18) -- both landed after this file's original collection pass. One
 new, concrete, filed finding:
 
 - **N3. `KEA_CTRL_TOKEN` healthcheck placeholder-detection fallback is
@@ -444,17 +444,17 @@ new, concrete, filed finding:
   (moderate).** `deploy/dev/docker-compose.yml` (line 312) and
   `deploy/quickstart/docker-compose.yml` (line 1255) use
   `case "$$token" in ""|CHANGE_ME_KEA_CTRL_TOKEN|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret)`
-  — an exact-literal-only match. `deploy/prod/docker-compose.yml` (line 347)
+  -- an exact-literal-only match. `deploy/prod/docker-compose.yml` (line 347)
   uses the wider
   `case "$$token" in ""|CHANGE_ME*|changeme*|YOUR_*|*_HERE|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret)`
-  — closer to, but still not the same as, `secret_is_placeholder()`'s
+  -- closer to, but still not the same as, `secret_is_placeholder()`'s
   actual logic, because shell `case` patterns match case-sensitively and do
   no `-`/`_` folding. `secret_is_placeholder()` (embedded in
   `services/dhcp/entrypoint.sh`, hardened by #967/#988) lowercases the
   value and folds `-`/`_` together *before* matching, so it correctly
   recognizes e.g. `Change-Me-Kea-Token`, `change_me_kea_token`, or
   `YOUR_TOKEN_HERE` (any case) as placeholders needing shared-secret
-  resolution — but none of the three inline healthcheck patterns replicate
+  resolution -- but none of the three inline healthcheck patterns replicate
   that normalization, and the two narrower ones (dev/quickstart) do not
   even recognize Kea's own `CHANGE_ME*`/`changeme*`/`YOUR_*`/`*_HERE`
   pattern *families*, only one exact literal.
@@ -464,7 +464,7 @@ new, concrete, filed finding:
   dash variant, or any `CHANGE_ME*`/`YOUR_*_HERE`-shaped value other than
   the exact literal `CHANGE_ME_KEA_CTRL_TOKEN`), the `dhcp` container's own
   `HEALTHCHECK` keeps authenticating with the stale placeholder string
-  instead of falling back to `/var/lib/lancache-secrets/kea-ctrl-token` —
+  instead of falling back to `/var/lib/lancache-secrets/kea-ctrl-token` --
   reproducing, for a narrower set of inputs, the exact "container reports
   permanently unhealthy despite Kea running fine" failure class the
   healthcheck's own code comment says it exists to prevent.
@@ -472,7 +472,7 @@ new, concrete, filed finding:
   issue #967 and in PR #988's own "Scope Boundaries" section ("A possible
   future issue (not filed here) could cover the docker-compose inline
   `KEA_CTRL_TOKEN` pattern family... if the maintainer wants that
-  addressed") — this pass re-confirms it live against current code and
+  addressed") -- this pass re-confirms it live against current code and
   files it as issue #1091.
   **Evidence:** `deploy/dev/docker-compose.yml:312`,
   `deploy/quickstart/docker-compose.yml:1255`,
