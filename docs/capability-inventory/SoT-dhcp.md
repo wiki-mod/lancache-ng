@@ -196,7 +196,27 @@ resolution *before* the jq pass, since jq itself cannot shell out to
 `getent`); and adds a `/var/log/kea/kea-dhcp4.log` file-logger output
 alongside (not replacing) the existing `stdout` output for both the
 `kea-dhcp4` and `kea-dhcp4.dhcp4` loggers (central logging pipeline, issue
-#633). The whole migration is a no-op (`cmp -s` finds no diff, file left
+#633). **`multi-threading.enable-multi-threading: false` (both the first-boot
+template, `kea-dhcp4.conf` line 8, and the migration default above) has no
+documented rationale anywhere in this codebase** -- checked the full commit
+history via `git log --all -S "enable-multi-threading" -- services/dhcp/`;
+the one commit that introduced it (`59527fca`, "Fix Kea DDNS updates to
+PowerDNS") carries no comment or commit-message explanation for why it is
+explicitly disabled rather than left at Kea's own default. This is exactly
+the open question raised in the maintainer's own field-testing issue #1068
+(item 10, "needs an explanation: what does this setting actually do, and
+why is it currently disabled?") -- flagging honestly as an undocumented gap
+rather than inventing a plausible-sounding rationale (per `AG-HDR-006`, a
+technical claim about *why* a design choice was made must be verified
+against actual file content/git history, not asserted). Kea's own
+multi-threading feature (a packet-processing thread pool for lease
+allocation and hook execution) is a real, documented upstream option;
+whether it would help or hurt this project's typical LAN-scale request
+rate, and whether every loaded hook (`lease_cmds`) is safe to run
+multi-threaded, is a real open question for whoever answers #1068, not
+determined here.
+
+The whole migration is a no-op (`cmp -s` finds no diff, file left
 untouched) once a config already has every field. **Zero direct test
 coverage** -- the bats function-extractor whitelist for this file does not
 include `migrate_dhcp4_config`/`build_ntp_migration_map`, and both Kea E2E
