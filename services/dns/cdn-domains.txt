@@ -1,12 +1,23 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# CDN domain list for DNS spoofing. One domain per line; leading dot auto-added to cover subdomains.
+# CDN domain list for DNS spoofing. One domain per line, three explicit match modes (#1072):
+#   domain.com      -> matches ONLY domain.com (no subdomains)
+#   .domain.com     -> matches ONLY *.domain.com (every subdomain, not the bare root)
+#   sub.domain.com  -> matches ONLY that exact host (no further subdomains beneath it)
+# A bare entry never implicitly also wildcards what's underneath it, regardless of how
+# many labels it has. Lines starting with # are ignored.
 
 # LanCache DNS — CDN domain list
-# One domain per line. The leading dot is added automatically (covers all subdomains).
-# Lines starting with # are ignored.
+# One domain per line. Lines starting with # are ignored.
 
 # ---- Steam ----
-steamcontent.com
+# steamcontent.com is the only entry in this file migrated to wildcard-only
+# form for #1072: real Steam CDN traffic is served from many arbitrarily-
+# named edge hosts under this domain (e.g. numbered/regional cache nodes),
+# not from the bare apex itself, so it needs *.steamcontent.com coverage,
+# not an exact match on the root. Every other entry below is already a
+# specific, literal CDN hostname (a leaf, not a shared root with further
+# real-world subdomains beneath it), so it stays an exact-match bare entry.
+.steamcontent.com
 content1.steampowered.com
 content2.steampowered.com
 content3.steampowered.com

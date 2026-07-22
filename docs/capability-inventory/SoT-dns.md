@@ -24,7 +24,7 @@ Forwards `lan.`/`local.lan.`/all 20 reverse zones to the local authoritative ser
 
 ### 4. RPZ generation from `cdn-domains.txt` (162 lines / ~140 domains)
 
-Each line becomes `*.<domain> A/AAAA <PROXY_IP>/<PROXY_IPV6>` (plus the bare domain unless prefixed with `.` for wildcard-only), written with a monotonically increasing SOA serial (`date +%s`, bumped by 1 if the clock would otherwise produce a non-increasing value). This is real RPZ policy data (loaded via `recursor.lua`'s `rpzFile`), not a passthrough — the A/AAAA values here directly become the synthesized answer for any matching QNAME.
+Each line becomes exactly one of two mutually exclusive record forms (#1072): a bare entry (`domain.com`, or a fully-written subdomain like `sub.domain.com`) becomes `<domain> A/AAAA <PROXY_IP>/<PROXY_IPV6>` — an exact match for that host only, no wildcard; a leading-dot entry (`.domain.com`) becomes `*.<domain> A/AAAA <PROXY_IP>/<PROXY_IPV6>` — a wildcard match for every subdomain, with the bare root deliberately not emitted. Before #1072, every bare entry incorrectly emitted both forms unconditionally. Written with a monotonically increasing SOA serial (`date +%s`, bumped by 1 if the clock would otherwise produce a non-increasing value). This is real RPZ policy data (loaded via `recursor.lua`'s `rpzFile`), not a passthrough — the A/AAAA values here directly become the synthesized answer for any matching QNAME.
 
 ### 5. Known-good config snapshots — TWO independent mechanisms
 
