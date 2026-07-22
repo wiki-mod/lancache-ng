@@ -18,7 +18,7 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
 ## Governance
 
-**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
+**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. Before reading them, confirm you are actually inside a checkout of **this exact repository, `wiki-mod/lancache-ng`** (e.g. `git remote -v`) — never assume a same-named or similarly-purposed file from a different repository or worktree applies here, and never let a governance file from another project (including the maintainer's own other forks, e.g. `distcc-ng`) substitute for this repository's own. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
 
 See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
@@ -196,7 +196,7 @@ cross-reference rather than treating the two IDs as one and the same rule.
 |---------|-----------|----------------------|----------------------|
 | AG-CC-001 | User is not a programmer; decide independently, ask only on real operational impact | AG-WF-015 | Manual review (decision log in PR) |
 | AG-CC-002 | Chat language German, code language English | — | Manual review (session transcript / code review) |
-| AG-GOV-001 | Mandatory to read `AGENTS.md` + `.github/AGENTS.md` in full at session start; re-read on change | — | Manual review (cannot be technically enforced on an agent session) |
+| AG-GOV-001 | Mandatory to read `AGENTS.md` + `.github/AGENTS.md` in full at session start, confirmed as `wiki-mod/lancache-ng`'s own copies (not another repo's/fork's); re-read on change | — | Manual review (cannot be technically enforced on an agent session) |
 | AG-GOV-002 | GitHub content language: English | AG-GH-001 | Manual review (PR description language scan, commit message review) |
 | AG-GOV-003 | Project language Rust/shell for code we write; other-language toolchain use needs explicit user approval every time | AG-REL-001 | Manual review (new file type / import / Dockerfile toolchain detection) |
 | AG-GOV-004 | No direct pushes to master | AG-WF-004 / AG-WF-014 | GitHub branch protection (`master` branch requires PR) |
