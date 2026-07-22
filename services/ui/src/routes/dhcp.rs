@@ -1630,9 +1630,11 @@ pub async fn update_dhcp_ddns(
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
     let enabled = parse_bool_flag(&form.enabled);
 
-    kea_config_modify(&state, move |config| set_config_ddns_enabled(config, enabled))
-        .await
-        .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    kea_config_modify(&state, move |config| {
+        set_config_ddns_enabled(config, enabled)
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     Ok(Redirect::to("/dhcp"))
 }
