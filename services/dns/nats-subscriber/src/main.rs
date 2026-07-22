@@ -360,6 +360,13 @@ async fn main() {
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF_SECS: u64 = 30;
 
+    // Per-key applied-sequence watermarks for the cross-batch stale-write guard
+    // (issue #772; see `AppliedSequences`). Owned solely by this fetch loop,
+    // which is a single task processing messages sequentially with `.await`, so
+    // no locking is needed -- the snapshot watcher, reconciler, and rollback
+    // listener only ever publish records, they never apply them here.
+    let mut applied_seqs = AppliedSequences::default();
+
     loop {
         let fetch_result = consumer
             .fetch()
@@ -388,9 +395,14 @@ async fn main() {
                 while let Some(msg_result) = messages.next().await {
                     match msg_result {
                         Ok(msg) => {
-                            let result =
-                                handle_message(&msg, &pdns_api_key, &http_client, &snapshot_ctx)
-                                    .await;
+                            let result = handle_message(
+                                &msg,
+                                &pdns_api_key,
+                                &http_client,
+                                &snapshot_ctx,
+                                &mut applied_seqs,
+                            )
+                            .await;
                             // #653 fix: what to do with THIS message is decided by the pure
                             // `decide_msg` (unit-tested below via `simulate_batch_processing`)
                             // so the ack/nak decision itself -- not just this call site -- is
@@ -584,11 +596,86 @@ fn decide_msg(outcome: HandleOutcome) -> MsgDecision {
     }
 }
 
+/// Identifies one DNS record for stale-write detection: normalized
+/// `(zone, name, type)`. Normalization is deliberate: the different publishers
+/// of the same logical record -- the Admin UI routes
+/// (`services/ui/src/routes/domains.rs`, which sends `zone: "lan"` and a name
+/// like `host.lan.`), this binary's own `reconciler`, and `rollback_listener`'s
+/// post-rollback re-publish -- do not all emit byte-identical `zone`/`name`
+/// strings (e.g. `host.lan.` vs `host.lan`, differing case). A non-normalized
+/// key would silently treat those as different records and fail to guard the
+/// very clobber this exists to prevent (issue #772). DNS names are
+/// case-insensitive and a trailing dot is not a semantic distinction, so
+/// stripping the trailing dot and lowercasing can never merge two genuinely
+/// different records.
+type RecordKey = (String, String, String);
+
+fn record_key(zone: &str, name: &str, record_type: &str) -> RecordKey {
+    (
+        zone.trim_end_matches('.').to_ascii_lowercase(),
+        name.trim_end_matches('.').to_ascii_lowercase(),
+        record_type.to_ascii_uppercase(),
+    )
+}
+
+/// Per-key watermark of the highest JetStream stream sequence already
+/// successfully applied to PowerDNS, so a redelivered older-sequence message
+/// can be recognized as stale and skipped rather than clobbering newer state.
+///
+/// This closes the cross-batch stale-record clobber race documented in issue
+/// #772, which the within-batch `NakAndStopBatch` fix (#653/#738) does not
+/// reach. Sequence of events that race closes: a retryable PDNS failure NAKs
+/// message A (older update for key X, stream seq N) with a short delay and
+/// stops the rest of that batch; the outer loop's very next `fetch()` is
+/// `no_wait`, so it immediately pulls batch N+1, which can contain message B (a
+/// newer update for the SAME key X, seq > N) and apply+ack it before A's ~100ms
+/// NAK redelivers. Without this guard, A's redelivery then reapplies its stale
+/// state over B. With it, once B is applied at seq > N, A's redelivery at seq N
+/// is `<= ` the recorded watermark for X and is dropped.
+///
+/// STATUS (as of 2026-07-23, issue #772): this watermark is in-memory only and
+/// is intentionally NOT persisted across process restarts. A restart while an
+/// older message is still NAK'd/unacked would lose the watermark, letting that
+/// message reapply stale state after restart with no newer message left to
+/// correct it. Persisting it is not cheap -- PowerDNS stores no per-record
+/// sequence number, so the watermark cannot be reconstructed from PDNS on
+/// restart -- and is deliberately out of scope for this fix; the in-process
+/// window closed here is the common one #772 describes, and this is a strict
+/// improvement over leaving the race open in steady state. The map is also
+/// never pruned: it holds one `(zone,name,type) -> u64` entry per distinct
+/// record ever applied, bounded by the LAN's DNS record count (hundreds to low
+/// thousands), a negligible footprint. Pruning on `delete` was rejected on
+/// purpose -- evicting a key would reopen the race for a stale `replace` that
+/// redelivers after a `delete` + evict.
+#[derive(Default)]
+struct AppliedSequences {
+    last_applied: HashMap<RecordKey, u64>,
+}
+
+impl AppliedSequences {
+    /// Returns true if applying `seq` for `key` would be a stale write -- a
+    /// sequence `>=` it has already been applied for the same key. `>=` (not
+    /// `>`) so an exact redelivery of the already-applied message is skipped
+    /// idempotently instead of needlessly re-PATCHed.
+    fn is_stale(&self, key: &RecordKey, seq: u64) -> bool {
+        matches!(self.last_applied.get(key), Some(&applied) if seq <= applied)
+    }
+
+    /// Records that `seq` was successfully applied for `key`. `max` guards
+    /// against ever lowering an existing watermark (e.g. if two messages for
+    /// the same key were applied out of publish order within one batch).
+    fn record_applied(&mut self, key: RecordKey, seq: u64) {
+        let entry = self.last_applied.entry(key).or_insert(0);
+        *entry = (*entry).max(seq);
+    }
+}
+
 async fn handle_message(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
     http_client: &Arc<Client>,
     snapshot_ctx: &SnapshotContext,
+    applied_seqs: &mut AppliedSequences,
 ) -> HandleOutcome {
     let subject = msg.subject.as_ref();
 
@@ -598,7 +685,9 @@ async fn handle_message(
     }
 
     if subject == "lancache.dns.record" {
-        return if handle_dns_record(msg, pdns_api_key, http_client, snapshot_ctx).await {
+        return if handle_dns_record(msg, pdns_api_key, http_client, snapshot_ctx, applied_seqs)
+            .await
+        {
             HandleOutcome::Ack
         } else {
             // Record updates carry the stale-clobber ordering hazard -- stop
@@ -652,6 +741,7 @@ async fn handle_dns_record(
     pdns_api_key: &str,
     http_client: &Arc<Client>,
     snapshot_ctx: &SnapshotContext,
+    applied_seqs: &mut AppliedSequences,
 ) -> bool {
     let record: DNSRecord = match serde_json::from_slice(&msg.payload) {
         Ok(r) => r,
@@ -688,6 +778,35 @@ async fn handle_dns_record(
             return true;
         }
     };
+
+    // Cross-batch stale-write guard (issue #772; see `AppliedSequences`). A
+    // redelivered older-sequence update for a key whose newer sequence was
+    // already applied must be dropped, not replayed over the newer state.
+    let key = record_key(&record.zone, &record.name, &record.record_type);
+    let stream_seq = match msg.info() {
+        Ok(info) => Some(info.stream_sequence),
+        Err(e) => {
+            // A consumer-fetched JetStream message always carries a $JS.ACK
+            // reply subject, so info() should never fail on this path. If it
+            // somehow does we cannot order this write, so apply it unguarded
+            // (no worse than the pre-#772 behavior) rather than silently
+            // dropping what may be a real update.
+            eprintln!("Could not read JetStream message info for stale-write guard (applying unguarded): {e}");
+            None
+        }
+    };
+    if let Some(seq) = stream_seq {
+        if applied_seqs.is_stale(&key, seq) {
+            // Ack (return true): the message has been superseded by a newer
+            // sequence for the same key, so there is nothing left to apply and
+            // JetStream must stop redelivering it.
+            println!(
+                "Skipping stale DNS record redelivery: zone={} name={} type={} seq={} (a newer sequence for this key was already applied)",
+                record.zone, record.name, record.record_type, seq
+            );
+            return true;
+        }
+    }
 
     let url = format!(
         "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
@@ -726,6 +845,13 @@ async fn handle_dns_record(
                     snapshot_ctx,
                 )
                 .await;
+                // Record the applied watermark only after PowerDNS confirmed
+                // the write (2xx). A failed/retried write must not advance the
+                // watermark, or a later legitimate retry of this same message
+                // would be wrongly skipped as stale (issue #772).
+                if let Some(seq) = stream_seq {
+                    applied_seqs.record_applied(key, seq);
+                }
                 true
             } else if resp.status().is_client_error() {
                 // P2 fix: Ack on 4xx client errors (invalid data, permanent failure).
@@ -1248,6 +1374,80 @@ mod tests {
                 BatchOutcome::NakedAndBatchStopped,
                 BatchOutcome::SkippedDueToEarlierFailure,
             ]
+        );
+    }
+
+    // Issue #772: the applied-sequence watermark must treat any sequence <= the
+    // highest already applied for a key as stale, so a redelivered older
+    // message -- or an exact re-delivery of the same one -- is skipped instead
+    // of clobbering newer state. This is the core invariant the cross-batch
+    // guard in handle_dns_record relies on.
+    #[test]
+    fn applied_sequences_marks_older_and_equal_as_stale() {
+        let mut seqs = AppliedSequences::default();
+        let key = record_key("lan", "host.lan.", "A");
+        assert!(
+            !seqs.is_stale(&key, 100),
+            "the first sight of a key can never be stale"
+        );
+        seqs.record_applied(key.clone(), 100);
+        assert!(
+            seqs.is_stale(&key, 100),
+            "an exact redelivery (equal seq) must be treated as stale"
+        );
+        assert!(seqs.is_stale(&key, 99), "an older seq must be stale");
+        assert!(!seqs.is_stale(&key, 101), "a newer seq must not be stale");
+    }
+
+    // Issue #772 core scenario, modeled without a live NATS connection: message
+    // B (newer, seq 105) for key X is applied first -- as happens when it
+    // arrives in the fetch batch right after message A's failure stopped the
+    // previous batch -- and then message A (older, seq 100) for the SAME key
+    // redelivers after its NAK. The guard must classify A as stale so it is
+    // dropped rather than reapplying its old state over B.
+    #[test]
+    fn applied_sequences_closes_cross_batch_clobber_scenario() {
+        let mut seqs = AppliedSequences::default();
+        let key = record_key("lan", "host.lan.", "A");
+        assert!(!seqs.is_stale(&key, 105));
+        seqs.record_applied(key.clone(), 105);
+        assert!(
+            seqs.is_stale(&key, 100),
+            "A's post-NAK redelivery at the older seq must be recognized as stale"
+        );
+    }
+
+    // Guards against an overly-coarse key: applying a newer seq for one record
+    // must never make an unrelated record (different name, or same name but a
+    // different record type) look stale and get its legitimate update dropped.
+    #[test]
+    fn applied_sequences_are_per_key_independent() {
+        let mut seqs = AppliedSequences::default();
+        let a_v4 = record_key("lan", "a.lan.", "A");
+        let a_v6 = record_key("lan", "a.lan.", "AAAA");
+        let b_v4 = record_key("lan", "b.lan.", "A");
+        seqs.record_applied(a_v4.clone(), 200);
+        assert!(
+            !seqs.is_stale(&a_v6, 1),
+            "same name, different type is an independent key"
+        );
+        assert!(
+            !seqs.is_stale(&b_v4, 1),
+            "a different name is an independent key"
+        );
+        assert!(seqs.is_stale(&a_v4, 200));
+    }
+
+    // Issue #772: the key must be normalized so the same logical record
+    // published with a trailing dot or different case (as the reconciler and
+    // the Admin UI routes can each do) maps to ONE watermark. If these produced
+    // different keys, a stale redelivery under one spelling could clobber newer
+    // state written under the other, defeating the guard entirely.
+    #[test]
+    fn record_key_normalizes_trailing_dot_and_case() {
+        assert_eq!(
+            record_key("lan", "Host.LAN.", "a"),
+            record_key("lan.", "host.lan", "A")
         );
     }
 }
