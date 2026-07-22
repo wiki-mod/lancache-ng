@@ -155,6 +155,10 @@ echo "== Phase 1: fresh install via the real setup.sh CLI (expect-driven, mirror
 # "Add now? (ip addr add ...)" is always answered "" (default N): this
 # script must never mutate the runner host's real network configuration,
 # only ever bind to already-existing loopback addresses.
+# "Cache size in GiB" is answered "5", not "" (the 50 GiB default): issue
+# #1069 added a real free-disk-space check against this runner's filesystem,
+# and this phase must not depend on however much space happens to be free on
+# whichever self-hosted runner picks up the job.
 LANCACHE_IMAGE_CHANNEL="${SETUP_SIM_IMAGE_CHANNEL:-edge}" \
 LANCACHE_IMAGE_TAG="${SETUP_SIM_IMAGE_TAG:-}" \
 SETUP_SIM_INSTALL_DIR="$install_dir" \
@@ -181,8 +185,9 @@ expect_prompt {SSL mode IP} \$ip_ssl
 expect_prompt {Add now\?[^\n]*ip addr add} ""
 expect_prompt {Directory[^\n]*\[} \$install_dir
 expect_prompt {Cache directory \(absolute path\)} ""
-expect_prompt {Cache size in GiB} ""
+expect_prompt {Cache size in GiB} "5"
 expect_prompt {Cache RAM buffer in MB} ""
+expect_prompt {Cache entry max age} ""
 expect_prompt {Enable scheduled automatic updates\?} ""
 expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy\)} "disabled"
 expect_prompt {Protect Admin-UI with password\? \[Y/n\]} "n"
