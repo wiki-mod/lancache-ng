@@ -1561,6 +1561,13 @@ pub async fn release_lease(
         ));
     }
 
+    // Capture the lease's DDNS hostname BEFORE deleting it (issue #1083):
+    // lease4-del removes the lease record this is read from, and it is the
+    // exact forward FQDN Kea's D2 used for the A record that must be cleaned
+    // up. Best-effort -- a failed/absent read just skips the forward-record
+    // delete; the reverse PTR is reconstructed from the IP alone.
+    let lease_hostname = fetch_lease_hostname(&state, &form.ip).await;
+
     let resp = kea_post(
         &state,
         json!({
@@ -1575,7 +1582,18 @@ pub async fn release_lease(
     .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     match kea_lease_del_result(&resp) {
-        LeaseDelOutcome::Released => Ok(Redirect::to("/dhcp")),
+        LeaseDelOutcome::Released => {
+            // Kea's lease4-del does NOT trigger a DDNS removal (issue #1083,
+            // confirmed against Kea's docs: only a client DHCPRELEASE or Kea's
+            // own expired-lease reclamation send a removal NCR to D2, never an
+            // admin-issued lease4-del). Clean up the A + PTR records D2 created
+            // by publishing deletes on the same lancache.dns.record NATS
+            // subject both PowerDNS instances already consume. Best-effort: the
+            // address is already freed, so a DNS-cleanup failure must never
+            // turn a successful release into an error response.
+            cleanup_lease_ddns_records(&state, &form.ip, lease_hostname.as_deref()).await;
+            Ok(Redirect::to("/dhcp"))
+        }
         // Kea's CONTROL_RESULT_EMPTY (3) for lease4-del means no lease matched
         // the given address -- an ordinary race (the lease expired or was
         // already released between page render and this request), not a
@@ -1589,6 +1607,117 @@ pub async fn release_lease(
         )),
         LeaseDelOutcome::Error(msg) => Err(DhcpError::config_error(msg)),
     }
+}
+
+// Reads a single lease by IP (lease4-get) and returns its DDNS hostname if
+// present and non-empty. Best-effort by design (see release_lease's #1083
+// cleanup): any error, a missing lease, or a hostname-less lease yields None,
+// and the caller simply skips the forward-record delete.
+async fn fetch_lease_hostname(state: &AppState, ip: &str) -> Option<String> {
+    let resp = kea_post(
+        state,
+        json!({
+            "command": "lease4-get",
+            "service": ["dhcp4"],
+            "arguments": {"ip-address": ip}
+        }),
+    )
+    .await
+    .ok()?;
+    let hostname = resp
+        .get(0)?
+        .get("arguments")?
+        .get("hostname")?
+        .as_str()?
+        .trim();
+    if hostname.is_empty() {
+        None
+    } else {
+        Some(hostname.to_string())
+    }
+}
+
+// Publishes the forward-A and reverse-PTR record deletes for a just-released
+// lease over the lancache.dns.record NATS subject (issue #1083). Best-effort:
+// logs and continues on any publish failure. Both records are reconstructed
+// from this lease's own IP/hostname, so the worst case of a mismatch is a
+// stale record left behind (or a logged PowerDNS 4xx), never the removal of an
+// unrelated active record.
+async fn cleanup_lease_ddns_records(state: &AppState, ip: &str, hostname: Option<&str>) {
+    // Forward A record: keyed by Kea's own FQDN for the lease. Skipped when the
+    // lease had no hostname (nothing was ever registered forward).
+    if let Some(hostname) = hostname {
+        if let Some((zone, name)) = forward_record_zone_and_name(hostname) {
+            publish_dns_record_delete(state, &zone, &name, "A").await;
+        }
+    }
+    // Reverse PTR record: name + zone derive purely from the IPv4, so this runs
+    // even when the lease carried no hostname.
+    if let Some((zone, name)) = reverse_ptr_zone_and_name(ip) {
+        publish_dns_record_delete(state, &zone, &name, "PTR").await;
+    }
+}
+
+// Publishes one record-delete event, mirroring remove_lan_record's payload
+// shape exactly -- the DNS subscriber acks malformed delete events (missing
+// fields) as unrecoverable, so the schema must match the proven producer. The
+// subscriber is record-type-agnostic and applies the delete to whatever zone
+// is named by name+type, origin-independent, so it removes a D2-created record
+// the same as an Admin-UI-created one.
+async fn publish_dns_record_delete(state: &AppState, zone: &str, name: &str, record_type: &str) {
+    let msg = json!({
+        "action": "delete",
+        "zone": zone,
+        "name": name,
+        "type": record_type
+    });
+    if let Err(e) = state
+        .nats
+        .publish(
+            "lancache.dns.record",
+            serde_json::to_vec(&msg).unwrap().into(),
+        )
+        .await
+    {
+        tracing::error!(
+            zone = %zone,
+            name = %name,
+            record_type = %record_type,
+            "NATS publish of DDNS record delete failed: {e}"
+        );
+    }
+}
+
+// Splits a fully-qualified lease hostname into (zone, name-with-trailing-dot)
+// for a forward-record delete. The zone is the FQDN's parent domain in
+// add_lan_record's no-trailing-dot convention (host.lan -> zone "lan", name
+// "host.lan."; host.local.lan -> zone "local.lan"). Returns None for a bare
+// single-label name, which has no parent zone to delete from.
+fn forward_record_zone_and_name(hostname: &str) -> Option<(String, String)> {
+    let trimmed = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_label, zone) = trimmed.split_once('.')?;
+    if zone.is_empty() {
+        return None;
+    }
+    Some((zone.to_string(), format!("{trimmed}.")))
+}
+
+// Computes the (zone, PTR-name) for an IPv4's reverse record, mirroring the
+// RFC1918 private reverse zones services/dns creates (its PRIVATE_REVERSE_ZONES
+// list): 10.in-addr.arpa, 168.192.in-addr.arpa, and {16..31}.172.in-addr.arpa.
+// Expressed as the three structural rules rather than a copied 18-entry list so
+// it cannot drift from that generation. Returns None for any address outside
+// those ranges -- no PowerDNS zone hosts it, so there is nothing to delete.
+fn reverse_ptr_zone_and_name(ip: &str) -> Option<(String, String)> {
+    let [a, b, c, d] = parse_ipv4(ip)?.octets();
+    let zone = match (a, b) {
+        (10, _) => "10.in-addr.arpa".to_string(),
+        (192, 168) => "168.192.in-addr.arpa".to_string(),
+        (172, 16..=31) => format!("{b}.172.in-addr.arpa"),
+        _ => return None,
+    };
+    let name = format!("{d}.{c}.{b}.{a}.in-addr.arpa.");
+    Some((zone, name))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -5212,6 +5341,73 @@ mod tests {
         assert!(validate_custom_dhcp_option_data("pxelinux.0").is_ok());
         assert!(validate_custom_dhcp_option_data("").is_err());
         assert!(validate_custom_dhcp_option_data("line\nbreak").is_err());
+    }
+
+    // Issue #1083: the forward-record cleanup must split Kea's stored FQDN
+    // into the right PowerDNS zone (its parent domain) and canonical record
+    // name (trailing dot), tolerate an already-dotted/mixed-case input, and
+    // refuse a bare single-label name that has no parent zone to delete from.
+    #[test]
+    fn forward_record_zone_and_name_splits_fqdn() {
+        assert_eq!(
+            forward_record_zone_and_name("laptop.lan"),
+            Some(("lan".to_string(), "laptop.lan.".to_string()))
+        );
+        assert_eq!(
+            forward_record_zone_and_name("Laptop.LAN."),
+            Some(("lan".to_string(), "laptop.lan.".to_string()))
+        );
+        assert_eq!(
+            forward_record_zone_and_name("host.local.lan."),
+            Some(("local.lan".to_string(), "host.local.lan.".to_string()))
+        );
+        // A bare label (or empty/whitespace) has no parent zone to target.
+        assert_eq!(forward_record_zone_and_name("lan"), None);
+        assert_eq!(forward_record_zone_and_name(""), None);
+        assert_eq!(forward_record_zone_and_name("   "), None);
+    }
+
+    // Issue #1083: the reverse-PTR cleanup must map an IPv4 to the exact
+    // private reverse zone services/dns actually hosts and to the canonical
+    // PTR name, and must skip any address outside the RFC1918 ranges -- no
+    // such zone exists there, so a PTR delete would be a pointless/wrong
+    // request. The 172.16-31 boundary is the easy-to-get-wrong case.
+    #[test]
+    fn reverse_ptr_zone_and_name_covers_rfc1918_and_skips_public() {
+        assert_eq!(
+            reverse_ptr_zone_and_name("10.1.2.3"),
+            Some((
+                "10.in-addr.arpa".to_string(),
+                "3.2.1.10.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(
+            reverse_ptr_zone_and_name("192.168.1.42"),
+            Some((
+                "168.192.in-addr.arpa".to_string(),
+                "42.1.168.192.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(
+            reverse_ptr_zone_and_name("172.16.5.6"),
+            Some((
+                "16.172.in-addr.arpa".to_string(),
+                "6.5.16.172.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(
+            reverse_ptr_zone_and_name("172.31.9.9"),
+            Some((
+                "31.172.in-addr.arpa".to_string(),
+                "9.9.31.172.in-addr.arpa.".to_string()
+            ))
+        );
+        // 172.15 and 172.32 are just outside the private block; public IPs and
+        // non-IPs skip too.
+        assert_eq!(reverse_ptr_zone_and_name("172.15.0.1"), None);
+        assert_eq!(reverse_ptr_zone_and_name("172.32.0.1"), None);
+        assert_eq!(reverse_ptr_zone_and_name("8.8.8.8"), None);
+        assert_eq!(reverse_ptr_zone_and_name("not-an-ip"), None);
     }
 
     // ─── Issue #450: dnsmasq relay/proxy field validators ───
