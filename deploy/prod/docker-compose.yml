@@ -344,8 +344,10 @@ services:
           host="$${KEA_CTRL_HOST:-127.0.0.1}";
           [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
           token="$${KEA_CTRL_TOKEN:-}";
-          case "$$token" in ""|CHANGE_ME*|changeme*|YOUR_*|*_HERE|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret)
-          token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)" ;; esac;
+          norm="$$(printf '%s' "$$token" | tr '[:upper:]' '[:lower:]' | tr '-' '_')";
+          case "$$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac;
+          case "$$token" in lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) token="" ;; esac;
+          [ -n "$$token" ] || token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)";
           curl -sf -u admin:$$token
           -H 'Content-Type: application/json'
           -d '{"command":"config-get","service":["dhcp4"]}'
