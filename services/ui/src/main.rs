@@ -961,6 +961,8 @@ async fn main() -> Result<()> {
         // check_dhcp_conflict's own comment for the header-based CSRF check
         // that pairs with this route now being a mutating method.
         .route("/api/dhcp/check", post(routes::dhcp::check_dhcp_conflict))
+        .route("/ntp", get(routes::ntp::ntp_page))
+        .route("/ntp/settings", post(routes::ntp::update_ntp_settings))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))

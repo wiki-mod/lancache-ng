@@ -355,6 +355,46 @@ services:
       - dhcp-proxy
     restart: unless-stopped
 
+  # ── LanCache-NG-NTP (chrony) ──────────────────────────────────────────────
+  # Disciplines its own clock against public NTP servers and serves LAN
+  # clients on UDP/123. Opt-in like the dhcp/dhcp-proxy services above:
+  # created only when the `ntp` Compose profile is active (see setup.sh's
+  # compose_profiles_for_runtime), and enabled/disabled at runtime by the
+  # Admin UI starting/stopping this predeclared container, mirroring
+  # reconcile_dhcp_mode's pattern for `dhcp`/`dhcp-proxy`.
+  ntp:
+    container_name: lancache-ntp
+    build:
+      context: ../../services/ntp
+    profiles:
+      - ntp
+    env_file:
+      - ../../config/dev/ntp.env
+    volumes:
+      - ui-data:/data:ro
+      - ntp-data:/var/lib/chrony
+      # Central logging pipeline (#633): chronyd's `log` directive (see
+      # chrony.conf) writes here in addition to the process's own stdout.
+      - ntp-logs:/var/log/chrony
+    ports:
+      # No dedicated LAN IP (unlike dns-standard/dns-ssl): NTP is plain
+      # unicast UDP, not a broadcast protocol like DHCP, so Docker's normal
+      # port-publish DNAT already preserves the real client source IP for
+      # genuine LAN traffic without needing network_mode: host. Bound to all
+      # interfaces, matching how `dhcp`'s port 67/udp is published below.
+      - "123:123/udp"
+    cap_add:
+      # chronyd needs to step/slew the container HOST's real system clock to
+      # genuinely discipline time (containers share one kernel clock; there
+      # is no per-container clock namespace). Docker's default capability
+      # set excludes CAP_SYS_TIME, so this must be granted explicitly. This
+      # is inherent to running any real NTP server in Docker, not specific
+      # to this project -- see services/ntp/Dockerfile's matching comment.
+      - SYS_TIME
+    networks:
+      - lancache
+    restart: unless-stopped
+
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
   # DHCP servers" feature. Reuses the UI image (already has nmap and dhclient
@@ -1530,3 +1570,9 @@ volumes:
   netdata-logs:
   logs-syslog-ng:
   ui-data:
+  # LanCache-NG-NTP (chrony): drift file / runtime state, and its own log
+  # output. Not yet wired into the `syslog` (fluent-bit) central logging
+  # pipeline (#633) -- a known, deliberately deferred follow-up (see
+  # docs/architecture-ng.md's logging matrix).
+  ntp-data:
+  ntp-logs:

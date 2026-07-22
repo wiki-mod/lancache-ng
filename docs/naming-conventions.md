@@ -96,7 +96,7 @@ Documented exceptions:
 
 Rule: lowercase, hyphen-separated, one word per logical responsibility —
 `proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
-`nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
+`ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
 These names are also the DNS aliases used for
 service-to-service HTTP calls inside a Compose network (see "Two separate
 name namespaces" above). They must be identical across `deploy/dev`,
@@ -168,10 +168,11 @@ explicitly scoped change adds the volume migration logic.
 Rule: everything under the shared `LANCACHE_STATE_DIR` (default
 `/opt/lancache-ng`) uses lowercase, hyphen-separated subdirectory names that
 match the service that owns them: `cache`, `pdns-standard`, `pdns-ssl`,
-`pdns-filter-state`, `nats`, `nats-conf`, `kea`. See `docs/backup-restore.md`
+`pdns-filter-state`, `nats`, `nats-conf`, `kea`, `ntp`. See `docs/backup-restore.md`
 and `docs/how-to-change-ip.md` for the full `LANCACHE_STATE_DIR` contract
 and its override variables (`PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`,
-`PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`).
+`PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`,
+`NTP_DATA_DIR`).
 This document does not duplicate that contract; it only asserts that new
 state directories must follow the same naming shape.
 
@@ -179,7 +180,7 @@ state directories must follow the same naming shape.
 
 Rule: `ghcr.io/wiki-mod/lancache-ng/<service>` for every first-party image,
 where `<service>` is the same lowercase-hyphenated name as the Compose
-service (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ui`,
+service (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`,
 `build-tools`, `stack`). This is already fully governed by
 `release/stack-images.yml` (the machine-readable inventory) and
 `docs/release-versioning.md` — this document does not duplicate that

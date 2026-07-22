@@ -171,7 +171,7 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
 require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-tools.yml \
   'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
-require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
+require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 
@@ -310,7 +310,7 @@ require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-\$\
 require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
   .github/workflows/build-push.yml \
   'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
-require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack' \
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \

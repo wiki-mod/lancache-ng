@@ -241,6 +241,18 @@ pub struct Config {
     pub syslog_log_root: String,
     pub syslog_max_gb: u32,
     pub syslog_retention_days: u32,
+    // LanCache-NG-NTP (chrony) settings. Mirrors the dhcp_mode/dhcp_* shape
+    // above: an env-loaded default, overridable at runtime via the Admin
+    // UI's own ui_settings_file persistence (see effective_ntp_enabled()/
+    // effective_ntp_upstream_servers()/effective_ntp_auto_dhcp() further
+    // down). ntp_auto_dhcp is deliberately a separate field from
+    // ntp_enabled: requirement 4 of the issue this was built for is explicit
+    // that "auto-set this as the DHCP NTP server" must be its own opt-in
+    // toggle, never an automatic side effect of enabling the NTP container
+    // itself.
+    pub ntp_enabled: bool,
+    pub ntp_upstream_servers: String,
+    pub ntp_auto_dhcp: bool,
 }
 
 // Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
@@ -352,6 +364,9 @@ impl fmt::Debug for Config {
             .field("syslog_log_root", &self.syslog_log_root)
             .field("syslog_max_gb", &self.syslog_max_gb)
             .field("syslog_retention_days", &self.syslog_retention_days)
+            .field("ntp_enabled", &self.ntp_enabled)
+            .field("ntp_upstream_servers", &self.ntp_upstream_servers)
+            .field("ntp_auto_dhcp", &self.ntp_auto_dhcp)
             .finish()
     }
 }
@@ -540,6 +555,27 @@ impl Config {
     pub fn effective_dhcp_proxy_custom_options(&self) -> String {
         read_ui_override(&self.ui_settings_file, "DHCP_PROXY_CUSTOM_OPTIONS")
             .unwrap_or_else(|| self.dhcp_proxy_custom_options.clone())
+    }
+
+    pub fn effective_ntp_enabled(&self) -> bool {
+        read_ui_override(&self.ui_settings_file, "NTP_ENABLED")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(self.ntp_enabled)
+    }
+
+    pub fn effective_ntp_upstream_servers(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "NTP_UPSTREAM_SERVERS")
+            .unwrap_or_else(|| self.ntp_upstream_servers.clone())
+    }
+
+    // Separate from effective_ntp_enabled by design (requirement 4): whether
+    // this container is enabled at all, and whether it should be pushed into
+    // Kea's ntp-servers option, are two independent toggles that both
+    // routes/ntp.rs and routes/dhcp.rs's reconcile hook must check.
+    pub fn effective_ntp_auto_dhcp(&self) -> bool {
+        read_ui_override(&self.ui_settings_file, "NTP_AUTO_DHCP")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(self.ntp_auto_dhcp)
     }
 
     // Release channel / scheduled-update settings (#819). Unlike DHCP mode,
@@ -781,6 +817,15 @@ impl Config {
             syslog_log_root: env_str("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
             syslog_max_gb: env_u32_clamped_with_max("SYSLOG_MAX_GB", 10, SYSLOG_MAX_GB_CEILING),
             syslog_retention_days: env_u32_clamped("SYSLOG_RETENTION_DAYS", 30),
+            ntp_enabled: env_bool("NTP_ENABLED", false),
+            // Matches services/ntp/entrypoint.sh's own curated default
+            // exactly, so the Admin UI's NTP page shows the real running
+            // default rather than an empty field on a fresh install.
+            ntp_upstream_servers: env_str(
+                "NTP_UPSTREAM_SERVERS",
+                "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com",
+            ),
+            ntp_auto_dhcp: env_bool("NTP_AUTO_DHCP", false),
         })
     }
 }
@@ -1517,6 +1562,39 @@ mod tests {
         }
     }
 
+    // Confirms LanCache-NG-NTP's three settings load with the documented
+    // defaults (matching services/ntp/entrypoint.sh's own curated upstream
+    // list exactly, so the Admin UI never shows a different default than
+    // what the container actually renders on a fresh install) and that env
+    // overrides take effect.
+    #[test]
+    fn ntp_settings_load_from_env_with_documented_defaults() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        for key in ["NTP_ENABLED", "NTP_UPSTREAM_SERVERS", "NTP_AUTO_DHCP"] {
+            env::remove_var(key);
+        }
+        let cfg = Config::from_env().unwrap();
+        assert!(!cfg.ntp_enabled);
+        assert_eq!(
+            cfg.ntp_upstream_servers,
+            "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com"
+        );
+        assert!(!cfg.ntp_auto_dhcp);
+
+        env::set_var("NTP_ENABLED", "true");
+        env::set_var("NTP_UPSTREAM_SERVERS", "192.0.2.1 192.0.2.2");
+        env::set_var("NTP_AUTO_DHCP", "1");
+        let cfg = Config::from_env().unwrap();
+        assert!(cfg.ntp_enabled);
+        assert_eq!(cfg.ntp_upstream_servers, "192.0.2.1 192.0.2.2");
+        assert!(cfg.ntp_auto_dhcp);
+
+        for key in ["NTP_ENABLED", "NTP_UPSTREAM_SERVERS", "NTP_AUTO_DHCP"] {
+            env::remove_var(key);
+        }
+    }
+
     // Proves env_bool()'s SYSLOG_ENABLED parsing agrees with watchdog.sh's
     // is_truthy() (services/watchdog/watchdog.sh) on the exact same input
     // tables that tests/bats/watchdog_truthy_parsing.bats and
@@ -1722,6 +1800,51 @@ mod tests {
             "DHCP_PROXY_BOOT_FILENAME",
             "DHCP_PROXY_BOOT_SERVER",
             "DHCP_PROXY_CUSTOM_OPTIONS",
+            "UI_SETTINGS_FILE",
+        ] {
+            env::remove_var(key);
+        }
+        let _ = fs::remove_file(&settings_path);
+    }
+
+    // Same env-then-UI-override precedence as dhcp_proxy_optional_fields_
+    // load_from_env_and_ui_override_wins above, for LanCache-NG-NTP's three
+    // settings -- these are what routes/ntp.rs's update_ntp_settings and
+    // routes/dhcp.rs's persist_ntp_settings/apply_ntp_lan_ip_to_all_subnets/
+    // restore_default_ntp_on_all_subnets all read through.
+    #[test]
+    fn ntp_settings_load_from_env_and_ui_override_wins() {
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-ntp-{}.env",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&settings_path);
+        env::set_var("UI_SETTINGS_FILE", &settings_path);
+
+        env::set_var("NTP_ENABLED", "false");
+        env::set_var("NTP_UPSTREAM_SERVERS", "192.0.2.1");
+        env::set_var("NTP_AUTO_DHCP", "false");
+
+        let cfg = Config::from_env().unwrap();
+        assert!(!cfg.effective_ntp_enabled());
+        assert_eq!(cfg.effective_ntp_upstream_servers(), "192.0.2.1");
+        assert!(!cfg.effective_ntp_auto_dhcp());
+
+        fs::write(
+            &settings_path,
+            "NTP_ENABLED=1\nNTP_UPSTREAM_SERVERS=192.0.2.9 192.0.2.10\nNTP_AUTO_DHCP=1\n",
+        )
+        .unwrap();
+        let cfg = Config::from_env().unwrap();
+        assert!(cfg.effective_ntp_enabled());
+        assert_eq!(cfg.effective_ntp_upstream_servers(), "192.0.2.9 192.0.2.10");
+        assert!(cfg.effective_ntp_auto_dhcp());
+
+        for key in [
+            "NTP_ENABLED",
+            "NTP_UPSTREAM_SERVERS",
+            "NTP_AUTO_DHCP",
             "UI_SETTINGS_FILE",
         ] {
             env::remove_var(key);

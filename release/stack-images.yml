@@ -87,6 +87,14 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
+  - name: ntp
+    image: ghcr.io/wiki-mod/lancache-ng/ntp
+    source: services/ntp/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    compose:
+      - deploy/prod/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
     source: services/ui/Dockerfile

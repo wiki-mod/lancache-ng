@@ -1318,6 +1318,36 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+  # ── LanCache-NG-NTP (chrony) ──────────────────────────────────────────────
+  # Disciplines its own clock against public NTP servers and serves LAN
+  # clients on UDP/123. Opt-in like dhcp/dhcp-proxy above.
+  ntp:
+    profiles: [ntp]
+    container_name: lancache-ntp
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
+    volumes:
+      - ui-data:/data:ro
+      - ${NTP_DATA_DIR:-./ntp}:/var/lib/chrony
+      # Central logging pipeline (#633): chronyd's `log` directive (see
+      # chrony.conf) writes here in addition to the process's own stdout.
+      - ntp-logs:/var/log/chrony
+    environment:
+      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:-0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com}
+      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
+    ports:
+      # No dedicated LAN IP: NTP is plain unicast UDP, not a broadcast
+      # protocol like DHCP, so Docker's normal port-publish DNAT already
+      # preserves real client source IPs without network_mode: host.
+      - "123:123/udp"
+    cap_add:
+      # chronyd needs to step/slew the container HOST's real system clock to
+      # genuinely discipline time -- see services/ntp/Dockerfile's comment.
+      - SYS_TIME
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
   # DHCP servers" feature. Reuses the UI image (already has nmap and dhclient
@@ -1544,6 +1574,10 @@ volumes:
   watchdog-logs:
   nats-logs:
   netdata-logs:
+  # LanCache-NG-NTP (chrony) log output. Not yet wired into the `syslog`
+  # (fluent-bit) central logging pipeline (#633) -- a known, deliberately
+  # deferred follow-up (see docs/architecture-ng.md's logging matrix).
+  ntp-logs:
   logs-syslog-ng:
   pdns-data-standard:
   pdns-data-ssl:
