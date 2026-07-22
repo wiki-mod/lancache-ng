@@ -19,6 +19,15 @@ ARG DOCKER_BUILDX_VERSION=0.35.0
 # `go get` this exact module up to the fixed version before building instead
 # of carrying the vulnerability forward.
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
+# docker-buildx v0.35.0 and docker-compose v5.2.0 both pin
+# google.golang.org/grpc at v1.81.1, which carries a HIGH-severity CVE
+# (GHSA-hrxh-6v49-42gf, gRPC-Go xDS RBAC and HTTP/2 vulnerabilities) fixed
+# in 1.82.1 -- confirmed via Trivy scanning this image (CI run 29926535995
+# on PR #1070; tracked as issue #1080, the third confirmed instance of this
+# CVE class per CLAUDE.md's AG-KD-003). Same reasoning as the containerd
+# override above: neither project has cut a release that resolves this on
+# its own yet, so `go get` the fixed version directly before building.
+ARG GRPC_GO_VERSION=1.82.1
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -75,6 +84,7 @@ RUN set -euo pipefail; \
     git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
     ( cd "$buildx_src" \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
@@ -88,7 +98,9 @@ RUN set -euo pipefail; \
     /out/docker --version; \
     compose_src="$(mktemp -d)"; \
     git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
-    ( cd "$compose_src" && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
+    ( cd "$compose_src" \
+      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
     rm -rf "$compose_src"; \
     /out/docker-compose version
 
