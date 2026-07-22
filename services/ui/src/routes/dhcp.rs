@@ -2961,7 +2961,10 @@ fn parse_custom_option_key(raw: &str) -> Result<CustomOptionKey, &'static str> {
     let trimmed = raw.trim();
     // into_iter() over the &'static str array yields owned &'static str
     // elements, so the matched name can be stored in the Pxe variant directly.
-    if let Some(field) = PXE_SUBNET_FIELDS.into_iter().find(|&field| field == trimmed) {
+    if let Some(field) = PXE_SUBNET_FIELDS
+        .into_iter()
+        .find(|&field| field == trimmed)
+    {
         return Ok(CustomOptionKey::Pxe(field));
     }
     parse_custom_dhcp_option_code(trimmed).map(CustomOptionKey::Numeric)
