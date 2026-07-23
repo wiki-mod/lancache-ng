@@ -4061,8 +4061,7 @@ mod tests {
             status_code: 500,
             message: "container crashed on start".to_string(),
         };
-        let err: anyhow::Error =
-            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
+        let err: anyhow::Error = anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
         let dhcp_err = start_service_error(err, "dhcp", "dhcp-kea");
         assert!(
             !dhcp_err.message.contains("has not been created yet"),
