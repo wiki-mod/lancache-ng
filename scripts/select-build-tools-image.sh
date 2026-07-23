@@ -47,10 +47,21 @@ case "$channel_ref" in
     ;;
   *)
     # Every other ref this script is realistically invoked against --
-    # v0.2.0 itself, or a feature/claude/* branch forked from it without an
-    # open PR yet (e.g. a manual workflow_dispatch run) -- is v0.2.0-line
-    # work, so `dev` (the channel v0.2.0 pushes actually promote) is the
-    # correct default rather than the stable-only `latest`.
+    # current_dev itself (today's active development branch; v0.2.0 is
+    # frozen), or a feature/claude/* branch forked from it without an open PR
+    # yet (e.g. a manual workflow_dispatch run) -- is pre-release integration
+    # work, so `dev` is the correct default rather than the stable-only
+    # `latest`.
+    #
+    # STATUS (#709, found during this comment's own update): build-push.yml's
+    # promote job only actually WRITES the `:dev` channel tag for a push
+    # matching `refs/heads/v[0-9]*` (e.g. v0.2.0) -- current_dev does not
+    # match that glob, so today no push actually promotes `:dev` at all, and
+    # this script's own choice of `dev` as current_dev's default is therefore
+    # a read of a channel nothing currently writes. Whether current_dev
+    # should take over v0.2.0's old `:dev`-promoting role (or use a different
+    # channel) is a real, currently-open question tied to #825's branch-
+    # promotion-model decision, deliberately not decided or changed here.
     build_tools_channel="dev"
     ;;
 esac

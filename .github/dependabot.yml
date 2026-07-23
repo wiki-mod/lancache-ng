@@ -5,16 +5,29 @@
 # target-branch key accepts exactly one branch per update entry -- there is
 # no way to list multiple branches for a single block -- and defaults to the
 # repo's default branch (master) when omitted. All real feature/dependency
-# work currently lands on the long-lived v0.2.0 branch, not master (which
-# only receives occasional direct housekeeping commits), so relying on the
-# implicit default silently left v0.2.0 with zero automated dependency
-# scanning. master keeps its own entries too rather than losing coverage.
+# work now lands on the `current_dev` branch (found and fixed per #709's
+# audit of hardcoded v0.2.0 branch-name references: `v0.2.0` was the active
+# branch when this file was first written, but it is now frozen and
+# `current_dev` took over that role -- relying on the implicit master
+# default, or on stale v0.2.0-only coverage, would silently leave the actual
+# active branch with zero automated dependency scanning). `v0.2.0` keeps its
+# own entries for now since it may still need security-only dependency
+# updates while frozen; `master` keeps its own entries too rather than
+# losing coverage there.
 version: 2
 updates:
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
     target-branch: master
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: current_dev
     schedule:
       interval: weekly
     groups:
@@ -40,6 +53,14 @@ updates:
         patterns: ["*"]
   - package-ecosystem: cargo
     directory: /services/ui
+    target-branch: current_dev
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /services/ui
     target-branch: v0.2.0
     schedule:
       interval: weekly
@@ -51,6 +72,14 @@ updates:
   - package-ecosystem: cargo
     directory: /services/dns/nats-subscriber
     target-branch: master
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /services/dns/nats-subscriber
+    target-branch: current_dev
     schedule:
       interval: weekly
     groups:
@@ -73,6 +102,11 @@ updates:
       interval: weekly
   - package-ecosystem: docker
     directory: /services/proxy
+    target-branch: current_dev
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/proxy
     target-branch: v0.2.0
     schedule:
       interval: weekly
@@ -80,6 +114,11 @@ updates:
   - package-ecosystem: docker
     directory: /services/dns
     target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dns
+    target-branch: current_dev
     schedule:
       interval: weekly
   - package-ecosystem: docker
@@ -91,6 +130,11 @@ updates:
   - package-ecosystem: docker
     directory: /services/watchdog
     target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/watchdog
+    target-branch: current_dev
     schedule:
       interval: weekly
   - package-ecosystem: docker
@@ -102,6 +146,11 @@ updates:
   - package-ecosystem: docker
     directory: /services/dhcp
     target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dhcp
+    target-branch: current_dev
     schedule:
       interval: weekly
   - package-ecosystem: docker
@@ -113,6 +162,11 @@ updates:
   - package-ecosystem: docker
     directory: /services/dhcp-proxy
     target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dhcp-proxy
+    target-branch: current_dev
     schedule:
       interval: weekly
   - package-ecosystem: docker
@@ -124,6 +178,11 @@ updates:
   - package-ecosystem: docker
     directory: /services/ui
     target-branch: master
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/ui
+    target-branch: current_dev
     schedule:
       interval: weekly
   - package-ecosystem: docker
