@@ -36,6 +36,10 @@
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
       LAN
     </button>
+    <button type="button" data-dns-tab="ptr"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      PTR (Reverse)
+    </button>
     <button type="button" data-dns-tab="settings"
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
       Settings
@@ -203,6 +207,80 @@
       <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
     </section>
 
+    <section data-dns-panel="ptr" class="card flex flex-col gap-4 hidden">
+      <div>
+        <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          PowerDNS Authoritative Server · Reverse-Lookups (IP&nbsp;→&nbsp;Hostname) für die privaten Reverse-Zonen
+          (<span class="font-mono">10.in-addr.arpa</span>, <span class="font-mono">168.192.in-addr.arpa</span>,
+          <span class="font-mono">16–31.172.in-addr.arpa</span>).
+        </p>
+        <p class="text-xs text-amber-300/90 mt-1 leading-relaxed">
+          Hinweis: Automatisch von Kea (DHCP-DDNS) angelegte PTR-Einträge sind technisch nicht von manuell
+          angelegten unterscheidbar und werden hier gemeinsam angezeigt. Wird ein von DHCP verwalteter Eintrag
+          entfernt, kann Kea ihn beim nächsten Lease-Ereignis erneut anlegen.
+        </p>
+      </div>
+
+      <form action="/domains/ptr/add" method="post" class="flex flex-col gap-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# PTR records live in the reverse zones, not lan.; the operator enters a
+           plain IP + target hostname and the backend derives the in-addr.arpa
+           record name (see reverse_dns.rs). #}
+        <div class="flex gap-2">
+          <input type="text" name="ip" placeholder="IP, z.B. 192.168.1.50"
+                 required
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+          <input type="text" name="hostname" placeholder="Hostname, z.B. printer.lan."
+                 required
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+        </div>
+        <div class="flex gap-2">
+          <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
+                 required min="1"
+                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+          <button type="submit"
+                  class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+            Hinzufügen
+          </button>
+        </div>
+      </form>
+
+      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
+        {% if ptr_records %}
+        {% for ptr in ptr_records %}
+        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+          <div class="flex-1 min-w-0">
+            <div class="flex gap-2 items-center">
+              <span class="font-mono text-sm text-slate-300">{{ ptr.ip }}</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">PTR</span>
+              <span class="text-xs text-slate-500">TTL: {{ ptr.ttl }}</span>
+            </div>
+            <div class="text-xs text-slate-400 mt-0.5 font-mono">→ {{ ptr.hostname }}</div>
+          </div>
+          <form action="/domains/ptr/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {# A PTR is keyed by its IP; the backend deletes the whole PTR rrset
+               for this address. #}
+            <input type="hidden" name="ip" value="{{ ptr.ip }}">
+            <button type="submit"
+                    data-ptr-ip="{{ ptr.ip }}"
+                    data-ptr-host="{{ ptr.hostname }}"
+                    onclick="return confirmRemovePtr(this)"
+                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+              Entfernen
+            </button>
+          </form>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-slate-500 text-sm px-3 py-2">Keine PTR-Einträge vorhanden.</p>
+        {% endif %}
+      </div>
+
+      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+    </section>
+
     <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">Settings / IPv4-only Modus</h2>
@@ -346,6 +424,10 @@
 
   function confirmRemoveRecord(btn) {
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
+  }
+
+  function confirmRemovePtr(btn) {
+    return confirm('PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost + ' entfernen?');
   }
 
   // Zone-snapshot timestamps (#628): same Intl.DateTimeFormat-based helper

@@ -71,6 +71,9 @@ pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap
     let dns_domains = read_domain_entries(&state.config.cdn_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
+    // #1077: all PTR rows across the provisioned reverse zones (manual +
+    // Kea-DDNS-auto-created; they are indistinguishable in PowerDNS).
+    let ptr_records = fetch_ptr_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
     // #628: zone/record known-good snapshot rollback -- see
     // routes/dns_snapshots.rs's module doc comment for why this is a thin
@@ -81,6 +84,7 @@ pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &dns_domains);
     ctx.insert("lan_records", &lan_records);
+    ctx.insert("ptr_records", &ptr_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
     // Retention count shown on the zone-snapshot panel: the same
@@ -1051,9 +1055,379 @@ fn normalize_lan_name(name: &str) -> String {
     }
 }
 
+// ── Manual PTR (reverse DNS) records (#1077) ─────────────────────────────
+//
+// Unlike the forward LAN-record flow above (which publishes to NATS so the
+// change replicates to every DNS node), manual PTR writes go DIRECTLY to the
+// primary's PowerDNS authoritative API via `pdns_auth_url` -- the write path
+// the maintainer confirmed for #1077, with NATS-based replication of manual
+// PTR edits to the other DNS instances (the primary's dns-ssl, and the
+// secondaries) deliberately left as a follow-up pending the still-open
+// reverse-zone replication decision (see #770). The reverse zones themselves
+// are provisioned identically on every instance and Kea writes its automatic
+// PTRs to each directly, so this only affects manual edits.
+
+#[derive(Deserialize)]
+pub struct PtrRecordForm {
+    pub csrf_token: String,
+    // Operator-facing "IP address" input, e.g. `192.168.1.50` -- translated to
+    // the reversed `in-addr.arpa` record name here, so the operator never sees
+    // raw reverse-zone syntax (matching this project's simple-fields pattern).
+    pub ip: String,
+    // The PTR target hostname, e.g. `printer.lan.` (trailing dot optional on
+    // input; normalized below).
+    pub hostname: String,
+    pub ttl: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct PtrDeleteForm {
+    pub csrf_token: String,
+    // A PTR is keyed by its IP: removal deletes the whole PTR rrset for this
+    // address, so only the IP is needed.
+    pub ip: String,
+}
+
+// One row of the PTR display table. Note (#1077): PowerDNS stores no provenance
+// distinguishing a Kea-DDNS-auto-created PTR from a manually-created one (same
+// rrset type, same zone), so this view deliberately shows ALL reverse-zone
+// PTRs uniformly. A consequence surfaced in the UI/PR: removing a
+// DDNS-managed PTR here may simply be recreated by Kea on the next lease event.
+#[derive(Serialize)]
+pub struct PtrRecordView {
+    pub ip: String,
+    pub hostname: String,
+    pub ttl: u32,
+    // Numeric form of `ip` for a stable numeric sort of the table; not rendered.
+    #[serde(skip)]
+    sort_key: u32,
+}
+
+// The 18 IPv4 private reverse zones this project provisions (see
+// services/dns/entrypoint.sh's PRIVATE_REVERSE_ZONES / nats-subscriber's
+// ROLLBACK_ZONES). Generated from the same ranges `reverse_dns` maps into,
+// rather than a second hand-maintained literal list, so the two cannot drift.
+// The IPv6 ULA reverse zones (`c.f.ip6.arpa.`/`d.f.ip6.arpa.`) are intentionally
+// excluded: no IPv6 PTR management is offered here (Kea emits no IPv6 PTRs).
+fn provisioned_ipv4_reverse_zones() -> Vec<String> {
+    let mut zones = vec![
+        "10.in-addr.arpa".to_string(),
+        "168.192.in-addr.arpa".to_string(),
+    ];
+    for second_octet in 16..=31u8 {
+        zones.push(format!("{second_octet}.172.in-addr.arpa"));
+    }
+    zones
+}
+
+// Normalizes and validates a PTR target hostname: trims, lowercases, ensures
+// the trailing dot PowerDNS expects, and requires a valid concrete FQDN
+// (no wildcard, no underscore -- a PTR must point at a real host name).
+fn normalize_ptr_target(hostname: &str) -> Option<String> {
+    let host = hostname.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let fqdn = if host.ends_with('.') {
+        host
+    } else {
+        format!("{host}.")
+    };
+    if is_valid_dns_fqdn_impl(&fqdn, false, false) {
+        Some(fqdn)
+    } else {
+        None
+    }
+}
+
+// Validates a PTR add request, returning (reverse zone id, PTR record name,
+// normalized target FQDN) on success. Rejects (returns None) an unparseable or
+// non-provisioned-range IP, an out-of-range TTL, or an invalid target host --
+// the caller then soft-fails back to /domains, matching add_lan_record.
+fn validate_ptr_add(ip: &str, hostname: &str, ttl: u32) -> Option<(String, String, String)> {
+    if !(MIN_TTL..=MAX_TTL).contains(&ttl) {
+        return None;
+    }
+    let addr: Ipv4Addr = ip.trim().parse().ok()?;
+    let zone = crate::reverse_dns::reverse_zone_for_ipv4(addr)?;
+    let ptr_name = crate::reverse_dns::ptr_name_for_ipv4(addr);
+    let target = normalize_ptr_target(hostname)?;
+    Some((zone, ptr_name, target))
+}
+
+// Validates a PTR delete request (IP only), returning (reverse zone id, PTR
+// record name). Same range validation as add: an IP with no provisioned
+// reverse zone is rejected rather than producing a PATCH that would 404.
+fn validate_ptr_ip(ip: &str) -> Option<(String, String)> {
+    let addr: Ipv4Addr = ip.trim().parse().ok()?;
+    let zone = crate::reverse_dns::reverse_zone_for_ipv4(addr)?;
+    let ptr_name = crate::reverse_dns::ptr_name_for_ipv4(addr);
+    Some((zone, ptr_name))
+}
+
+// PATCHes one reverse zone on the primary's PowerDNS (pdns_auth_url), mirroring
+// nats-subscriber's handle_dns_record write shape (the canonical PowerDNS-write
+// shape in this repo). Returns whether PowerDNS accepted the change (2xx).
+async fn patch_reverse_zone(state: &AppState, zone: &str, body: String) -> bool {
+    let url = format!(
+        "{}/api/v1/servers/localhost/zones/{}",
+        state.config.pdns_auth_url, zone
+    );
+    match state
+        .http_client
+        .patch(&url)
+        .header("X-API-Key", &state.config.pdns_api_key)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(e) => {
+            tracing::error!("PTR PATCH to reverse zone {zone} failed: {e}");
+            false
+        }
+    }
+}
+
+pub async fn add_ptr_record(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<PtrRecordForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
+    let ttl = form.ttl.unwrap_or(300);
+
+    let Some((zone, ptr_name, target)) = validate_ptr_add(&form.ip, &form.hostname, ttl) else {
+        tracing::warn!(ip = %form.ip, hostname = %form.hostname, "Rejected invalid PTR record");
+        return Ok(Redirect::to("/domains"));
+    };
+
+    let body = json!({
+        "rrsets": [{
+            "name": ptr_name,
+            "type": "PTR",
+            "ttl": ttl,
+            "changetype": "REPLACE",
+            "records": [{"content": target, "disabled": false}]
+        }]
+    })
+    .to_string();
+
+    // Only flush the recursor cache once PowerDNS actually accepted the write,
+    // so a failed PATCH doesn't advertise a change that never happened.
+    if patch_reverse_zone(&state, &zone, body).await {
+        flush_recursor_cache(&state, &ptr_name).await;
+    } else {
+        tracing::error!(ip = %form.ip, "PowerDNS rejected PTR add");
+    }
+
+    Ok(Redirect::to("/domains"))
+}
+
+pub async fn remove_ptr_record(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<PtrDeleteForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
+
+    let Some((zone, ptr_name)) = validate_ptr_ip(&form.ip) else {
+        tracing::warn!(ip = %form.ip, "Rejected invalid PTR delete");
+        return Ok(Redirect::to("/domains"));
+    };
+
+    // DELETE changetype removes the whole PTR rrset for this name; ttl/records
+    // are omitted, exactly as remove_lan_record's delete message does.
+    let body = json!({
+        "rrsets": [{
+            "name": ptr_name,
+            "type": "PTR",
+            "changetype": "DELETE"
+        }]
+    })
+    .to_string();
+
+    if patch_reverse_zone(&state, &zone, body).await {
+        flush_recursor_cache(&state, &ptr_name).await;
+    } else {
+        tracing::error!(ip = %form.ip, "PowerDNS rejected PTR delete");
+    }
+
+    Ok(Redirect::to("/domains"))
+}
+
+// Extracts displayable PTR rows from one PowerDNS zone export's `rrsets` array.
+// Skips non-PTR rrsets, disabled records, and any name that does not parse as a
+// four-label IPv4 in-addr.arpa name, so a malformed/foreign entry is left out
+// of the IP-addressed table rather than shown as a broken row.
+fn parse_ptr_views(rrsets: &serde_json::Value) -> Vec<PtrRecordView> {
+    let mut views = Vec::new();
+    let Some(arr) = rrsets.as_array() else {
+        return views;
+    };
+    for rrset in arr {
+        if rrset.get("type").and_then(|v| v.as_str()) != Some("PTR") {
+            continue;
+        }
+        let Some(name) = rrset.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(addr) = crate::reverse_dns::ipv4_from_ptr_name(name) else {
+            continue;
+        };
+        let ttl = rrset.get("ttl").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if let Some(records) = rrset.get("records").and_then(|v| v.as_array()) {
+            for record in records {
+                if record.get("disabled").and_then(|v| v.as_bool()) == Some(true) {
+                    continue;
+                }
+                if let Some(content) = record.get("content").and_then(|v| v.as_str()) {
+                    views.push(PtrRecordView {
+                        ip: addr.to_string(),
+                        hostname: content.to_string(),
+                        ttl,
+                        sort_key: u32::from(addr),
+                    });
+                }
+            }
+        }
+    }
+    views
+}
+
+async fn fetch_ptr_records_for_zone(state: &AppState, zone: &str) -> Vec<PtrRecordView> {
+    let url = format!(
+        "{}/api/v1/servers/localhost/zones/{}",
+        state.config.pdns_auth_url, zone
+    );
+    match state
+        .http_client
+        .get(&url)
+        .header("X-API-Key", &state.config.pdns_api_key)
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => parse_ptr_views(data.get("rrsets").unwrap_or(&serde_json::Value::Null)),
+            Err(_) => vec![],
+        },
+        Err(_) => vec![],
+    }
+}
+
+// Reads every provisioned IPv4 reverse zone from the primary's PowerDNS and
+// returns all PTR rows (manual AND Kea-DDNS-auto-created -- they are
+// indistinguishable, see PtrRecordView), sorted by IP. The per-zone GETs run
+// concurrently because there are up to 18 of them and doing them serially on
+// every /domains render would be needlessly slow.
+async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRecordView> {
+    let zones = provisioned_ipv4_reverse_zones();
+    let per_zone =
+        futures_util::future::join_all(zones.iter().map(|z| fetch_ptr_records_for_zone(state, z)))
+            .await;
+    let mut all: Vec<PtrRecordView> = per_zone.into_iter().flatten().collect();
+    all.sort_by(|a, b| {
+        a.sort_key
+            .cmp(&b.sort_key)
+            .then_with(|| a.hostname.cmp(&b.hostname))
+    });
+    all
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1077: a valid PTR add resolves to the correct reverse zone id, the
+    // reversed dot-terminated PTR name, and a normalized dot-terminated target.
+    // This is the exact tuple the handler feeds into the PowerDNS PATCH, so a
+    // wrong mapping here would write to the wrong zone/name.
+    #[test]
+    fn validate_ptr_add_accepts_private_ip_and_host() {
+        assert_eq!(
+            validate_ptr_add("192.168.1.50", "printer.lan", 300),
+            Some((
+                "168.192.in-addr.arpa".to_string(),
+                "50.1.168.192.in-addr.arpa.".to_string(),
+                "printer.lan.".to_string()
+            ))
+        );
+        // Trailing dot on the host and a 172.16/12 address also work.
+        assert_eq!(
+            validate_ptr_add("172.20.0.7", "nas.lan.", 600),
+            Some((
+                "20.172.in-addr.arpa".to_string(),
+                "7.0.20.172.in-addr.arpa.".to_string(),
+                "nas.lan.".to_string()
+            ))
+        );
+    }
+
+    // #1077: inputs that must be rejected (soft-fail) rather than PATCHed --
+    // a public IP has no provisioned reverse zone; TTL 0 is out of range; a
+    // wildcard or empty target is not a valid concrete PTR host. Each would
+    // otherwise cause a bad or nonsensical PowerDNS write.
+    #[test]
+    fn validate_ptr_add_rejects_bad_ip_ttl_and_host() {
+        assert_eq!(validate_ptr_add("8.8.8.8", "host.lan", 300), None);
+        assert_eq!(validate_ptr_add("not-an-ip", "host.lan", 300), None);
+        assert_eq!(validate_ptr_add("192.168.1.50", "host.lan", 0), None);
+        assert_eq!(validate_ptr_add("192.168.1.50", "*.lan", 300), None);
+        assert_eq!(validate_ptr_add("192.168.1.50", "", 300), None);
+    }
+
+    // #1077: delete validation keys off the IP alone and applies the same
+    // provisioned-range gate as add, so a delete for an unprovisioned IP is
+    // rejected instead of issuing a PATCH that would 404.
+    #[test]
+    fn validate_ptr_ip_maps_or_rejects() {
+        assert_eq!(
+            validate_ptr_ip("10.1.2.3"),
+            Some((
+                "10.in-addr.arpa".to_string(),
+                "3.2.1.10.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(validate_ptr_ip("203.0.113.1"), None);
+    }
+
+    // #1077: the generated reverse-zone list must be exactly the 18 IPv4
+    // private zones PowerDNS provisions (10, 168.192, and 16..=31.172), so the
+    // display view GETs the right zones and never an unprovisioned one.
+    #[test]
+    fn provisioned_reverse_zones_match_the_18_ipv4_zones() {
+        let zones = provisioned_ipv4_reverse_zones();
+        assert_eq!(zones.len(), 18);
+        assert!(zones.contains(&"10.in-addr.arpa".to_string()));
+        assert!(zones.contains(&"168.192.in-addr.arpa".to_string()));
+        assert!(zones.contains(&"16.172.in-addr.arpa".to_string()));
+        assert!(zones.contains(&"31.172.in-addr.arpa".to_string()));
+        assert!(!zones.contains(&"15.172.in-addr.arpa".to_string()));
+        assert!(!zones.contains(&"32.172.in-addr.arpa".to_string()));
+    }
+
+    // #1077: the display parser must turn a real PowerDNS zone export into IP
+    // rows -- keeping PTR rrsets, resolving the reversed name back to an IP,
+    // and skipping non-PTR rrsets (SOA/NS), disabled records, and any name that
+    // is not a four-label IPv4 in-addr.arpa name -- so the table shows exactly
+    // the reverse mappings and nothing malformed.
+    #[test]
+    fn parse_ptr_views_extracts_only_valid_ptr_rows() {
+        let rrsets = json!([
+            {"name": "50.1.168.192.in-addr.arpa.", "type": "PTR", "ttl": 300,
+             "records": [{"content": "printer.lan.", "disabled": false}]},
+            {"name": "168.192.in-addr.arpa.", "type": "SOA", "ttl": 3600,
+             "records": [{"content": "ns.lan. admin.lan. 1 2 3 4 5", "disabled": false}]},
+            {"name": "9.1.168.192.in-addr.arpa.", "type": "PTR", "ttl": 60,
+             "records": [{"content": "old.lan.", "disabled": true}]}
+        ]);
+        let views = parse_ptr_views(&rrsets);
+        assert_eq!(views.len(), 1, "only the enabled PTR rrset is kept");
+        assert_eq!(views[0].ip, "192.168.1.50");
+        assert_eq!(views[0].hostname, "printer.lan.");
+        assert_eq!(views[0].ttl, 300);
+    }
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
