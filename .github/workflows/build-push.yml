@@ -453,6 +453,134 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
+  pr-title-convention-check:
+    # Enforces AGENTS.md AG-GH-018: a PR title must follow this repo's
+    # Conventional-Commit taxonomy (audited from real history in #850) --
+    # this repo merges (not squashes) pull requests, so the PR title, not
+    # any individual commit message, is the unit any future release-please
+    # automation (#819) would read to compute the next vX.Y.Z bump. Same
+    # zero-LAN-dependency shape as pr-template-check/
+    # pr-tracking-metadata-check -- reads github.event.pull_request context
+    # plus one live `gh pr view` call, no self-hosted-specific resource
+    # needed -- but kept on the self-hosted pool as the primary job with a
+    # hosted fallback below, matching every other zero-LAN check in this
+    # file.
+    #
+    # check-pr-title-convention.sh only needs bash itself, but still runs
+    # inside the pinned build-tools image (per AG-VAL-016), the same
+    # pattern pr-tracking-metadata-check uses for python3/curl: project
+    # verification should not depend on whichever bash happens to be
+    # preinstalled on a given runner host.
+    name: PR title Conventional-Commit lint
+    if: github.event_name == 'pull_request'
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Fetch current PR title live
+        # Same class of bug found and fixed in pr-template-check and
+        # pr-tracking-metadata-check (2026-07-16): github.event.pull_request
+        # .title is a snapshot taken when THIS event fired, and an edited
+        # title (without a new commit, which does not retrigger this
+        # workflow's declared event types) can leave that snapshot stale.
+        # A live `gh pr view` fetch is always current regardless of why/when
+        # this job runs.
+        id: live-title
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
+      - name: Validate PR title convention
+        env:
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          # Dependabot's own PR author identity -- see
+          # check-pr-title-convention.sh's dependabot[bot] exemption.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # Grace-period switch (see check-pr-title-convention.sh's header
+          # comment): unset (the default) currently means "warn", per the
+          # maintainer's 2026-07-23 decision on #850 -- a transitional grace
+          # period, not a permanent downgrade; a warn result is still a real
+          # AG-GH-018 violation that must be fixed before merge, it just
+          # doesn't hard-block CI yet. Set this optional repository variable
+          # to "block" once the maintainer is ready for full enforcement,
+          # with no code change needed.
+          PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+        run: |
+          set -euo pipefail
+          pr_title="$(cat /tmp/pr-title-live.txt)"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e PR_TITLE="$pr_title" \
+            -e PR_DRAFT \
+            -e PR_AUTHOR \
+            -e PR_TITLE_LINT_MODE \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-pr-title-convention.sh
+
+  pr-title-convention-check-hosted:
+    name: PR title Conventional-Commit lint (GitHub-hosted fallback)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Select build-tools image
+        # This fallback job must resolve its own image rather than depending
+        # on validate-compose's output (like the self-hosted job above does)
+        # -- it exists specifically for when self-hosted runners (and
+        # anything that depends on them, including validate-compose) are
+        # unavailable, so a needs: dependency on that job would defeat the
+        # fallback's purpose. Matches pr-tracking-metadata-check-hosted's own
+        # resolution step.
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Fetch current PR title live
+        # See the primary pr-title-convention-check job's identical step for
+        # why this fetches live via `gh pr view` instead of trusting
+        # github.event.pull_request.title.
+        id: live-title
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
+      - name: Validate PR title convention
+        env:
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+        run: |
+          set -euo pipefail
+          pr_title="$(cat /tmp/pr-title-live.txt)"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e PR_TITLE="$pr_title" \
+            -e PR_DRAFT \
+            -e PR_AUTHOR \
+            -e PR_TITLE_LINT_MODE \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-pr-title-convention.sh
+
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -646,6 +774,53 @@ jobs:
             -e GOVERNANCE_PR_BODY="$governance_pr_body" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+
+      # Warn-only guard (#893): flags a PR that edits CHANGELOG.md directly,
+      # since #899 that file is normally written by an automated bot commit
+      # (.github/workflows/update-changelog.yaml on release publish), never
+      # through a PR -- see CONTRIBUTING.md's "Releasing Changes to
+      # CHANGELOG.md". This step is deliberately independent of the
+      # governance-guardrails step above rather than extending it: that
+      # step's own $changed_files tempfile is already deleted by its EXIT
+      # trap before this step starts (each `run:` block is its own shell
+      # process), so a self-contained fetch here is simpler than threading
+      # state between steps. This can NEVER fail the job: the script itself
+      # always exits 0 (see its header), and `|| true` below is a deliberate,
+      # documented fallback (not a hidden failure per AG-VAL-004) covering
+      # the unlikely case where the docker run invocation itself errors for
+      # an infra reason -- a warn-only check must never become a hard gate
+      # by accident.
+      - name: Warn on direct CHANGELOG.md edits outside a release PR
+        if: github.event_name == 'pull_request'
+        env:
+          GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -uo pipefail
+
+          changelog_guard_changed_files="$(mktemp "$PWD/.changelog-guard-changed-files.XXXXXX")"
+          trap 'rm -f "$changelog_guard_changed_files"' EXIT
+
+          if git fetch --no-tags --depth=1 origin \
+               "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}" \
+             && git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA" \
+             && git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}" \
+             && git cat-file -e "${GITHUB_SHA}^{commit}"; then
+            git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changelog_guard_changed_files"
+          else
+            echo "::warning::check-changelog-direct-edit: could not compute this PR's changed-files diff; skipping the CHANGELOG.md direct-edit check for this run."
+            : > "$changelog_guard_changed_files"
+          fi
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
+          || true
 
       - name: Run setup migration semantics tests
         run: |
@@ -4665,6 +4840,7 @@ jobs:
       - file-headers
       - pr-template-check
       - pr-tracking-metadata-check
+      - pr-title-convention-check
       - line-endings
     if: >-
       ${{
@@ -4676,7 +4852,8 @@ jobs:
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success')
+        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
@@ -5387,6 +5564,7 @@ jobs:
       - file-headers
       - pr-template-check
       - pr-tracking-metadata-check
+      - pr-title-convention-check
       - line-endings
     if: >-
       ${{
@@ -5398,7 +5576,8 @@ jobs:
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success')
+        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
