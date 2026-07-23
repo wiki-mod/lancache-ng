@@ -159,8 +159,53 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    # Reported for real on a shared self-hosted runner (not hypothetical):
+    # services/dhcp/entrypoint.sh runs as root inside the Kea container and
+    # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
+    # uid (10001, see that entrypoint's own comment, and this script's
+    # identical comment on its own kea-data mount above). Left as-is, the
+    # plain `rm -rf "$work_dir"` below silently fails to remove those now-
+    # root/10001-owned files, leaving them on disk under this runner's own
+    # actions-runner work directory -- which then made a LATER job's
+    # `actions/checkout` on the same runner slot fail outright trying to
+    # clean its workspace (EACCES: permission denied, rmdir ...), blocking
+    # an unrelated PR's CI run regardless of what that later job actually
+    # checked. Reset ownership back to this process's own uid/gid via the
+    # already-built (no extra pull) Kea image -- unconditionally, in this
+    # EXIT trap, so it runs whether the simulation above succeeded or
+    # failed, not just on the happy path -- before ever touching rm -rf.
+    # Same fix, same root cause, as scripts/setup-reset-kea-config-
+    # simulation.sh's own cleanup() (that script had it from the start;
+    # this one was added later for issue #634 and missed the pattern).
+    if [[ -d "$work_dir" ]]; then
+        # Reported explicitly (not just silently `|| true`-d) so the
+        # ownership reset's own success is a directly visible fact in every
+        # run's log, success or failure, instead of something a future
+        # reviewer would have to infer from the absence of a later
+        # "Permission denied" line.
+        if docker run --rm --entrypoint chown \
+            -v "$work_dir:/reset-owner" \
+            "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1; then
+            echo "cleanup: reset ownership of $work_dir to $(id -u):$(id -g) -- ok"
+        else
+            echo "cleanup: WARNING -- resetting ownership of $work_dir failed (rc=$?); the rm -rf below may leave files behind on this runner" >&2
+        fi
+    fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
-    rm -rf "$work_dir"
+    # `|| true`: an unguarded `rm -rf` here would still exit non-zero on a
+    # permission-denied removal (the chown step above should prevent that
+    # now, but this is the second, independent layer) and, under
+    # `set -euo pipefail`, would then override this trap's own
+    # `exit "$status"` below with a spurious cleanup failure instead of the
+    # test's real outcome. Its own stderr is deliberately left unredirected
+    # (unlike the chown step above) so a leftover permission-denied file
+    # still shows up verbatim in the log even though it can no longer flip
+    # the job red.
+    if rm -rf "$work_dir"; then
+        echo "cleanup: removed $work_dir -- ok"
+    else
+        echo "cleanup: WARNING -- rm -rf $work_dir left files behind (see stderr above); this can block a LATER job's actions/checkout on this same runner slot" >&2
+    fi
     exit "$status"
 }
 trap cleanup EXIT
