@@ -4,7 +4,7 @@
 //! LAN DNS records while preserving the on-disk domain-file semantics.
 
 use crate::{docker_client, AppState};
-use axum::extract::{Form, State};
+use axum::extract::{Form, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{Html, Redirect};
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,40 @@ pub struct Record {
     pub disabled: bool,
 }
 
-pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+// Query params this page reads back after a redirect from one of its own
+// forms (add_dns's validation-failure path below). Deliberately just this
+// one optional field, not a general flash-message mechanism: this UI has no
+// site-wide flash/banner system today (see routes/dns_snapshots.rs's own
+// doc comment on that gap), and building one is a bigger change than this
+// one page's error display needs.
+#[derive(Deserialize)]
+pub struct DomainsPageQuery {
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+// Maps a known `?error=` code to the exact, safe, human-readable banner text
+// -- never renders the query parameter's raw value directly. This keeps the
+// set of possible messages fixed and reviewable instead of turning an
+// operator-controlled (or link-shared) URL parameter into arbitrary page
+// text. An unrecognized code (a stale bookmark from a future/older version,
+// or a manually-edited URL) is treated as no error rather than guessed at.
+fn domains_page_error_message(code: &str) -> Option<&'static str> {
+    match code {
+        "invalid_domain" => Some(
+            "That domain was not added: CDN entries need a real domain name, not just a bare \
+             top-level domain (e.g. \"steamcontent.com\", not \"com\"). A leading \".\" for a \
+             wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\").",
+        ),
+        _ => None,
+    }
+}
+
+pub async fn domains_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DomainsPageQuery>,
+) -> Html<String> {
     let dns_domains = read_domain_entries(&state.config.cdn_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
@@ -83,6 +116,10 @@ pub async fn domains_page(State(state): State<Arc<AppState>>, headers: HeaderMap
     ctx.insert("lan_records", &lan_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
+    ctx.insert(
+        "domain_error_message",
+        &query.error.as_deref().and_then(domains_page_error_message),
+    );
     // Retention count shown on the zone-snapshot panel: the same
     // KEEP_KNOWN_GOOD_CONFIGS variable and default this adapter shares with
     // every other known-good-snapshot adapter (docs/known-good-config-
@@ -112,7 +149,16 @@ pub async fn add_dns(
     crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let Some(domain) = parse_domain_entry(&form.domain) else {
         tracing::warn!(domain = %form.domain, "Rejected invalid dns domain");
-        return Err(axum::http::StatusCode::BAD_REQUEST);
+        // Redirect back to the page with an in-app error banner instead of a
+        // bare 400: this handler is reached by a plain HTML form POST (no
+        // JS/fetch error handling on the client), so returning a raw
+        // StatusCode here used to navigate the browser to an unstyled error
+        // page -- reported during field testing for the bare-TLD case (e.g.
+        // typing "com"), which parse_domain_entry already correctly rejects
+        // (it requires at least two labels), just without a usable error
+        // surface. See domains_page_error_message for the fixed, safe set of
+        // messages this can redirect to.
+        return Ok(Redirect::to("/domains?error=invalid_domain"));
     };
 
     let wrote = {
@@ -1146,6 +1192,45 @@ mod tests {
         assert!(!is_valid_domain("bad-.example.com"));
         assert!(!is_valid_domain("bad_label.example.com"));
         assert!(!is_valid_domain(&format!("{}.example.com", "a".repeat(64))));
+    }
+
+    // Bare-TLD regression guard (#1068 item 17): confirms parse_domain_entry
+    // already correctly rejects a single-label entry like "com" (with or
+    // without the leading-dot wildcard marker) before add_dns ever runs --
+    // the reported bug was never server-side validation accepting a bare
+    // TLD, it was the Admin UI's plain-HTML-form POST surfacing that
+    // (correct) rejection as a raw, unstyled browser-level HTTP 400 instead
+    // of an in-app error. See add_dns's own redirect-with-error-code fix and
+    // domains_page_error_message below for the UX half of this fix.
+    #[test]
+    fn rejects_bare_top_level_domain() {
+        assert!(!is_valid_domain("com"));
+        assert!(!is_valid_domain(".com"));
+        assert!(parse_domain_entry("com").is_none());
+        assert!(parse_domain_entry(".com").is_none());
+    }
+
+    // domains_page_error_message must only ever return one of the fixed,
+    // reviewed strings for a known code, and None for anything else --
+    // guarding against a future change accidentally reflecting the raw query
+    // parameter value back into the page (see the function's own doc
+    // comment for why that would be an XSS/hygiene concern).
+    #[test]
+    fn domains_page_error_message_only_recognizes_known_codes() {
+        assert_eq!(
+            domains_page_error_message("invalid_domain"),
+            Some(
+                "That domain was not added: CDN entries need a real domain name, not just a bare \
+                 top-level domain (e.g. \"steamcontent.com\", not \"com\"). A leading \".\" for a \
+                 wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\")."
+            )
+        );
+        assert_eq!(domains_page_error_message("unknown_code"), None);
+        assert_eq!(domains_page_error_message(""), None);
+        assert_eq!(
+            domains_page_error_message("<script>alert(1)</script>"),
+            None
+        );
     }
 
     // Cross-language parity guard (issue #822 pattern audit): this

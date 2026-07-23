@@ -1,7 +1,15 @@
 # Release External Images and Provenance
 
 This document records how lancache-ng handles container images that are not
-built from this repository.
+built from this repository. It does not cover how a first-party release is
+actually cut (channel promotion, patch tagging, platform support, rollback);
+see [docs/release-versioning.md](release-versioning.md) for that process --
+its own "External Images" section links back here for the per-image table
+and provenance/SBOM handling below.
+
+Reviewed against the current release pipeline (`.github/workflows/build-push.yml`)
+and `release/stack-images.yml` as part of issue #1068: the image list, digests,
+and the provenance/SBOM status line below are accurate as of this writing.
 
 ## Policy
 
