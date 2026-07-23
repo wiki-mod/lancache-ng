@@ -23,8 +23,14 @@ is_excluded() {
         Cargo.lock | */Cargo.lock) return 0 ;;
         .gitkeep | */.gitkeep) return 0 ;;
         VERSION) return 0 ;;
+        # JSON has no comment syntax, so no JSON file can carry the header
+        # (AG-HDR-002 / AG-HDR-007: JSON content is excluded regardless of
+        # extension). Covers e.g. release-please-config.json /
+        # .release-please-manifest.json at the repo root.
+        *.json) return 0 ;;
         # JSON despite the .conf extension — see AGENTS.md for why these
-        # three specifically are excluded.
+        # three specifically are excluded (the *.json rule above does not match
+        # their .conf extension).
         services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
         # Vendored third-party file and generated/compiled build output.
         services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;

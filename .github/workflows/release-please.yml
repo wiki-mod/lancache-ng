@@ -1,0 +1,94 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# release-please scaffold (Refs #850, Refs #819) -- GATED, NOT YET LIVE.
+#
+# This workflow, plus release-please-config.json and .release-please-manifest.json
+# at the repo root, are reviewable GROUNDWORK for automating the vX.Y.Z bump
+# decision from Conventional-Commit history. It is deliberately wired as
+# `workflow_dispatch`-ONLY so it never fires automatically and cannot cut or
+# propose a release until a maintainer both (a) resolves the gates below and
+# (b) enables the `push:` trigger. Running it manually today would, at most,
+# open a "release PR" proposing the next version from commits since v0.2.0 --
+# it moves no channel tag and publishes no image by itself.
+#
+# OPEN GATES that must be resolved before this is enabled (do not flip the
+# push trigger until each is addressed):
+#
+#  1. WHICH BRANCH does release-please run on? This depends on the still-open
+#     branch/promotion-model decision in #825. Under the maintainer's current
+#     model (`current_dev` = active dev, `master` = tested/stable, old
+#     `vY.X.Z` = pure archive), releases are cut from `master`, so the commented
+#     `push: branches: [master]` block below is the intended trigger -- but it
+#     stays commented until #825 is settled, because the whole channel model it
+#     sits inside is not final. It intentionally does NOT trigger on
+#     `current_dev`: development there is allowed to be broken and must not
+#     drive release proposals.
+#
+#  2. CONVENTIONAL-COMMIT ENFORCEMENT PREREQUISITE. release-please's bump
+#     detection is only trustworthy if PR titles / commit subjects actually
+#     follow Conventional Commits. This repo's titles are only loosely
+#     conventional today (audited on #850). The PR-title lint being added under
+#     #850 is the hard prerequisite -- enabling this before that lint is in
+#     force would produce wrong or missing bumps.
+#
+#  3. TAG-PUSH ANTI-RECURSION (#819). When release-please's release PR is merged
+#     it pushes a `vX.Y.Z` tag. A tag pushed by the default GITHUB_TOKEN does
+#     NOT trigger other workflows (GitHub's deliberate anti-recursion rule), so
+#     build-push.yml's `on: push: tags: ["v*"]` release pipeline would NOT run.
+#     To make the full chain work, release-please must use a separate token
+#     (a PAT / GitHub App token) exposed as `RELEASE_PLEASE_TOKEN`. The
+#     `token:` input below prefers that secret and falls back to GITHUB_TOKEN
+#     (sufficient only for opening the release PR, not for chaining the tag
+#     into the release build).
+#
+#  4. VERSION-FILE SYNC. `.release-please-manifest.json` is release-please's own
+#     source of truth for the current version; the repo's root `VERSION` file
+#     (read by setup.sh's derive_current_release_image_tag) is separate and is
+#     NOT updated by this config (VERSION is consumed as a bare raw value with
+#     no comment/annotation support -- see AG-HDR-003 -- so release-please's
+#     generic updater can't safely rewrite it). Keeping the two in sync is an
+#     open integration point: either the promote job's version-bump step
+#     (#819 Points 5-6) or a small post-release updater. Do NOT assume this is
+#     handled -- it isn't yet.
+#
+#  5. RELATIONSHIP TO EXISTING CHANGELOG AUTOMATION. release-drafter.yml and
+#     update-changelog.yaml are the CURRENT changelog mechanism. release-please
+#     would SUPERSEDE them once enabled (it writes CHANGELOG.md itself from the
+#     same merged-PR history). They are deliberately left untouched here so the
+#     current mechanism keeps working while this stays gated; retiring them is
+#     part of enabling this, not of scaffolding it.
+
+name: release-please (scaffold, gated)
+
+on:
+  # MANUAL-ONLY until the gates in the header are resolved. A dispatch run only
+  # ever opens/updates a release PR proposing the next version; it never moves a
+  # channel tag or publishes an image on its own.
+  workflow_dispatch:
+  # GATED -- do not uncomment until #825 (branch model) and the #850 commit-lint
+  # prerequisite are settled, and RELEASE_PLEASE_TOKEN is configured (see header):
+  # push:
+  #   branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: propose release (release-please)
+    # Pure GitHub-API action with no LAN/build-tools dependency, so it runs on a
+    # GitHub-hosted runner rather than the (temporary) self-hosted fleet --
+    # keeps release proposal independent of self-hosted availability.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run release-please
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          # Prefer a dedicated token so the merged release PR's tag push can
+          # chain into build-push.yml's tag-triggered release (see header gate 3);
+          # falls back to GITHUB_TOKEN, which can open the release PR but cannot
+          # trigger the downstream release build on the tag it pushes.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
