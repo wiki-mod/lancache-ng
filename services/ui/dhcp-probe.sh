@@ -53,9 +53,35 @@ if [ -z "$dhcp_iface" ]; then
 fi
 
 dhclient_out="$tmpdir/dhclient.out"
-if dhclient -4 -1 -v -d -sf /bin/true -pf "$tmpdir/dhclient.pid" -lf "$tmpdir/dhclient.leases" "$dhcp_iface" >"$dhclient_out" 2>&1; then
+dhclient_leases="$tmpdir/dhclient.leases"
+# -d (foreground debug) is deliberately NOT passed here. Confirmed live against
+# a real DHCP server (isc-dhclient 4.4.3-P1): with -1 (try-once) plus -d, a
+# successful bind never returns -- -1's "exit once a lease is obtained" path
+# is implemented by dhclient forking into the background and letting the
+# now-empty parent exit, but -d suppresses that fork, so the still-foreground
+# process just keeps running as the lease's own renewal daemon indefinitely
+# (observed live: still running 9+ minutes after printing "bound to ... --
+# renewal in N seconds", with no sign it would ever exit on its own -- this
+# probe is meant to finish in seconds, not run until the next lease renewal).
+# Plain -v prints the exact same DHCPDISCOVER/DHCPOFFER/DHCPREQUEST/DHCPACK/
+# bound transcript, so dropping -d loses no information while restoring the
+# bounded run time (~1s on success; ~60s on failure, from -1's own no-offer
+# timeout, confirmed unaffected by this change).
+if dhclient -4 -1 -v -sf /bin/true -pf "$tmpdir/dhclient.pid" -lf "$dhclient_leases" "$dhcp_iface" >"$dhclient_out" 2>&1; then
     client_detail="dhclient succeeded on $dhcp_iface"
     cat "$dhclient_out"
+    # dhclient's own stdout transcript (just cat'd above) never prints the
+    # negotiated lease's actual fields (router, DNS, lease time, ...) -- only
+    # protocol-exchange lines (DHCPDISCOVER/OFFER/REQUEST/ACK/bound). Those
+    # fields live solely in the leases file, in ISC's "option name value;"
+    # syntax, so print it too (mirroring how the raw nmap output is cat'd
+    # above for the conflict-probe path's own detail parser) for
+    # extract_dhcp_lease_details (dhcp.rs) to read. A failed attempt never
+    # receives a DHCPACK, so this file stays empty in that case -- nothing to
+    # print, nothing lost.
+    if [ -s "$dhclient_leases" ]; then
+        cat "$dhclient_leases"
+    fi
     printf '__LANCACHE_DHCP_CLIENT_RESULT__ passed %s\n' "$client_detail"
 else
     client_detail="$(last_non_empty_line "$dhclient_out")"

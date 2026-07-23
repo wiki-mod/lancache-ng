@@ -163,6 +163,13 @@
            data.conflict.status === 'found' and details are present, see script below. #}
         <ul id="check-conflict-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
         <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
+        {# Lists the lease fields (assigned IP, router, DNS, lease time, ...) dhclient actually
+           negotiated on a SUCCESSFUL dry-run, alongside the summary already shown above in
+           check-client-status -- same rendering pattern as check-conflict-details above, just for
+           the "it worked, here's what we got" case instead of "a rogue server answered". Hidden by
+           default/on every re-check; only populated+shown by checkDhcpConflict() itself when
+           data.client.status === 'passed' and details are present, see script below. #}
+        <ul id="check-client-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
       </div>
       <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
         Erneut prüfen
@@ -578,14 +585,17 @@ async function checkDhcpConflict() {
   const conflictEl = document.getElementById('check-conflict-status');
   const conflictDetailsEl = document.getElementById('check-conflict-details');
   const clientEl = document.getElementById('check-client-status');
+  const clientDetailsEl = document.getElementById('check-client-details');
   statusEl.textContent = 'Prüfe...';
   conflictEl.textContent = 'Konfliktprobe läuft...';
-  // Reset the details list on every run (button re-click or the
+  // Reset both details lists on every run (button re-click or the
   // DOMContentLoaded auto-run further down), not just when a conflict is
-  // found below -- otherwise a later "no conflict" re-check would still
-  // show a stale server's fields from a previous run.
+  // found / a dry-run succeeds below -- otherwise a later re-check with a
+  // different outcome would still show a stale previous run's fields.
   conflictDetailsEl.replaceChildren();
   conflictDetailsEl.classList.add('hidden');
+  clientDetailsEl.replaceChildren();
+  clientDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
     // POST with an explicit CSRF header, not a plain GET: this endpoint has
@@ -639,6 +649,20 @@ async function checkDhcpConflict() {
     if (data.client?.status === 'passed') {
       clientEl.className = 'text-sm text-green-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
+      // Label/value pairs come from dhclient's own negotiated lease (a real
+      // response from whichever DHCP server answered -- our own or, if this
+      // dry-run happened to reach a foreign one, that server's), so each row
+      // is built with textContent, never innerHTML, same as the conflict
+      // details above.
+      const clientDetails = data.client.details ?? [];
+      for (const item of clientDetails) {
+        const li = document.createElement('li');
+        li.textContent = `${item.label}: ${item.value}`;
+        clientDetailsEl.appendChild(li);
+      }
+      if (clientDetails.length > 0) {
+        clientDetailsEl.classList.remove('hidden');
+      }
     } else if (data.client?.status === 'failed') {
       clientEl.className = 'text-sm text-amber-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: fehlgeschlagen (${data.client.output ?? 'ohne Detail'})`;

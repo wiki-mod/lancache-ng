@@ -1548,6 +1548,35 @@ sync_repo_to_default_branch() {
         || die "Failed to reset $repo_dir to origin/$default_branch."
 }
 
+# Resolves which git ref the standalone bootstrap (the self-clone path used by
+# the documented `curl | bash` one-liner) should check out. An operator-supplied
+# LANCACHE_SETUP_GIT_REF (mirroring the existing LANCACHE_IMAGE_CHANNEL env-var
+# override pattern) takes priority; unset/empty means "keep today's behavior"
+# (resolve and track origin's default branch) so existing installs, docs, and
+# automation are unaffected by this being introduced (#814).
+resolve_setup_bootstrap_ref() {
+    printf '%s\n' "${LANCACHE_SETUP_GIT_REF:-}"
+}
+
+# Hard-resets a repo checkout to a specific, operator-pinned ref (branch, tag,
+# or commit-ish). Fetches the ref explicitly by name rather than relying on a
+# bare `git fetch --prune origin` (which only guarantees branches land under
+# refs/remotes/origin/* -- tag-following is a local clone/config detail this
+# function should not have to assume) so this works uniformly whether "ref" is
+# a branch or a release tag such as v0.2.0. Refuses to run on a dirty tree,
+# matching sync_repo_to_default_branch's safety behavior above.
+sync_repo_to_ref() {
+    local repo_dir="$1" ref="$2"
+
+    git_repo_is_clean "$repo_dir" \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+
+    git -C "$repo_dir" fetch --prune origin "$ref" \
+        || die "Failed to fetch ref '$ref' for $repo_dir. Check that LANCACHE_SETUP_GIT_REF names a real branch, tag, or commit on origin."
+    git -C "$repo_dir" checkout -B "$ref" FETCH_HEAD \
+        || die "Failed to reset $repo_dir to ref '$ref'."
+}
+
 # Resolves the git repo root two levels above a deploy/prod install_dir
 # (deploy/prod -> repo root), used to locate the manual production repo's
 # other runtime inputs (certs/, config/prod/, cdn-domains.txt).
@@ -3432,6 +3461,13 @@ Usage: ./setup.sh install
 
 Runs the guided LanCache-NG installer. This is the default command when no
 argument is provided, which preserves the existing curl | bash setup flow.
+
+When no local repo is found (the standalone curl | bash path), this command
+self-clones to /opt/lancache-ng from the remote's default branch (master) by
+default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
+LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
+for validating a pre-release branch the same documented one-liner way that
+LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
 EOF
             ;;
         update)
@@ -5428,9 +5464,18 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     if ! command -v git >/dev/null 2>&1; then
         install_git
     fi
+    setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
     if [[ -d "/opt/lancache-ng/.git" ]]; then
-        print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
-        sync_repo_to_default_branch /opt/lancache-ng
+        if [[ -n "$setup_bootstrap_ref" ]]; then
+            print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
+            sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
+        else
+            print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+            sync_repo_to_default_branch /opt/lancache-ng
+        fi
+    elif [[ -n "$setup_bootstrap_ref" ]]; then
+        git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+            || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
     else
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
             || die "Clone failed."

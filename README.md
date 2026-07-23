@@ -367,6 +367,25 @@ Recommended for production:
 
 The release workflow publishes service images with branch, tag, and SHA tags and keeps release source notes in GitHub releases.
 
+### Pinning the standalone installer's git ref
+
+The `curl | bash` one-liner above self-clones `/opt/lancache-ng` from
+origin's default branch (`master`) when run standalone with no local repo
+present. `LANCACHE_IMAGE_CHANNEL` already lets you pin which *image* channel
+gets pulled, but until now there was no equivalent for which *git ref* the
+installer bootstraps its own on-disk checkout from. Set
+`LANCACHE_SETUP_GIT_REF` to a branch, tag, or commit-ish to bootstrap from
+that ref instead, for example to validate a pre-release branch the same
+documented way:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo LANCACHE_SETUP_GIT_REF=v0.2.0 bash
+```
+
+Unset (the default) keeps today's behavior unchanged: the installer tracks
+origin's default branch, both for a fresh clone and when re-run against an
+existing `/opt/lancache-ng` checkout.
+
 ## Debug information
 
 If something does not work, run:

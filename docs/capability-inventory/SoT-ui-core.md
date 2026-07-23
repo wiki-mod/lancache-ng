@@ -325,13 +325,18 @@ writer/DNS-replica/every secondary) lives in the implicit default account
   same create_new+0600 persistence pattern as `main.rs`'s session secret.
   This keypair signs every per-secondary user JWT ever issued; its seed
   never leaves the file.
-- `hash_nats_password(password: &str) -> String` — plain unsalted SHA-256
-  hex. Explicitly justified as safe *because* passwords are always 32-byte
-  CSPRNG output (never user-chosen), so salting adds nothing against
-  precomputed tables a fixed random value already defeats — issue #680
-  (open) tracks upgrading this to Argon2id anyway (defense-in-depth /
-  consistency with password-hashing best practice generally, not because the
-  current justification is wrong).
+- `hash_nats_password(password: &str) -> Result<String, String>` — salted
+  Argon2id, stored as a PHC string. Verification (in
+  `authorize_secondary_with_conn`) uses Argon2's own constant-time
+  `PasswordVerifier::verify_password`, not a re-hash-and-compare, since a
+  fresh per-call salt makes two hashes of the same password differ. This
+  replaced the earlier unsalted SHA-256 hex scheme (issue #680, closed): the
+  passwords are always 32-byte CSPRNG output so a slow KDF buys nothing today,
+  but nothing enforces that invariant at the type level, so Argon2id removes
+  the latent weakness that would appear if a chosen password ever entered.
+  Legacy pre-#680 SHA-256 hashes fail closed (a secondary must re-register or
+  rotate to obtain an Argon2id credential); the old scheme is not kept as a
+  verification fallback.
 - `secondary_permissions() -> Value` — the fixed subject-level ACL every
   secondary gets: pub `$JS.API.STREAM.INFO.LANCACHE_DNS`,
   `$JS.API.CONSUMER.INFO.LANCACHE_DNS.>`,
@@ -860,7 +865,6 @@ retracted "no CI test coverage" claim above.
 | xkey (curve25519) encryption of the `$SYS.REQ.USER.AUTH` round trip is not implemented | `nats_auth_callout.rs` | Tracked: **#682** (open), rolled into **#839** (open) |
 | Incoming `AuthorizationRequest`'s own nats-server signature is never verified | `nats_auth_callout.rs` | Tracked: **#839** (open) |
 | No active disconnect of an already-established secondary connection on removal/rotation (only blocks the *next* reconnect) | `nats_auth_callout.rs` | Tracked: **#681** (open) |
-| Secondary password hashing is unsalted SHA-256, not Argon2id | `nats_auth_callout.rs` | Tracked: **#680** (open) |
 | Legacy pre-#583 `nats_token` column kept as permanently inert dead weight (never dropped, SQLite `DROP COLUMN` needs a table rebuild) | `main.rs` | Deliberate, documented trade-off, not a gap |
 | `nats_ui_password`/etc. use `Option<String>` specifically to dodge a CodeQL `rust/hard-coded-cryptographic-value` false positive, not for a functional reason | `config.rs` | Deliberate, documented, worth knowing if CodeQL findings on this file get re-triaged later |
 | `LANCACHE_DEV_MODE` directly controls whether template-render errors leak internals to the client; nothing in-process enforces it's off in prod | `routes/mod.rs` | Operator/deploy-tooling responsibility, not a code gap |

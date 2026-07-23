@@ -381,15 +381,27 @@ IP family.
 
 ---
 
-## 12. [Info] Wildcard-only ("leading dot") CDN domain syntax is implemented and unit-tested but never exercised by the real shipped domain list
+## 12. [Info, superseded by #1072] Wildcard-only ("leading dot") CDN domain syntax is implemented and unit-tested but never exercised by the real shipped domain list
 
-`entrypoint.sh`'s RPZ generator (and the mirrored bats helper) both fully implement a
-"leading dot = wildcard-only, no base-domain record" convention for `cdn-domains.txt`
-entries. `tests/bats/dns_zone_generation.bats` exercises this via synthetic fixtures.
-However, the real, shipped `services/dns/cdn-domains.txt` (162 lines) contains **zero**
-leading-dot entries (`grep -n '^\.' services/dns/cdn-domains.txt` → no matches) -- this
-behavior has never been exercised against the actual file PowerDNS loads in production,
-only against test fixtures.
+**STATUS as of #1072's fix:** this finding described the state of the file *before* a
+related bug and a related migration. The bug this finding didn't itself flag:
+`entrypoint.sh`'s RPZ generator emitted the wildcard `*.<domain>` record
+**unconditionally**, regardless of `is_wildcard_only` -- a bare entry always got both the
+exact-match record and a wildcard record, so the leading-dot form was never actually
+needed to get subdomain coverage, which is exactly why no one had reached for it. #1072
+fixed the generator so the wildcard record is now gated by `is_wildcard_only`, and
+migrated the `services/dns/cdn-domains.txt` entries that rely on real subdomain coverage
+(see that PR body for the per-entry migration reasoning) to the leading-dot form. The
+original observation below is preserved for historical context; "zero leading-dot
+entries" is no longer accurate post-migration.
+
+Original finding: `entrypoint.sh`'s RPZ generator (and the mirrored bats helper) both
+fully implement a "leading dot = wildcard-only, no base-domain record" convention for
+`cdn-domains.txt` entries. `tests/bats/dns_zone_generation.bats` exercises this via
+synthetic fixtures. However, the real, shipped `services/dns/cdn-domains.txt` (162 lines)
+contains **zero** leading-dot entries (`grep -n '^\.' services/dns/cdn-domains.txt` → no
+matches) -- this behavior has never been exercised against the actual file PowerDNS loads
+in production, only against test fixtures.
 
 **Evidence:** `services/dns/cdn-domains.txt` (`grep -n '^\.'` → empty);
 `services/dns/entrypoint.sh:712-716` (`is_wildcard_only` branch).

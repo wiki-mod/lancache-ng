@@ -429,6 +429,21 @@ independent follow-through for anything not yet traced to its end. Verdicts:
   resulting broken `kea-dhcp4.conf` is caught by the healthcheck (not silent),
   so lower severity — noted for completeness of the interpolation-safety class.
 
+## New findings from a follow-up pass (SoT-dhcp.md capability inventory, #843)
+
+This pass re-read `services/dhcp/entrypoint.sh` and its compose wiring
+against current `origin/v0.2.0` while building `docs/capability-inventory/SoT-dhcp.md`,
+which post-dates issue #858 (shared-secret bootstrap, merged 2026-07-16) and
+issue #967/PR #988 (case-insensitive placeholder-detection parity, merged
+2026-07-18) -- both landed after this file's original collection pass. One
+new finding, already fully actioned (per issue #1068 item 9's working-doc
+wind-down guidance, a fully-filed finding is a one-line pointer here, not a
+duplicated write-up):
+
+- **N3. `KEA_CTRL_TOKEN` healthcheck placeholder-detection fallback drift**
+  (moderate) -- filed and fully detailed as issue #1091, `Refs #849`. Not
+  repeated here to avoid maintaining two copies of the same analysis.
+
 ## Out of scope / explicitly not re-litigated here
 
 - `services/dhcp-proxy` (dnsmasq ProxyDHCP/PXE mode) — different code path,
