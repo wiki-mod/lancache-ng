@@ -4010,6 +4010,20 @@ lancache_ui_channel_override_is_valid() {
     esac
 }
 
+# Same validation shape as lancache_ui_channel_override_is_valid above, for
+# the DHCP_MODE key persist_ui_settings (routes/dhcp.rs) writes to the same
+# ui-settings volume. Matches exactly the three values
+# parse_dhcp_mode_input in routes/dhcp.rs accepts -- anything else (empty,
+# a future value this script doesn't know yet) is left as a silent no-op
+# tick rather than folded in, for the same "must never die() inside a
+# systemd service tick" reason documented above.
+lancache_ui_dhcp_mode_override_is_valid() {
+    case "$1" in
+        disabled|kea|dnsmasq-proxy) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Reads a single KEY=value line out of the ui-data volume's
 # lancache-ui-settings.env, or prints nothing if the volume doesn't exist yet
 # (a fresh install before the UI container has ever started), Docker itself
@@ -4052,6 +4066,7 @@ reconcile_auto_update_timer_state() {
 cmd_converge_reconcile() {
     local install_dir="${1:-/opt/lancache-ng}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
+    local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
 
     install_dir=$(realpath -m "$install_dir")
     # A converge tick can fire before the very first install completes (the
@@ -4080,6 +4095,38 @@ cmd_converge_reconcile() {
         if [[ "$ui_auto_update" != "$current_auto_update" ]]; then
             set_env_key AUTO_UPDATE_ENABLED "$ui_auto_update" "$env_file"
             print_ok "Scheduled automatic updates setting updated from Admin UI: ${ui_auto_update} (was ${current_auto_update:-0})"
+        fi
+    fi
+
+    # Issue #1068 item 6: DHCP_MODE is the one Admin-UI-editable setting among
+    # these that also has a real Compose-profile side effect (the `dhcp`/
+    # `dhcp-proxy` services are profile-gated -- see docker-compose.yml).
+    # Without this fold, switching DHCP mode in the Admin UI updated only the
+    # ui-settings volume; .env's COMPOSE_PROFILES (and therefore what
+    # `docker compose up` actually creates) never learned about the change,
+    # so a mode an operator had never used before could never be started --
+    # the Admin UI's own docker-socket-proxy access has no container-create
+    # capability (routes/dhcp.rs's reconcile_dhcp_mode can only start/stop an
+    # ALREADY-EXISTING container). Folding it here, the same way the channel/
+    # auto-update keys already are above, means: once an operator has saved a
+    # new DHCP mode in the UI (which itself may still require one manual
+    # `docker compose --profile ... up -d ...` the very first time that mode
+    # is ever used, per routes/dhcp.rs's start_service_error guidance), this
+    # tick keeps .env's COMPOSE_PROFILES converged with it from then on, so
+    # the container survives a future `setup.sh update` / host reboot /
+    # `docker compose up` instead of silently falling out of the active
+    # profile set again.
+    ui_dhcp_mode=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "DHCP_MODE")
+    if [[ -n "$ui_dhcp_mode" ]] && lancache_ui_dhcp_mode_override_is_valid "$ui_dhcp_mode"; then
+        current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
+        if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
+            current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
+            current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+            new_compose_profiles=$(compose_profiles_for_runtime \
+                "$current_compose_profiles" "$current_ssl_enabled" "$ui_dhcp_mode")
+            set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
+            set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
+            print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
         fi
     fi
 

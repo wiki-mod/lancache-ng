@@ -574,6 +574,33 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
     }
 }
 
+// Turns a start_service failure into a DhcpError, adding actionable
+// create-the-container guidance when the underlying cause is a 404 (see
+// docker_client::is_container_not_created's own comment for why that
+// specific status code means "never created", not "crashed"). Without this,
+// an operator switching to a DHCP mode that was never active before saw only
+// "Failed to start 'dhcp-proxy'" with no indication of what to actually do
+// (issue #1068 item 6) -- the docker-socket-proxy allowlist this module
+// talks through has no create capability, so the Admin UI itself cannot
+// bring the missing container up; the operator (or the host's
+// lancache-converge.timer, once installed) has to run `docker compose up`
+// with the matching profile at least once.
+fn start_service_error(err: anyhow::Error, service_name: &str, profile: &str) -> DhcpError {
+    if docker_client::is_container_not_created(&err) {
+        DhcpError::config_error(format!(
+            "The '{service_name}' container has not been created yet: this Compose stack was \
+             never started with the '{profile}' profile active, so Docker has no container for \
+             the Admin UI to start (it is only allowed to start/stop existing containers, never \
+             create new ones). Fix: in the lancache-ng install directory, run \
+             `docker compose --profile {profile} up -d {service_name}` once to create it, then \
+             switch DHCP mode again here. If a `lancache-converge.timer` is installed, it will \
+             also pick this up automatically within a few minutes after that."
+        ))
+    } else {
+        DhcpError::config_error(format!("{err:#}"))
+    }
+}
+
 async fn reconcile_dhcp_mode(
     state: &AppState,
     mode: crate::config::DhcpMode,
@@ -585,26 +612,26 @@ async fn reconcile_dhcp_mode(
         crate::config::DhcpMode::Disabled => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
         crate::config::DhcpMode::Kea => {
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
         crate::config::DhcpMode::DnsmasqProxy => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
         }
     }
     Ok(())

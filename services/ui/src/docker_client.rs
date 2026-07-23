@@ -69,6 +69,31 @@ pub async fn stop_service_if_present(docker: &Docker, service_name: &str) -> Res
     }
 }
 
+// A 404 from start/restart means the target container was never created at
+// all -- distinct from every other start failure (crash loop, OOM, bad
+// config), which always act on an EXISTING container. In this project that
+// only happens for a profile-gated Compose service (see docker-compose.yml's
+// `dhcp`/`dhcp-proxy` `profiles:`) whose profile was never included in
+// COMPOSE_PROFILES at `docker compose up` time -- reconcile_dhcp_mode in
+// routes/dhcp.rs hits exactly this the first time an operator switches to a
+// DHCP mode that was never active before, since the docker-socket-proxy
+// allowlist this module talks through deliberately has no container-create
+// capability (see this file's own header). Callers use this to turn an
+// opaque "Failed to start 'x'" into the actionable "the container doesn't
+// exist yet, here's the exact command to create it" guidance an operator
+// (who is not assumed to be a programmer) can actually act on.
+pub fn is_container_not_created(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<BollardError>(),
+            Some(BollardError::DockerResponseServerError {
+                status_code: 404,
+                ..
+            })
+        )
+    })
+}
+
 pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
     match service_name {
         "proxy" | "lancache-proxy" => Ok("lancache-proxy"),
