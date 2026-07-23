@@ -39,8 +39,21 @@ _registrable_domain() {
     return 0
 }
 
-declare -a _UNIQUE_DOMAINS=()
-declare -A _DOMAIN_IS_ROOT=()
+# -g is required here: this file is sourced from inside bats' setup()
+# function (see tests/bats/proxy_collect_domain_rows.bats), and plain
+# `declare` inside a function scopes the variable to that function --
+# without -g, both arrays are destroyed the moment setup() returns, so by
+# the time a @test body calls _collect_domain_rows(), `_DOMAIN_IS_ROOT` is
+# gone entirely. The next plain assignment to it inside the function
+# (`_DOMAIN_IS_ROOT=()`) then silently recreates it as an ordinary (non-
+# associative) variable, so `_DOMAIN_IS_ROOT[$root]` is parsed as an
+# arithmetic array subscript instead of a string key -- which fails with
+# "invalid arithmetic operator" the moment $root contains a "." character.
+# The real services/proxy/entrypoint.sh does not have this problem: it
+# declares these at the actual top level of the executed script, never
+# inside a function, so they are genuinely global there already.
+declare -ag _UNIQUE_DOMAINS=()
+declare -Ag _DOMAIN_IS_ROOT=()
 _DOMAIN_ROWS_SKIPPED=0
 
 _collect_domain_rows() {
