@@ -38,9 +38,12 @@ jobs:
     uses: ./.github/workflows/full-setup-sims.yml
     with:
       image_tag: ${{ inputs.image_tag }}
-      should_run: "true"
-      pr_staging_available: "false"
-      build_tools_touched: "false"
+      # should_run / pr_staging_available / build_tools_touched are intentionally
+      # omitted: the reusable workflow's own string defaults (true / false /
+      # false) already express this dispatch-mode intent (run the suite against a
+      # published channel tag, no PR staging). Passing the literal booleans here
+      # is rejected by actionlint against those string-typed inputs, and the
+      # defaults are byte-identical in effect.
     secrets: inherit
 
   dhcp-proxy-pxe-simulation:
