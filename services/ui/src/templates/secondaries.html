@@ -38,7 +38,7 @@
   --token {{ registration_token }} \
   --name myname \
   --proxy-ip {{ primary_url | replace(from="http://", to="") | replace(from=":8080", to="") }}</div>
-      <button onclick="copyCmd()"
+      <button onclick="copyCmd(this)"
               class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors opacity-0 group-hover:opacity-100">
         Kopieren
       </button>
@@ -140,13 +140,40 @@
     });
   }
 
-  function copyCmd() {
-    const text = document.getElementById('install-cmd').innerText;
-    navigator.clipboard.writeText(text).then(() => {
-      const btn = event.target;
+  function copyCmd(btn) {
+    const el = document.getElementById('install-cmd');
+    const flash = () => {
       btn.textContent = 'Kopiert!';
-      setTimeout(() => btn.textContent = 'Kopieren', 1500);
-    });
+      setTimeout(() => { btn.textContent = 'Kopieren'; }, 1500);
+    };
+    // navigator.clipboard exists only in a secure context (HTTPS or
+    // localhost). The Admin UI is commonly served over plain HTTP on a LAN
+    // IP, where navigator.clipboard is undefined and calling it throws --
+    // #1068 item 19's "Copy button non-functional". Fall back to selecting
+    // the command text and the legacy execCommand('copy') in that case, and
+    // pass the button element in explicitly (btn) rather than reading the
+    // global `event`, which is unreliable inside the async .then() callback.
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(el.innerText).then(flash).catch(() => selectAndCopy(el, flash));
+    } else {
+      selectAndCopy(el, flash);
+    }
+  }
+
+  function selectAndCopy(el, onCopied) {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    if (ok) {
+      sel.removeAllRanges();
+      onCopied();
+    }
+    // On failure, deliberately leave the text selected so the operator can
+    // still copy it manually with Ctrl+C.
   }
 
   async function rotateToken(name) {

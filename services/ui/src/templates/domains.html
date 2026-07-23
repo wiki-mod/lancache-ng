@@ -16,6 +16,16 @@
     </p>
   </div>
 
+  {# domain_error_message (only ever one of the fixed, safe strings from
+     domains_page_error_message -- never raw query-parameter text) surfaces
+     a rejected CDN-domain add (e.g. a bare TLD) as an in-app banner instead
+     of the raw browser-level HTTP 400 page a plain form POST used to show. #}
+  {% if domain_error_message %}
+  <div class="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-300">
+    {{ domain_error_message }}
+  </div>
+  {% endif %}
+
   <div class="flex items-center gap-2 border-b border-slate-700">
     <a href="/domains"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "domains" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
