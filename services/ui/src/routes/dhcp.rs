@@ -1404,10 +1404,13 @@ pub async fn remove_subnet(
     Ok(Redirect::to("/dhcp"))
 }
 
-// Adds one custom DHCP option (by numeric code, e.g. a vendor-specific
-// option) to a subnet. Both code and data are validated before touching the
-// config -- see parse_custom_dhcp_option_code/validate_custom_dhcp_option_data
-// further down for what makes a code/value acceptable here.
+// Adds one custom DHCP option to a subnet. The "code" field accepts either a
+// numeric option code (e.g. a vendor-specific option, stored in option-data)
+// or one of the three top-level PXE subnet fields
+// next-server/server-hostname/boot-file-name (stored as a top-level subnet
+// key) -- see parse_custom_option_key/validate_custom_option_data further down
+// for what makes a code/value acceptable here and PXE_SUBNET_FIELDS for why
+// both share one form.
 pub async fn add_subnet_option(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1415,13 +1418,13 @@ pub async fn add_subnet_option(
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
-    let code = parse_custom_dhcp_option_code(&form.code).map_err(|message| {
+    let key = parse_custom_option_key(&form.code).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
             format!("Invalid DHCP option: {message}"),
         )
     })?;
-    let data = validate_custom_dhcp_option_data(&form.data).map_err(|message| {
+    let data = validate_custom_option_data(key, &form.data).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
             format!("Invalid DHCP option: {message}"),
@@ -1431,7 +1434,10 @@ pub async fn add_subnet_option(
 
     kea_config_modify(&state, move |config| {
         let subnet = find_subnet_mut(config, subnet_id)?;
-        add_custom_subnet_option(subnet, code, &data)?;
+        match key {
+            CustomOptionKey::Numeric(code) => add_custom_subnet_option(subnet, code, &data)?,
+            CustomOptionKey::Pxe(field) => set_pxe_subnet_field(subnet, field, &data)?,
+        }
         Ok(())
     })
     .await
@@ -1444,7 +1450,8 @@ pub async fn add_subnet_option(
 // together (see RemoveSubnetOptionForm's own comment for why both are
 // needed) -- the same code/data parsing as add_subnet_option is re-run here
 // so the value being removed is normalized the same way the stored value
-// was when it was added, and the two compare equal.
+// was when it was added, and the two compare equal. Routes a PXE field key to
+// its top-level subnet field the same way add_subnet_option does.
 pub async fn remove_subnet_option(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1452,13 +1459,13 @@ pub async fn remove_subnet_option(
 ) -> Result<Redirect, DhcpError> {
     require_kea_mode(&state)?;
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
-    let code = parse_custom_dhcp_option_code(&form.code).map_err(|message| {
+    let key = parse_custom_option_key(&form.code).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
             format!("Invalid DHCP option: {message}"),
         )
     })?;
-    let data = validate_custom_dhcp_option_data(&form.data).map_err(|message| {
+    let data = validate_custom_option_data(key, &form.data).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
             format!("Invalid DHCP option: {message}"),
@@ -1468,7 +1475,10 @@ pub async fn remove_subnet_option(
 
     kea_config_modify(&state, move |config| {
         let subnet = find_subnet_mut(config, subnet_id)?;
-        remove_custom_subnet_option(subnet, code, &data)?;
+        match key {
+            CustomOptionKey::Numeric(code) => remove_custom_subnet_option(subnet, code, &data)?,
+            CustomOptionKey::Pxe(field) => remove_pxe_subnet_field(subnet, field, &data)?,
+        }
         Ok(())
     })
     .await
@@ -3417,6 +3427,114 @@ fn validate_custom_dhcp_option_data(raw: &str) -> Result<String, &'static str> {
         return Err("option data must fit on one line");
     }
     Ok(data.to_string())
+}
+
+// The three legacy BOOTP/PXE fields Kea exposes as top-level subnet
+// parameters (next-server/server-hostname/boot-file-name -> the BOOTP
+// siaddr/sname/file fields), NOT as numbered options in `option-data`. The
+// Admin UI groups them into the same "custom options" picker as the numbered
+// options for consistency (maintainer's call, 2026-07-22), so the add/remove
+// option routes accept these three string keys in addition to a numeric code
+// and route them to the subnet's top-level JSON keys instead of its
+// option-data array.
+const PXE_SUBNET_FIELDS: [&str; 3] = ["next-server", "server-hostname", "boot-file-name"];
+
+// Kea caps server-hostname (BOOTP `sname`) at 64 bytes and boot-file-name
+// (BOOTP `file`) at 128 bytes. Rejecting an over-long value here gives the
+// operator an immediate, specific error instead of a later Kea config-test
+// rejection surfaced only as a config_error from kea_config_modify.
+const KEA_SERVER_HOSTNAME_MAX_LEN: usize = 64;
+const KEA_BOOT_FILE_NAME_MAX_LEN: usize = 128;
+
+// A parsed custom-option "code" field: either a numbered DHCP option (stored
+// in the subnet's option-data array) or one of the three top-level PXE subnet
+// fields (stored as a top-level subnet key). See PXE_SUBNET_FIELDS for why
+// both share one form field.
+#[derive(Clone, Copy)]
+enum CustomOptionKey {
+    Numeric(u16),
+    Pxe(&'static str),
+}
+
+// Accepts either one of the three PXE field names verbatim or, failing that,
+// a numeric code via the existing numeric validator. The PxeField arm carries
+// a &'static str borrowed from PXE_SUBNET_FIELDS (not the caller's input), so
+// downstream writes use a known-good key name.
+fn parse_custom_option_key(raw: &str) -> Result<CustomOptionKey, &'static str> {
+    let trimmed = raw.trim();
+    // into_iter() over the &'static str array yields owned &'static str
+    // elements, so the matched name can be stored in the Pxe variant directly.
+    if let Some(field) = PXE_SUBNET_FIELDS
+        .into_iter()
+        .find(|&field| field == trimmed)
+    {
+        return Ok(CustomOptionKey::Pxe(field));
+    }
+    parse_custom_dhcp_option_code(trimmed).map(CustomOptionKey::Numeric)
+}
+
+// Validates the "data" value against what the chosen key accepts: next-server
+// must be a bare IPv4 address (Kea rejects a hostname there);
+// server-hostname/boot-file-name are free-form one-line strings bounded to
+// their BOOTP field sizes; a numbered option keeps the generic opaque-string
+// rules (see validate_custom_dhcp_option_data).
+fn validate_custom_option_data(key: CustomOptionKey, raw: &str) -> Result<String, &'static str> {
+    match key {
+        CustomOptionKey::Pxe("next-server") => {
+            let data = raw.trim();
+            if !is_valid_ip(data) {
+                return Err("next-server must be a valid IPv4 address");
+            }
+            Ok(data.to_string())
+        }
+        CustomOptionKey::Pxe(field) => {
+            let data = validate_custom_dhcp_option_data(raw)?;
+            let max = if field == "server-hostname" {
+                KEA_SERVER_HOSTNAME_MAX_LEN
+            } else {
+                KEA_BOOT_FILE_NAME_MAX_LEN
+            };
+            if data.len() > max {
+                return Err("value is too long for this field");
+            }
+            Ok(data)
+        }
+        CustomOptionKey::Numeric(_) => validate_custom_dhcp_option_data(raw),
+    }
+}
+
+// Writes one of the three top-level PXE subnet fields. Unlike a numbered
+// option (which lives in an array and can legitimately repeat), each of these
+// is a single-valued subnet key, so this overwrites any existing value; an
+// exact-duplicate write is still rejected to guard against a double form
+// submission, mirroring add_custom_subnet_option.
+fn set_pxe_subnet_field(subnet: &mut Value, field: &str, data: &str) -> Result<(), &'static str> {
+    let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
+    if subnet.get(field).and_then(|value| value.as_str()) == Some(data) {
+        return Err("custom option already exists");
+    }
+    subnet.insert(field.to_string(), json!(data));
+    Ok(())
+}
+
+// Clears a top-level PXE subnet field, but only when its current value
+// matches `data`. The remove form echoes back the value being removed, so
+// matching on it prevents clearing a field whose value changed between page
+// render and submit -- the same code+data match contract
+// remove_custom_subnet_option uses for numbered options.
+fn remove_pxe_subnet_field(
+    subnet: &mut Value,
+    field: &str,
+    data: &str,
+) -> Result<(), &'static str> {
+    let subnet = subnet.as_object_mut().ok_or("subnet not an object")?;
+    match subnet.get(field).and_then(|value| value.as_str()) {
+        Some(current) if current == data => {
+            subnet.remove(field);
+            Ok(())
+        }
+        _ => Err("custom option not found"),
+    }
 }
 
 // True for an option-data entry that is a genuine operator-added custom
@@ -6049,6 +6167,128 @@ mod tests {
         assert!(validate_custom_dhcp_option_data("pxelinux.0").is_ok());
         assert!(validate_custom_dhcp_option_data("").is_err());
         assert!(validate_custom_dhcp_option_data("line\nbreak").is_err());
+    }
+
+    // Issue #1085: the same custom-option "code" field must also accept the
+    // three PXE top-level subnet keys verbatim, while still parsing a numeric
+    // code and rejecting an arbitrary non-numeric string -- otherwise the PXE
+    // keys would hit the numeric-only parser and be rejected as "not a number".
+    #[test]
+    fn parse_custom_option_key_accepts_pxe_names_and_numeric_codes() {
+        for field in PXE_SUBNET_FIELDS {
+            match parse_custom_option_key(field).expect("pxe key") {
+                CustomOptionKey::Pxe(parsed) => assert_eq!(parsed, field),
+                CustomOptionKey::Numeric(_) => panic!("{field} parsed as numeric"),
+            }
+        }
+        // Surrounding whitespace is tolerated (form fields often carry it).
+        assert!(matches!(
+            parse_custom_option_key("  next-server  ").expect("trimmed pxe key"),
+            CustomOptionKey::Pxe("next-server")
+        ));
+        assert!(matches!(
+            parse_custom_option_key("66").expect("numeric key"),
+            CustomOptionKey::Numeric(66)
+        ));
+        // An unrelated non-numeric string is neither a PXE key nor a code.
+        assert!(parse_custom_option_key("boot-file").is_err());
+        assert!(parse_custom_option_key("tftp-server-name").is_err());
+    }
+
+    // Issue #1085: next-server is a bare IPv4 field in Kea (a hostname is
+    // rejected), so its data validator must require a parseable IPv4; the two
+    // string fields keep the generic one-line rules but gain a BOOTP-accurate
+    // byte cap so an over-long value fails here with a clear message instead
+    // of surfacing only as a later Kea config-test rejection.
+    #[test]
+    fn validate_custom_option_data_enforces_per_pxe_field_rules() {
+        let next_server = parse_custom_option_key("next-server").expect("key");
+        assert_eq!(
+            validate_custom_option_data(next_server, " 10.0.0.1 ").expect("valid ip"),
+            "10.0.0.1"
+        );
+        assert!(validate_custom_option_data(next_server, "boot.lan").is_err());
+
+        let server_hostname = parse_custom_option_key("server-hostname").expect("key");
+        assert!(validate_custom_option_data(server_hostname, "tftp-01").is_ok());
+        assert!(validate_custom_option_data(server_hostname, &"h".repeat(65)).is_err());
+
+        let boot_file = parse_custom_option_key("boot-file-name").expect("key");
+        assert!(validate_custom_option_data(boot_file, "pxelinux.0").is_ok());
+        assert!(validate_custom_option_data(boot_file, &"f".repeat(129)).is_err());
+        // 128 bytes is still accepted (boundary), 65 bytes is fine for a file.
+        assert!(validate_custom_option_data(boot_file, &"f".repeat(128)).is_ok());
+    }
+
+    // Issue #1085: a PXE field is a single-valued top-level subnet key (not an
+    // option-data array entry), so set writes it at the top level and rejects
+    // an exact duplicate (double-submit guard) while allowing an overwrite to
+    // a new value; remove clears it only when the echoed-back value still
+    // matches, and errors otherwise.
+    #[test]
+    fn pxe_subnet_field_set_and_remove_round_trip() {
+        let mut subnet = json!({"id": 1, "option-data": []});
+
+        set_pxe_subnet_field(&mut subnet, "next-server", "10.0.0.5").expect("set");
+        assert_eq!(subnet["next-server"], "10.0.0.5");
+        // The write lands at the top level, never in option-data.
+        assert!(subnet["option-data"].as_array().expect("array").is_empty());
+
+        // Exact duplicate is rejected; a different value overwrites.
+        assert!(set_pxe_subnet_field(&mut subnet, "next-server", "10.0.0.5").is_err());
+        set_pxe_subnet_field(&mut subnet, "next-server", "10.0.0.6").expect("overwrite");
+        assert_eq!(subnet["next-server"], "10.0.0.6");
+
+        // Remove requires the current value to match; a stale value does not.
+        assert!(remove_pxe_subnet_field(&mut subnet, "next-server", "10.0.0.5").is_err());
+        remove_pxe_subnet_field(&mut subnet, "next-server", "10.0.0.6").expect("remove");
+        assert!(subnet.get("next-server").is_none());
+        // Removing an absent field is a not-found error, not a silent no-op.
+        assert!(remove_pxe_subnet_field(&mut subnet, "next-server", "10.0.0.6").is_err());
+    }
+
+    // Issue #1085 regression guard: an operator-set PXE top-level field must
+    // survive an unrelated subnet edit. update_subnet runs apply_subnet_value
+    // on the existing entry, which only rewrites specific keys -- if that ever
+    // changed to rebuild the subnet from scratch, these fields would be
+    // silently erased on the next save (the exact "accepted, never persists"
+    // failure class this project refuses to ship).
+    #[test]
+    fn apply_subnet_value_preserves_pxe_top_level_fields() {
+        let mut subnet = json!({
+            "id": 4,
+            "subnet": "10.0.0.0/24",
+            "pools": [{"pool": "10.0.0.10 - 10.0.0.200"}],
+            "option-data": [],
+            "valid-lifetime": 3600,
+            "next-server": "10.0.0.9",
+            "server-hostname": "tftp-01",
+            "boot-file-name": "pxelinux.0"
+        });
+
+        let preserved_options = preserved_subnet_options(&subnet);
+        apply_subnet_value(
+            &mut subnet,
+            SubnetValue {
+                id: 4,
+                subnet: "10.0.0.0/24".to_string(),
+                pool_start: "10.0.0.10".to_string(),
+                pool_end: "10.0.0.200".to_string(),
+                gateway: "10.0.0.1".to_string(),
+                dns_primary: "10.0.0.2".to_string(),
+                dns_secondary: "10.0.0.3".to_string(),
+                ntp_servers: String::new(),
+                domain: "lan".to_string(),
+                lease_time: 3600,
+                editable_options: preserved_options,
+                reservations: None,
+            },
+        )
+        .expect("apply subnet value");
+
+        assert_eq!(subnet["next-server"], "10.0.0.9");
+        assert_eq!(subnet["server-hostname"], "tftp-01");
+        assert_eq!(subnet["boot-file-name"], "pxelinux.0");
     }
 
     // Issue #1076: the DDNS toggle's read side must report the live
