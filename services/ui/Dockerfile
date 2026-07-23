@@ -471,8 +471,21 @@ COPY src/templates /templates
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY dhcp-probe.sh /usr/local/bin/dhcp-probe.sh
 
+# `--groups adm`: the UI process drops privileges to this unprivileged user
+# (see docker-entrypoint.sh's `setpriv --reuid=lancache ... --init-groups`),
+# but the dashboard/log-viewer must still READ the proxy's nginx access log,
+# mounted read-only at /var/log/nginx (proxy-logs volume). nginx writes that
+# log as mode 0640 owned by its own runtime user and group `adm` -- the Debian
+# convention for granting log-read access. Without adm membership, uid 10001 is
+# neither the owner nor in the file's group, so every File::open on the log
+# fails with EACCES. That error is swallowed (parse_log_tail returns an empty
+# Vec, get_log_stats skips the unreadable file), so the Admin UI silently shows
+# an empty log viewer, 0% cache-hit-ratio, and empty "Recent requests" even
+# though caching is demonstrably working at the nginx level (issue #1068 item 6).
+# `--init-groups` in the entrypoint is what carries this supplementary group
+# through the privilege drop; a bare `setpriv --regid` alone would not.
 RUN groupadd --system --gid 10001 lancache \
-    && useradd --uid 10001 --gid lancache --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
+    && useradd --uid 10001 --gid lancache --groups adm --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/dhcp-probe.sh
