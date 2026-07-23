@@ -1,7 +1,16 @@
 # Local Admin UI Rust Checks
 
-This repository provides local Docker-based Rust checks for `services/ui`, so
-contributors do not need `rustc` on the host machine.
+This repository provides local Docker-based Rust checks for the Admin UI
+crate at `services/ui/` (a single directory, not a list of separate
+services), so contributors do not need `rustc` on the host machine.
+
+The checks run inside a container specifically so every contributor and CI
+job validates the Admin UI against the exact same toolchain version,
+regardless of what Rust (if any) is installed on the host -- see
+`scripts/ui-rust-checks.sh`'s own header comment for the same rationale in
+the script itself, and `AGENTS.md`'s build-tools verification contract for
+why this is the only supported way to run these checks at all (host-local
+`cargo`/`rustc` are not treated as valid verification, even if present).
 
 By default, the script uses the project build-tools image:
 
