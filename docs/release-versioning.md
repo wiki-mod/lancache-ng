@@ -213,7 +213,10 @@ build workflow, setup platform guards, release notes, and validation together.
 ## External Images
 
 External images are not part of the first-party stack tag. They remain explicit
-dependencies and are tracked in `release/stack-images.yml`.
+dependencies and are tracked in `release/stack-images.yml`. See
+[docs/release-external-images.md](release-external-images.md) for the
+per-image table (role, digest, policy) and provenance/SBOM expectations --
+this section states the policy only, not the current image list.
 
 Before a stable release, each external image used by a supported deployment
 profile must be pinned by digest, mirrored, or documented as intentionally

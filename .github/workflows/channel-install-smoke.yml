@@ -1,0 +1,293 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Scheduled channel-install smoke check (issue #785).
+#
+# WHY THIS EXISTS: the per-PR full-setup gate (full-setup-deep-validate.yml)
+# used to install a mutable channel (edge) on every PR, so it doubled as a
+# "does the currently-published channel still install cleanly?" check. That
+# gate is now pinned to each PR's OWN immutable pr-<N>-sha-<short> images
+# (correct for a per-PR gate -- it must test the PR's diff, not a moving
+# channel), which dropped channel-install coverage on the common same-repo-PR
+# path: setup.sh's resolve_lancache_stack_channel_tag (channel -> stack:<channel>
+# pointer -> stack.env -> immutable sha-*) is now only exercised on
+# workflow_dispatch/fork/Dependabot runs. "Is the published channel still
+# installable?" is a real concern, but it must NOT block individual PRs -- a
+# broken published channel is not a given PR's fault. This scheduled job is the
+# legitimate home for that check.
+#
+# SCOPE: deliberately minimal. It builds the deploy/full-setup image against a
+# live published channel (which runs setup.sh's real channel resolution), brings
+# the stack up, and asserts every service is healthy and not crash-looping. It
+# does NOT run the heavy SSL/HTTP/DHCP/NATS client simulations that
+# full-setup-validate.yml / full-setup-deep-validate.yml run -- scheduling that
+# whole suite on a cron would strain the shared lancache-light tier (see that
+# workflow's RUNNER CAPACITY NOTE). The install+health check is exactly the
+# "still installable?" coverage #785 asks to restore, and no more.
+#
+# CHANNEL: defaults to `dev` (the channel build-push.yml's promote job actively
+# maintains). `edge` is intentionally NOT included yet -- it is currently stale
+# (missing tools, see #1035) and only gets promoted once master is un-frozen.
+# Add `edge` (e.g. as a second matrix channel, or a second scheduled input)
+# once its channel pointer is actively maintained again.
+#
+# NOTE ON TRIGGERS: `schedule:` only fires from the default branch (master), so
+# this check becomes live once this file is synced from v0.2.0 to master via the
+# normal release flow. A new workflow file also cannot be workflow_dispatch-run
+# from a feature branch until it exists on the default branch (GitHub
+# limitation) -- pre-merge validation here is actionlint (syntax + runner
+# labels); the first real runtime run happens post-merge.
+
+name: Channel Install Smoke
+
+on:
+  schedule:
+    # Weekly, Mondays 06:17 UTC. Deliberately off the hour and off Dependabot's
+    # own weekly cadence so this light job does not pile onto another burst.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Published channel/tag to install and smoke-test (e.g. dev, edge, a sha-* or vX.Y.Z tag).
+        required: false
+        default: dev
+
+permissions:
+  contents: read
+
+jobs:
+  channel-install-smoke:
+    name: install-smoke (published channel)
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      LANCACHE_IMAGE_REGISTRY: ghcr.io
+      LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+      # On a schedule event `inputs.image_tag` is empty, so fall back to the
+      # actively-maintained `dev` channel; a manual dispatch can override it.
+      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag || 'dev' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Building deploy/full-setup with LANCACHE_IMAGE_TAG=<channel> runs
+      # setup.sh's real channel resolution (resolve_lancache_stack_channel_tag)
+      # inside the image build -- exactly the path #785 wants re-covered.
+      - name: Build full-setup validation image (against published channel)
+        run: |
+          set -euo pipefail
+          echo "Smoke-testing published channel/tag: ${LANCACHE_IMAGE_TAG}"
+          docker build \
+            --build-arg LANCACHE_IMAGE_REGISTRY="${LANCACHE_IMAGE_REGISTRY}" \
+            --build-arg LANCACHE_IMAGE_PREFIX="${LANCACHE_IMAGE_PREFIX}" \
+            --build-arg LANCACHE_IMAGE_TAG="${LANCACHE_IMAGE_TAG}" \
+            -t lancache-ng-full-setup:channel-smoke \
+            deploy/full-setup
+
+      - name: Validate compose configuration
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/deploy/full-setup:/validation:ro" \
+            -w /validation \
+            --env LANCACHE_IMAGE_REGISTRY \
+            --env LANCACHE_IMAGE_PREFIX \
+            --env LANCACHE_IMAGE_TAG \
+            docker:latest \
+            docker compose -f docker-compose.yml config >/dev/null
+
+      # Subnet reservation is identical to full-setup-validate.yml's own
+      # "Reserve a validation subnet and start the stack" step: a per-run
+      # candidate /27 (scripts/lib/reserve-validation-subnet.sh) made
+      # collision-safe against other concurrent runs on the same self-hosted
+      # host via a host-local flock + re-derive-and-retry loop (#623/#703/#820/
+      # #932). Only network-overlap failures are retried; any other
+      # `docker compose up` failure (a bad channel image, a missing env) is
+      # surfaced immediately instead of burning through every retry. See that
+      # workflow for the full incident history behind this shape.
+      - name: Reserve a validation subnet and start the stack (locked, retries on collision)
+        id: reserve-and-start
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+
+          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+          : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is required for safe validation-subnet locking."
+            exit 1
+          fi
+
+          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+
+          lock_root="/tmp/lancache-validation-locks"
+          max_attempts=10
+
+          docker compose pull --quiet
+
+          reserved_slot=""
+          holder_pid=""
+          next_attempt=1
+
+          while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
+            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+              echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
+              exit 1
+            }
+            attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
+            slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
+            candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+
+            # Re-derive the COMPLETE VALIDATION_* set from THIS attempt's slot via
+            # the shared library, and persist it to $GITHUB_ENV every iteration
+            # (not just after success) so the always()-teardown step below always
+            # has this attempt's real COMPOSE_PROJECT_NAME / lock PID even on a
+            # non-retryable failure exit (#932).
+            validation_subnet_export_env "$slot"
+            {
+              echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+              echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
+              echo "VALIDATION_LOCK_HOLDER_PID=$candidate_pid"
+              echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
+              echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
+              echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
+              echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
+              echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
+              echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
+              echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
+              echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
+              echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
+              echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
+              echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
+            } >> "$GITHUB_ENV"
+
+            conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
+            if [[ -n "$conflict" ]]; then
+              echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+              validation_subnet_release "$candidate_pid"
+              next_attempt=$((attempt + 1))
+              continue
+            fi
+
+            echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
+            if up_output="$(docker compose up -d 2>&1)"; then
+              echo "$up_output"
+              reserved_slot="$slot"
+              holder_pid="$candidate_pid"
+              break
+            fi
+
+            echo "$up_output"
+            validation_subnet_release "$candidate_pid"
+
+            if ! validation_subnet_output_is_collision "$up_output"; then
+              echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
+              exit 1
+            fi
+
+            echo "docker compose up failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
+            next_attempt=$((attempt + 1))
+          done
+
+          if [[ -z "$reserved_slot" ]]; then
+            echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
+            exit 1
+          fi
+
+          echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
+
+      # A successful `docker compose up` does not prove the stack is healthy: a
+      # service can start and immediately crash-loop (#450/#485). Assert real
+      # health + a restart-count ceiling, identical to full-setup-validate.yml.
+      - name: Wait for the stack to stabilize and check container health
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+
+          services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
+          all_services="docker-socket-proxy $services_with_healthcheck"
+
+          deadline=$((SECONDS + 90))
+          while (( SECONDS < deadline )); do
+            all_ready=1
+            for service in $services_with_healthcheck; do
+              cid="$(docker compose ps -q "$service")"
+              status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+              if [[ "$status" != "healthy" ]]; then
+                all_ready=0
+              fi
+            done
+            if [[ "$all_ready" -eq 1 ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          echo "::group::Final container status"
+          docker compose ps
+          echo "::endgroup::"
+
+          failed=0
+          for service in $all_services; do
+            cid="$(docker compose ps -q "$service")"
+            if [[ -z "$cid" ]]; then
+              echo "::error::$service has no running container"
+              failed=1
+              continue
+            fi
+
+            restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
+            container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
+
+            if [[ "$container_status" != "running" ]]; then
+              echo "::error::$service is not running (state: $container_status)"
+              failed=1
+            elif (( restart_count > 1 )); then
+              # > 1, not > 0: a single restart during normal startup ordering
+              # (waiting on a not-yet-healthy dependency) is expected.
+              echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
+              failed=1
+            fi
+
+            if [[ " $services_with_healthcheck " == *" $service "* ]]; then
+              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+              if [[ "$health" != "healthy" ]]; then
+                echo "::error::$service did not become healthy (status: $health)"
+                failed=1
+              fi
+            fi
+          done
+
+          if [[ "$failed" -eq 1 ]]; then
+            echo "::group::Logs from all services (failure diagnostics)"
+            docker compose logs --no-color
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "Published channel '${LANCACHE_IMAGE_TAG}' installs cleanly: all services running and healthy."
+
+      # Teardown mirrors full-setup-validate.yml: `down` can lose Docker's own
+      # "has active endpoints" race and leave this project's network behind,
+      # poisoning the slot for the next run, so force a real removal and release
+      # the host-local subnet lock explicitly. Runs unconditionally, and guards
+      # against COMPOSE_PROJECT_NAME being unset when reserve failed early.
+      - name: Tear down validation stack
+        if: always()
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          docker compose down --volumes --remove-orphans || true
+
+          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+          if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+            validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
+          fi
+          if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
+            kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
+          fi
+
+      - name: Clean up image
+        if: always()
+        run: |
+          docker rmi lancache-ng-full-setup:channel-smoke || true
