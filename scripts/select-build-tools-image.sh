@@ -6,16 +6,18 @@
 # refs (pushes, or same-repo pull requests) — untrusted forked pull requests
 # never trigger a fallback build. Prints the chosen image reference on stdout.
 #
-# IMPORTANT: This script resolves the mutable channel tag it selects (`:dev`
-# or `:nightly`, see channel_ref below) to its immutable digest-qualified
-# reference before returning. Do not call this script expecting a mutable tag
-# in the output; the returned reference is always pinned to a digest or a
-# branch-local validation image.
+# IMPORTANT: This script resolves the mutable channel tag it selects (`:dev`,
+# see scripts/lib/build-tools-channel.sh's resolve_build_tools_channel) to its
+# immutable digest-qualified reference before returning. Do not call this
+# script expecting a mutable tag in the output; the returned reference is
+# always pinned to a digest or a branch-local validation image.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/build-tools-channel.sh
+source "$script_dir/lib/build-tools-channel.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -25,7 +27,8 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 # images.yml) -- and this project has not cut one yet (see
 # full-setup-validate.yml's own image_tag comment) -- so it can sit stale for
 # weeks while `:dev` (written on every push to a v[0-9]* integration branch
-# such as v0.2.0) and `:nightly` (written on every push to master) stay current.
+# such as v0.2.0) stays current (see scripts/lib/build-tools-channel.sh's own
+# header for why `master` also resolves to `dev` today, issue #1035).
 # Confirmed directly during issue #775's investigation: `:latest` was still
 # pinned to a build predating the Dockerfile's dhclient/expect additions
 # while `:dev` already had them, which is exactly why a job asking for
@@ -35,36 +38,7 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 # branch still resolves against what it will actually merge into, not the
 # feature branch's own name.
 channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
-case "$channel_ref" in
-  master)
-    # STATUS (2026-07-19, #1056): the `edge` channel was renamed to `nightly`
-    # project-wide. This only repoints the channel NAME resolved for master --
-    # no workflow actively writes build-tools:nightly yet (it inherits that gap
-    # from build-tools:edge, which nothing wrote either; see #1035, still open).
-    # Whether to add an active writer or drop this build-tools channel entirely
-    # is #1035's open call, deliberately not decided here.
-    build_tools_channel="nightly"
-    ;;
-  *)
-    # Every other ref this script is realistically invoked against --
-    # current_dev itself (today's active development branch; v0.2.0 is
-    # frozen), or a feature/claude/* branch forked from it without an open PR
-    # yet (e.g. a manual workflow_dispatch run) -- is pre-release integration
-    # work, so `dev` is the correct default rather than the stable-only
-    # `latest`.
-    #
-    # STATUS (#709, found during this comment's own update): build-push.yml's
-    # promote job only actually WRITES the `:dev` channel tag for a push
-    # matching `refs/heads/v[0-9]*` (e.g. v0.2.0) -- current_dev does not
-    # match that glob, so today no push actually promotes `:dev` at all, and
-    # this script's own choice of `dev` as current_dev's default is therefore
-    # a read of a channel nothing currently writes. Whether current_dev
-    # should take over v0.2.0's old `:dev`-promoting role (or use a different
-    # channel) is a real, currently-open question tied to #825's branch-
-    # promotion-model decision, deliberately not decided or changed here.
-    build_tools_channel="dev"
-    ;;
-esac
+build_tools_channel="$(resolve_build_tools_channel "$channel_ref")"
 published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
