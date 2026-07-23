@@ -385,6 +385,16 @@ pub struct ReleaseLeaseForm {
     pub ip: String,
 }
 
+// Toggles Kea's DDNS master switch (Dhcp4.dhcp-ddns.enable-updates)
+// independently of the DHCP mode (issue #1076). `enabled` is submitted as an
+// explicit "true"/"false" string rather than an HTML checkbox, so an "off"
+// state is a real submitted value instead of an omitted field.
+#[derive(Deserialize)]
+pub struct DdnsToggleForm {
+    pub csrf_token: String,
+    pub enabled: String,
+}
+
 // The remaining forms below configure DHCP at the whole-stack level (which
 // backend runs at all, and dnsmasq-proxy's relay settings), not a specific
 // subnet/reservation/lease -- see update_dhcp_mode/update_dhcp_proxy.
@@ -491,15 +501,26 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         state.config.effective_dhcp_mode(),
         &state.config.dhcp_api_url,
     ) {
-        let subnets = fetch_subnets(&state).await.unwrap_or_default();
+        // One config-get feeds both the subnet list and the DDNS toggle
+        // state (issue #1076), rather than a second round-trip just for
+        // enable-updates. Leases and reservations are independent and still
+        // fetched concurrently below.
+        let config = fetch_dhcp_config(&state).await.ok();
+        let subnets = config
+            .as_ref()
+            .map(fetch_subnets_from_config)
+            .unwrap_or_default();
+        let ddns_enabled = config.as_ref().map(config_ddns_enabled).unwrap_or(false);
         let (leases, reservations) =
             tokio::join!(fetch_leases(&state), fetch_all_reservations(&state));
         ctx.insert("subnets", &subnets);
+        ctx.insert("dhcp_ddns_enabled", &ddns_enabled);
         ctx.insert("leases", &leases.unwrap_or_default());
         ctx.insert("reservations", &reservations.unwrap_or_default());
     } else {
         let empty: Vec<Subnet> = Vec::new();
         ctx.insert("subnets", &empty);
+        ctx.insert("dhcp_ddns_enabled", &false);
         ctx.insert("leases", &Vec::<Lease>::new());
         ctx.insert("reservations", &Vec::<Reservation>::new());
     }
@@ -1630,6 +1651,33 @@ pub async fn release_lease(
     }
 }
 
+// Toggles Kea's DDNS master switch, Dhcp4.dhcp-ddns.enable-updates (issue
+// #1076). This is deliberately separate from update_dhcp_mode: an operator
+// running Kea DHCP may or may not want it also writing DNS records on every
+// lease, and that is a distinct decision from issuing addresses. Goes through
+// kea_config_modify (config-test/config-set/config-write/rollback/snapshot)
+// because it persists a config-file change; Kea applies the new
+// enable-updates value live on config-set, so no container restart is needed.
+// The value survives a restart via entrypoint.sh's migrate_dhcp4_config
+// existing-wins merge.
+pub async fn update_dhcp_ddns(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<DdnsToggleForm>,
+) -> Result<Redirect, DhcpError> {
+    require_kea_mode(&state)?;
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    let enabled = parse_bool_flag(&form.enabled);
+
+    kea_config_modify(&state, move |config| {
+        set_config_ddns_enabled(config, enabled)
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+
+    Ok(Redirect::to("/dhcp"))
+}
+
 // Reads a single lease by IP (lease4-get) and returns its DDNS hostname if
 // present and non-empty. Best-effort by design (see release_lease's #1083
 // cleanup): any error, a missing lease, or a hostname-less lease yields None,
@@ -2145,7 +2193,9 @@ where
 
 // Fetches Kea's live config, the same config-get command kea_config_modify_with_post
 // uses -- but as a plain read, not the start of a modify/test/set/write chain.
-// Used by the read-only fetch_subnets/fetch_all_reservations below.
+// Used by the read-only paths: dhcp_page (subnets + the DDNS toggle state via
+// fetch_subnets_from_config/config_ddns_enabled) and fetch_all_reservations
+// below.
 async fn fetch_dhcp_config(
     state: &AppState,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -2171,6 +2221,48 @@ fn fetch_subnets_from_config(config: &Value) -> Vec<Subnet> {
     dhcp4_subnets(config)
         .map(|subnets| subnets.iter().map(parse_subnet_entry).collect())
         .unwrap_or_default()
+}
+
+// Reads Kea's live DDNS master switch (Dhcp4.dhcp-ddns.enable-updates) so the
+// settings page can render the "Enable DDNS Updates" toggle in its true state
+// (issue #1076). Defaults to false when the key is absent -- matching both
+// Kea's own default and this project's fresh-install default -- rather than
+// assuming DDNS is on.
+fn config_ddns_enabled(config: &Value) -> bool {
+    config
+        .get("Dhcp4")
+        .and_then(|dhcp4| dhcp4.get("dhcp-ddns"))
+        .and_then(|ddns| ddns.get("enable-updates"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+// Sets Dhcp4.dhcp-ddns.enable-updates without disturbing any other dhcp-ddns
+// field (server-ip/port/queue/etc. stay as the entrypoint rendered them).
+// Creates the dhcp-ddns object if it is somehow absent (a hand-edited config)
+// so the toggle always has a target to write.
+fn set_config_ddns_enabled(config: &mut Value, enabled: bool) -> Result<(), &'static str> {
+    let dhcp4 = config
+        .get_mut("Dhcp4")
+        .and_then(|dhcp4| dhcp4.as_object_mut())
+        .ok_or("Dhcp4 missing")?;
+    let ddns = dhcp4
+        .entry("dhcp-ddns")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("dhcp-ddns not an object")?;
+    ddns.insert("enable-updates".to_string(), json!(enabled));
+    Ok(())
+}
+
+// Interprets a form flag string as a boolean the same way entrypoint.sh
+// normalizes DHCP_DDNS_ENABLED, so the Admin UI toggle and the container agree
+// on exactly which spellings count as "on".
+fn parse_bool_flag(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 // Flattens every subnet's nested `reservations` array into one flat list of
@@ -2199,12 +2291,6 @@ fn fetch_reservations_from_config(config: &Value) -> Vec<Reservation> {
         .unwrap_or_default()
 }
 
-async fn fetch_subnets(
-    state: &AppState,
-) -> Result<Vec<Subnet>, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(fetch_subnets_from_config(&fetch_dhcp_config(state).await?))
-}
-
 // fetch_leases below talks to Kea's lease database directly (lease4-get-all)
 // rather than going through fetch_dhcp_config -- leases are runtime state,
 // not part of the Dhcp4 config JSON subnets/reservations live in.
@@ -2213,8 +2299,8 @@ async fn fetch_subnets(
 // newest first (the order an operator picking a rollback target cares
 // about). Missing/unreadable snapshot storage renders as "no snapshots yet"
 // rather than failing the whole page -- the same fail-open treatment
-// `dhcp_page` already gives `fetch_subnets`/`fetch_leases`/
-// `fetch_all_reservations` when the Kea API itself is unavailable.
+// `dhcp_page` already gives its subnet/lease/reservation fetches when the Kea
+// API itself is unavailable.
 fn fetch_kea_snapshot_summaries(state: &AppState) -> Vec<KeaSnapshotSummary> {
     let snapshot_root = PathBuf::from(&state.config.kea_config_snapshot_dir);
     let mut ids = kea_snapshots::list_snapshot_ids(&snapshot_root).unwrap_or_default();
@@ -5654,6 +5740,77 @@ mod tests {
         assert!(validate_custom_dhcp_option_data("pxelinux.0").is_ok());
         assert!(validate_custom_dhcp_option_data("").is_err());
         assert!(validate_custom_dhcp_option_data("line\nbreak").is_err());
+    }
+
+    // Issue #1076: the DDNS toggle's read side must report the live
+    // enable-updates value, and must default to false (DDNS off) when the key
+    // is absent -- reading a config with no dhcp-ddns block must not be
+    // mistaken for "DDNS on".
+    #[test]
+    fn config_ddns_enabled_reads_switch_and_defaults_off() {
+        assert!(config_ddns_enabled(&json!({
+            "Dhcp4": {"dhcp-ddns": {"enable-updates": true}}
+        })));
+        assert!(!config_ddns_enabled(&json!({
+            "Dhcp4": {"dhcp-ddns": {"enable-updates": false}}
+        })));
+        // Missing dhcp-ddns block, missing enable-updates key, and a
+        // non-boolean value all fall back to false rather than panicking or
+        // reporting "on".
+        assert!(!config_ddns_enabled(&json!({"Dhcp4": {}})));
+        assert!(!config_ddns_enabled(&json!({"Dhcp4": {"dhcp-ddns": {}}})));
+        assert!(!config_ddns_enabled(&json!({})));
+    }
+
+    // Issue #1076: the toggle must flip only enable-updates and leave every
+    // other dhcp-ddns field (server-ip/port/queue/...) exactly as the
+    // entrypoint rendered it, since those are not the operator's to change
+    // here. It must also self-heal a config whose dhcp-ddns block is missing
+    // rather than erroring.
+    #[test]
+    fn set_config_ddns_enabled_preserves_other_ddns_fields() {
+        let mut config = json!({
+            "Dhcp4": {
+                "dhcp-ddns": {
+                    "enable-updates": false,
+                    "server-ip": "127.0.0.1",
+                    "server-port": 53001,
+                    "max-queue-size": 1024
+                }
+            }
+        });
+        set_config_ddns_enabled(&mut config, true).expect("set true");
+        assert_eq!(config["Dhcp4"]["dhcp-ddns"]["enable-updates"], true);
+        // Sibling fields untouched.
+        assert_eq!(config["Dhcp4"]["dhcp-ddns"]["server-ip"], "127.0.0.1");
+        assert_eq!(config["Dhcp4"]["dhcp-ddns"]["server-port"], 53001);
+        assert_eq!(config["Dhcp4"]["dhcp-ddns"]["max-queue-size"], 1024);
+
+        set_config_ddns_enabled(&mut config, false).expect("set false");
+        assert_eq!(config["Dhcp4"]["dhcp-ddns"]["enable-updates"], false);
+
+        // A config with no dhcp-ddns block gets one created rather than erroring.
+        let mut bare = json!({"Dhcp4": {}});
+        set_config_ddns_enabled(&mut bare, true).expect("create block");
+        assert_eq!(bare["Dhcp4"]["dhcp-ddns"]["enable-updates"], true);
+
+        // A config with no Dhcp4 object is a real error, not a silent no-op.
+        let mut broken = json!({});
+        assert!(set_config_ddns_enabled(&mut broken, true).is_err());
+    }
+
+    // Issue #1076: the UI toggle and entrypoint.sh's DHCP_DDNS_ENABLED
+    // normalization must agree on which spellings mean "on"; anything else
+    // (including empty/garbage) must read as off, so a malformed submit can
+    // never accidentally enable DDNS.
+    #[test]
+    fn parse_bool_flag_matches_entrypoint_normalization() {
+        for on in ["1", "true", "TRUE", "yes", "On", " true "] {
+            assert!(parse_bool_flag(on), "{on:?} should be true");
+        }
+        for off in ["0", "false", "no", "off", "", "  ", "enabled", "2"] {
+            assert!(!parse_bool_flag(off), "{off:?} should be false");
+        }
     }
 
     // Issue #1083: the forward-record cleanup must split Kea's stored FQDN
