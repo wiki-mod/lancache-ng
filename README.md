@@ -1009,4 +1009,4 @@ Use SSL mode when:
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
