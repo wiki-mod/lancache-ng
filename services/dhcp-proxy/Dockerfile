@@ -11,7 +11,15 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     dnsmasq \
     gettext \
+    nano \
+    lsof \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
+
+# nano/lsof/ripgrep: in-container troubleshooting tools -- see
+# services/proxy/Dockerfile's identical comment for the full rationale.
+ENV EDITOR=nano
+ENV VISUAL=$EDITOR
 
 COPY dnsmasq.conf.template /etc/dnsmasq.conf.template
 COPY entrypoint.sh /entrypoint.sh
