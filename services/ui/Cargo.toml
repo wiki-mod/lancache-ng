@@ -31,6 +31,10 @@ hex = "0.4"
 form_urlencoded = "1"
 subtle = "2"
 sha2 = "0.11"
+# Argon2id password-hashing for secondary NATS credentials at rest (#680),
+# replacing the previous unsalted SHA-256. Default features provide the
+# `password-hash` PHC string API plus the OsRng salt source used below.
+argon2 = "0.5"
 nkeys = "0.4"
 data-encoding = "2"
 # Transparent decompression of syslog-ng's rotated log output (#633:

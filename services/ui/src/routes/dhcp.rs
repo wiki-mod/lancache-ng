@@ -184,9 +184,30 @@ struct DhcpProbeDetail {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpClientCheckStatus {
-    Passed { output: String },
-    Failed { output: String },
-    Unavailable { reason: String },
+    // `details` is additive, same rationale as DhcpConflictCheckStatus::Found's
+    // own `details` field above: dhclient's own -v transcript (`output`) only
+    // ever shows the DHCPDISCOVER/OFFER/REQUEST/ACK/bound protocol exchange,
+    // never the negotiated lease's actual fields (router, DNS, lease time,
+    // ...) -- those come from a separate source (the dhclient leases file,
+    // see extract_dhcp_lease_details) and are populated here so a SUCCESSFUL
+    // dry-run is as informative as a found-conflict result already is, not
+    // just a bare "it worked". Always present (never absent) so the frontend
+    // never has to null-check the field; empty when the leases file had none
+    // of the known fields. `Failed` intentionally has no `details`: a failed
+    // dry-run never receives a DHCPACK, so dhclient never writes a lease
+    // block at all -- there is no partial lease data to extract in that case
+    // (confirmed against a real failed run), unlike a conflict scan's
+    // `Found`, which always has full DHCPOFFER data available.
+    Passed {
+        output: String,
+        details: Vec<DhcpProbeDetail>,
+    },
+    Failed {
+        output: String,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
@@ -1582,6 +1603,13 @@ pub async fn release_lease(
         ));
     }
 
+    // Capture the lease's DDNS hostname BEFORE deleting it (issue #1083):
+    // lease4-del removes the lease record this is read from, and it is the
+    // exact forward FQDN Kea's D2 used for the A record that must be cleaned
+    // up. Best-effort -- a failed/absent read just skips the forward-record
+    // delete; the reverse PTR is reconstructed from the IP alone.
+    let lease_hostname = fetch_lease_hostname(&state, &form.ip).await;
+
     let resp = kea_post(
         &state,
         json!({
@@ -1596,7 +1624,18 @@ pub async fn release_lease(
     .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     match kea_lease_del_result(&resp) {
-        LeaseDelOutcome::Released => Ok(Redirect::to("/dhcp")),
+        LeaseDelOutcome::Released => {
+            // Kea's lease4-del does NOT trigger a DDNS removal (issue #1083,
+            // confirmed against Kea's docs: only a client DHCPRELEASE or Kea's
+            // own expired-lease reclamation send a removal NCR to D2, never an
+            // admin-issued lease4-del). Clean up the A + PTR records D2 created
+            // by publishing deletes on the same lancache.dns.record NATS
+            // subject both PowerDNS instances already consume. Best-effort: the
+            // address is already freed, so a DNS-cleanup failure must never
+            // turn a successful release into an error response.
+            cleanup_lease_ddns_records(&state, &form.ip, lease_hostname.as_deref()).await;
+            Ok(Redirect::to("/dhcp"))
+        }
         // Kea's CONTROL_RESULT_EMPTY (3) for lease4-del means no lease matched
         // the given address -- an ordinary race (the lease expired or was
         // already released between page render and this request), not a
@@ -1637,6 +1676,117 @@ pub async fn update_dhcp_ddns(
     .map_err(|e| DhcpError::config_error(e.to_string()))?;
 
     Ok(Redirect::to("/dhcp"))
+}
+
+// Reads a single lease by IP (lease4-get) and returns its DDNS hostname if
+// present and non-empty. Best-effort by design (see release_lease's #1083
+// cleanup): any error, a missing lease, or a hostname-less lease yields None,
+// and the caller simply skips the forward-record delete.
+async fn fetch_lease_hostname(state: &AppState, ip: &str) -> Option<String> {
+    let resp = kea_post(
+        state,
+        json!({
+            "command": "lease4-get",
+            "service": ["dhcp4"],
+            "arguments": {"ip-address": ip}
+        }),
+    )
+    .await
+    .ok()?;
+    let hostname = resp
+        .get(0)?
+        .get("arguments")?
+        .get("hostname")?
+        .as_str()?
+        .trim();
+    if hostname.is_empty() {
+        None
+    } else {
+        Some(hostname.to_string())
+    }
+}
+
+// Publishes the forward-A and reverse-PTR record deletes for a just-released
+// lease over the lancache.dns.record NATS subject (issue #1083). Best-effort:
+// logs and continues on any publish failure. Both records are reconstructed
+// from this lease's own IP/hostname, so the worst case of a mismatch is a
+// stale record left behind (or a logged PowerDNS 4xx), never the removal of an
+// unrelated active record.
+async fn cleanup_lease_ddns_records(state: &AppState, ip: &str, hostname: Option<&str>) {
+    // Forward A record: keyed by Kea's own FQDN for the lease. Skipped when the
+    // lease had no hostname (nothing was ever registered forward).
+    if let Some(hostname) = hostname {
+        if let Some((zone, name)) = forward_record_zone_and_name(hostname) {
+            publish_dns_record_delete(state, &zone, &name, "A").await;
+        }
+    }
+    // Reverse PTR record: name + zone derive purely from the IPv4, so this runs
+    // even when the lease carried no hostname.
+    if let Some((zone, name)) = reverse_ptr_zone_and_name(ip) {
+        publish_dns_record_delete(state, &zone, &name, "PTR").await;
+    }
+}
+
+// Publishes one record-delete event, mirroring remove_lan_record's payload
+// shape exactly -- the DNS subscriber acks malformed delete events (missing
+// fields) as unrecoverable, so the schema must match the proven producer. The
+// subscriber is record-type-agnostic and applies the delete to whatever zone
+// is named by name+type, origin-independent, so it removes a D2-created record
+// the same as an Admin-UI-created one.
+async fn publish_dns_record_delete(state: &AppState, zone: &str, name: &str, record_type: &str) {
+    let msg = json!({
+        "action": "delete",
+        "zone": zone,
+        "name": name,
+        "type": record_type
+    });
+    if let Err(e) = state
+        .nats
+        .publish(
+            "lancache.dns.record",
+            serde_json::to_vec(&msg).unwrap().into(),
+        )
+        .await
+    {
+        tracing::error!(
+            zone = %zone,
+            name = %name,
+            record_type = %record_type,
+            "NATS publish of DDNS record delete failed: {e}"
+        );
+    }
+}
+
+// Splits a fully-qualified lease hostname into (zone, name-with-trailing-dot)
+// for a forward-record delete. The zone is the FQDN's parent domain in
+// add_lan_record's no-trailing-dot convention (host.lan -> zone "lan", name
+// "host.lan."; host.local.lan -> zone "local.lan"). Returns None for a bare
+// single-label name, which has no parent zone to delete from.
+fn forward_record_zone_and_name(hostname: &str) -> Option<(String, String)> {
+    let trimmed = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_label, zone) = trimmed.split_once('.')?;
+    if zone.is_empty() {
+        return None;
+    }
+    Some((zone.to_string(), format!("{trimmed}.")))
+}
+
+// Computes the (zone, PTR-name) for an IPv4's reverse record, mirroring the
+// RFC1918 private reverse zones services/dns creates (its PRIVATE_REVERSE_ZONES
+// list): 10.in-addr.arpa, 168.192.in-addr.arpa, and {16..31}.172.in-addr.arpa.
+// Expressed as the three structural rules rather than a copied 18-entry list so
+// it cannot drift from that generation. Returns None for any address outside
+// those ranges -- no PowerDNS zone hosts it, so there is nothing to delete.
+fn reverse_ptr_zone_and_name(ip: &str) -> Option<(String, String)> {
+    let [a, b, c, d] = parse_ipv4(ip)?.octets();
+    let zone = match (a, b) {
+        (10, _) => "10.in-addr.arpa".to_string(),
+        (192, 168) => "168.192.in-addr.arpa".to_string(),
+        (172, 16..=31) => format!("{b}.172.in-addr.arpa"),
+        _ => return None,
+    };
+    let name = format!("{d}.{c}.{b}.{a}.in-addr.arpa.");
+    Some((zone, name))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2445,6 +2595,113 @@ fn extract_dhcp_offer_details(output: &str) -> Vec<DhcpProbeDetail> {
         .collect()
 }
 
+// Known fields dhclient's own leases file (`-lf`, ISC "lease { ... }" syntax)
+// records for a successfully bound lease, mapped to the human-readable label
+// the Admin UI should show -- in display order (see extract_dhcp_lease_details).
+// A dedicated table, not a reuse of DHCP_OFFER_DETAIL_LABELS: confirmed live
+// (a real dhclient run, see dhcp-probe.sh's own comment on the dhclient
+// invocation) that dhclient's stdout transcript never prints a "Label: value"
+// breakdown at all -- only protocol-exchange lines -- and the leases file's
+// own syntax uses ISC's internal option names (`routers`, `dhcp-lease-time`,
+// ...), not nmap's human-readable ones, with some units differing too (e.g.
+// `dhcp-lease-time` is a bare integer of seconds, unlike nmap's own
+// duration-formatted "1h00m00s" for the equivalent field) -- so reusing
+// DHCP_OFFER_DETAIL_LABELS's labels here would misleadingly imply identical
+// formatting. The first element of each pair is the exact leases-file field
+// name this label maps to (see extract_dhcp_lease_details for how bare vs
+// `option`-prefixed keys are both normalized to this same key space).
+const DHCP_LEASE_DETAIL_LABELS: &[(&str, &str)] = &[
+    ("fixed-address", "Assigned IP Address"),
+    ("dhcp-server-identifier", "Server Identifier"),
+    ("subnet-mask", "Subnet Mask"),
+    ("routers", "Router"),
+    ("domain-name-servers", "Domain Name Server"),
+    ("domain-name", "Domain Name"),
+    ("broadcast-address", "Broadcast Address"),
+    ("dhcp-lease-time", "Lease Time (seconds)"),
+    ("dhcp-renewal-time", "Renewal Time (seconds)"),
+    ("dhcp-rebinding-time", "Rebinding Time (seconds)"),
+    ("ntp-servers", "NTP Servers"),
+    ("host-name", "Host Name"),
+    ("netbios-name-servers", "NetBIOS Name Server"),
+];
+
+// Pulls the known lease fields (see DHCP_LEASE_DETAIL_LABELS) out of the
+// dhclient leases file text dhcp-probe.sh now cat's alongside a successful
+// client dry-run's own stdout transcript (see its comment on the dhclient
+// invocation). Only the LAST "lease { ... }" block is kept -- the opposite
+// direction from extract_dhcp_offer_details's "first response block wins":
+// a renewed/rebound lease appends a new block after the original rather than
+// replacing it in place, so the most recent block is the one that reflects
+// the lease dhclient is actually holding now. `found` is cleared every time
+// a new "lease {" line is seen for exactly this reason: by the time every
+// line has been scanned, only the final block's fields remain in it.
+fn extract_dhcp_lease_details(output: &str) -> Vec<DhcpProbeDetail> {
+    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
+
+    for line in output.lines() {
+        let line = line.trim().trim_end_matches(';');
+
+        if line == "lease {" {
+            found.clear();
+            continue;
+        }
+
+        // Distinguishes `option <name> <value>` lines from the leases
+        // file's own bare keyword lines (`fixed-address ...`, `renew ...`)
+        // -- both end up compared against the same DHCP_LEASE_DETAIL_LABELS
+        // key space below, since dhclient's option names never collide with
+        // its bare structural keywords.
+        let rest = line.strip_prefix("option ").unwrap_or(line);
+        let Some((key, value)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
+
+        // Look up the label FIRST, then check/insert keyed by that
+        // `&'static str` label -- not by `key` itself, which only borrows
+        // from `output` and would be the wrong (and, for an unknown key,
+        // entirely absent) thing to key `found` by. This also gives "first
+        // occurrence within the current block wins", same rule as
+        // extract_dhcp_offer_details.
+        let Some((_, label)) = DHCP_LEASE_DETAIL_LABELS
+            .iter()
+            .copied()
+            .find(|&(known_key, _)| known_key == key)
+        else {
+            continue;
+        };
+        if found.contains_key(label) {
+            continue;
+        }
+        // Only a curated subset of fields (see DHCP_LEASE_DETAIL_LABELS) are
+        // ever bare-quoted single strings (`domain-name`, `host-name`) --
+        // deliberately not e.g. `domain-search`, whose value is itself a
+        // comma-separated list of quoted strings that this simple
+        // outer-quote strip would mangle. Since none of the curated fields
+        // have that shape, stripping one matching outer quote pair here is
+        // safe and just tidies up the Admin UI's rendered value.
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        if !value.is_empty() {
+            found.insert(label, value.to_string());
+        }
+    }
+
+    DHCP_LEASE_DETAIL_LABELS
+        .iter()
+        .copied()
+        .filter_map(|(_, label)| {
+            found.get(label).map(|value| DhcpProbeDetail {
+                label: label.to_string(),
+                value: value.clone(),
+            })
+        })
+        .collect()
+}
+
 // Same marker-line-first strategy as parse_conflict_probe_result, but for
 // the dhclient dry-run's own result marker. Unlike that function, there is
 // no plain-text fallback scan here -- if the marker line is absent, this
@@ -2458,6 +2715,7 @@ fn parse_client_probe_result(output: &str) -> DhcpClientCheckStatus {
                 } else {
                     detail.to_string()
                 },
+                details: extract_dhcp_lease_details(output),
             },
             "failed" => DhcpClientCheckStatus::Failed {
                 output: if detail.is_empty() {
@@ -3618,8 +3876,11 @@ mod tests {
             other => panic!("unexpected conflict result: {:?}", other),
         }
         match report.client {
-            DhcpClientCheckStatus::Passed { output } => {
-                assert_eq!(output, "dhclient succeeded on eth0")
+            DhcpClientCheckStatus::Passed { output, details } => {
+                assert_eq!(output, "dhclient succeeded on eth0");
+                // No leases-file text in this fixture's single-line input --
+                // details must default to empty, not panic or fabricate data.
+                assert!(details.is_empty());
             }
             other => panic!("unexpected client result: {:?}", other),
         }
@@ -3726,6 +3987,187 @@ mod tests {
     #[test]
     fn extract_dhcp_offer_details_returns_empty_for_unrelated_text() {
         assert!(extract_dhcp_offer_details("some unrelated log line\n").is_empty());
+    }
+
+    // Fixture text is a real dhclient.leases file captured from a live
+    // dhclient -4 -1 -v run against a real DHCP server (see dhcp-probe.sh's
+    // own comment on the dhclient invocation for how this was confirmed) --
+    // not a hand-guessed approximation of ISC's lease syntax.
+    #[test]
+    fn extract_dhcp_lease_details_parses_a_real_captured_lease_block() {
+        let details = extract_dhcp_lease_details(concat!(
+            "lease {\n",
+            "  interface \"eth0\";\n",
+            "  fixed-address 192.168.1.211;\n",
+            "  filename \"boot/grub/i386-pc/core.0\";\n",
+            "  server-name \"192.168.1.10\";\n",
+            "  option subnet-mask 255.255.255.0;\n",
+            "  option routers 192.168.1.2;\n",
+            "  option dhcp-lease-time 3600;\n",
+            "  option dhcp-message-type 5;\n",
+            "  option domain-name-servers 192.168.1.22,192.168.1.23;\n",
+            "  option dhcp-server-identifier 192.168.1.19;\n",
+            "  option interface-mtu 1500;\n",
+            "  option domain-search \"lan.local.\", \"local.\";\n",
+            "  option dhcp-renewal-time 1800;\n",
+            "  option ntp-servers 192.168.1.10;\n",
+            "  option broadcast-address 192.168.1.255;\n",
+            "  option dhcp-rebinding-time 3150;\n",
+            "  option host-name \"sccache-build-slave-240\";\n",
+            "  option netbios-name-servers 192.168.1.22,192.168.1.23;\n",
+            "  option domain-name \"lan.local\";\n",
+            "  renew 4 2026/07/23 13:03:59;\n",
+            "  rebind 4 2026/07/23 13:30:17;\n",
+            "  expire 4 2026/07/23 13:37:47;\n",
+            "}\n",
+        ));
+
+        assert_eq!(
+            details,
+            vec![
+                DhcpProbeDetail {
+                    label: "Assigned IP Address".to_string(),
+                    value: "192.168.1.211".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Server Identifier".to_string(),
+                    value: "192.168.1.19".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Subnet Mask".to_string(),
+                    value: "255.255.255.0".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Router".to_string(),
+                    value: "192.168.1.2".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Domain Name Server".to_string(),
+                    value: "192.168.1.22,192.168.1.23".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Domain Name".to_string(),
+                    value: "lan.local".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Broadcast Address".to_string(),
+                    value: "192.168.1.255".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Lease Time (seconds)".to_string(),
+                    value: "3600".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Renewal Time (seconds)".to_string(),
+                    value: "1800".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Rebinding Time (seconds)".to_string(),
+                    value: "3150".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "NTP Servers".to_string(),
+                    value: "192.168.1.10".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Host Name".to_string(),
+                    value: "sccache-build-slave-240".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "NetBIOS Name Server".to_string(),
+                    value: "192.168.1.22,192.168.1.23".to_string(),
+                },
+            ]
+        );
+    }
+
+    // A renewed lease appends a NEW "lease { ... }" block after the original
+    // rather than replacing it -- only the second (last) block's fields may
+    // end up in the result, even though the first block has fields this
+    // parser also knows how to extract. Opposite direction from
+    // extract_dhcp_offer_details_stops_at_second_response_block, which keeps
+    // the FIRST block: documented explicitly on extract_dhcp_lease_details.
+    #[test]
+    fn extract_dhcp_lease_details_keeps_only_the_last_lease_block() {
+        let details = extract_dhcp_lease_details(concat!(
+            "lease {\n",
+            "  fixed-address 192.168.1.50;\n",
+            "  option routers 192.168.1.1;\n",
+            "}\n",
+            "lease {\n",
+            "  fixed-address 192.168.1.211;\n",
+            "  option routers 192.168.1.2;\n",
+            "}\n",
+        ));
+
+        assert_eq!(
+            details,
+            vec![
+                DhcpProbeDetail {
+                    label: "Assigned IP Address".to_string(),
+                    value: "192.168.1.211".to_string(),
+                },
+                DhcpProbeDetail {
+                    label: "Router".to_string(),
+                    value: "192.168.1.2".to_string(),
+                },
+            ]
+        );
+    }
+
+    // No "lease {" block at all (e.g. a probe run that never reached the
+    // dhclient stage, or a failed dry-run where dhcp-probe.sh never cats an
+    // empty leases file) must yield an empty list, not a panic -- the caller
+    // (DhcpClientCheckStatus::Passed) relies on this being a safe default.
+    #[test]
+    fn extract_dhcp_lease_details_returns_empty_for_unrelated_text() {
+        assert!(extract_dhcp_lease_details("some unrelated log line\n").is_empty());
+    }
+
+    // parse_client_probe_result must wire extract_dhcp_lease_details into a
+    // real "passed" marker line's surrounding output, the same way
+    // parse_conflict_probe_result already wires extract_dhcp_offer_details in
+    // for the conflict path -- this is the actual code path the Admin UI
+    // depends on, not just the extractor function in isolation.
+    #[test]
+    fn parses_dhcp_probe_report_extracts_lease_details_alongside_passed_marker() {
+        let report = parse_dhcp_probe_report(concat!(
+            "__LANCACHE_DHCP_PROBE_START__ 1\n",
+            "__LANCACHE_DHCP_CONFLICT_RESULT__ not_found\n",
+            "Internet Systems Consortium DHCP Client 4.4.3-P1\n",
+            "DHCPACK of 192.168.1.211 from 192.168.1.19\n",
+            "bound to 192.168.1.211 -- renewal in 1572 seconds.\n",
+            "lease {\n",
+            "  fixed-address 192.168.1.211;\n",
+            "  option routers 192.168.1.2;\n",
+            "  option domain-name-servers 192.168.1.22,192.168.1.23;\n",
+            "}\n",
+            "__LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
+        ));
+
+        match report.client {
+            DhcpClientCheckStatus::Passed { output, details } => {
+                assert_eq!(output, "dhclient succeeded on eth0");
+                assert_eq!(
+                    details,
+                    vec![
+                        DhcpProbeDetail {
+                            label: "Assigned IP Address".to_string(),
+                            value: "192.168.1.211".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Router".to_string(),
+                            value: "192.168.1.2".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Domain Name Server".to_string(),
+                            value: "192.168.1.22,192.168.1.23".to_string(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("unexpected client result: {:?}", other),
+        }
     }
 
     // A probe run that never reaches the dhclient stage (e.g. the container
@@ -5369,6 +5811,73 @@ mod tests {
         for off in ["0", "false", "no", "off", "", "  ", "enabled", "2"] {
             assert!(!parse_bool_flag(off), "{off:?} should be false");
         }
+    }
+
+    // Issue #1083: the forward-record cleanup must split Kea's stored FQDN
+    // into the right PowerDNS zone (its parent domain) and canonical record
+    // name (trailing dot), tolerate an already-dotted/mixed-case input, and
+    // refuse a bare single-label name that has no parent zone to delete from.
+    #[test]
+    fn forward_record_zone_and_name_splits_fqdn() {
+        assert_eq!(
+            forward_record_zone_and_name("laptop.lan"),
+            Some(("lan".to_string(), "laptop.lan.".to_string()))
+        );
+        assert_eq!(
+            forward_record_zone_and_name("Laptop.LAN."),
+            Some(("lan".to_string(), "laptop.lan.".to_string()))
+        );
+        assert_eq!(
+            forward_record_zone_and_name("host.local.lan."),
+            Some(("local.lan".to_string(), "host.local.lan.".to_string()))
+        );
+        // A bare label (or empty/whitespace) has no parent zone to target.
+        assert_eq!(forward_record_zone_and_name("lan"), None);
+        assert_eq!(forward_record_zone_and_name(""), None);
+        assert_eq!(forward_record_zone_and_name("   "), None);
+    }
+
+    // Issue #1083: the reverse-PTR cleanup must map an IPv4 to the exact
+    // private reverse zone services/dns actually hosts and to the canonical
+    // PTR name, and must skip any address outside the RFC1918 ranges -- no
+    // such zone exists there, so a PTR delete would be a pointless/wrong
+    // request. The 172.16-31 boundary is the easy-to-get-wrong case.
+    #[test]
+    fn reverse_ptr_zone_and_name_covers_rfc1918_and_skips_public() {
+        assert_eq!(
+            reverse_ptr_zone_and_name("10.1.2.3"),
+            Some((
+                "10.in-addr.arpa".to_string(),
+                "3.2.1.10.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(
+            reverse_ptr_zone_and_name("192.168.1.42"),
+            Some((
+                "168.192.in-addr.arpa".to_string(),
+                "42.1.168.192.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(
+            reverse_ptr_zone_and_name("172.16.5.6"),
+            Some((
+                "16.172.in-addr.arpa".to_string(),
+                "6.5.16.172.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(
+            reverse_ptr_zone_and_name("172.31.9.9"),
+            Some((
+                "31.172.in-addr.arpa".to_string(),
+                "9.9.31.172.in-addr.arpa.".to_string()
+            ))
+        );
+        // 172.15 and 172.32 are just outside the private block; public IPs and
+        // non-IPs skip too.
+        assert_eq!(reverse_ptr_zone_and_name("172.15.0.1"), None);
+        assert_eq!(reverse_ptr_zone_and_name("172.32.0.1"), None);
+        assert_eq!(reverse_ptr_zone_and_name("8.8.8.8"), None);
+        assert_eq!(reverse_ptr_zone_and_name("not-an-ip"), None);
     }
 
     // ─── Issue #450: dnsmasq relay/proxy field validators ───
