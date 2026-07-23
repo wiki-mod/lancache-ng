@@ -494,6 +494,15 @@ migrate_dhcp4_config() {
         |
         .Dhcp4["hooks-libraries"] = ((.Dhcp4["hooks-libraries"] // []) | if any(.[]; .library == $lease_cmds_hook_path) then . else . + [{"library": $lease_cmds_hook_path}] end)
         |
+        # Deliberately disabled default, not an oversight -- see the Kea DHCP
+        # section of docs/architecture-ng.md for the full reasoning.
+        # Kea has shipped multi-threaded packet processing enabled by default
+        # since 2.4.0 for high-throughput ISP-scale deployments, which this
+        # single LAN/lab-scale subnet has no need for, while adding real
+        # concurrency surface against the lease_cmds hook and the DDNS-
+        # forwarding path just below. The `// {}` merge still lets an operator
+        # who explicitly sets "multi-threading" in their own config override
+        # this default.
         .Dhcp4["multi-threading"] = ({"enable-multi-threading": false} + (.Dhcp4["multi-threading"] // {}))
         | .Dhcp4["dhcp-ddns"] = ({
             "enable-updates": true,
