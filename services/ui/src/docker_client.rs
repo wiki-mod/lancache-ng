@@ -109,3 +109,50 @@ pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Live-reproduced on a real dev stack (issue #1068 item 6): starting a
+    // profile-gated container that was never created returns exactly this
+    // 404 shape from the docker-socket-proxy. Confirms is_container_not_created
+    // recognizes it so callers can turn it into actionable guidance instead
+    // of an opaque "Failed to start 'x'".
+    #[test]
+    fn is_container_not_created_recognizes_a_404_anywhere_in_the_error_chain() {
+        let bollard_err = BollardError::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container: lancache-dhcp-proxy".to_string(),
+        };
+        let wrapped: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp-proxy'");
+        assert!(is_container_not_created(&wrapped));
+    }
+
+    // A stopped/crash-looping container also surfaces through start_container,
+    // but as a different status code (e.g. 500 for an internal daemon error,
+    // or 409 for a conflicting operation) -- this must NOT be mistaken for
+    // the "never created" case, or an operator would be told to run a
+    // `docker compose up --profile ...` command that cannot fix a real
+    // runtime failure.
+    #[test]
+    fn is_container_not_created_rejects_other_status_codes() {
+        let bollard_err = BollardError::DockerResponseServerError {
+            status_code: 500,
+            message: "internal server error".to_string(),
+        };
+        let wrapped: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
+        assert!(!is_container_not_created(&wrapped));
+    }
+
+    // A plain anyhow error with no Docker cause at all (e.g. the
+    // container_name_for_service allowlist rejection above) must not
+    // false-positive just because is_container_not_created scans the chain.
+    #[test]
+    fn is_container_not_created_rejects_non_docker_errors() {
+        let err = anyhow::anyhow!("Docker service 'bogus' is not in the allowlist");
+        assert!(!is_container_not_created(&err));
+    }
+}

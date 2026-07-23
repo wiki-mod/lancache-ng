@@ -4021,6 +4021,57 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
+    // Issue #1068 item 6: switching to a DHCP mode whose container was never
+    // created (the docker-socket-proxy allowlist has no create capability --
+    // see docker_client's own module comment) used to surface as a bare
+    // "Failed to start 'dhcp-proxy'" with no indication of what to do about
+    // it. Confirms the 404 case is rewritten into the actionable
+    // create-it-yourself guidance instead of the raw Docker error text.
+    #[test]
+    fn start_service_error_gives_actionable_guidance_for_a_missing_container() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container: lancache-dhcp-proxy".to_string(),
+        };
+        let err: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp-proxy'");
+        let dhcp_err = start_service_error(err, "dhcp-proxy", "dhcp-proxy");
+        assert_eq!(dhcp_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            dhcp_err.message.contains("has not been created yet"),
+            "expected actionable guidance, got: {}",
+            dhcp_err.message
+        );
+        assert!(
+            dhcp_err
+                .message
+                .contains("docker compose --profile dhcp-proxy up -d dhcp-proxy"),
+            "expected the exact fix command, got: {}",
+            dhcp_err.message
+        );
+    }
+
+    // A real operational failure (not a missing container) must still
+    // surface as an honest error -- this must not be misclassified as the
+    // "run this command" bootstrap case, which would send an operator
+    // chasing a fix that cannot possibly help.
+    #[test]
+    fn start_service_error_passes_through_other_failures_unchanged() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "container crashed on start".to_string(),
+        };
+        let err: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
+        let dhcp_err = start_service_error(err, "dhcp", "dhcp-kea");
+        assert!(
+            !dhcp_err.message.contains("has not been created yet"),
+            "a real failure must not get the missing-container message: {}",
+            dhcp_err.message
+        );
+        assert!(dhcp_err.message.contains("container crashed on start"));
+    }
+
     // Wraps validate_dhcp_form's 9-field DhcpFormValidation struct literal
     // so individual tests below can call it with plain positional
     // arguments instead of repeating every field name at each call site.
