@@ -15,26 +15,28 @@ setup() {
     source "$repo_root/scripts/lib/validation-image-tag.sh"
 }
 
-@test "base channel: master publishes nightly" {
+@test "base channel: master publishes latest" {
     run vit_base_channel_tag "master"
+    [ "$status" -eq 0 ]
+    [ "$output" = "latest" ]
+}
+
+@test "base channel: current_dev publishes nightly" {
+    run vit_base_channel_tag "current_dev"
     [ "$status" -eq 0 ]
     [ "$output" = "nightly" ]
 }
 
-@test "base channel: vX.Y.Z pre-release branch publishes dev" {
+@test "base channel: an archived vX.Y.Z release branch has no live channel, falls back to latest" {
+    # #825/#1141: archived vY.X.Z release branches no longer publish a live
+    # channel (the old 'dev' channel mapping was retired), so they get the
+    # same generic fallback as any other non-current_dev branch.
     run vit_base_channel_tag "v0.2.0"
-    [ "$output" = "dev" ]
+    [ "$output" = "latest" ]
 }
 
 @test "base channel: anything else falls back to latest" {
     run vit_base_channel_tag "some-feature-branch"
-    [ "$output" = "latest" ]
-}
-
-@test "base channel: a v-prefixed non-semver ref is NOT treated as a release branch" {
-    # Only strict vMAJOR.MINOR.PATCH maps to dev; a loose 'v2' or 'v0.2' must
-    # not, or an unrelated branch name could accidentally publish to dev.
-    run vit_base_channel_tag "v0.2"
     [ "$output" = "latest" ]
 }
 
@@ -67,13 +69,16 @@ setup() {
 @test "resolve tag: Dependabot PR falls back to the base channel" {
     run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
         "dependabot[bot]" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""
-    [ "$output" = "nightly" ]
+    [ "$output" = "latest" ]
 }
 
-@test "resolve tag: fork PR against v0.2.0 falls back to dev" {
+@test "resolve tag: fork PR against an archived v0.2.0 branch falls back to latest" {
+    # #825/#1141: v0.2.0 no longer has a live channel of its own (the old
+    # 'dev' channel mapping was retired), so it falls to the same generic
+    # fallback as any other non-current_dev branch.
     run vit_resolve_tag "pull_request" "v0.2.0" "715" "abcdef0123456789" \
         "someuser" "fork/lancache-ng" "wiki-mod/lancache-ng" ""
-    [ "$output" = "dev" ]
+    [ "$output" = "latest" ]
 }
 
 @test "resolve tag: workflow_dispatch honours the operator's chosen tag" {
@@ -122,8 +127,11 @@ setup() {
         || fail "build-push.yml no longer calls vit_service_should_have_staging_tag"
 
     # The old inline reimplementation used this exact conditional shape for
-    # the base-channel mapping -- if it reappears, someone re-duplicated the
-    # logic instead of calling vit_base_channel_tag.
+    # the base-channel mapping -- if it reappears (in either the pre-#825
+    # master->nightly form or a naive post-#825 master->latest rewrite),
+    # someone re-duplicated the logic instead of calling vit_base_channel_tag.
     ! grep -qF 'base_channel_tag=nightly' "$workflow_file" \
+        || fail "build-push.yml appears to reimplement the base-channel mapping inline again"
+    ! grep -qF 'base_channel_tag=latest' "$workflow_file" \
         || fail "build-push.yml appears to reimplement the base-channel mapping inline again"
 }
