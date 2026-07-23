@@ -19,6 +19,7 @@ mod kea_snapshots;
 mod nats_auth_callout;
 mod nats_config;
 mod nginx_client;
+mod reverse_dns;
 mod routes;
 mod session;
 mod syslog_client;
@@ -982,6 +983,11 @@ async fn main() -> Result<()> {
         .route(
             "/domains/lan/remove",
             post(routes::domains::remove_lan_record),
+        )
+        .route("/domains/ptr/add", post(routes::domains::add_ptr_record))
+        .route(
+            "/domains/ptr/remove",
+            post(routes::domains::remove_ptr_record),
         )
         .route(
             "/domains/aaaa-filter",
