@@ -27,7 +27,7 @@ The first-party metadata package is:
 - `stack`
 
 `stack` is not a runtime service. It is the single mutable channel pointer used
-by setup/update to resolve `latest`, `nightly`, or `dev` to one immutable `sha-*`
+by setup/update to resolve `latest` or `nightly` to one immutable `sha-*`
 runtime image set.
 
 The authoritative machine-readable inventory is
@@ -39,32 +39,59 @@ must stay consistent with that file.
 | Channel | Meaning | Mutability | Intended use |
 | --- | --- | --- | --- |
 | `sha-<commit>` | Immutable build identity for a source commit | Immutable | Debugging, rollback, provenance, and promotion source |
-| `dev` | Explicit development/test channel | Mutable | Maintainer-triggered development checks only |
-| `nightly` | Tested pre-stable integration channel built continuously from `master` (renamed from `edge` in v0.3.0, #1056) | Mutable | Operators who explicitly opt into pre-stable builds |
+| `nightly` | Tested pre-stable integration channel built continuously from `current_dev` (renamed from `edge` in v0.3.0, #1056; re-pointed from `master` to `current_dev` in v0.3.0, #825/#1141) | Mutable | Operators who explicitly opt into pre-stable builds |
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
-| `latest` | Latest stable release only | Mutable | Default stable install path |
+| `latest` | Latest stable release, published continuously from `master` | Mutable | Default stable install path |
 | `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stack:stable` GHCR tag exists -- `stable` and `latest` resolve to the identical pointer image |
 
-`latest` must not be moved by a normal `master` build. The `master` branch
-publishes `nightly` after the required checks pass. Stable release tags publish
-the matching `vX.Y.Z` tag and may move `latest` (and, being the same pointer,
-`stable`) to the same digest.
+**Branch/channel model (#825/#1141, decided 2026-07-23 -- "master = stable,
+current_dev = nightly, vY.X.Z = archived release, ganz simpel")**: `master`
+publishes `latest` continuously after the required checks pass -- this is its
+sole, permanent role, not an exception that needs a separate justification
+each time. `current_dev` (the permanent active-development branch, decoupled
+from any version number) publishes `nightly` continuously from its own tip,
+taking over the role `master` used to have here before this decision.
+`vY.X.Z` branches (e.g. `v0.2.0`) are archived release freezes: they still
+take deliberate backports, exactly as before, but publish no live channel at
+all -- nothing tracks them as a rolling install target. Stable release tags
+(`vX.Y.Z`) publish the matching immutable tag and move `latest` (and, being
+the same pointer, `stable`) to the same digest.
 
 The `nightly` channel was named `edge` before v0.3.0 (#1056). The rename is a
 deliberate breaking change with no alias: an install still carrying
 `LANCACHE_IMAGE_CHANNEL=edge` is rejected with a clear error telling the
 operator to switch to `nightly`, rather than being silently accepted.
 
+**Retired: the `dev` channel (#825/#1141, v0.3.0).** Before this decision,
+`dev` published automatically on every push to whichever branch matched
+`vX.Y.Z` (the active pre-release integration branch of the time, e.g.
+`v0.2.0`), separately from `master`'s own `nightly`/`edge` publishing. Once
+`current_dev` became the permanent active-development branch, that role was
+never re-pointed in code (the concrete gap #1141 found and fixed), and the
+decision above formally retired `dev` rather than re-pointing it: archived
+`vY.X.Z` branches are frozen release history now, not an active integration
+branch, so there is no longer anything for a `dev` channel to mean. This is a
+hard cut, not an alias, mirroring the `edge` -> `nightly` rename precedent
+above: an install still carrying `LANCACHE_IMAGE_CHANNEL=dev` is rejected by
+`setup.sh` with a clear error directing the operator to `nightly` (to track
+ongoing development, now from `current_dev`) or `stable`/`latest` (to track
+the stable release), rather than being silently accepted against an
+increasingly stale, unmaintained image. `dev` was never offered by
+`setup.sh`'s interactive picker (see below) or the Admin UI's channel
+control, so this cut affects only operators who set
+`LANCACHE_IMAGE_CHANNEL=dev` explicitly via `.env`/shell env or the
+secondary-node registration flow.
+
 `setup.sh`'s interactive install flow offers exactly two operator-facing
 channel names: `nightly` (default pre-1.0) and `stable`, each with an inline
 explanation of what it means. `stable` is not a new GHCR tag --
 `resolve_lancache_stack_channel_tag` maps it onto the existing `latest`
 pointer before pulling, so introducing it required no change to the
-promotion/release pipeline. `dev` and `pinned` remain valid
-`LANCACHE_IMAGE_CHANNEL` values (env var / `.env`, or the secondary-node
-registration flow) but are not offered by the interactive picker -- `dev` is
-an internal maintainer-triggered channel (see below), not an end-user choice.
+promotion/release pipeline. `pinned` remains a valid `LANCACHE_IMAGE_CHANNEL`
+value (env var / `.env`, or the secondary-node registration flow) but is not
+offered by the interactive picker -- it is a request for one specific
+immutable tag, not a moving channel choice.
 
 **Pre-1.0 default (#1068)**: the picker's default answer and its
 "recommended" label were originally on `stable`, matching the plan when this
@@ -83,15 +110,6 @@ right default again once a real `vX.Y.Z` stable release exists and moves
 ever displays and edits an *existing* install's already-resolved channel
 value, so it has no "default a new choice" moment the way the CLI installer
 does.
-
-`dev` publishes automatically on every push to a branch matching `vX.Y.Z`
-(not a hardcoded branch name, so this keeps working as the active
-integration branch changes over time), mirroring how `master` publishes
-`nightly`. It can
-additionally be requested from any other ref via the `channel` input on a
-manual `workflow_dispatch` run of `Build & Push` -- e.g. to spot-check a
-feature branch as `dev` without merging it into the integration branch
-first. It never creates a GitHub release and never moves `latest`.
 
 ## Promotion
 
@@ -145,7 +163,7 @@ ghcr.io/wiki-mod/lancache-ng/stack:<channel>
 ```
 
 That image contains `stack.env`, including the immutable `sha-*` tag for the
-coherent first-party image set. Setup resolves `latest`, `nightly`, and `dev`
+coherent first-party image set. Setup resolves `latest` and `nightly`
 through this pointer before `docker compose pull`, so a user install/update does
 not consume per-service mutable tags while a promotion is in progress.
 
@@ -233,7 +251,10 @@ build workflow, setup platform guards, release notes, and validation together.
 ## External Images
 
 External images are not part of the first-party stack tag. They remain explicit
-dependencies and are tracked in `release/stack-images.yml`.
+dependencies and are tracked in `release/stack-images.yml`. See
+[docs/release-external-images.md](release-external-images.md) for the
+per-image table (role, digest, policy) and provenance/SBOM expectations --
+this section states the policy only, not the current image list.
 
 Before a stable release, each external image used by a supported deployment
 profile must be pinned by digest, mirrored, or documented as intentionally
@@ -265,7 +286,10 @@ The CI guardrails must fail closed when:
 
 - compose image names drift from `release/stack-images.yml`
 - the build matrix omits a first-party package
-- `master` attempts to publish `latest`
+- `latest` is published through any path other than the gated `promote` job
+  (e.g. `docker/metadata-action`'s own `is_default_branch` auto-tag on a raw
+  build step) -- `master`'s own `promote`-job publish of `latest` is the
+  correct, audited path and is not what this guards against
 - an RC tag attempts to create a non-prerelease
 - a release job uses mutable `build-tools:latest`
 - release notes omit a first-party package
