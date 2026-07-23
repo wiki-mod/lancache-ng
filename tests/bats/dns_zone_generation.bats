@@ -417,11 +417,15 @@ count_record_type() {
 # disabled check must run before the wildcard-dot marker is stripped, so a
 # disabled wildcard entry is skipped just like a disabled plain one, not
 # misread as a plain domain literally named "!.disabled-wild.example.com".
+# The second fixture entry is deliberately ALSO wildcard-only (leading dot):
+# this proves the disabled first entry doesn't leak any state (e.g. an
+# is_wildcard_only flag left set from a skipped line) into how the next,
+# genuinely-enabled wildcard entry gets emitted.
 @test "generate_rpz_zone skips a disabled wildcard-only ('!.') entry" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
 
-    printf '%s\n' '!.disabled-wild.example.com' 'still-enabled.example.com' > "$domains_file"
+    printf '%s\n' '!.disabled-wild.example.com' '.still-enabled.example.com' > "$domains_file"
 
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
 
