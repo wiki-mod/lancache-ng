@@ -104,7 +104,30 @@ kea_image_tag="lancache-ng-resetkea:$$"
 kea_container="lancache-ng-resetkea-kea-$$"
 ui_container="lancache-ng-resetkea-ui-$$"
 
-work_dir="$repo_root/.setup-reset-kea-config-simulation-tmp"
+# Deliberately OUTSIDE the git working tree (not under $repo_root): once the
+# test runs, kea-data/config-snapshots/ ends up owned by the Admin UI's fixed
+# unprivileged uid (10001) on the HOST -- services/dhcp/entrypoint.sh (root
+# inside the Kea container) creates and chowns config-snapshots/ on every
+# start, and a bind mount does not remap that uid back on the host. If this
+# lived inside the checked-out repo, a cleanup miss from ANY cause -- the EXIT
+# trap not running because the job was cancelled/SIGKILLed, the throwaway
+# chown image no longer existing, or simply an OLDER branch whose copy of this
+# script predates the cleanup fix being dispatched onto the same shared
+# self-hosted runner -- would leave that uid-10001 directory in the repo
+# workspace, and the NEXT job's actions/checkout on that same runner slot
+# would then fail outright trying to clean it (EACCES: permission denied,
+# rmdir ...), blocking an unrelated PR's CI run. Putting work_dir under
+# $TMPDIR/tmp -- which actions/checkout never touches, is not wiped per-job
+# the way the runner's own $RUNNER_TEMP/_work is, and whose sticky bit keeps
+# a stray dir harmless to other processes -- means a leftover can never
+# poison another job's checkout no matter why cleanup was skipped. The
+# cleanup() chown+rm below is still kept, now purely to tidy this run's own
+# temp dir on a normal exit rather than as the cross-job safety net it used
+# to be. See issue #1123 for the sibling
+# scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh incident this same
+# failure class was confirmed in. Unique per run ($$) because $TMPDIR is
+# shared host-wide, unlike the per-checkout worktree this used to sit in.
+work_dir="${TMPDIR:-/tmp}/lancache-ng-setup-reset-kea-config.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared" "$work_dir/kea-data" "$work_dir/install"
 
@@ -114,21 +137,19 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-    # Reported for real on a shared self-hosted runner (not hypothetical):
     # services/dhcp/entrypoint.sh runs as root inside the Kea container and
     # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
     # uid (10001, see that entrypoint and dhcp-kea-ctrl-agent-mutation-
-    # simulation.sh's identical comment on its own kea-data mount). Left
-    # as-is, the plain `rm -rf "$work_dir"` below silently fails to remove
-    # those now-root/10001-owned files, leaving them on disk under this
-    # runner's own actions-runner work directory -- which then made a LATER
-    # job's `actions/checkout` on the same runner slot fail outright trying
-    # to clean its workspace (EACCES: permission denied, rmdir ...),
-    # blocking an unrelated PR's CI run. Reset ownership back to this
-    # process's own uid/gid via the already-built (no extra pull) Kea image
-    # -- unconditionally, in this EXIT trap, so it runs whether the
-    # simulation above succeeded or failed, not just on the happy path --
-    # before ever touching rm -rf.
+    # simulation.sh's identical comment on its own kea-data mount). A plain
+    # `rm -rf "$work_dir"` as this (non-root, non-10001) process would fail
+    # to remove those files, leaving the tree behind. Since work_dir now
+    # lives under $TMPDIR (outside the checked-out repo -- see its definition
+    # above), a leftover there is already harmless to other CI jobs; this
+    # ownership reset is kept purely so THIS run tidies up after itself
+    # instead of accumulating undeletable uid-10001 dirs in $TMPDIR. Reset
+    # ownership back to this process's own uid/gid via the already-built (no
+    # extra pull) Kea image -- unconditionally, in this EXIT trap, so it runs
+    # whether the simulation above succeeded or failed -- before rm -rf.
     if [[ -d "$work_dir" ]]; then
         # Reported explicitly (not just silently `|| true`-d) because the
         # first time this was fixed, the fix's own success was only ever
@@ -161,7 +182,7 @@ cleanup() {
     if rm -rf "$work_dir"; then
         echo "cleanup: removed $work_dir -- ok"
     else
-        echo "cleanup: WARNING -- rm -rf $work_dir left files behind (see stderr above); this can block a LATER job's actions/checkout on this same runner slot" >&2
+        echo "cleanup: WARNING -- rm -rf $work_dir left files behind (see stderr above); harmless to other jobs now that work_dir lives under \$TMPDIR outside the checkout, but it should not normally happen after the ownership reset above" >&2
     fi
     exit "$status"
 }
