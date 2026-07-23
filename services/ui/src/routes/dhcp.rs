@@ -33,7 +33,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tera::Context;
 
 // ─── Constants ───
@@ -2378,13 +2378,18 @@ async fn check_dhcp_probe(state: &AppState) -> DhcpCheckReport {
     let output = match run_dhcp_probe(&state.docker).await {
         Ok(out) => out,
         Err(e) => {
+            // Both statuses get the same diagnostic-rich reason -- neither
+            // check actually ran, so there is no reason to give one of them
+            // less detail than the other (issue #1136's follow-up: a bare
+            // "timed out"/"did not complete" must not read the same whether
+            // the probe was silently hung or was actively producing output
+            // right up to the deadline; see ProbeError's Display impl).
+            let reason = e.to_string();
             return DhcpCheckReport {
                 conflict: DhcpConflictCheckStatus::Unavailable {
-                    reason: format!("Failed to execute DHCP check: {}", e),
+                    reason: reason.clone(),
                 },
-                client: DhcpClientCheckStatus::Unavailable {
-                    reason: "probe container did not complete".to_string(),
-                },
+                client: DhcpClientCheckStatus::Unavailable { reason },
             };
         }
     };
@@ -2406,6 +2411,151 @@ const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
 const DHCP_CONFLICT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CONFLICT_RESULT__";
 const DHCP_CLIENT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CLIENT_RESULT__";
 
+// Bounded ceiling for a single dhcp-probe container wait (issue #1136: the
+// previous code awaited Docker's wait_container with no timeout at all, so
+// any future hang inside the probe script -- a stuck nmap scan, a dhclient
+// behavior change, an unrelated container-runtime hiccup -- would block the
+// Admin UI's /api/dhcp/check handler forever). Chosen against the actual
+// worst case the probe script (services/ui/dhcp-probe.sh) can legitimately
+// take today: nmap's own `broadcast-dhcp-discover.timeout=5` (5s) plus
+// dhclient's `-1` built-in no-offer timeout (60s -- dhclient.conf(5)'s
+// documented default when no explicit `timeout` statement is configured,
+// and this probe script sets none) gives ~65s for a clean run that simply
+// finds no DHCP server at all. 100s leaves a comfortable ~35s margin over
+// that for container start/log-flush overhead, while still resolving in
+// well under the "minutes" of masking the issue's follow-up comment warned
+// against, and sits inside the 90-120s range the issue itself suggested.
+const DHCP_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(100);
+
+// Trailing byte budget for the log tail captured at timeout time (see
+// ProbeError::TimedOut / wait_for_probe_container below) -- long enough to
+// show real diagnostic content (an operator/future reader can tell "it was
+// silent the whole time" apart from "it was actively retrying right up to
+// the deadline") without letting a noisy hung nmap/dhclient invocation blow
+// up the surfaced Unavailable reason string without bound.
+const DHCP_PROBE_TIMEOUT_LOG_TAIL_BYTES: usize = 2000;
+
+// Distinguishes a bounded-timeout hang (DHCP_PROBE_WAIT_TIMEOUT elapsed with
+// no result from the container) from every other run_dhcp_probe failure.
+// check_dhcp_probe needs this split so a timed-out probe surfaces the
+// diagnostic signal actually available at the moment of the timeout
+// (elapsed time, whatever log output the container produced, whether the
+// presumed-stuck container could even be stopped) instead of collapsing
+// into the same bare, contentless "timed out" text every other failure
+// would get -- the maintainer's follow-up catch on #1136: a bare timeout
+// message must not read the same whether the probe was silently hung the
+// whole time or was actively producing output/retrying right up to the
+// deadline.
+#[derive(Debug)]
+enum ProbeError {
+    TimedOut {
+        elapsed: Duration,
+        log_tail: String,
+        stop_note: String,
+    },
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeError::TimedOut {
+                elapsed,
+                log_tail,
+                stop_note,
+            } => write!(
+                f,
+                "DHCP probe timed out after {:.0}s with no result from the container ({}). \
+                 Captured probe output up to the timeout: {}",
+                elapsed.as_secs_f64(),
+                stop_note,
+                log_tail
+            ),
+            ProbeError::Other(e) => write!(f, "Failed to execute DHCP check: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ProbeError {}
+
+// Keeps only the trailing `max_bytes` of `text`, cut on a UTF-8 char
+// boundary (never mid-codepoint, which would panic a naive byte slice) so a
+// truncated timeout-time log capture can never crash the very diagnostic
+// path it's meant to make more reliable. The trailing (not leading) bytes
+// are kept because the most useful signal at timeout time is what the
+// container was doing right before it got stuck, not what it printed first.
+fn truncate_log_tail(text: &str, max_bytes: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    let mut start = trimmed.len() - max_bytes;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...(truncated)... {}", trimmed[start..].trim())
+}
+
+// Wraps a single dhcp-probe container-wait future in `timeout` and, only on
+// an actual timeout, captures whatever diagnostic signal is cheaply
+// available before giving up: the log output the container produced up to
+// that point (via `fetch_logs`, reusing collect_container_logs_since) and a
+// best-effort stop of the presumed-stuck container (via `stop`, reusing
+// stop_container_if_running) so the *next* /api/dhcp/check call isn't left
+// fighting over the same wedged container. Generic over the wait future and
+// the logs/stop operations (rather than taking `&bollard::Docker` and the
+// container id directly) specifically so a test can exercise this real
+// timeout-and-diagnostics logic against a wait future that simply never
+// resolves -- the exact class of hang #1132/#1136 were about -- without
+// needing a fake Docker daemon; see the `wait_for_probe_container_times_out`
+// test below.
+async fn wait_for_probe_container<T, W, LogsFut, StopFut>(
+    wait_next: W,
+    timeout: Duration,
+    fetch_logs: impl FnOnce() -> LogsFut,
+    stop: impl FnOnce() -> StopFut,
+) -> Result<T, ProbeError>
+where
+    W: Future<Output = Option<Result<T, bollard::errors::Error>>>,
+    LogsFut: Future<Output = Result<String, anyhow::Error>>,
+    StopFut: Future<Output = Result<(), anyhow::Error>>,
+{
+    let start = Instant::now();
+    match tokio::time::timeout(timeout, wait_next).await {
+        Ok(Some(Ok(resp))) => Ok(resp),
+        Ok(Some(Err(e))) => Err(ProbeError::Other(
+            anyhow::Error::new(e).context("read DHCP probe wait response"),
+        )),
+        Ok(None) => Err(ProbeError::Other(anyhow::anyhow!(
+            "DHCP probe container wait stream ended without a result"
+        ))),
+        Err(_elapsed) => {
+            let elapsed = start.elapsed();
+            let log_tail = match fetch_logs().await {
+                Ok(logs) => {
+                    let tail =
+                        truncate_log_tail(&current_probe_output(&logs), DHCP_PROBE_TIMEOUT_LOG_TAIL_BYTES);
+                    if tail.is_empty() {
+                        "(none -- the container produced no output before the timeout)".to_string()
+                    } else {
+                        tail
+                    }
+                }
+                Err(e) => format!("(failed to capture probe container logs: {e})"),
+            };
+            let stop_note = match stop().await {
+                Ok(()) => "the presumed-stuck container was stopped".to_string(),
+                Err(e) => format!("stopping the presumed-stuck container also failed: {e}"),
+            };
+            Err(ProbeError::TimedOut {
+                elapsed,
+                log_tail,
+                stop_note,
+            })
+        }
+    }
+}
+
 // Restarts the predeclared dhcp-probe container fresh and runs it to
 // completion (an nmap DHCP-conflict scan plus a dhclient dry-run, see
 // services/dhcp-probe), then returns only the log output from this run.
@@ -2414,17 +2564,21 @@ const DHCP_CLIENT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CLIENT_RESULT__";
 // to Docker's own log API as a `since` filter, and current_probe_output
 // further discards anything before this run's own start marker within
 // whatever logs that filter still let through.
-async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, anyhow::Error> {
+async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, ProbeError> {
     let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
-        .context("resolve DHCP probe container")?;
+        .context("resolve DHCP probe container")
+        .map_err(ProbeError::Other)?;
 
-    stop_container_if_running(docker, id).await?;
+    stop_container_if_running(docker, id)
+        .await
+        .map_err(ProbeError::Other)?;
     let started_since = unix_timestamp_seconds();
 
     docker
         .start_container(id, Some(StartContainerOptionsBuilder::default().build()))
         .await
-        .context("start DHCP probe container")?;
+        .context("start DHCP probe container")
+        .map_err(ProbeError::Other)?;
 
     let mut wait = docker.wait_container(
         id,
@@ -2434,23 +2588,26 @@ async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, anyhow::Erro
                 .build(),
         ),
     );
-    let wait_result = wait
-        .next()
-        .await
-        .context("wait for DHCP probe container")?
-        .context("read DHCP probe wait response")?;
+    let wait_result = wait_for_probe_container(
+        wait.next(),
+        DHCP_PROBE_WAIT_TIMEOUT,
+        || collect_container_logs_since(docker, id, started_since),
+        || stop_container_if_running(docker, id),
+    )
+    .await?;
 
     let output = collect_container_logs_since(docker, id, started_since)
         .await
-        .context("read DHCP probe logs")?;
+        .context("read DHCP probe logs")
+        .map_err(ProbeError::Other)?;
     let output = current_probe_output(&output);
 
     if wait_result.status_code != 0 {
-        return Err(anyhow::anyhow!(
+        return Err(ProbeError::Other(anyhow::anyhow!(
             "DHCP probe container exited with code {}: {}",
             wait_result.status_code,
             output.trim()
-        ));
+        )));
     }
 
     Ok(output)
@@ -3987,6 +4144,156 @@ mod tests {
     #[test]
     fn extract_dhcp_offer_details_returns_empty_for_unrelated_text() {
         assert!(extract_dhcp_offer_details("some unrelated log line\n").is_empty());
+    }
+
+    // ─── Issue #1136: bounded dhcp-probe wait timeout ───
+
+    #[test]
+    fn truncate_log_tail_returns_input_unchanged_when_within_budget() {
+        assert_eq!(truncate_log_tail("  short line  ", 100), "short line");
+    }
+
+    // The multi-byte emoji planted in the middle of this fixture would
+    // panic a naive `&text[text.len() - max_bytes..]` byte slice if it fell
+    // mid-codepoint; truncate_log_tail must walk forward to the next real
+    // char boundary instead.
+    #[test]
+    fn truncate_log_tail_keeps_trailing_bytes_on_a_char_boundary() {
+        let long = format!("{}{}{}", "x".repeat(10), '\u{1F600}', "y".repeat(10));
+        let truncated = truncate_log_tail(&long, 5);
+        assert!(truncated.starts_with("...(truncated)..."));
+        assert!(truncated.ends_with("yyyyy"));
+        assert!(!truncated.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn probe_error_display_distinguishes_timeout_from_other_failures() {
+        let timeout_err = ProbeError::TimedOut {
+            elapsed: Duration::from_secs(100),
+            log_tail: "dhclient: bound to 192.168.1.50".to_string(),
+            stop_note: "the presumed-stuck container was stopped".to_string(),
+        };
+        let timeout_msg = timeout_err.to_string();
+        assert!(timeout_msg.contains("timed out"));
+        assert!(timeout_msg.contains("100"));
+        assert!(timeout_msg.contains("bound to 192.168.1.50"));
+        assert!(timeout_msg.contains("the presumed-stuck container was stopped"));
+
+        // The non-timeout variant keeps the exact prefix pre-#1136 callers
+        // already saw, and must never contain "timed out" itself -- a
+        // future reader greping a captured reason string for "timed out"
+        // must not get a false positive from an unrelated failure.
+        let other_err = ProbeError::Other(anyhow::anyhow!("container start failed"));
+        let other_msg = other_err.to_string();
+        assert!(other_msg.contains("Failed to execute DHCP check"));
+        assert!(other_msg.contains("container start failed"));
+        assert!(!other_msg.contains("timed out"));
+    }
+
+    // Sanity check that wait_for_probe_container's timeout wrapping doesn't
+    // interfere with the ordinary, fast-completing case -- only a wait
+    // future that resolves before `timeout` elapses should take this path.
+    #[tokio::test]
+    async fn wait_for_probe_container_returns_ok_when_wait_resolves_before_timeout() {
+        let result = wait_for_probe_container(
+            async { Some(Ok::<u32, bollard::errors::Error>(0)) },
+            Duration::from_secs(5),
+            || async { Ok(String::new()) },
+            || async { Ok(()) },
+        )
+        .await;
+
+        assert!(matches!(result, Ok(0)));
+    }
+
+    // The core #1136 acceptance criterion: a fixture that simulates a
+    // wait_container call that never resolves -- the exact "genuinely hung,
+    // zero progress" class confirmed live for #1132 -- and asserts the
+    // timeout path actually fires and produces a diagnostic-rich status,
+    // not just reasoning about it. `std::future::pending` never completes,
+    // standing in for a wait_container stream item that simply never
+    // arrives; the real timeout (DHCP_PROBE_WAIT_TIMEOUT) is 100s, but this
+    // test injects a 20ms bound so it proves the same logic without
+    // actually waiting on it.
+    #[tokio::test]
+    async fn wait_for_probe_container_times_out_and_captures_diagnostics() {
+        let never_resolves = std::future::pending::<Option<Result<u32, bollard::errors::Error>>>();
+
+        let result = wait_for_probe_container(
+            never_resolves,
+            Duration::from_millis(20),
+            || async { Ok("dhclient: still trying to obtain a lease...\n".to_string()) },
+            || async { Ok(()) },
+        )
+        .await;
+
+        match result {
+            Err(ProbeError::TimedOut {
+                elapsed,
+                log_tail,
+                stop_note,
+            }) => {
+                assert!(elapsed >= Duration::from_millis(20));
+                assert!(log_tail.contains("still trying to obtain a lease"));
+                assert!(stop_note.contains("was stopped"));
+            }
+            other => panic!("expected ProbeError::TimedOut, got {other:?}"),
+        }
+    }
+
+    // The maintainer's follow-up catch, tested directly: a timeout must not
+    // collapse into a bare "timed out" with nothing else even when the
+    // log/stop side-channels themselves fail -- the diagnostic text must
+    // say so explicitly rather than silently produce an empty/misleading
+    // tail.
+    #[tokio::test]
+    async fn wait_for_probe_container_timeout_survives_log_and_stop_failures() {
+        let never_resolves = std::future::pending::<Option<Result<u32, bollard::errors::Error>>>();
+
+        let result = wait_for_probe_container(
+            never_resolves,
+            Duration::from_millis(20),
+            || async { Err::<String, _>(anyhow::anyhow!("log stream broken")) },
+            || async { Err::<(), _>(anyhow::anyhow!("stop also failed")) },
+        )
+        .await;
+
+        match result {
+            Err(ProbeError::TimedOut {
+                log_tail,
+                stop_note,
+                ..
+            }) => {
+                assert!(log_tail.contains("failed to capture probe container logs"));
+                assert!(log_tail.contains("log stream broken"));
+                assert!(stop_note.contains("stopping the presumed-stuck container also failed"));
+                assert!(stop_note.contains("stop also failed"));
+            }
+            other => panic!("expected ProbeError::TimedOut, got {other:?}"),
+        }
+    }
+
+    // No output captured before the timeout must render as an explicit
+    // "(none -- ...)" placeholder, not a silently empty reason fragment
+    // that would read the same as a formatting bug.
+    #[tokio::test]
+    async fn wait_for_probe_container_timeout_with_no_captured_output_says_so_explicitly() {
+        let never_resolves = std::future::pending::<Option<Result<u32, bollard::errors::Error>>>();
+
+        let result = wait_for_probe_container(
+            never_resolves,
+            Duration::from_millis(20),
+            || async { Ok(String::new()) },
+            || async { Ok(()) },
+        )
+        .await;
+
+        match result {
+            Err(ProbeError::TimedOut { log_tail, .. }) => {
+                assert!(log_tail.contains("no output"));
+            }
+            other => panic!("expected ProbeError::TimedOut, got {other:?}"),
+        }
     }
 
     // Fixture text is a real dhclient.leases file captured from a live
