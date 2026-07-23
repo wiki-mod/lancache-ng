@@ -1735,7 +1735,7 @@ jobs:
             /^cmd_update\(\) \{/ { in_update=1; pause_seen=0; next }
             /^# .*debug subcommand/ { in_update=0 }
             in_update && /pause_lancache_convergence_for_update/ { pause_seen=1 }
-            in_update && !pause_seen && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ { print FILENAME ":" FNR ":" $0; found=1 }
+            in_update && !pause_seen && !/^[[:space:]]*#/ && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ { print FILENAME ":" FNR ":" $0; found=1 }
             END { exit found ? 0 : 1 }
           ' setup.sh; then
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
