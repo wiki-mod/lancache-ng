@@ -24,7 +24,6 @@ pub async fn setup_page(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     let mut ctx = Context::new();
     ctx.insert("standard_ip", &state.config.standard_ip);
     ctx.insert("ssl_ip", &state.config.ssl_ip);
-    ctx.insert("dhcp_mode", &state.config.effective_dhcp_mode().as_str());
     ctx.insert(
         "lancache_image_channel",
         &state.config.effective_lancache_image_channel_override(),
