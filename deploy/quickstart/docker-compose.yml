@@ -1457,6 +1457,16 @@ services:
     container_name: lancache-netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata
+    # pid: host: required by netdata's own official Docker documentation for
+    # apps.plugin to read other containers' /proc/<pid> entries (e.g.
+    # .../io). Without it, netdata's own PID namespace is a sibling of, not
+    # an ancestor of, the host's -- so even with cap_add: SYS_PTRACE below,
+    # the kernel's ptrace_may_access check for a process outside netdata's
+    # own container still fails with Permission denied, which is exactly the
+    # "collector: apps.plugin permission-denied spam per host process" this
+    # file already called out below as noise to keep out of the shared log
+    # view, without this being the actual fix for it.
+    pid: host
     cap_add: [SYS_PTRACE]
     security_opt: [apparmor:unconfined]
     # Central logging pipeline (#633, #847): this netdata build's own log
@@ -1472,8 +1482,9 @@ services:
     # netdata-logs shares that path with fluent-bit, which tails those real
     # files read-only. collector/access/debug stay on their stdout defaults
     # and are NOT collected: collector is extremely high-rate internal
-    # diagnostics (temperature-sensor flapping, apps.plugin permission-denied
-    # spam per host process) that would flood the shared bounded /logs view
+    # diagnostics (temperature-sensor flapping, and previously apps.plugin
+    # permission-denied spam per host process before `pid: host` above fixed
+    # the underlying cause) that would flood the shared bounded /logs view
     # and hide every other source; access is high-rate API chatter; debug is
     # empty unless enabled.
     entrypoint: ["/usr/bin/bash", "-c"]
