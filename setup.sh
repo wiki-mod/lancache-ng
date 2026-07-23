@@ -5063,7 +5063,11 @@ EOF
     # (visible to anything reading `ps`/`/proc/<pid>/cmdline` on this host),
     # the same exposure class already fixed for kea_ctrl_post's Basic-Auth
     # credential (#955/#956).
-    if ! http_status=$(printf '{"token":"%s","name":"%s"}' "$token" "$name" \
+    # #1084: also report this secondary's chosen DNS bind IP so the primary can
+    # store it and later run an active health probe against it. Harmless if the
+    # primary is older and ignores the field; the primary validates it as a
+    # private IPv4 before storing, so a blank/odd value is simply dropped.
+    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token" "$name" "$listen_ip" \
         | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d @- \
