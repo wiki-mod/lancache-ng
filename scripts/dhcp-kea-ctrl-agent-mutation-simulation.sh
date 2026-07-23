@@ -135,7 +135,31 @@ kea_image_tag="lancache-ng-dhcp634-kea:$$"
 kea_container="lancache-ng-dhcp634-kea-$$"
 ui_container="lancache-ng-dhcp634-ui-$$"
 
-work_dir="$repo_root/.dhcp-kea-ctrl-agent-mutation-tmp"
+# Deliberately OUTSIDE the git working tree (not under $repo_root): once the
+# test runs, kea-data/config-snapshots/ below ends up owned by the Admin UI's
+# fixed unprivileged uid (10001) on the HOST -- services/dhcp/entrypoint.sh
+# (root inside the Kea container) creates and chowns config-snapshots/ on
+# every start, and a bind mount does not remap that uid back on the host.
+# If this lived inside the checked-out repo, a cleanup miss from ANY cause --
+# the EXIT trap not running because the job was cancelled/SIGKILLed, the
+# throwaway chown image no longer existing, or simply an OLDER branch whose
+# copy of this script predates the cleanup fix being dispatched onto the same
+# shared self-hosted runner -- would leave that uid-10001 directory in the
+# repo workspace, and the NEXT job's actions/checkout on that same runner
+# slot would then fail outright trying to clean it (EACCES: permission
+# denied, rmdir ...), blocking an unrelated PR's CI run. Putting work_dir
+# under $TMPDIR/tmp -- which actions/checkout never touches, is not wiped
+# per-job the way the runner's own $RUNNER_TEMP/_work is, and whose sticky
+# bit keeps a stray dir harmless to other processes -- means a leftover can
+# never poison another job's checkout no matter why cleanup was skipped. The
+# cleanup() chown+rm below is still kept, now purely to tidy this run's own
+# temp dir on a normal exit rather than as the cross-job safety net it used
+# to be. Confirmed for real (issue #1123): a uid-10001 config-snapshots dir
+# left in the repo workspace by an earlier, pre-cleanup-fix run poisoned
+# every later job scheduled onto that runner. Unique per run ($$) because
+# $TMPDIR is shared host-wide, unlike the per-checkout worktree this used to
+# sit in, so two concurrent runs on one host never collide on it.
+work_dir="${TMPDIR:-/tmp}/lancache-ng-dhcp-kea-ctrl-agent-mutation.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
 # Bind-mounted onto BOTH the Kea and Admin UI containers below at
@@ -159,8 +183,48 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    # services/dhcp/entrypoint.sh runs as root inside the Kea container and
+    # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
+    # uid (10001, see that entrypoint's own comment, and this script's
+    # identical comment on its own kea-data mount above). A plain
+    # `rm -rf "$work_dir"` as this (non-root, non-10001) process would fail to
+    # remove those files, leaving the tree behind. Since work_dir now lives
+    # under $TMPDIR (outside the checked-out repo -- see its definition
+    # above), a leftover there is already harmless to other CI jobs; this
+    # ownership reset is kept purely so THIS run tidies up after itself
+    # instead of accumulating undeletable uid-10001 dirs in $TMPDIR. Reset
+    # ownership back to this process's own uid/gid via the already-built (no
+    # extra pull) Kea image -- unconditionally, in this EXIT trap, so it runs
+    # whether the simulation above succeeded or failed -- before rm -rf.
+    if [[ -d "$work_dir" ]]; then
+        # Reported explicitly (not just silently `|| true`-d) so the
+        # ownership reset's own success is a directly visible fact in every
+        # run's log, success or failure, instead of something a future
+        # reviewer would have to infer from the absence of a later
+        # "Permission denied" line.
+        if docker run --rm --entrypoint chown \
+            -v "$work_dir:/reset-owner" \
+            "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1; then
+            echo "cleanup: reset ownership of $work_dir to $(id -u):$(id -g) -- ok"
+        else
+            echo "cleanup: WARNING -- resetting ownership of $work_dir failed (rc=$?); the rm -rf below may leave files behind on this runner" >&2
+        fi
+    fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
-    rm -rf "$work_dir"
+    # `|| true`: an unguarded `rm -rf` here would still exit non-zero on a
+    # permission-denied removal (the chown step above should prevent that
+    # now, but this is the second, independent layer) and, under
+    # `set -euo pipefail`, would then override this trap's own
+    # `exit "$status"` below with a spurious cleanup failure instead of the
+    # test's real outcome. Its own stderr is deliberately left unredirected
+    # (unlike the chown step above) so a leftover permission-denied file
+    # still shows up verbatim in the log even though it can no longer flip
+    # the job red.
+    if rm -rf "$work_dir"; then
+        echo "cleanup: removed $work_dir -- ok"
+    else
+        echo "cleanup: WARNING -- rm -rf $work_dir left files behind (see stderr above); harmless to other jobs now that work_dir lives under \$TMPDIR outside the checkout, but it should not normally happen after the ownership reset above" >&2
+    fi
     exit "$status"
 }
 trap cleanup EXIT
