@@ -4722,6 +4722,17 @@ cmd_reset_to_last_known_good_config() {
     done
     service="${positional[0]:-}"
     [[ -n "${positional[1]:-}" ]] && install_dir="${positional[1]}"
+    # Normalizes a relative [install-dir] to absolute, matching cmd_update_ip's
+    # identical `realpath -m` call: reset_dns_to_last_known_good_config's
+    # dns_rollback_exec runs `cd "$install_dir" && docker compose --env-file
+    # "$env_file" ...` (needed so `docker compose exec` resolves the right
+    # project/container -- see that function's own doc comment), and
+    # env_file is itself computed as "$install_dir/.env" -- if install_dir
+    # were left relative, that cd would re-resolve env_file a second time
+    # relative to the NEW cwd, silently doubling the path (e.g.
+    # "a/b/a/b/.env"). Confirmed empirically while validating this command
+    # against a real stack with a relative install-dir argument.
+    install_dir=$(realpath -m "$install_dir")
 
     # PowerDNS's zone/record snapshots are inherently per-zone (lan.,
     # local.lan., and 20 private reverse zones -- see zone_snapshots.rs's
