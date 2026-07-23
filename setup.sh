@@ -4956,7 +4956,13 @@ canonical_dns_zone() {
 # all ~22 zones every time would bury the ones that actually matter.
 list_dns_zones_with_snapshots() {
     local body="$1"
-    printf '%s' "$body" | grep -oP '"[a-zA-Z0-9.-]+"\s*:\s*\[\{' | grep -oP '^"\K[^"]+'
+    # `|| true`: an empty result (every zone's array is empty) is a valid,
+    # expected outcome here, not a failure -- grep's own "no match" exit
+    # status (1) would otherwise become this function's exit status too,
+    # since it is the last command in the pipeline, wrongly signaling
+    # failure to a caller that only checked $? rather than the actual
+    # (empty but valid) output.
+    printf '%s' "$body" | grep -oP '"[a-zA-Z0-9.-]+"\s*:\s*\[\{' | grep -oP '^"\K[^"]+' || true
 }
 
 # Extracts "<id> <created_unix>" lines for one zone from a GET /snapshots
