@@ -44,6 +44,44 @@ printf '%s\n' "$data" >> "${MOCK_CURL_LOG:?}"
 printf '%s' "${MOCK_CURL_STATUS:-200}"
 MOCK
     chmod +x "$mock_bin/curl"
+
+    export MOCK_DOCKER_LOG="$BATS_TEST_TMPDIR/docker.log"
+    : > "$MOCK_DOCKER_LOG"
+
+    # Mock docker: dns_rollback_exec's only external dependency is `docker
+    # compose ... exec -T <container> sh -c '<script>' sh <method> <path>
+    # <body>` -- this mock does not actually run that embedded script (there
+    # is no real container/curl in a bats sandbox); it logs the full argv so
+    # tests can assert method/path/body, then emits a canned
+    # "<status>\n<body>" pair on stdout the way the real embedded script's
+    # `printf "%s\n" "$status"; cat ...resp` would. A full rollback run calls
+    # this twice (GET /snapshots, then POST /rollback), so the canned
+    # response is keyed on whether "POST" appears as its own argv element
+    # (the method, passed as a distinct trailing arg) rather than a single
+    # shared canned value for both calls. MOCK_DOCKER_EXEC_FAIL simulates the
+    # embedded script's own fail-closed exits (missing API key, curl connect
+    # failure) by printing the matching marker string instead.
+    cat > "$mock_bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${MOCK_DOCKER_LOG:?}"
+if [[ "${MOCK_DOCKER_EXEC_FAIL:-0}" == "1" ]]; then
+    printf '%s\n' "${MOCK_DOCKER_EXEC_FAIL_MARKER:-DNS_ROLLBACK_EXEC_CURL_FAILED}"
+    exit "${MOCK_DOCKER_EXEC_FAIL_CODE:-8}"
+fi
+is_post=0
+for arg in "$@"; do
+    [[ "$arg" == "POST" ]] && is_post=1
+done
+if [[ "$is_post" -eq 1 ]]; then
+    printf '%s\n' "${MOCK_DOCKER_POST_STATUS:-200}"
+    printf '%s' "${MOCK_DOCKER_POST_BODY:-{\"applied\":true}}"
+else
+    printf '%s\n' "${MOCK_DOCKER_GET_STATUS:-200}"
+    printf '%s' "${MOCK_DOCKER_GET_BODY:-{\"zones\":{}}}"
+fi
+MOCK
+    chmod +x "$mock_bin/docker"
+
     export PATH="$mock_bin:$PATH"
 
     # shellcheck source=tests/bats/helpers/setup-reset-kgc-helpers.sh
@@ -151,12 +189,15 @@ make_install_fixture() {
 
 # --- cmd_reset_to_last_known_good_config dispatch --------------------------
 
-# The dns/pdns target is deliberately not implemented yet (depends on #628); it
-# must fail closed with the pointer, never silently no-op.
-@test "cmd_reset dispatch fails closed for the not-yet-implemented dns target" {
-    run cmd_reset_to_last_known_good_config dns
+# The dns/pdns target must fail closed for "no stack found" the same as kea
+# when there is nothing at the target install-dir -- proves dispatch actually
+# routes into reset_dns_to_last_known_good_config rather than silently
+# no-op-ing (the dns/pdns target used to die immediately with a #628 pointer;
+# it is implemented now, see the dedicated dns dispatch/reset tests below).
+@test "cmd_reset dispatch routes the dns target into reset_dns_to_last_known_good_config" {
+    run cmd_reset_to_last_known_good_config dns "$BATS_TEST_TMPDIR/no-such-install"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"#628"* ]]
+    [[ "$output" == *"No stack found"* ]]
 }
 
 # An unknown service name must be rejected, not treated as kea.
@@ -267,4 +308,234 @@ make_install_fixture() {
     # Only config-test should have been attempted; config-set must not appear.
     grep -q 'config-test' "$MOCK_CURL_LOG"
     ! grep -q 'config-set' "$MOCK_CURL_LOG"
+}
+
+# --- dns/pdns: canonical_dns_zone -------------------------------------------
+
+# Mirrors zone_snapshots.rs's canonical_zone: adds a trailing dot only when
+# missing, so an operator typing "lan" reaches the same zone key the listener
+# stores snapshots under ("lan.").
+@test "canonical_dns_zone adds a trailing dot only when missing" {
+    [ "$(canonical_dns_zone lan)" = "lan." ]
+    [ "$(canonical_dns_zone lan.)" = "lan." ]
+    [ "$(canonical_dns_zone local.lan)" = "local.lan." ]
+}
+
+# --- dns/pdns: list_dns_zones_with_snapshots --------------------------------
+
+# Only zones whose array is non-empty (`[{`) must be listed -- the listener's
+# real response includes every one of the ~22 managed zones unconditionally,
+# most with an empty array, and printing all of them every time an operator
+# omits <zone> would bury the ones that actually matter.
+@test "list_dns_zones_with_snapshots lists only zones with a non-empty array" {
+    body='{"zones":{"lan.":[{"id":"1","created_unix":100}],"local.lan.":[],"10.in-addr.arpa.":[{"id":"2","created_unix":200}]}}'
+    run list_dns_zones_with_snapshots "$body"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"lan."* ]]
+    [[ "$output" == *"10.in-addr.arpa."* ]]
+    [[ "$output" != *"local.lan."* ]]
+}
+
+# An all-empty response (fresh install, nothing rolled back yet on any zone)
+# must produce no output, not an error -- callers distinguish this from a
+# real failure by exit status alone, same convention as list_kea_snapshot_ids.
+@test "list_dns_zones_with_snapshots emits nothing when every zone is empty" {
+    body='{"zones":{"lan.":[],"local.lan.":[]}}'
+    run list_dns_zones_with_snapshots "$body"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# --- dns/pdns: dns_zone_snapshot_entries ------------------------------------
+
+# Extracts "<id> <created_unix>" lines for exactly the requested zone, in the
+# listener's own (newest-first) order -- and does NOT leak another zone's
+# entries into the result, proving the zone-name match is anchored on the
+# quoted key rather than a loose substring match (a real risk given zone names
+# contain literal dots, e.g. "lan." is also a substring of a hypothetical
+# "vlan." key).
+@test "dns_zone_snapshot_entries extracts only the requested zone's entries, newest first" {
+    body='{"zones":{"lan.":[{"id":"00000000000000000002","created_unix":200},{"id":"00000000000000000001","created_unix":100}],"vlan.":[{"id":"00000000000000000099","created_unix":999}]}}'
+    run dns_zone_snapshot_entries "$body" "lan."
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "00000000000000000002 200" ]
+    [ "${lines[1]}" = "00000000000000000001 100" ]
+    [ "${#lines[@]}" -eq 2 ]
+    [[ "$output" != *"00000000000000000099"* ]]
+}
+
+# A zone with no stored snapshots (an empty array, or absent entirely from the
+# response) must produce no output, not an error.
+@test "dns_zone_snapshot_entries emits nothing for a zone with no snapshots" {
+    body='{"zones":{"lan.":[]}}'
+    run dns_zone_snapshot_entries "$body" "lan."
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# --- dns/pdns: dns_rollback_exec ---------------------------------------------
+
+# A 2xx response must return the response body on stdout with exit 0.
+@test "dns_rollback_exec returns the response body on a 2xx status" {
+    export MOCK_DOCKER_GET_STATUS=200
+    export MOCK_DOCKER_GET_BODY='{"zones":{}}'
+    run dns_rollback_exec "/tmp/install" "/tmp/install/.env" dns-standard GET /snapshots
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"zones":{}}' ]
+}
+
+# A non-2xx status (e.g. the listener's own 401 for a bad X-API-Key) must fail
+# closed with the status and body surfaced, not be treated as success.
+@test "dns_rollback_exec fails closed on a non-2xx HTTP status" {
+    export MOCK_DOCKER_GET_STATUS=401
+    export MOCK_DOCKER_GET_BODY='{"error":"missing or invalid X-API-Key"}'
+    run dns_rollback_exec "/tmp/install" "/tmp/install/.env" dns-standard GET /snapshots
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"HTTP 401"* ]]
+}
+
+# The embedded exec script's own NO_API_KEY marker (PDNS_API_KEY unresolved
+# inside the container, neither a usable env value nor a shared-secrets file)
+# must surface as a clear, distinct error, not a generic exec failure.
+@test "dns_rollback_exec fails closed with a clear message when the API key cannot be resolved" {
+    export MOCK_DOCKER_EXEC_FAIL=1
+    export MOCK_DOCKER_EXEC_FAIL_MARKER=DNS_ROLLBACK_EXEC_NO_API_KEY
+    run dns_rollback_exec "/tmp/install" "/tmp/install/.env" dns-standard GET /snapshots
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"PDNS_API_KEY could not be resolved"* ]]
+}
+
+# The embedded exec script's own CURL_FAILED marker (curl could not connect to
+# 127.0.0.1:8083 inside the container) must surface as a clear, distinct
+# error, not be mistaken for an authentication or docker-exec failure.
+@test "dns_rollback_exec fails closed with a clear message when curl cannot reach the listener" {
+    export MOCK_DOCKER_EXEC_FAIL=1
+    export MOCK_DOCKER_EXEC_FAIL_MARKER=DNS_ROLLBACK_EXEC_CURL_FAILED
+    run dns_rollback_exec "/tmp/install" "/tmp/install/.env" dns-standard GET /snapshots
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Failed to reach the rollback listener"* ]]
+}
+
+# --- dns/pdns: reset_dns_to_last_known_good_config fail-closed guards ------
+
+make_dns_install_fixture() {
+    local install_dir="$BATS_TEST_TMPDIR/dns-install"
+    mkdir -p "$install_dir"
+    : > "$install_dir/docker-compose.yml"
+    printf 'PDNS_API_KEY=irrelevant-mock-resolves-this-itself\n' > "$install_dir/.env"
+    printf '%s\n' "$install_dir"
+}
+
+@test "reset_dns fails closed when no docker-compose.yml exists" {
+    mkdir -p "$BATS_TEST_TMPDIR/noinstall"
+    run reset_dns_to_last_known_good_config dns-standard "$BATS_TEST_TMPDIR/noinstall" "lan." "" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No stack found"* ]]
+}
+
+@test "reset_dns fails closed when the .env is missing" {
+    d="$BATS_TEST_TMPDIR/nonenv"; mkdir -p "$d"; : > "$d/docker-compose.yml"
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No .env"* ]]
+}
+
+# --- dns/pdns: reset_dns_to_last_known_good_config zone handling -----------
+
+# Omitting the zone must list which zones currently have snapshots and stop
+# there -- unlike Kea's single config, defaulting the ZONE itself would risk
+# silently mutating the wrong zone's data, so this must never auto-pick one.
+@test "reset_dns lists zones with snapshots and requires an explicit zone when omitted" {
+    d="$(make_dns_install_fixture)"
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[{"id":"00000000000000000001","created_unix":100}],"local.lan.":[]}}'
+    run reset_dns_to_last_known_good_config dns-standard "$d" "" "" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"lan."* ]]
+    [[ "$output" == *"A zone is required"* ]]
+}
+
+# A requested snapshot id that does not exist for the given zone must be
+# rejected before any rollback POST is attempted.
+@test "reset_dns fails closed when the requested snapshot id is absent for the zone" {
+    d="$(make_dns_install_fixture)"
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[{"id":"00000000000000000001","created_unix":100}]}}'
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "99999999999999999999" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+    # No POST /rollback should have been attempted for a rejected snapshot.
+    ! grep -q ' POST ' "$MOCK_DOCKER_LOG"
+}
+
+# A zone with no known-good snapshots at all must be rejected before any
+# rollback POST is attempted.
+@test "reset_dns fails closed when the zone has no known-good snapshots" {
+    d="$(make_dns_install_fixture)"
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[]}}'
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No known-good snapshots found for zone lan."* ]]
+}
+
+# --- dns/pdns: reset_dns_to_last_known_good_config full rollback ----------
+
+# The happy path: with a valid zone/snapshot and --yes, the recovery must call
+# the rollback listener's POST /rollback with the right zone/snapshot_id and
+# report success from applied=true.
+@test "reset_dns applies the requested snapshot for the given zone on success" {
+    d="$(make_dns_install_fixture)"
+    # Listed newest-first, matching the real listener's own ordering: id
+    # ...0001 (created_unix 300) is the newest, ...0002 (created_unix 100)
+    # the older one -- so "index 0 = newest" and "highest created_unix" agree,
+    # the same invariant the real GET /snapshots response guarantees.
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[{"id":"00000000000000000001","created_unix":300},{"id":"00000000000000000002","created_unix":100}]}}'
+    export MOCK_DOCKER_POST_BODY='{"applied":true,"changed_names":["host.lan."],"zone_check_passed":true,"republished_to_nats":true,"flush_ok":true,"flush_failed_names":[]}'
+
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "00000000000000000001" 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rolled back to known-good snapshot 00000000000000000001"* ]]
+    grep -q '"zone":"lan\.".*"snapshot_id":"00000000000000000001"' "$MOCK_DOCKER_LOG"
+}
+
+# When no snapshot id is given for an explicit zone, the newest is selected
+# (mirroring Kea's own default-to-newest behavior) -- this IS safe because the
+# zone itself was already given explicitly.
+@test "reset_dns defaults to the newest snapshot for the zone when none is given" {
+    d="$(make_dns_install_fixture)"
+    # Listed newest-first, matching the real listener's own ordering: id
+    # ...0001 (created_unix 300) is the newest, ...0002 (created_unix 100)
+    # the older one -- so "index 0 = newest" and "highest created_unix" agree,
+    # the same invariant the real GET /snapshots response guarantees.
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[{"id":"00000000000000000001","created_unix":300},{"id":"00000000000000000002","created_unix":100}]}}'
+    export MOCK_DOCKER_POST_BODY='{"applied":true,"changed_names":[],"zone_check_passed":true,"republished_to_nats":false,"flush_ok":true,"flush_failed_names":[]}'
+
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "" 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"defaulting to the newest: 00000000000000000001"* ]]
+    grep -q '"snapshot_id":"00000000000000000001"' "$MOCK_DOCKER_LOG"
+}
+
+# A post-rollback problem the listener itself reports (a failed cache flush)
+# must be surfaced as a warning, not silently swallowed -- the rollback PATCH
+# still succeeded, so this must not be reported as a hard failure either.
+@test "reset_dns warns but still succeeds when the listener reports a flush failure" {
+    d="$(make_dns_install_fixture)"
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[{"id":"00000000000000000001","created_unix":100}]}}'
+    export MOCK_DOCKER_POST_BODY='{"applied":true,"changed_names":["host.lan."],"zone_check_passed":true,"republished_to_nats":true,"flush_ok":false,"flush_failed_names":["host.lan."]}'
+
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "00000000000000000001" 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cache-flush publish"* ]]
+}
+
+# A response missing applied=true (should never happen given dns_rollback_exec
+# already validated the HTTP status, but defense in depth) must not be
+# reported as a successful rollback.
+@test "reset_dns fails closed when the rollback response does not report applied=true" {
+    d="$(make_dns_install_fixture)"
+    export MOCK_DOCKER_GET_BODY='{"zones":{"lan.":[{"id":"00000000000000000001","created_unix":100}]}}'
+    export MOCK_DOCKER_POST_BODY='{"applied":false}'
+
+    run reset_dns_to_last_known_good_config dns-standard "$d" "lan." "00000000000000000001" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"did not report applied=true"* ]]
 }

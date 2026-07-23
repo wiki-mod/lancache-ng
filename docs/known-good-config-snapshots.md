@@ -728,21 +728,42 @@ Admin UI itself is unreachable, the snapshot JSON files under
 in both the `ui` and `dhcp` containers) can be inspected the same way, and a
 chosen one applied manually against the Kea Control Agent API
 (`config-test` → `config-set` → `config-write`, the same three-call
-sequence the Admin UI itself uses).
+sequence the Admin UI itself uses) -- or, since #794, automated with
+`./setup.sh reset-to-last-known-good-config kea [install-dir] [snapshot-id]
+[--yes]`, which does exactly that.
 
-The PowerDNS zone/record adapter described above under "Zones, records, and
-TSIG/DDNS metadata" has no equivalent manual-CLI fallback documented here
-yet, even though the mechanism itself now exists and runs. Like Kea's
-on-disk snapshot JSON files, its snapshots are also stored as JSON `rrsets`
-(under `${DNS_CONFIG_SNAPSHOT_DIR}/zones/<zone>/<id>/zone.json`, see
-"Snapshot mechanism" above), but there is still no established procedure for
-inspecting one directly and hand-applying it outside the Admin UI. That is
-not an oversight this PR could have closed cheaply: any fallback procedure
-documented here would still need either `nats-subscriber`'s local admin
-listener reachable inside the `dns-standard`/`dns-ssl` container (and,
-per the auth requirement above, credentials for it), or, for the stored
-JSON snapshot files themselves, the container reachable to inspect them and
-run `pdnsutil --config-dir=/etc/pdns/auth check-zone` against the live zone
-directly — which is exactly the gap issue #763 is meant to close. Writing
-that fallback procedure down is therefore still deferred to #763 rather
-than invented here ahead of the rescue-mode mechanism it would depend on.
+**Update (#836): the PowerDNS zone/record adapter now has this same CLI
+fallback too.** The gap this section used to describe here -- "no equivalent
+manual-CLI fallback documented here yet" -- is closed:
+`./setup.sh reset-to-last-known-good-config dns [install-dir] <zone>
+[snapshot-id] [--yes]` (aliases: `pdns`; `dns-standard`/`dns-ssl` select an
+explicit target container, defaulting to `dns-standard` to match the Admin
+UI's own current single-primary scope) lists this install's known-good
+snapshots for the given zone and applies one via nats-subscriber's real
+rollback listener -- the same list/diff/PATCH/check-zone/flush/republish
+chain `services/ui/src/routes/dns_snapshots.rs` already forwards to when the
+Admin UI IS reachable. Unlike Kea (one `dhcp4.json`, one snapshot history),
+PowerDNS tracks snapshots per zone (`lan.`, `local.lan.`, and the private
+reverse zones), so `<zone>` is a required argument for this target; omitting
+it lists which zones currently have at least one snapshot instead of
+guessing one, since silently defaulting the zone itself (unlike defaulting
+the *snapshot id* to the newest within an already-chosen zone) risks
+mutating the wrong zone's data.
+
+This command reaches the rollback listener (port 8083) by running
+`docker compose exec` into the target `dns-standard`/`dns-ssl` container and
+calling `curl` from inside it, rather than calling the listener directly from
+the host: unlike Kea's Control Agent (reachable via `network_mode: host`),
+the rollback listener's port is deliberately only `expose`d to the Compose
+network, never published to the host (see "The rollback listener must
+require authentication" above). The `X-API-Key` value is resolved *inside*
+that container -- reading `PDNS_API_KEY` from its own environment if usable,
+else the `pdns-api-key` file on the shared-secrets volume it already mounts
+at `/var/lib/lancache-secrets` -- rather than read from this host's `.env`
+and passed in, so the #858 shared-secrets first-writer-wins bootstrap (a
+fresh install's `.env`-configured `PDNS_API_KEY` can legitimately be blank
+until a container generates it) cannot leave this command sending a stale or
+empty key. This still depends on the target container itself being
+reachable, the same latent gap Kea's own fallback has and #763 is meant to
+close -- see "Known gap: this rollback path assumes the container is
+reachable" above.
