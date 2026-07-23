@@ -30,6 +30,17 @@ per-class status instead of a single yes/no answer.
   `pr-template-check` and `watchdog_test`. Both are added as
   `pr-template-check-hosted` and `watchdog_test-hosted` in the same change
   that adds this document.
+- `pr-title-convention-check` (added by the #850/AG-GH-018 PR-title
+  Conventional-Commit lint) is a new job in the same zero-LAN-dependency
+  "cheap lint" class as `pr-template-check`/`pr-tracking-metadata-check`,
+  and ships its own hosted fallback, `pr-title-convention-check-hosted`,
+  from the start rather than as a later catch-up pass. Note: a re-check
+  while adding this entry found that `pr-tracking-metadata-check` (added
+  after this document was originally written) also already has a
+  `pr-tracking-metadata-check-hosted` sibling in the workflow file but was
+  never added to the table below -- a pre-existing documentation gap this
+  PR did not introduce and left as-is rather than expanding scope; flagged
+  here per AG-DOC-009 rather than silently ignored.
 
 ## Current job inventory and classification
 
@@ -40,6 +51,7 @@ per-class status instead of a single yes/no answer.
 | `shellcheck` | cheap lint | `shellcheck-hosted` (PR #591) |
 | `pr-template-check` | cheap lint | `pr-template-check-hosted` (this change) |
 | `watchdog_test` | cheap lint | `watchdog_test-hosted` (this change) |
+| `pr-title-convention-check` | cheap lint | `pr-title-convention-check-hosted` (#850/AG-GH-018) |
 | `ci_scope_policy` | policy gate over Rust job results | none -- decided not feasible, see below |
 | `detect-changes`, `validate-compose`, `compute-validation-network`, `full-setup-validate` | build-tools image / full Docker Compose stack | none -- see "Other self-hosted-only jobs" below |
 | `dns_rust_quality`, `ui_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
