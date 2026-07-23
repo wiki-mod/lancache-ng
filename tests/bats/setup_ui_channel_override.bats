@@ -5,7 +5,7 @@
 # pure gate cmd_converge_reconcile uses before ever folding an Admin-UI-
 # written LANCACHE_IMAGE_CHANNEL override into .env. Deliberately narrower
 # than the wider validate_lancache_image_channel() (which also accepts
-# dev/pinned and, once #827 lands, "stable" via a different codepath): this
+# pinned and, once #827 lands, "stable" via a different codepath): this
 # control only ever offers the operator "stable" or "nightly" (services/ui/src/
 # routes/setup.rs's is_valid_ui_channel; "nightly" was named "edge" before the
 # v0.3.0 hard-cut, #1056), and validate_lancache_image_channel
@@ -40,7 +40,12 @@ setup() {
     [ "$status" -eq 1 ]
 }
 
-@test "rejects dev even though the wider channel validator accepts it" {
+# "dev" is retired (#825/#1141), not just narrower-scoped here: the wider
+# validate_lancache_image_channel() now hard-cuts it too. This gate must
+# still reject it independently, since it never offered dev as a UI choice
+# to begin with (unlike edge/dev in the wider validator, this one has never
+# had to widen and then retire anything).
+@test "rejects dev" {
     run lancache_ui_channel_override_is_valid "dev"
     [ "$status" -eq 1 ]
 }
