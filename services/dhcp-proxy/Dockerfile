@@ -14,6 +14,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 
 COPY dnsmasq.conf.template /etc/dnsmasq.conf.template
+COPY dnsmasq-relay.conf.template /etc/dnsmasq-relay.conf.template
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

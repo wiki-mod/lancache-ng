@@ -401,6 +401,18 @@ pub struct UpdateDhcpProxyForm {
     pub dhcp_proxy_custom_options: String,
 }
 
+// Issue #844: the DHCP-relay-mode settings form. Distinct from
+// UpdateDhcpProxyForm because relay mode has an entirely different, much
+// smaller config surface -- only its own client-facing local address (the
+// giaddr source) and the upstream DHCP server it forwards to. Everything the
+// ProxyDHCP form carries (subnet/DNS/PXE) is meaningless to a relay.
+#[derive(Deserialize)]
+pub struct UpdateDhcpRelayForm {
+    pub csrf_token: String,
+    pub dhcp_relay_local_addr: String,
+    pub upstream_dhcp_ip: String,
+}
+
 #[derive(Deserialize)]
 pub struct RollbackKeaSnapshotForm {
     pub csrf_token: String,
@@ -435,6 +447,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let dhcp_ntp_servers = state.config.effective_dhcp_ntp_servers();
     let dhcp_proxy_subnet_start = state.config.effective_dhcp_proxy_subnet_start();
     let dhcp_upstream_dhcp_ip = state.config.effective_dhcp_upstream_dhcp_ip();
+    let dhcp_relay_local_addr = state.config.effective_dhcp_relay_local_addr();
     let dhcp_proxy_interface = state.config.effective_dhcp_proxy_interface();
     let dhcp_proxy_router = state.config.effective_dhcp_proxy_router();
     let dhcp_proxy_domain = state.config.effective_dhcp_proxy_domain();
@@ -451,6 +464,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert("dhcp_ntp_servers", &dhcp_ntp_servers);
     ctx.insert("dhcp_proxy_subnet_start", &dhcp_proxy_subnet_start);
     ctx.insert("dhcp_upstream_dhcp_ip", &dhcp_upstream_dhcp_ip);
+    ctx.insert("dhcp_relay_local_addr", &dhcp_relay_local_addr);
     ctx.insert("dhcp_proxy_interface", &dhcp_proxy_interface);
     ctx.insert("dhcp_proxy_router", &dhcp_proxy_router);
     ctx.insert("dhcp_proxy_domain", &dhcp_proxy_domain);
@@ -528,6 +542,7 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
         "disabled" => Some(crate::config::DhcpMode::Disabled),
         "kea" => Some(crate::config::DhcpMode::Kea),
         "dnsmasq-proxy" => Some(crate::config::DhcpMode::DnsmasqProxy),
+        "dnsmasq-relay" => Some(crate::config::DhcpMode::DnsmasqRelay),
         _ => None,
     }
 }
@@ -556,7 +571,13 @@ async fn reconcile_dhcp_mode(
                 .await
                 .map_err(|err| DhcpError::config_error(err.to_string()))?;
         }
-        crate::config::DhcpMode::DnsmasqProxy => {
+        // Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in the
+        // same `dhcp-proxy` container -- it renders one config or the other
+        // from the DHCP_MODE it reads out of the persisted UI settings -- so
+        // reconciliation is identical: ensure Kea is stopped and the
+        // dhcp-proxy container is running. The container itself, on (re)start,
+        // reads the new mode and renders the matching config.
+        crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
                 .map_err(|err| DhcpError::config_error(err.to_string()))?;
@@ -666,6 +687,10 @@ pub(crate) fn persist_stack_settings(
                 state.config.effective_dhcp_upstream_dhcp_ip(),
             ),
             (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
+            (
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
@@ -727,6 +752,9 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         "DHCP_DNS_PRIMARY",
         "DHCP_DNS_SECONDARY",
         "UPSTREAM_DHCP_IP",
+        // Issue #844: DHCP-relay-mode local address. Same whitelist rule as
+        // the keys around it -- must be listed here or persist silently drops it.
+        "DHCP_RELAY_LOCAL_ADDR",
         "DHCP_NTP_SERVERS",
         // Issue #450's optional relay/PXE fields -- this key list is the
         // authoritative whitelist of what this file can ever contain, so a
@@ -839,6 +867,10 @@ pub async fn update_dhcp_mode(
             (
                 "UPSTREAM_DHCP_IP",
                 state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
             ),
             (
                 "DHCP_NTP_SERVERS",
@@ -1035,6 +1067,14 @@ pub async fn update_dhcp_proxy(
             ("DHCP_DNS_PRIMARY", form.dhcp_dns_primary),
             ("DHCP_DNS_SECONDARY", form.dhcp_dns_secondary),
             ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            // #844: this ProxyDHCP-settings route never edits the relay local
+            // address, but persist rewrites the whole file, so carry the
+            // current value through unchanged (via effective_*, not the form)
+            // rather than blanking it when an operator saves proxy settings.
+            (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
             ("DHCP_NTP_SERVERS", form.dhcp_ntp_servers.trim().to_string()),
             (
                 "DHCP_PROXY_INTERFACE",
@@ -1059,6 +1099,101 @@ pub async fn update_dhcp_proxy(
             ("DHCP_PROXY_CUSTOM_OPTIONS", custom_options_storage),
             // #819: same carry-through reasoning as update_dhcp_mode above --
             // this route never edits these either.
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+        ],
+    )?;
+    Ok(Redirect::to("/dhcp"))
+}
+
+// Saves the DHCP-relay-mode settings (issue #844). Mirrors update_dhcp_proxy's
+// persist-only contract (no container mutation here; the dhcp-proxy container
+// re-renders from the persisted DHCP_MODE/relay settings on its next start),
+// but with relay's own two required, IPv4-validated fields. Every ProxyDHCP
+// setting is carried through unchanged via effective_* so switching between
+// the two dnsmasq modes never silently discards the other mode's config.
+pub async fn update_dhcp_relay(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateDhcpRelayForm>,
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    if parse_ipv4(&form.dhcp_relay_local_addr).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Relay local address must be a valid IPv4 address (this relay's own IP on the client network).",
+        ));
+    }
+    if parse_ipv4(&form.upstream_dhcp_ip).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Upstream DHCP server must be a valid IPv4 address.",
+        ));
+    }
+
+    persist_ui_settings(
+        &state,
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            // ProxyDHCP settings carried through unchanged (relay ignores them,
+            // but a later switch back to ProxyDHCP mode must not lose them).
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            // The two values this form actually edits.
+            ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            ("DHCP_RELAY_LOCAL_ADDR", form.dhcp_relay_local_addr),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
             (
                 "LANCACHE_IMAGE_CHANNEL",
                 state.config.effective_lancache_image_channel_override(),
@@ -3689,7 +3824,12 @@ mod tests {
         // The mode-switch form is the only writer of DHCP_MODE from the UI, so
         // every supported value must parse back to its enum, and unknown input
         // must be rejected rather than silently coerced to a default.
-        for mode in [DhcpMode::Disabled, DhcpMode::Kea, DhcpMode::DnsmasqProxy] {
+        for mode in [
+            DhcpMode::Disabled,
+            DhcpMode::Kea,
+            DhcpMode::DnsmasqProxy,
+            DhcpMode::DnsmasqRelay,
+        ] {
             assert_eq!(parse_dhcp_mode_input(mode.as_str()), Some(mode));
         }
         // Case/whitespace tolerance mirrors the setup.sh prompt handling.
@@ -3697,8 +3837,32 @@ mod tests {
             parse_dhcp_mode_input("  Dnsmasq-Proxy "),
             Some(DhcpMode::DnsmasqProxy)
         );
+        // Issue #844: the new relay mode parses (incl. case/whitespace) and
+        // stays distinct from proxy -- not silently coerced to it or dropped.
+        assert_eq!(
+            parse_dhcp_mode_input(" DNSMASQ-RELAY "),
+            Some(DhcpMode::DnsmasqRelay)
+        );
         assert_eq!(parse_dhcp_mode_input("dnsmasq"), None);
         assert_eq!(parse_dhcp_mode_input(""), None);
+    }
+
+    // Issue #844: the DhcpMode helpers must classify the relay variant
+    // correctly -- is_dnsmasq covers both dnsmasq modes (they share the
+    // dhcp-proxy container), is_dnsmasq_relay is relay-only, and is_kea stays
+    // false for it. A miss here would render the wrong Admin UI panel or start
+    // the wrong container.
+    #[test]
+    fn dhcp_mode_relay_classification_helpers() {
+        use crate::config::DhcpMode;
+        assert!(DhcpMode::DnsmasqRelay.is_dnsmasq());
+        assert!(DhcpMode::DnsmasqProxy.is_dnsmasq());
+        assert!(!DhcpMode::Kea.is_dnsmasq());
+        assert!(!DhcpMode::Disabled.is_dnsmasq());
+        assert!(DhcpMode::DnsmasqRelay.is_dnsmasq_relay());
+        assert!(!DhcpMode::DnsmasqProxy.is_dnsmasq_relay());
+        assert!(!DhcpMode::DnsmasqRelay.is_kea());
+        assert_eq!(DhcpMode::DnsmasqRelay.as_str(), "dnsmasq-relay");
     }
 
     // validate_dhcp_form's containment/range checks are exactly the kind of
