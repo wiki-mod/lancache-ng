@@ -2533,8 +2533,10 @@ where
             let elapsed = start.elapsed();
             let log_tail = match fetch_logs().await {
                 Ok(logs) => {
-                    let tail =
-                        truncate_log_tail(&current_probe_output(&logs), DHCP_PROBE_TIMEOUT_LOG_TAIL_BYTES);
+                    let tail = truncate_log_tail(
+                        &current_probe_output(&logs),
+                        DHCP_PROBE_TIMEOUT_LOG_TAIL_BYTES,
+                    );
                     if tail.is_empty() {
                         "(none -- the container produced no output before the timeout)".to_string()
                     } else {
