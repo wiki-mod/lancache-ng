@@ -12,8 +12,15 @@
 #
 # Per AG-VAL-024, the script is invoked via explicit `bash "$script"`
 # rather than relying on the committed executable bit, and the fail-closed
-# (non-draft, blocking-mode) path is exercised with a real failing input,
-# not just reasoned about.
+# (non-draft, PR_TITLE_LINT_MODE=block) path is exercised with a real
+# failing input, not just reasoned about.
+#
+# NOTE (maintainer decision, #850, 2026-07-23): `security` is a standard
+# allowed type (not excluded), and PR_TITLE_LINT_MODE now defaults to "warn"
+# (a transitional grace period, not a permanent downgrade) rather than
+# "block". The "Fail cases" below therefore set PR_TITLE_LINT_MODE=block
+# explicitly to exercise the real hard-fail path; a separate section further
+# down proves the current default (unset PR_TITLE_LINT_MODE) is warn-only.
 
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-pr-title-convention.sh"
@@ -54,42 +61,50 @@ write_title() {
     [[ "$output" == *"passed"* ]]
 }
 
-# --- Fail cases (non-draft, default blocking mode) --------------------------
+@test "passes: security: x -- security is a standard type (maintainer decision, #850)" {
+    write_title 'security: harden the docker socket proxy'
+    run bash "$script" "$title_file"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"passed"* ]]
+}
+
+@test "passes: security(proxy): x -- security type combined with a documented scope" {
+    write_title 'security(proxy): patch a credential leak'
+    run bash "$script" "$title_file"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"passed"* ]]
+}
+
+# --- Fail cases (non-draft, explicit PR_TITLE_LINT_MODE=block) ---------------
+# PR_TITLE_LINT_MODE=block is set explicitly here to exercise the real
+# hard-fail path even though "warn" is the current default (see below).
 
 @test "fails: Feature: x -- capitalized, non-conventional type" {
     write_title 'Feature: x'
-    PR_DRAFT=false run bash "$script" "$title_file"
+    PR_DRAFT=false PR_TITLE_LINT_MODE=block run bash "$script" "$title_file"
     [ "$status" -ne 0 ]
     [[ "$output" == *"AG-GH-018"* ]]
 }
 
 @test "fails: harden(ci): y -- 'harden' is not an allowed type" {
     write_title 'harden(ci): y'
-    PR_DRAFT=false run bash "$script" "$title_file"
+    PR_DRAFT=false PR_TITLE_LINT_MODE=block run bash "$script" "$title_file"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not one of the allowed types"* ]]
 }
 
 @test "fails: fix(bogus-scope): z -- scope not in the documented area list" {
     write_title 'fix(bogus-scope): z'
-    PR_DRAFT=false run bash "$script" "$title_file"
+    PR_DRAFT=false PR_TITLE_LINT_MODE=block run bash "$script" "$title_file"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not one of the documented areas"* ]]
 }
 
 @test "fails: no-conventional-commit-prefix -- plain title with no type at all" {
     write_title 'update the readme with new instructions'
-    PR_DRAFT=false run bash "$script" "$title_file"
+    PR_DRAFT=false PR_TITLE_LINT_MODE=block run bash "$script" "$title_file"
     [ "$status" -ne 0 ]
     [[ "$output" == *"does not start with a Conventional-Commit prefix"* ]]
-}
-
-@test "fails: security: x -- non-standard type gets the pending-decision explanation" {
-    write_title 'security: harden the docker socket proxy'
-    PR_DRAFT=false run bash "$script" "$title_file"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"pending maintainer decision"* ]]
-    [[ "$output" == *"#850"* ]]
 }
 
 # --- Draft-PR non-blocking behavior ------------------------------------------
@@ -103,11 +118,19 @@ write_title() {
 
 # --- Grace-period warn-only mode ---------------------------------------------
 
-@test "PR_TITLE_LINT_MODE=warn: a non-conforming title on a non-draft PR warns but exits 0" {
+@test "PR_TITLE_LINT_MODE=warn (explicit): a non-conforming title on a non-draft PR warns but exits 0, and says this is still a defect" {
     write_title 'harden(ci): y'
     PR_DRAFT=false PR_TITLE_LINT_MODE=warn run bash "$script" "$title_file"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"grace-period mode"* ]]
+    [[ "$output" == *"transitional grace period"* ]]
+    [[ "$output" == *"must be fixed before this PR merges"* ]]
+}
+
+@test "default mode (PR_TITLE_LINT_MODE unset): a non-conforming title on a non-draft PR warns, not blocks -- current maintainer-decided default" {
+    write_title 'harden(ci): y'
+    PR_DRAFT=false run bash "$script" "$title_file"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"transitional grace period"* ]]
 }
 
 # --- dependabot exemption -----------------------------------------------------

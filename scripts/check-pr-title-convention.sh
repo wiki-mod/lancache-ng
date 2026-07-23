@@ -4,10 +4,13 @@
 # Validates a pull request TITLE against this repo's Conventional-Commit
 # taxonomy, enforced from AGENTS.md's AG-GH-018. This repo merges (not
 # squashes) pull requests, so the PR title -- not any individual commit
-# message -- is the unit release-please would read to compute the next
-# vX.Y.Z bump; see issue #850 for the real-history audit this taxonomy was
-# derived from and #819 for the release-automation this is a prerequisite
-# for.
+# message -- is the most reliable single human-authored summary of what a
+# PR did; see issue #850 for the real-history audit this taxonomy was
+# derived from and #819 for the release-automation this is groundwork for.
+# NOTE: enforcing this on PR titles is necessary but, per the release-please
+# evaluation on PR #1113, not by itself sufficient to make PR titles what a
+# future release-please adoption would actually consume -- see AG-GH-018's
+# own caveat on this before assuming otherwise.
 #
 # Expected shape: type(scope)!: subject
 #   - type    required, one of $allowed_types below (lowercase, exact match)
@@ -15,11 +18,10 @@
 #   - !       optional, marks a breaking change (see AG-GH-018 bump policy)
 #   - subject required, non-empty after the mandatory ": " separator
 #
-# `security` is intentionally NOT in $allowed_types -- see AG-GH-018 and the
-# #850 comment thread for why, and for the pending maintainer decision this
-# still needs before it's considered final. Until decided, security-related
-# changes should use `fix(security): ...` / `feat(security): ...` instead of
-# a bespoke `security:` type.
+# `security` IS one of the allowed types (maintainer decision on #850,
+# 2026-07-23): it marks a security-relevant fix or hardening change and
+# bumps Z (patch) like `fix`. `security(scope): ...` is also fine if a more
+# specific area applies.
 #
 # For draft PRs: prints warnings but exits 0 (non-blocking), matching
 # validate-pr-template.sh's and check-pr-tracking-metadata.sh's draft
@@ -27,10 +29,13 @@
 # draft, not before the first push.
 #
 # Grace-period switch: PR_TITLE_LINT_MODE controls whether a non-draft PR
-# with a non-conforming title fails the job ("block", the default per the
-# maintainer's "enforcing" ask) or only warns ("warn", for a temporary
-# rollout grace period). This is the one line to flip:
-#   PR_TITLE_LINT_MODE="${PR_TITLE_LINT_MODE:-block}"
+# with a non-conforming title fails the job ("block") or only warns ("warn").
+# Per the maintainer's 2026-07-23 decision on #850, this defaults to "warn"
+# for now: a transitional grace period, NOT a permanent downgrade. A warn
+# result is still a real AG-GH-018 violation that must be fixed before
+# merge -- it simply does not hard-block CI yet. This is the one line to
+# flip back to full enforcement once the maintainer is ready:
+#   PR_TITLE_LINT_MODE="${PR_TITLE_LINT_MODE:-warn}"
 #
 # Usage:
 #   check-pr-title-convention.sh <title-file>
@@ -41,7 +46,8 @@
 #   PR_AUTHOR             - github.event.pull_request.user.login; a literal
 #                           "dependabot[bot]" short-circuits this check entirely
 #                           (see the exemption below for why)
-#   PR_TITLE_LINT_MODE    - "block" (default) or "warn"; see grace-period note above
+#   PR_TITLE_LINT_MODE    - "warn" (current default, transitional grace period)
+#                           or "block" (full enforcement); see the note above
 #
 # Runs inside the build-tools container in CI (per AG-VAL-016), not directly
 # on the runner host -- see the pr-title-convention-check job in
@@ -62,9 +68,10 @@ if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
     exit 0
 fi
 
-# Grace-period switch -- see the header comment above. Flip the default
-# below from "block" to "warn" for a temporary non-blocking rollout period.
-pr_title_lint_mode="${PR_TITLE_LINT_MODE:-block}"
+# Grace-period switch -- see the header comment above. Currently defaults to
+# "warn" per the maintainer's 2026-07-23 decision on #850; flip the line
+# below to "block" once the maintainer is ready for full enforcement.
+pr_title_lint_mode="${PR_TITLE_LINT_MODE:-warn}"
 
 pr_draft="${PR_DRAFT:-false}"
 
@@ -90,9 +97,10 @@ title="$(printf '%s' "$title" | sed 's/[[:space:]]*$//')"
 
 # Allowed types: the standard Conventional Commits set actually in use
 # across this repo's real history (per the #850 audit), plus `revert`
-# (not yet seen in history but a standard type worth allowing up front).
-# `security` is deliberately excluded -- see the header comment.
-allowed_types=(feat fix docs refactor perf test build ci chore style revert)
+# (not yet seen in history but a standard type worth allowing up front) and
+# `security` (a project-specific addition, maintainer decision on #850 --
+# see the header comment; maps to a Z/patch bump like `fix`).
+allowed_types=(feat fix docs refactor perf test build ci chore style revert security)
 
 # Allowed scopes: optional, lowercase, drawn from docs/naming-conventions.md's
 # real service names plus the non-service project areas the #850 audit found
@@ -131,15 +139,11 @@ if [[ "$title" =~ $conventional_commit_pattern ]]; then
     trimmed_subject="$(printf '%s' "$commit_subject" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 
     if ! array_contains "$commit_type" "${allowed_types[@]}"; then
-        if [ "$commit_type" = "security" ]; then
-            errors+=("Type 'security' is not a standard Conventional-Commit type and is not currently allowed (pending maintainer decision, see #850). Use 'fix(security): ...' or 'feat(security): ...' instead.")
+        lowercase_type="$(printf '%s' "$commit_type" | tr '[:upper:]' '[:lower:]')"
+        if array_contains "$lowercase_type" "${allowed_types[@]}"; then
+            errors+=("Type '$commit_type' must be lowercase ('$lowercase_type').")
         else
-            lowercase_type="$(printf '%s' "$commit_type" | tr '[:upper:]' '[:lower:]')"
-            if array_contains "$lowercase_type" "${allowed_types[@]}"; then
-                errors+=("Type '$commit_type' must be lowercase ('$lowercase_type').")
-            else
-                errors+=("Type '$commit_type' is not one of the allowed types: ${allowed_types[*]}.")
-            fi
+            errors+=("Type '$commit_type' is not one of the allowed types: ${allowed_types[*]}.")
         fi
     fi
 
@@ -173,9 +177,12 @@ if [ "$pr_draft" = "true" ]; then
     exit 0
 elif [ "$pr_title_lint_mode" = "warn" ]; then
     # Grace-period mode: report the same failure but do not block the PR.
+    # Per the maintainer's explicit 2026-07-23 instruction, this message must
+    # not read as "informational only" -- a warn result here is still a real
+    # AG-GH-018 violation, just not a hard CI gate yet.
     echo "::warning::$error_message" >&2
     echo "" >&2
-    echo "PR_TITLE_LINT_MODE=warn: this check is running in non-blocking grace-period mode." >&2
+    echo "PR_TITLE_LINT_MODE=warn: this is a transitional grace period, not a permanent downgrade. The title above is still a rule violation (AG-GH-018) and must be fixed before this PR merges -- it simply does not hard-block CI while the grace period is active." >&2
     exit 0
 else
     echo "::error::$error_message" >&2

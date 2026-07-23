@@ -504,10 +504,13 @@ jobs:
           # check-pr-title-convention.sh's dependabot[bot] exemption.
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           # Grace-period switch (see check-pr-title-convention.sh's header
-          # comment): set this optional repository variable to "warn" for a
-          # temporary non-blocking rollout instead of editing the script.
-          # Unset (the default) keeps this check blocking, per the
-          # maintainer's "enforcing" ask on #850.
+          # comment): unset (the default) currently means "warn", per the
+          # maintainer's 2026-07-23 decision on #850 -- a transitional grace
+          # period, not a permanent downgrade; a warn result is still a real
+          # AG-GH-018 violation that must be fixed before merge, it just
+          # doesn't hard-block CI yet. Set this optional repository variable
+          # to "block" once the maintainer is ready for full enforcement,
+          # with no code change needed.
           PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
         run: |
           set -euo pipefail
