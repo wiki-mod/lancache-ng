@@ -26,6 +26,13 @@ load_setup_reset_kgc_helpers() {
         # `return`ed would let a tripped guard fall through to the next line
         # and defeat the fail-closed test.
         printf '%s\n' 'die() { printf "%s\n" "$*" >&2; exit 1; }'
+        # die_no_stack_found (#1068 item 22): a cross-cutting helper defined
+        # elsewhere in setup.sh (shared by 7 different commands, not specific
+        # to this family), so -- same reasoning as the other stubs below --
+        # it is stubbed here rather than captured by the awk range. Must
+        # still produce the "No stack found" substring reset_kea's own guard
+        # test asserts on.
+        printf '%s\n' 'die_no_stack_found() { die "No stack found in $1"; }'
         printf '%s\n' 'print_step() { :; }'
         printf '%s\n' 'print_ok() { :; }'
         printf '%s\n' 'print_warn() { :; }'
