@@ -50,6 +50,8 @@ on:
       - "scripts/check-executable-bits.sh"
       - "scripts/check-workflow-service-lists.sh"
       - "scripts/check-orphaned-branches.sh"
+      - "scripts/check-changelog-direct-edit.sh"
+      - "scripts/check-pr-title-convention.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
@@ -95,6 +97,8 @@ on:
       - "scripts/check-executable-bits.sh"
       - "scripts/check-workflow-service-lists.sh"
       - "scripts/check-orphaned-branches.sh"
+      - "scripts/check-changelog-direct-edit.sh"
+      - "scripts/check-pr-title-convention.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
@@ -450,7 +454,7 @@ jobs:
       # This build-tools workflow is the only place bats/shellspec ever run
       # against the LOCALLY built candidate image before it's published --
       # build-push.yml's own dns_test/ui_test/etc. jobs pull the already-
-      # published build-tools:edge, so they'd never catch a fixture
+      # published build-tools:nightly, so they'd never catch a fixture
       # regression introduced by a change to this Dockerfile itself. Running
       # the project's real test suites here doubles as this job's own proof
       # that the image it just built can actually execute them, not just
@@ -1121,7 +1125,7 @@ jobs:
           # (release/stack-images.yml declares that tag `mutable: false`),
           # silently overwriting it on the next
           # tools/build-tools/**-touching commit. None of this project's
-          # real release-channel tags for build-tools (`edge`, `dev`,
+          # real release-channel tags for build-tools (`nightly`, `dev`,
           # `latest`, `vX.Y.Z`, `vX.Y.Z-rc.N` -- see build-push.yml's
           # promote job) end with "-tc", so suffixing every branch-triggered
           # tag this way is collision-proof by construction against the

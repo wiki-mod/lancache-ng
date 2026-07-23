@@ -434,7 +434,7 @@ together.
 
 ## 10. Stale doc-comment references a deleted script as existing test coverage
 
-**File/line**: `tests/bats/setup_channel_stable_edge.bats:18-21` (header comment).
+**File/line**: `tests/bats/setup_channel_stable_nightly.bats:18-21` (header comment).
 
 ```
 Testing the pure mapping function directly is both simpler and strictly

@@ -180,7 +180,8 @@ pub async fn register_secondary(
     // returned exactly once, here, and never stored.
     let nats_user = form.name.clone();
     let nats_password = generate_nats_password();
-    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password);
+    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let consumer_name = form.name.clone();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -282,7 +283,8 @@ pub async fn rotate_token(
     // working the instant this commits -- no separate revocation step.
     let nats_user = name.clone();
     let nats_password = generate_nats_password();
-    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password);
+    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let rows_affected = {
         let db = state
@@ -477,14 +479,14 @@ mod tests {
             pdns_api_key: "pdns-secret".to_string(),
             image_registry: "registry.example.test:5000".to_string(),
             image_prefix: "mirror/lancache-ng".to_string(),
-            image_channel: "edge".to_string(),
+            image_channel: "nightly".to_string(),
             image_tag: "v1.2.3".to_string(),
         };
 
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["image_registry"], "registry.example.test:5000");
         assert_eq!(value["image_prefix"], "mirror/lancache-ng");
-        assert_eq!(value["image_channel"], "edge");
+        assert_eq!(value["image_channel"], "nightly");
         assert_eq!(value["image_tag"], "v1.2.3");
     }
 

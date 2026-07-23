@@ -6,16 +6,18 @@
 # refs (pushes, or same-repo pull requests) — untrusted forked pull requests
 # never trigger a fallback build. Prints the chosen image reference on stdout.
 #
-# IMPORTANT: This script resolves the mutable channel tag it selects (`:dev`
-# or `:edge`, see channel_ref below) to its immutable digest-qualified
-# reference before returning. Do not call this script expecting a mutable tag
-# in the output; the returned reference is always pinned to a digest or a
-# branch-local validation image.
+# IMPORTANT: This script resolves the mutable channel tag it selects (`:dev`,
+# see scripts/lib/build-tools-channel.sh's resolve_build_tools_channel) to its
+# immutable digest-qualified reference before returning. Do not call this
+# script expecting a mutable tag in the output; the returned reference is
+# always pinned to a digest or a branch-local validation image.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/build-tools-channel.sh
+source "$script_dir/lib/build-tools-channel.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -25,7 +27,8 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 # images.yml) -- and this project has not cut one yet (see
 # full-setup-validate.yml's own image_tag comment) -- so it can sit stale for
 # weeks while `:dev` (written on every push to a v[0-9]* integration branch
-# such as v0.2.0) and `:edge` (written on every push to master) stay current.
+# such as v0.2.0) stays current (see scripts/lib/build-tools-channel.sh's own
+# header for why `master` also resolves to `dev` today, issue #1035).
 # Confirmed directly during issue #775's investigation: `:latest` was still
 # pinned to a build predating the Dockerfile's dhclient/expect additions
 # while `:dev` already had them, which is exactly why a job asking for
@@ -35,19 +38,7 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 # branch still resolves against what it will actually merge into, not the
 # feature branch's own name.
 channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
-case "$channel_ref" in
-  master)
-    build_tools_channel="edge"
-    ;;
-  *)
-    # Every other ref this script is realistically invoked against --
-    # v0.2.0 itself, or a feature/claude/* branch forked from it without an
-    # open PR yet (e.g. a manual workflow_dispatch run) -- is v0.2.0-line
-    # work, so `dev` (the channel v0.2.0 pushes actually promote) is the
-    # correct default rather than the stable-only `latest`.
-    build_tools_channel="dev"
-    ;;
-esac
+build_tools_channel="$(resolve_build_tools_channel "$channel_ref")"
 published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
@@ -69,7 +60,7 @@ fail() {
 
 # smoke_test_image verifies the provided image contains all required CI tools (cargo,
 # rustc, distcc, docker, etc.) before it is trusted. The published channel tag (:dev or
-# :edge) is mutable and could become stale, broken, or missing tools between publication
+# :nightly) is mutable and could become stale, broken, or missing tools between publication
 # and use, so explicit verification is preferable to assuming the tag is current and valid.
 smoke_test_image() {
   local image="$1"
@@ -123,7 +114,7 @@ smoke_test_image() {
     # deferred while #789 first added buildx to tools/build-tools/Dockerfile,
     # because this strict path (BUILD_TOOLS_REQUIRE_PUBLISHED callers have no
     # local-build fallback -- see the strict-mode branch below) trusts the
-    # already-published :dev/:edge image, which could not contain buildx
+    # already-published :dev/:nightly image, which could not contain buildx
     # until after #789 merged and republished it. That has since happened, so
     # gating on it now no longer creates the chicken-and-egg failure #791
     # documents. The setup.sh assert_resolved_image_tag_platform_supported

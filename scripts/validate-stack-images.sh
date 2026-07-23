@@ -180,9 +180,9 @@ forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
 if grep -Fq "$forbidden_latest_default_branch" "$repo_root/.github/workflows/build-push.yml"; then
   fail 'default branch must not publish latest; latest is stable-release only'
 fi
-require_grep 'channel_tags\+=\(edge\)' \
+require_grep 'channel_tags\+=\(nightly\)' \
   .github/workflows/build-push.yml \
-  'default branch promotion must publish the tested edge channel'
+  'default branch promotion must publish the tested nightly channel'
 require_grep 'channel_tags\+=\(latest\)' \
   .github/workflows/build-push.yml \
   'stable release promotion must publish latest'

@@ -315,7 +315,7 @@ teardown() {
     # misclassifying it as a collision would waste the whole retry budget and
     # bury the true error. Assert a representative non-collision failure is
     # correctly rejected.
-    run validation_subnet_output_is_collision "Error: manifest for ghcr.io/wiki-mod/lancache-ng/proxy:edge not found"
+    run validation_subnet_output_is_collision "Error: manifest for ghcr.io/wiki-mod/lancache-ng/proxy:nightly not found"
     [ "$status" -eq 1 ]
 
     run validation_subnet_output_is_collision "assertion failed: expected cache HIT but got MISS"

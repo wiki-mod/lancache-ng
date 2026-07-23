@@ -73,9 +73,10 @@ count_record_type() {
     [[ "$serial" =~ ^[0-9]{10}$ ]]
 }
 
-# This is the core case: each domain generates both a base record and a wildcard record.
-# The wildcard-handling, AAAA-generation, and record-order tests below all depend on this behavior.
-@test "zone generates A records for each domain" {
+# This is the core case (#1072 semantics): a bare entry (no leading dot) is an exact-match
+# entry only -- it must generate a base domain record and MUST NOT also generate a wildcard
+# record for what's underneath it. Before #1072 this same input silently generated both.
+@test "zone generates only an exact A record for each bare domain entry" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
 
@@ -84,11 +85,15 @@ count_record_type() {
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
 
     [ "$status" -eq 0 ]
-    # Each domain should generate: base domain record + wildcard record
     grep -qx 'steam\.com 60 IN A 192\.0\.2\.1' "$zone_file"
-    grep -qx '\*\.steam\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     grep -qx 'epic\.com 60 IN A 192\.0\.2\.1' "$zone_file"
-    grep -qx '\*\.epic\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx 'gog\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    # Regression guard for #1072: a bare entry must never also emit a wildcard record.
+    # See the SC2314 comments elsewhere in this file -- a bare "! cmd" only guards the
+    # single assertion it directly precedes, so each domain gets its own negated check.
+    run ! grep -qx '\*\.steam\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    run ! grep -qx '\*\.epic\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    run ! grep -qx '\*\.gog\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 @test "zone generates AAAA records when IPv6 is provided" {
@@ -101,7 +106,25 @@ count_record_type() {
 
     [ "$status" -eq 0 ]
     grep -qx 'content\.steam\.com 60 IN AAAA 2001:db8::1' "$zone_file"
-    grep -qx '\*\.content\.steam\.com 60 IN AAAA 2001:db8::1' "$zone_file"
+    # #1072: a bare, fully-written subdomain entry (no leading dot) is an exact-match
+    # entry, not a wildcard root -- it must not also generate a wildcard record for
+    # everything underneath content.steam.com.
+    run ! grep -qx '\*\.content\.steam\.com 60 IN AAAA 2001:db8::1' "$zone_file"
+}
+
+# #1072 mode 3: a fully-written subdomain (no leading dot) is exact-match only, the
+# same as any other bare entry -- it must not additionally wildcard everything below it.
+@test "zone treats a written-out subdomain entry as exact-match only, not a wildcard root" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' 'cdn1.steamcontent.com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    grep -qx 'cdn1\.steamcontent\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    run ! grep -qx '\*\.cdn1\.steamcontent\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 @test "zone skips AAAA records when IPv6 is empty" {
@@ -167,9 +190,10 @@ count_record_type() {
     # assertions, so a bare "! cmd" here would not fail the test on its own.
     run ! grep -qx 'wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
     grep -qx '\*\.wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
-    # Normal domain should have both
+    # #1072: a bare entry is exact-match only -- it must have the base record
+    # and must NOT also get a wildcard record.
     grep -qx 'normal\.com 60 IN A 192\.0\.2\.1' "$zone_file"
-    grep -qx '\*\.normal\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    run ! grep -qx '\*\.normal\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 @test "zone serial is monotonically increasing across regenerations" {
@@ -226,8 +250,8 @@ count_record_type() {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
 
-    # 3 domains: each generates 2 A records (base + wildcard)
-    # Total with IPv6: 6 A records + 6 AAAA records = 12 records
+    # #1072: each bare domain now generates exactly 1 A record (exact match
+    # only, no wildcard). Total with IPv6: 3 A records + 3 AAAA records = 6.
     printf '%s\n' 'domain1.com' 'domain2.com' 'domain3.com' > "$domains_file"
 
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1 "2001:db8::1"
@@ -235,10 +259,32 @@ count_record_type() {
     [ "$status" -eq 0 ]
     local a_count
     a_count=$(count_record_type "$zone_file" "A")
-    [ "$a_count" -eq 6 ]  # 3 domains × 2 records each (base + wildcard)
+    [ "$a_count" -eq 3 ]  # 3 domains x 1 record each (exact match, no wildcard)
     local aaaa_count
     aaaa_count=$(count_record_type "$zone_file" "AAAA")
-    [ "$aaaa_count" -eq 6 ]  # Same for IPv6
+    [ "$aaaa_count" -eq 3 ]  # Same for IPv6
+}
+
+# #1072: a mix of all three match modes in one file must each produce exactly
+# the record count their mode implies -- proves the modes don't leak into each
+# other when processed together, not just in isolation.
+@test "zone generates the correct record count per match mode when mixed in one file" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    # exact root, wildcard-only, exact subdomain
+    printf '%s\n' 'exact.com' '.wildcard.com' 'sub.exact.com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    local a_count
+    a_count=$(count_record_type "$zone_file" "A")
+    [ "$a_count" -eq 3 ]  # 1 record per entry: no entry emits both forms
+
+    grep -qx 'exact\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx '\*\.wildcard\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+    grep -qx 'sub\.exact\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
 
 # Verifies the generated zone file is accessible (readable) after generation, since PowerDNS
@@ -257,25 +303,27 @@ count_record_type() {
     [ -r "$zone_file" ]
 }
 
-# Keeps the generated zone file easy to read and diff: the base domain record immediately
-# followed by its wildcard record, not interleaved with other domains.
-@test "zone preserves record order (base domain before wildcard)" {
+# Keeps the generated zone file easy to read and diff: entries appear in the same order
+# as cdn-domains.txt, not reordered or interleaved. (Before #1072's fix, this test used a
+# single bare domain and checked its base record appeared before its own wildcard record;
+# that no longer applies since a bare entry emits only one record. It now checks ordering
+# across distinct entries instead.)
+@test "zone preserves record order (entries appear in file order)" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
 
-    printf '%s\n' 'ordered.com' > "$domains_file"
+    printf '%s\n' 'first.com' '.second.com' 'third.com' > "$domains_file"
 
     run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
 
     [ "$status" -eq 0 ]
-    # Extract record lines (skip header) and verify order
-    local base_line
-    base_line=$(grep -n 'ordered\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
-    local wildcard_line
-    wildcard_line=$(grep -n '\*\.ordered\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
+    local first_line second_line third_line
+    first_line=$(grep -n '^first\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
+    second_line=$(grep -n '^\*\.second\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
+    third_line=$(grep -n '^third\.com 60 IN A' "$zone_file" | head -1 | cut -d: -f1)
 
-    # Base domain record should appear before wildcard record
-    [ "$base_line" -lt "$wildcard_line" ]
+    [ "$first_line" -lt "$second_line" ]
+    [ "$second_line" -lt "$third_line" ]
 }
 
 # #822 pattern audit: RPZ generation previously had zero domain validation.
@@ -339,4 +387,49 @@ count_record_type() {
     grep -q '^also-good\.example\.com 60 IN A' "$zone_file"
     [[ "$output" == *"WARNING: skipping invalid domain entry in RPZ zone: com"* ]]
     run ! grep -q '\*\.com ' "$zone_file"
+}
+
+# #1073: the Admin UI's per-domain toggle disables an entry by prefixing it
+# with "!" instead of deleting the line. RPZ generation must skip such a row
+# entirely -- no A/AAAA record at all, and (unlike a genuinely malformed
+# entry) no WARNING, since this is a deliberate operator choice, not a
+# degraded config.
+@test "generate_rpz_zone skips a disabled ('!'-prefixed) entry without emitting a WARNING" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' '!disabled.example.com' 'enabled.example.com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    # Checked right after generate_rpz_zone's own run, before any further
+    # `run` command -- `run` (including a negated `run !`) always overwrites
+    # $output with its own command's output, so asserting this any later
+    # would silently check the wrong command's output instead of actually
+    # verifying generate_rpz_zone stayed quiet for a disabled entry.
+    [[ "$output" != *"WARNING"* ]]
+    run ! grep -q 'disabled\.example\.com' "$zone_file"
+    grep -qx 'enabled\.example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+}
+
+# Same skip, for a disabled wildcard-only entry ("!." combination) -- the
+# disabled check must run before the wildcard-dot marker is stripped, so a
+# disabled wildcard entry is skipped just like a disabled plain one, not
+# misread as a plain domain literally named "!.disabled-wild.example.com".
+# The second fixture entry is deliberately ALSO wildcard-only (leading dot):
+# this proves the disabled first entry doesn't leak any state (e.g. an
+# is_wildcard_only flag left set from a skipped line) into how the next,
+# genuinely-enabled wildcard entry gets emitted.
+@test "generate_rpz_zone skips a disabled wildcard-only ('!.') entry" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    zone_file="$BATS_TEST_TMPDIR/rpz.zone"
+
+    printf '%s\n' '!.disabled-wild.example.com' '.still-enabled.example.com' > "$domains_file"
+
+    run generate_rpz_zone "$domains_file" "$zone_file" 192.0.2.1
+
+    [ "$status" -eq 0 ]
+    run ! grep -q 'disabled-wild' "$zone_file"
+    grep -qx '\*\.still-enabled\.example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }

@@ -24,7 +24,6 @@ pub async fn setup_page(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     let mut ctx = Context::new();
     ctx.insert("standard_ip", &state.config.standard_ip);
     ctx.insert("ssl_ip", &state.config.ssl_ip);
-    ctx.insert("dhcp_mode", &state.config.effective_dhcp_mode().as_str());
     ctx.insert(
         "lancache_image_channel",
         &state.config.effective_lancache_image_channel_override(),
@@ -104,7 +103,7 @@ pub struct UpdateStackSettingsForm {
 // LANCACHE_IMAGE_TAG is set to a fixed sha/version tag outside the channel
 // system entirely, which this control does not touch.
 fn is_valid_ui_channel(value: &str) -> bool {
-    matches!(value, "stable" | "edge")
+    matches!(value, "stable" | "nightly")
 }
 
 // Saves the release channel and scheduled-update settings to the same
@@ -147,10 +146,15 @@ pub async fn update_stack_settings(
 mod tests {
     use super::*;
 
+    // The two end-user-facing channels are "stable" and "nightly". "edge" was
+    // the old name of "nightly" (renamed and hard-cut in v0.3.0, #1056) and is
+    // explicitly rejected now, not accepted as a synonym, so a stale pre-rename
+    // form submission gets a clean 400 rather than silently selecting nightly.
     #[test]
-    fn only_stable_and_edge_are_accepted() {
+    fn only_stable_and_nightly_are_accepted() {
         assert!(is_valid_ui_channel("stable"));
-        assert!(is_valid_ui_channel("edge"));
+        assert!(is_valid_ui_channel("nightly"));
+        assert!(!is_valid_ui_channel("edge"));
         assert!(!is_valid_ui_channel("dev"));
         assert!(!is_valid_ui_channel("pinned"));
         assert!(!is_valid_ui_channel("latest"));

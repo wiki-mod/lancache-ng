@@ -933,6 +933,7 @@ async fn main() -> Result<()> {
         .route("/", get(routes::dashboard::dashboard))
         .route("/dhcp", get(routes::dhcp::dhcp_page))
         .route("/dhcp/mode", post(routes::dhcp::update_dhcp_mode))
+        .route("/dhcp/ddns", post(routes::dhcp::update_dhcp_ddns))
         .route("/dhcp/proxy", post(routes::dhcp::update_dhcp_proxy))
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
@@ -964,6 +965,10 @@ async fn main() -> Result<()> {
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
+        .route(
+            "/domains/dns/toggle",
+            post(routes::domains::toggle_default_domain),
+        )
         .route("/domains/lan/add", post(routes::domains::add_lan_record))
         .route(
             "/domains/lan/remove",
@@ -1407,7 +1412,7 @@ mod tests {
 
         std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
         std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
 
         let cfg = config::Config::from_env().unwrap();
@@ -1425,7 +1430,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             rendered,
-            "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [edge]"
+            "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [nightly]"
         );
 
         std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
@@ -1446,7 +1451,7 @@ mod tests {
 
         std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
         std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "edge");
+        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
         std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
         std::env::set_var(
             "TEMPLATE_DIR",

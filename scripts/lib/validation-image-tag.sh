@@ -28,7 +28,7 @@
 
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
 # channel it publishes to. Mirrors build-push.yml's promote/validate mapping:
-# master publishes edge, a vX.Y.Z pre-release integration branch publishes
+# master publishes nightly, a vX.Y.Z pre-release integration branch publishes
 # dev, and everything else falls back to latest (the stable-release-only
 # channel). `latest` is intentionally never the default for a live branch --
 # see build-push.yml's own comment on why validating a pre-release branch
@@ -36,7 +36,7 @@
 vit_base_channel_tag() {
     local base_ref="$1"
     if [[ "$base_ref" == "master" ]]; then
-        printf 'edge\n'
+        printf 'nightly\n'
     elif [[ "$base_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         printf 'dev\n'
     else
@@ -65,7 +65,7 @@ vit_pr_staging_available() {
 # #715 explicitly preserves). A same-repo PR resolves to its OWN
 # pr-<N>-sha-<short> staging tag so the sims test the PR's real commits, not
 # whatever the base branch last published -- the inconsistency #715 calls out
-# where the deep sims previously always tested "edge" regardless of intent. A
+# where the deep sims previously always tested "nightly" regardless of intent. A
 # Dependabot/fork PR falls back to the base channel. Echoes the tag.
 #
 # build_sha is github.sha (for a pull_request event, the synthetic
@@ -79,7 +79,7 @@ vit_resolve_tag() {
     local actor="$5" head_repo="$6" repository="$7" dispatch_tag="$8"
 
     if [[ "$event_name" == "workflow_dispatch" ]]; then
-        printf '%s\n' "${dispatch_tag:-edge}"
+        printf '%s\n' "${dispatch_tag:-nightly}"
         return 0
     fi
 

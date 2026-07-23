@@ -1,0 +1,571 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Opt-in GitHub-hosted OVERFLOW path for the image build/scan/publish job
+# class that build-push.yml's `container-scan`, `build`, `merge-manifests`,
+# `promote`, and `release` jobs normally run on self-hosted `lancache-heavy`
+# runners. See issue #686 for the full history: an earlier investigation
+# recommended against building this at all (self-hosted was believed to only
+# need capacity hardening, see #1065/#1095); the maintainer reversed that
+# recommendation because the self-hosted fleet is a temporary
+# development-phase measure the project wants to depend on less over time,
+# not the permanent architecture -- while an unconditional hosted-only
+# pipeline is equally rejected, since GitHub's free-tier default concurrency
+# (~1 hosted runner per repo) would recreate the multi-hour queue waits this
+# project had before self-hosted runners existed. This workflow is therefore
+# a manually-invoked OVERFLOW path, never a replacement: self-hosted stays
+# the fast, default path (build-push.yml is completely unchanged by this
+# file), and this workflow only ever runs when a maintainer explicitly
+# dispatches it during a self-hosted outage.
+#
+# Scope covered: `container-scan` (amd64 only) + `build` (amd64 leg) +
+# manifest merge, producing the exact same `sha-<short>[-amd64]` / merged
+# `sha-<short>` GHCR tags build-push.yml's own jobs would have produced for
+# the same commit. The linux/arm64 leg needs no fallback: build-push.yml's
+# own `build-arm64` job already runs unconditionally on GitHub-hosted
+# `ubuntu-24.04-arm` for every push/PR regardless of self-hosted health (see
+# issue #592), so its `sha-<short>-arm64` tag is already available for this
+# workflow's merge step to combine with the amd64 tag produced here.
+#
+# Explicitly NOT covered: `promote` (channel-pointer moves) and `release`
+# (release-tag publish). Both carry `scripts/lib/promote-lock.sh`'s git-ref
+# locking and multi-channel branch/tag rules (see build-push.yml's own
+# `promote` job comments) that are not safe to re-derive from scratch as a
+# late-night first increment -- see docs/ci-github-hosted-fallback-decision.md
+# and issue #686 for the deferral reasoning. Once this workflow publishes a
+# service's merged `sha-<short>` tag, promoting it to a channel (`dev`,
+# `nightly`) still requires either self-hosted capacity to return so
+# build-push.yml's own `promote` job can run normally, or a manual
+# `workflow_dispatch` of build-push.yml itself with its existing `channel`
+# input (see that workflow's own `on.workflow_dispatch.inputs.channel`) once
+# a self-hosted runner is available to execute `promote`'s job body -- this
+# workflow does not attempt to run `promote` on a hosted runner.
+#
+# Credential design (issue #686's central question, resolved here): every
+# job below uses the same default, short-lived, repo-scoped `GITHUB_TOKEN`
+# with `packages: write` that build-push.yml's `build-arm64` job has already
+# used on a GitHub-hosted `ubuntu-24.04-arm` runner, continuously in
+# production, since issue #592 -- this is not a new credential exposure
+# decision, it is the same one already made and shipped for the arm64 leg,
+# now extended to the amd64 leg under the same trust model (a token scoped
+# to this repository's own packages, valid only for this run's lifetime, and
+# never a long-lived PAT). Trigger design deliberately does not use a
+# pull_request-shaped event: only `workflow_dispatch` can invoke this
+# workflow, which GitHub itself restricts to users with write access to this
+# repository -- the same population that can already push to protected
+# branches or dispatch build-push.yml's own `channel` promotion input. No
+# LAN-only secret (Redis sccache, sccache-dist, distcc) is read or mounted
+# anywhere in this file; the two Rust services build uncached on
+# `ubuntu-latest`, the same degraded-but-correct mode build-arm64 already
+# runs in on every single push.
+name: Build & Push (GitHub-hosted overflow fallback)
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_hosted_fallback:
+        description: >-
+          Must be "yes" to actually run. This is an explicit maintainer-invoked
+          overflow path for a self-hosted lancache-heavy outage, not a routine
+          CI job -- see the header comment in this workflow file.
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+      services:
+        description: >-
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ui,build-tools
+          to build, or "all".
+        required: false
+        default: all
+      merge_manifest:
+        description: >-
+          After the amd64 build, merge it with build-arm64's existing arm64
+          tag into the real multi-platform sha-<short> tag.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    # Gate + fan-out. Fails closed unless the operator explicitly chose "yes"
+    # -- a plain workflow_dispatch click with the default "no" left in place
+    # must not silently build and push anything. Also resolves the same
+    # digest-pinned, smoke-tested build-tools image build-push.yml's own
+    # validate-compose job resolves (AG-VAL-026: never trust a mutable
+    # channel tag inside a gate), and turns the `services` input into a JSON
+    # matrix the downstream jobs can consume via fromJSON().
+    runs-on: ubuntu-latest
+    outputs:
+      build_tools_image: ${{ steps.select-image.outputs.build_tools_image }}
+      matrix: ${{ steps.services.outputs.matrix }}
+    steps:
+      - name: Require explicit opt-in
+        env:
+          USE_HOSTED_FALLBACK: ${{ inputs.use_hosted_fallback }}
+        run: |
+          set -euo pipefail
+
+          if [ "$USE_HOSTED_FALLBACK" != "yes" ]; then
+            echo "::error::use_hosted_fallback must be explicitly set to 'yes' to run this overflow workflow. This is not a routine CI job -- see this workflow file's header comment."
+            exit 1
+          fi
+          echo "::notice::Hosted overflow fallback explicitly confirmed by dispatching operator."
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        # Required for the imagetools inspect call inside
+        # select-build-tools-image.sh below -- mirrors build-push.yml's own
+        # validate-compose job, which sets this up before calling the same
+        # script for the same reason, rather than relying on the hosted
+        # runner's default Docker install already having a usable builder.
+        uses: ./.github/actions/buildx-setup-retry
+
+      - name: Resolve build-tools image
+        id: select-image
+        run: |
+          set -euo pipefail
+
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          case "$build_tools_image" in
+            *@sha256:*)
+              ;;
+            *)
+              echo "::error::Expected a digest-qualified build-tools image, got '$build_tools_image'."
+              exit 1
+              ;;
+          esac
+          printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+
+      - name: Compute service matrix
+        id: services
+        env:
+          SERVICES_INPUT: ${{ inputs.services }}
+        run: |
+          set -euo pipefail
+
+          # Keep in sync by hand with build-push.yml's own build/build-arm64
+          # matrix.include service list -- there is no shared source both
+          # workflow files can read matrix rows from (GitHub Actions has no
+          # cross-workflow YAML include mechanism).
+          declare -A contexts=(
+            [proxy]=services/proxy
+            [dns]=services/dns
+            [watchdog]=services/watchdog
+            [dhcp]=services/dhcp
+            [dhcp-proxy]=services/dhcp-proxy
+            [ui]=services/ui
+            [build-tools]=tools/build-tools
+          )
+          declare -A build_contexts=(
+            [proxy]="dns-domains=services/dns"
+            [dns]=""
+            [watchdog]=""
+            [dhcp]=""
+            [dhcp-proxy]=""
+            [ui]=""
+            [build-tools]=""
+          )
+          declare -A descriptions=(
+            [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
+            [dns]="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
+            [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
+            [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
+            [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+            [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
+          )
+          declare -A is_rust=(
+            [dns]=true
+            [ui]=true
+          )
+
+          if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
+            selected=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          else
+            IFS=',' read -ra selected <<< "$SERVICES_INPUT"
+          fi
+
+          rows="[]"
+          for raw in "${selected[@]}"; do
+            svc="$(printf '%s' "$raw" | xargs)"
+            [ -z "$svc" ] && continue
+            if [ -z "${contexts[$svc]+set}" ]; then
+              echo "::error::Unknown service '$svc'. Valid services: ${!contexts[*]}."
+              exit 1
+            fi
+            row=$(jq -n \
+              --arg service "$svc" \
+              --arg context "${contexts[$svc]}" \
+              --arg build_contexts "${build_contexts[$svc]}" \
+              --arg description "${descriptions[$svc]}" \
+              --argjson rust "${is_rust[$svc]:-false}" \
+              '{service: $service, context: $context, build_contexts: $build_contexts, description: $description, rust: $rust}')
+            rows="$(printf '%s' "$rows" | jq --argjson row "$row" '. + [$row]')"
+          done
+
+          if [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
+            echo "::error::No valid services selected; 'services' input resolved to an empty set."
+            exit 1
+          fi
+
+          echo "::notice::Building services: $(printf '%s' "$rows" | jq -c '[.[].service]')"
+          printf 'matrix=%s\n' "$(printf '%s' "$rows" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
+
+  container-scan-hosted-fallback:
+    # Mirrors build-push.yml's own container-scan job for its amd64 rows,
+    # minus every self-hosted/LAN-acceleration concern: no sccache/distcc
+    # secret wiring (this runner cannot reach that LAN-only infrastructure --
+    # same reasoning as build-arm64, which never wires it either), and no
+    # persistent Trivy cache directory or retention/cleanup logic (this is a
+    # fresh, ephemeral ubuntu-latest VM every run, unlike the self-hosted
+    # pool's persistent disk that the real job's cache retention exists for
+    # -- there is nothing here for that machinery to protect).
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs.preflight.outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Compute Docker build parallelism
+        id: docker-build-jobs
+        run: |
+          set -euo pipefail
+
+          if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+            case "$CARGO_BUILD_JOBS" in
+              ''|*[!0-9]*)
+                echo "::error::CARGO_BUILD_JOBS must be a positive integer."
+                exit 1
+                ;;
+            esac
+            if [ "$CARGO_BUILD_JOBS" -le 0 ]; then
+              echo "::error::CARGO_BUILD_JOBS must be greater than zero."
+              exit 1
+            fi
+            jobs="$CARGO_BUILD_JOBS"
+          else
+            detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+            jobs=$((detected_cores - 2))
+            if [ "$jobs" -lt 4 ]; then
+              jobs=4
+            fi
+          fi
+          echo "::notice::Using CARGO_BUILD_JOBS=$jobs for scan build ($MATRIX_SERVICE)."
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+        env:
+          MATRIX_SERVICE: ${{ matrix.service }}
+
+      - name: Set up Docker Buildx
+        # Retried, not the plain action: this is a fresh GitHub-hosted VM
+        # every run with no local image cache, the same rate-limit exposure
+        # build-arm64 hit and worked around in issue #930.
+        uses: ./.github/actions/buildx-setup-retry
+
+      - name: Build local scan image
+        env:
+          CARGO_BUILD_JOBS: ${{ steps.docker-build-jobs.outputs.jobs }}
+          MATRIX_BUILD_CONTEXTS: ${{ matrix.build_contexts }}
+        run: |
+          set -euo pipefail
+
+          build_context_args=()
+          if [ -n "${MATRIX_BUILD_CONTEXTS:-}" ]; then
+            build_context_args+=(--build-context "$MATRIX_BUILD_CONTEXTS")
+          fi
+
+          docker buildx build \
+            --load \
+            --pull \
+            --platform linux/amd64 \
+            --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
+            --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
+            "${build_context_args[@]}" \
+            -t lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} \
+            ${{ matrix.context }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Remove scan image
+        if: always()
+        run: docker rmi lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} || true
+
+  build-hosted-fallback:
+    # Mirrors build-push.yml's build-arm64 job's own steps almost exactly
+    # (same composite actions, same credential pattern, same lack of
+    # LAN-acceleration wiring), swapped from linux/arm64 to linux/amd64 and
+    # from a per-push trigger to this workflow's opt-in workflow_dispatch.
+    # Publishes the same sha-<short>-amd64 tag build-push.yml's own `build`
+    # job would have published for this commit.
+    needs: [preflight, container-scan-hosted-fallback]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs.preflight.outputs.build_tools_image }}
+    outputs:
+      short_sha: ${{ steps.short-sha.outputs.value }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve short commit SHA
+        id: short-sha
+        run: |
+          set -euo pipefail
+          printf 'value=%s\n' "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        # Retried variant (not the plain action): ubuntu-latest is also a
+        # fresh VM every run with no local image cache, the same underlying
+        # condition (issue #930) that made build-arm64's arm64 leg hit
+        # Docker Hub's anonymous-pull rate limit while bootstrapping
+        # moby/buildkit:buildx-stable-1. That action's own header comment
+        # scopes itself to "GitHub-hosted arm64 runners" because arm64 was
+        # the only GitHub-hosted case that existed when it was written --
+        # the failure mode itself (fresh hosted VM, anonymous Docker Hub
+        # pull) is not arch-specific, so reusing it for this GitHub-hosted
+        # amd64 job is a direct extension of its existing rationale, not a
+        # new one.
+        id: buildx
+        uses: ./.github/actions/buildx-setup-retry
+
+      - name: Log in to GHCR
+        # Default, short-lived, repo-scoped GITHUB_TOKEN -- the exact same
+        # credential build-arm64 already uses on this same class of
+        # GitHub-hosted runner in production (issue #592). See this
+        # workflow's header comment for the full credential-decision writeup.
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          tags: |
+            type=sha,prefix=sha-,format=short,suffix=-amd64
+
+      - name: Resolve build-tools base image digests
+        id: build-tools-base-digests
+        if: matrix.service == 'build-tools'
+        run: |
+          set -euo pipefail
+
+          digest_for_image() {
+            local image=$1 digest
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            if [[ -z "$digest" || "$digest" = "null" ]]; then
+              echo "::error::Could not read digest for $image."
+              exit 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          {
+            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute Docker build parallelism
+        id: docker-build-jobs
+        run: |
+          set -euo pipefail
+
+          if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+            case "$CARGO_BUILD_JOBS" in
+              ''|*[!0-9]*)
+                echo "::error::CARGO_BUILD_JOBS must be a positive integer."
+                exit 1
+                ;;
+            esac
+            if [ "$CARGO_BUILD_JOBS" -le 0 ]; then
+              echo "::error::CARGO_BUILD_JOBS must be greater than zero."
+              exit 1
+            fi
+            jobs="$CARGO_BUILD_JOBS"
+          else
+            detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+            jobs=$((detected_cores - 2))
+            if [ "$jobs" -lt 4 ]; then
+              jobs=4
+            fi
+          fi
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        # No secret-files/network/allow input: same as build-arm64, this
+        # runner cannot reach the LAN-only Redis/sccache-dist/distcc
+        # acceleration infrastructure, so this always builds as a plain,
+        # uncached (but native amd64) cargo build. Uses the GitHub Actions
+        # cache backend (type=gha), not the self-hosted local Buildx cache,
+        # since this runner is ephemeral.
+        id: build
+        timeout-minutes: 90
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ steps.buildx.outputs.name }}
+          context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
+          build-args: |
+            BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
+            CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+          push: "true"
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+          outputs: type=image,oci-mediatypes=true
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.service }}-amd64-hosted-fallback
+          cache-to: type=gha,scope=${{ matrix.service }}-amd64-hosted-fallback,mode=max
+
+      - name: Scan pushed build-tools digest with Trivy
+        if: matrix.service == 'build-tools'
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Attest image build provenance
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+  merge-manifest-hosted-fallback:
+    # Combines the sha-<short>-amd64 tag just published above with
+    # build-arm64's existing sha-<short>-arm64 tag (already published by
+    # build-push.yml's own always-on hosted arm64 lane for this same commit,
+    # regardless of self-hosted health) into the real sha-<short>
+    # multi-platform tag -- the same tag shape build-push.yml's own
+    # merge-manifests job produces, using the same `imagetools create`
+    # approach (no image is rebuilt, only a manifest list assembled from two
+    # already-pushed digests). This is deliberately a small, self-contained
+    # step, not a reuse of the production merge-manifests job's actual job
+    # definition: GitHub Actions has no mechanism for one workflow file to
+    # invoke a specific job out of a different workflow file's run, and the
+    # scope here (assemble one already-known pair of per-arch tags) is a
+    # small enough, independently-auditable amount of logic that
+    # reimplementing it does not carry the same risk as `promote`'s
+    # channel-pointer/lock machinery, which is why that part stays deferred
+    # instead (see this file's header comment).
+    needs: [preflight, build-hosted-fallback]
+    if: ${{ inputs.merge_manifest }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-platform manifests
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHORT_SHA: ${{ needs['build-hosted-fallback'].outputs.short_sha }}
+          MATRIX_JSON: ${{ needs.preflight.outputs.matrix }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          source_tag="sha-${SHORT_SHA}"
+          mapfile -t services < <(printf '%s' "$MATRIX_JSON" | jq -r '.include[].service')
+
+          for service in "${services[@]}"; do
+            amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
+            arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
+            target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+
+            if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
+              echo "::error::Missing $amd64_image -- this workflow's own build-hosted-fallback job should have just pushed it."
+              exit 1
+            fi
+            # A missing arm64 leg means build-push.yml's own always-on
+            # build-arm64 job has not yet published this commit's arm64 tag
+            # (e.g. this commit was never pushed through the normal
+            # pipeline, only built here manually). That is a real gap this
+            # fallback cannot fill by itself -- it only produces the amd64
+            # leg -- so skip the merge for this service with a clear notice
+            # rather than publishing a false single-platform "multi-platform"
+            # tag.
+            if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
+              echo "::notice::Skipping $service: no arm64 tag ($arm64_image) found to merge with. Run build-push.yml's build-arm64 job for this commit first (it runs unconditionally on every push/PR)."
+              continue
+            fi
+
+            echo "::notice::Merging $amd64_image + $arm64_image -> $target_image"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
+          done
+
+      - name: Summary
+        run: |
+          echo "::notice::Hosted overflow fallback complete. Published/merged sha-* image tags above are directly pullable, but channel pointers (dev/nightly/latest) are NOT moved by this workflow -- that still requires build-push.yml's own promote job (self-hosted, or a manual channel dispatch once self-hosted capacity returns). See this workflow's header comment."

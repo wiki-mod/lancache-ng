@@ -29,15 +29,15 @@ source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 #     point of the change that added these vars: the gate now tests THIS PR's
 #     images against THIS PR's checked-out setup.sh/quickstart compose, so no
 #     channel-promotion timing can ever make it validate stale, months-old code
-#     (the old hardcoded `edge` did exactly that while master/edge sat frozen).
+#     (the old hardcoded `nightly` did exactly that while master/nightly sat frozen).
 #   * workflow_dispatch / fork / Dependabot -> SETUP_SIM_IMAGE_CHANNEL set to
-#     the base-ref channel (dev for a v0.2.0 PR, edge for master -- resolved by
+#     the base-ref channel (dev for a v0.2.0 PR, nightly for master -- resolved by
 #     the workflow, never hardcoded), SETUP_SIM_IMAGE_TAG empty. No PR staging
 #     tag exists for those, so setup.sh's normal channel->stack-pointer->sha
 #     resolution is exercised instead (and stays covered on those events).
 #
 # Defaults keep a bare local `bash scripts/setup-cli-simulation.sh` working:
-# edge is the only channel guaranteed to have published images pre-1.0. CI
+# nightly is the only channel guaranteed to have published images pre-1.0. CI
 # always sets SETUP_SIM_IMAGE_CHANNEL explicitly, so this default is a
 # local-run convenience only, not a hardcoded-channel CI gate.
 #
@@ -48,19 +48,19 @@ source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 # force a pull failure -- a process-wide LANCACHE_IMAGE_TAG export would shadow
 # that sabotaged .env value and make the rollback-safety phase silently pull a
 # real image and pass for the wrong reason.
-fresh_install_image_channel="${SETUP_SIM_IMAGE_CHANNEL:-edge}"
+fresh_install_image_channel="${SETUP_SIM_IMAGE_CHANNEL:-nightly}"
 fresh_install_image_tag="${SETUP_SIM_IMAGE_TAG:-}"
 
 # Without this, git inside this container treats the bind-mounted repo (owned
 # by the host runner's UID, not this container's root) as having "dubious
 # ownership" and refuses every git command, including the `git describe
 # --tags --exact-match` setup.sh's derive_release_archive_image_tag() relies
-# on to distinguish "no exact release tag, use the edge/latest channel"
+# on to distinguish "no exact release tag, use the nightly/latest channel"
 # from "this is a source archive with no .git at all, read VERSION instead".
 # Confirmed directly: without this line, a fresh install on a non-tagged
 # commit incorrectly fell through to the VERSION file (currently "1.0.1")
 # and tried to pull an ghcr.io/.../ui:v1.0.1 image that was never published,
-# instead of resolving the intended edge/latest channel. This is likely a
+# instead of resolving the intended nightly/latest channel. This is likely a
 # real latent issue for `sudo ./setup.sh` against a repo cloned by a
 # different user too -- see issue filed against setup.sh separately.
 git config --global --add safe.directory "$repo_root"
@@ -415,7 +415,7 @@ echo "== Phase 3: rollback safety (forced platform-preflight failure during upda
 cp "$install_dir/.env" "$install_dir/.env.before-forced-failure"
 # LANCACHE_IMAGE_CHANNEL must be forced to "pinned" too, not just the tag,
 # regardless of what Phase 1 left behind: on the base-ref-channel path the
-# .env still names a moving channel (dev/edge), and with a moving channel set
+# .env still names a moving channel (dev/nightly), and with a moving channel set
 # resolve_lancache_image_tag() resolves the tag from the channel pointer and
 # never even looks at the literal LANCACHE_IMAGE_TAG value -- confirmed
 # directly, the update just silently re-pulled the real channel images and

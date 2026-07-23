@@ -75,7 +75,7 @@ dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 # exactly the shallow check issue #668 found: comparing a DNS answer to a
 # hardcoded literal instead of proving the answer leads somewhere real.
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-image_tag="${LANCACHE_IMAGE_TAG:-edge}"
+image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 
 cleanup() {

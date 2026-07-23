@@ -987,6 +987,13 @@ fi
         domain="${domain#"${domain%%[![:space:]]*}"}"
         domain="${domain%"${domain##*[![:space:]]}"}"
         [[ -z "$domain" || "$domain" == \#* ]] && continue
+        # A leading "!" marks an entry the Admin UI's per-domain toggle has
+        # deliberately disabled (#1073) -- skip it silently, with no WARNING
+        # and no effect on the RPZ zone, since this is an intentional
+        # operator choice rather than a malformed or degraded
+        # cdn-domains.txt row. Mirrors services/proxy/entrypoint.sh's
+        # _collect_domain_rows handling of the same marker on the same file.
+        [[ "$domain" == !* ]] && continue
         is_wildcard_only=0
         if [[ "$domain" == .* ]]; then
             is_wildcard_only=1
@@ -1006,15 +1013,23 @@ fi
         fi
         domain="$(_normalize_domain "$domain")"
         [[ -z "$domain" ]] && continue
+        # Three non-overlapping match modes selected by how the entry is
+        # written (issue #1072): a bare entry ("domain.com" or
+        # "sub.domain.com") matches only that exact host and must never also
+        # emit a wildcard record for what's underneath it; only a
+        # leading-dot entry (".domain.com") opts into wildcard coverage, and
+        # in that case the bare root itself is deliberately not emitted.
         if [ "$is_wildcard_only" -eq 0 ]; then
             printf "%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
+        else
+            printf "*.%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
         fi
-        printf "*.%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
         if [ -n "$PROXY_IPV6" ]; then
             if [ "$is_wildcard_only" -eq 0 ]; then
                 printf "%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
+            else
+                printf "*.%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
             fi
-            printf "*.%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
         fi
     done < /etc/pdns/cdn-domains.txt
 } > "$RPZ_FILE"

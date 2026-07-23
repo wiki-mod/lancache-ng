@@ -10,9 +10,10 @@
 # hand-extracted test copy, not a sourced file) -- including the
 # _is_valid_domain/_normalize_domain validation call added for the #822
 # pattern audit (a malformed or overly-broad cdn-domains.txt entry must not
-# silently become an overly-broad RPZ wildcard rule). Requires
-# scripts/lib/domain-validation.sh to already be sourced by the caller (see
-# tests/bats/dns_zone_generation.bats's setup()).
+# silently become an overly-broad RPZ wildcard rule), and the leading-"!"
+# disabled-entry skip added for #1073 (the Admin UI's per-domain toggle).
+# Requires scripts/lib/domain-validation.sh to already be sourced by the
+# caller (see tests/bats/dns_zone_generation.bats's setup()).
 
 generate_rpz_zone() {
     local domains_file="$1" output_file="$2" proxy_ip="$3" proxy_ipv6="${4:-}"
@@ -37,15 +38,21 @@ generate_rpz_zone() {
         echo "@ SOA localhost. admin.rpz. $serial 3600 900 604800 60"
         echo "@ NS localhost."
         echo ""
-        # For each domain, emit RPZ A (and AAAA if proxy_ipv6 is set) records for both the base
-        # domain and its *.domain wildcard subdomain. Domains with a leading dot in the input
-        # (wildcard-only marker) only emit wildcard records, not base-domain records.
+        # For each domain, emit exactly one RPZ A (and AAAA if proxy_ipv6 is set) record set:
+        # a bare entry (no leading dot) matches only that exact host and emits a base-domain
+        # record; a leading-dot entry (wildcard-only marker) matches only *.domain and emits
+        # a wildcard record instead. The two are mutually exclusive (#1072) -- a bare entry
+        # must never also emit a wildcard for what's underneath it.
         while IFS= read -r domain || [ -n "$domain" ]; do
             # Strip leading and trailing whitespace
             domain="${domain#"${domain%%[![:space:]]*}"}"
             domain="${domain%"${domain##*[![:space:]]}"}"
             # Skip empty lines and comments
             [[ -z "$domain" || "$domain" == \#* ]] && continue
+            # A leading "!" marks a deliberately disabled entry (#1073) --
+            # skip it silently, same as services/dns/entrypoint.sh's real
+            # loop.
+            [[ "$domain" == !* ]] && continue
             # Check if domain starts with . (wildcard-only flag)
             local is_wildcard_only=0
             if [[ "$domain" == .* ]]; then
@@ -63,16 +70,18 @@ generate_rpz_zone() {
             fi
             domain="$(_normalize_domain "$domain")"
             [[ -z "$domain" ]] && continue
-            # Emit records: base domain + wildcard (if not wildcard-only)
+            # Emit records: exact-match base domain XOR wildcard, never both.
             if [ "$is_wildcard_only" -eq 0 ]; then
                 printf "%s 60 IN A %s\n" "${domain}" "${proxy_ip}"
+            else
+                printf "*.%s 60 IN A %s\n" "${domain}" "${proxy_ip}"
             fi
-            printf "*.%s 60 IN A %s\n" "${domain}" "${proxy_ip}"
             if [ -n "$proxy_ipv6" ]; then
                 if [ "$is_wildcard_only" -eq 0 ]; then
                     printf "%s 60 IN AAAA %s\n" "${domain}" "${proxy_ipv6}"
+                else
+                    printf "*.%s 60 IN AAAA %s\n" "${domain}" "${proxy_ipv6}"
                 fi
-                printf "*.%s 60 IN AAAA %s\n" "${domain}" "${proxy_ipv6}"
             fi
         done < "$domains_file"
     } > "$output_file"

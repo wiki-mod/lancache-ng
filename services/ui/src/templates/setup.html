@@ -25,6 +25,26 @@
       </p>
     </div>
 
+    <!-- Aktueller Status: read-only, unabhängig vom Formular darunter, damit
+         der Checkbox-Zustand nicht mit "das läuft gerade wirklich" verwechselt
+         wird (#1068: die UI zeigte bisher nirgends explizit an, ob
+         automatische Updates tatsächlich aktiv sind). -->
+    <div class="bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+      <span class="text-slate-400">Aktueller Stand:</span>
+      <span class="text-slate-200">
+        Kanal <span class="font-mono px-1.5 py-0.5 rounded bg-slate-700">{{ lancache_image_channel }}</span>
+      </span>
+      <span class="flex items-center gap-1.5">
+        {% if auto_update_enabled %}
+        <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+        <span class="text-green-400">Automatische Updates aktiv</span>
+        {% else %}
+        <span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+        <span class="text-slate-400">Automatische Updates deaktiviert</span>
+        {% endif %}
+      </span>
+    </div>
+
     <form method="post" action="/setup/update" class="grid gap-4 md:grid-cols-2 items-end">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
@@ -32,12 +52,12 @@
         <select name="lancache_image_channel"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
           <option value="stable" {% if lancache_image_channel == "stable" %}selected{% endif %}>stable</option>
-          <option value="edge" {% if lancache_image_channel == "edge" %}selected{% endif %}>edge</option>
+          <option value="nightly" {% if lancache_image_channel == "nightly" %}selected{% endif %}>nightly</option>
         </select>
         <p class="text-xs text-slate-500 mt-1">
           <strong>stable</strong>: getestete Releases, empfohlen für die meisten Installationen.
-          <strong>edge</strong>: neueste Änderungen direkt von master, vor jedem stable-Release —
-          kann gelegentlich instabil sein.
+          <strong>nightly</strong>: neueste Änderungen direkt von master, täglich vor jedem
+          stable-Release gebaut — kann gelegentlich instabil sein.
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -53,19 +73,6 @@
         Speichern
       </button>
     </form>
-  </div>
-
-  <div class="card space-y-2">
-    <h2 class="font-semibold text-slate-200">DHCP mode</h2>
-    <p class="text-sm text-slate-400">Current mode: <span class="text-slate-200">{{ dhcp_mode }}</span></p>
-    {% if dhcp_mode == "disabled" %}
-      <p class="text-xs text-slate-500">DHCP is disabled; the existing router DHCP configuration stays active.</p>
-    {% elif dhcp_mode == "kea" %}
-      <p class="text-xs text-slate-500">Kea is active in full mode: DNS, options, reservations, and leases can be managed here.</p>
-    {% else %}
-      <p class="text-xs text-amber-300">dnsmasq proxy mode is active in limited mode: it only serves proxy-DHCP/PXE clients and does not reliably replace DNS options from a normal router DHCP server.</p>
-      <p class="text-xs text-slate-500">Kea configuration pages are intentionally limited in this mode.</p>
-    {% endif %}
   </div>
 
   <!-- ── Transparenter Proxy (Router) ─────────────────────────────────────── -->

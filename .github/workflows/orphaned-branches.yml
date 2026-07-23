@@ -78,7 +78,7 @@ jobs:
 
       - name: Resolve build-tools image
         # Strict mode (BUILD_TOOLS_REQUIRE_PUBLISHED=true): this check only
-        # needs bash/curl/jq/git, already present in the published :dev/:edge
+        # needs bash/curl/jq/git, already present in the published :dev/:nightly
         # channel image, and this workflow has no PR of its own whose
         # Dockerfile changes would need a branch-local rebuild to validate
         # against -- so there is no reason to pay a local `docker build` on
