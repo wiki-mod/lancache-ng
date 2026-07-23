@@ -137,17 +137,34 @@ defaults:
     shell: bash
 
 jobs:
-  # PR-only change classification: skips per-crate/per-service heavy work only
-  # when a PR clearly cannot affect it. Service-image decisions are based on
-  # each Dockerfile's COPY graph, while docs/governance/setup/deploy/release
-  # classes stay visible for policy checks. Build-affecting workflow or
-  # composite-action changes are treated as touching runtime services, since the
-  # CI logic itself changed. Dedicated release helper workflows remain release
-  # contract changes, and build-tools rebuilds stay tied to build-tools inputs.
-  # Master/tag pushes are never scoped: they always run the full pipeline.
+  # Change classification for PR path-scoping and (as of #1095) push-event
+  # scoping of the four redundant Rust jobs. On a pull_request it diffs the PR's
+  # merge-base..head; on a push it diffs github.event.before..github.sha (the
+  # commits that push actually introduced), degrading to --all-changed when that
+  # base is absent/unreachable (all-zeros first push, force-push, GC'd base) so
+  # an undeterminable diff fails safe to the full pipeline. Service-image
+  # decisions are based on each Dockerfile's COPY graph, while docs/governance/
+  # setup/deploy/release classes stay visible for policy checks. Build-affecting
+  # workflow or composite-action changes are treated as touching runtime
+  # services, since the CI logic itself changed. Dedicated release helper
+  # workflows remain release contract changes, and build-tools rebuilds stay
+  # tied to build-tools inputs.
+  #
+  # SCOPE (#1095): the push-event outputs currently gate ONLY dns_test/ui_test/
+  # dns_cargo_audit/ui_cargo_audit -- work that already ran and passed on the PR
+  # that produced the push (AG-WF-004 forbids direct master pushes), so skipping
+  # it on a push that did not touch the relevant crate reuses that known-good
+  # result. build/build-arm64/container-scan still run the FULL per-service set
+  # on push: their should-build/should-scan gates keep their push branch
+  # unchanged here, because per-service build/scan reuse on push additionally
+  # needs a safe way to re-tag a prior commit's already-built sha-* image, which
+  # depends on cross-run ordering this job cannot provide by itself. That is
+  # deferred to Part 1 of #1095. workflow_dispatch is left unscoped (detect-
+  # changes does not run for it); the four jobs' own if: fail safe to running
+  # whenever this job did not produce a successful classification.
   detect-changes:
     name: detect changed paths
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     outputs:
       dns_rust: ${{ steps.filter.outputs.dns_rust }}
@@ -175,10 +192,10 @@ jobs:
         id: filter
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          : "${BASE_SHA:?pull request base SHA is required}"
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
           # The per-path classification -- and the merge-base #536 fix that
@@ -189,7 +206,27 @@ jobs:
           # "Changed files:" listing to stderr and the key=value booleans (plus
           # the additive IMAGE_IMPACT verdict, unused by this job) to stdout.
           # checkout above runs with fetch-depth: 0, which merge-base needs.
-          bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            : "${BASE_SHA:?pull request base SHA is required}"
+            bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            # push (branch or tag): diff exactly the commits this push
+            # introduced (github.event.before..github.sha). Fail safe to
+            # --all-changed when that base is unusable -- an all-zeros first
+            # push, or a base commit not present even under fetch-depth: 0 (a
+            # force-push that discarded the old tip, or a GC'd/unreachable ref)
+            # -- so an undeterminable diff runs the full set instead of silently
+            # skipping a real change. Mirrors build-tools.yml's own before-diff
+            # fallback (determine-publish-scope).
+            if [ -z "$BEFORE_SHA" ] \
+              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); classifying all paths as changed."
+              bash scripts/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+            else
+              bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
   file-headers:
     # Cheap repository hygiene gate. It runs before expensive Rust/image work so
@@ -3227,13 +3264,24 @@ jobs:
     # whether the regression is lint/format level or behavioral.
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095). detect-changes now runs
+    # on push too (diffing github.event.before..github.sha), so this consults its
+    # outputs uniformly instead of the old `github.event_name != 'pull_request'`
+    # always-run-on-push short-circuit: on a push that did not touch the crate
+    # (nor the workflow), the PR that produced that push already ran and passed
+    # this exact test (AG-WF-004), so skipping reuses that known-good result.
+    # `detect-changes.result != 'success'` fails safe to running whenever the
+    # classification is unavailable (workflow_dispatch, or an infra failure of
+    # detect-changes) rather than silently skipping. ci_scope_policy tolerates
+    # the resulting `skipped` on push (require_success_or_intentional_cancellation)
+    # and re-derives strict per-path required-ness on pull_request.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (needs.dns_rust_quality.result == 'success' || needs.dns_rust_quality.result == 'skipped') &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
@@ -3297,13 +3345,17 @@ jobs:
     # docs/setup-only PRs from paying for unrelated Rust test work.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning (reuse of the PR-time known-good
+    # result on an unchanged push, fail-safe run when classification is
+    # unavailable, ci_scope_policy tolerance of the resulting push `skipped`).
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (needs.ui_rust_quality.result == 'success' || needs.ui_rust_quality.result == 'skipped') &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
@@ -3768,12 +3820,14 @@ jobs:
     # filtering proves the crate and workflow contract did not change.
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
@@ -3824,12 +3878,14 @@ jobs:
     # serializing independent Rust checks.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
@@ -3939,6 +3995,20 @@ jobs:
     # require_success_or_intentional_skip() helper stays as defensive tolerance
     # for the pull_request path, where the validate-compose skip-cascade still
     # applies.
+    #
+    # (#1095 update) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit now have a
+    # SECOND legitimate `skipped` source on push, independent of the
+    # concurrency-cancellation one above: detect-changes runs on push events too
+    # (not just pull_request), and these four jobs' own `if:` gates skip on a
+    # push that did not touch the relevant crate (nor the workflow) -- the PR
+    # that produced that push already ran and passed them (AG-WF-004), so the
+    # skip reuses that known-good result. require_success_or_intentional_cancellation()
+    # already tolerates `skipped`, so it covers this new source with no change;
+    # this note just records that on push a `skipped` here can now mean
+    # "path-scoped out by detect-changes" as well as "superseded mid-flight".
+    # watchdog_test and rust_coverage are NOT path-scoped on push (rust_coverage
+    # stays unconditional for the badge, and still runs the crates' tests under
+    # tarpaulin regardless), so this change does not touch their tolerance.
     #
     # dns_rust_quality/ui_rust_quality are deliberately left on strict
     # require_success(): they are not in #891's enumerated candidate list
