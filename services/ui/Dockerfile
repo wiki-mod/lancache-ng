@@ -460,11 +460,18 @@ RUN set -eu; \
     locales \
     nmap \
     util-linux \
+    nano \
+    lsof \
+    ripgrep \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+# nano/lsof/ripgrep: in-container troubleshooting tools -- see
+# services/proxy/Dockerfile's identical comment for the full rationale.
+ENV EDITOR=nano
+ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
