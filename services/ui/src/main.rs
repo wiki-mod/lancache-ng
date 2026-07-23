@@ -13,6 +13,7 @@
 #![deny(warnings)]
 
 mod config;
+mod dns_probe;
 mod docker_client;
 mod kea_snapshots;
 mod nats_auth_callout;
@@ -246,6 +247,14 @@ fn migrate_secondaries_table_for_auth_callout(conn: &Connection) -> rusqlite::Re
             "ALTER TABLE secondaries ADD COLUMN nats_password_hash TEXT",
             [],
         )?;
+    }
+    // #1084: the secondary's reachable DNS address, for the active health
+    // probe. Same additive, idempotent ALTER pattern as the auth-callout
+    // columns above; NULL for a row registered before this column existed (and
+    // for any secondary whose setup.sh did not report an address) until the
+    // next registration or a manual address override sets it.
+    if !existing_columns.iter().any(|c| c == "address") {
+        conn.execute("ALTER TABLE secondaries ADD COLUMN address TEXT", [])?;
     }
     Ok(())
 }
@@ -998,6 +1007,14 @@ async fn main() -> Result<()> {
             "/api/secondary/{name}/rotate-token",
             post(routes::secondaries::rotate_token),
         )
+        .route(
+            "/api/secondary/{name}/health",
+            post(routes::secondaries::check_secondary_health),
+        )
+        .route(
+            "/api/secondary/{name}/address",
+            post(routes::secondaries::set_secondary_address),
+        )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             basic_auth,
@@ -1098,6 +1115,43 @@ mod tests {
             .unwrap();
         assert_eq!(nats_token, "old-shared-token");
         assert_eq!(registered_at, 42);
+    }
+
+    // #1084: the migration adds the nullable `address` column (idempotently),
+    // and it must be writable/readable afterwards -- this is what the health
+    // check's stored probe target depends on. Applying the migration twice must
+    // not error on a duplicate column.
+    #[test]
+    fn migration_adds_writable_address_column_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );",
+        )
+        .unwrap();
+
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at, address)
+             VALUES ('sec-a', 'sec-a', '', 0, '192.168.1.20')",
+            [],
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT address FROM secondaries WHERE name = 'sec-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("192.168.1.20"));
     }
 
     // X-Forwarded-Proto can carry a comma-separated chain when multiple
