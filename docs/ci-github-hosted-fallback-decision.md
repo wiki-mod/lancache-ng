@@ -44,7 +44,7 @@ per-class status instead of a single yes/no answer.
 | `detect-changes`, `validate-compose`, `compute-validation-network`, `full-setup-validate` | build-tools image / full Docker Compose stack | none -- see "Other self-hosted-only jobs" below |
 | `dns_rust_quality`, `ui_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
 | `publish_coverage_badge` | downstream of `rust_coverage`, needs `contents: write` | none, same reasoning as its upstream job |
-| `container-scan`, `build`, `build-arm64`, `merge-manifests`, `promote`, `release` | image build/scan/publish | none for amd64/publish; `build-arm64`'s arm64 lane already runs natively on GitHub-hosted `ubuntu-24.04-arm` (issue #592) -- see "Image build/push class" below |
+| `container-scan`, `build`, `build-arm64`, `merge-manifests`, `promote`, `release` | image build/scan/publish | `build-arm64`'s arm64 lane already runs natively on GitHub-hosted `ubuntu-24.04-arm` (issue #592); `container-scan`+`build` (amd64 leg) + manifest merge now have an opt-in `workflow_dispatch` overflow path (`.github/workflows/build-push-hosted-fallback.yml`, issue #686); `promote`/`release` remain self-hosted-only -- see "Image build/push class" below |
 
 ### Why `ci_scope_policy` has no hosted fallback
 
@@ -142,12 +142,45 @@ a `workflow_dispatch` input, or a job that only runs when self-hosted runners
 are actually observed to be unavailable, not unconditionally on every push
 and PR. A follow-up issue tracks scoping and prototyping this (see below).
 
-## Image build/push class: harder, not attempted here
+## Image build/push class: opt-in hosted overflow now exists for build+scan+merge (issue #686)
 
-`container-scan`, `build`, `merge-manifests`, `promote`, and `release` stay
-fully self-hosted, with one partial exception already shipped
+**STATUS (2026-07-23, issue #686): the "not attempted" conclusion below was
+reversed by the maintainer.** The reasoning at the time -- treat self-hosted
+`lancache-heavy` availability as a capacity problem to harden directly (Refs
+#1065/#1095) rather than build a second publish path -- assumed the
+self-hosted fleet was this project's permanent architecture. It is not: the
+current `.240`/`.229`/`.241`/`.243` fleet is a temporary development-phase
+measure the project wants to depend on *less* over time, not more. An
+unconditional hosted-only pipeline is equally rejected (GitHub's free-tier
+default concurrency is ~1 hosted runner per repo, which would recreate the
+multi-hour queue waits this project had before self-hosted runners existed),
+so the resolution is a genuine, manually-invoked **overflow** path:
+self-hosted stays the fast, default path (`build-push.yml` is untouched),
+and `.github/workflows/build-push-hosted-fallback.yml` is only ever run when
+a maintainer explicitly dispatches it during a self-hosted outage.
+
+That new workflow covers `container-scan` (amd64) + `build` (amd64 leg) +
+manifest merge, producing the same `sha-<short>[-amd64]` / merged
+`sha-<short>` GHCR tags the self-hosted jobs would have produced. It does
+not cover `promote` or `release` -- see that workflow's own header comment
+for why those stay deferred (their channel-pointer/promote-lock machinery
+was judged too risky to re-derive from scratch in the same increment).
+
+The credential question (constraint 2 below) turned out to already be
+answered by existing, shipped code: `build-arm64` has been pushing to GHCR
+with the default `GITHUB_TOKEN` and `packages: write` on a GitHub-hosted
+`ubuntu-24.04-arm` runner, continuously in production, since issue #592.
+The paragraph below describing `build-arm64` as having "no GHCR push" was
+incorrect and is corrected here -- re-verified directly against the current
+workflow file while implementing #686.
+
+The rest of this section is kept for historical context (the constraints
+that made this nontrivial, not moot):
+
+`container-scan`, `build`, `merge-manifests`, `promote`, and `release` used to
+stay fully self-hosted, with one partial exception already shipped
 (`build-arm64`'s native arm64 lane on GitHub-hosted `ubuntu-24.04-arm`,
-issue #592). Three independent constraints apply to the rest:
+issue #592). Three independent constraints apply:
 
 1. **Multi-arch build time.** `build` produces `linux/amd64` images for
    every service, including two Rust services compiled from source
@@ -160,24 +193,23 @@ issue #592). Three independent constraints apply to the rest:
    `release` all push to GHCR or move channel tags, which requires
    `packages: write` credentials. `docs/local-runner-docker-performance.md`'s
    "Keep the runner isolated" guidance is explicit that registry push
-   credentials should only be exposed where a workflow genuinely needs them;
-   widening that exposure to GitHub-hosted runners (which, unlike the
-   self-hosted pool, are not physically operator-controlled LAN hardware)
-   is a real security posture change, not a mechanical one, and is out of
-   scope for a fallback whose entire purpose is "keep validating/publishing
-   when self-hosted is down" rather than "change where secrets live."
+   credentials should only be exposed where a workflow genuinely needs them.
+   **This was re-examined and resolved for #686**: `build-arm64` already
+   exposes exactly this scope (`packages: write`, default `GITHUB_TOKEN`) to
+   a GitHub-hosted runner in production, so extending the same credential
+   pattern to an opt-in amd64 overflow path is not a new security-posture
+   decision, only an extension of one already made and shipped.
 3. **Runner-tier CPU/memory.** Same constraint as the Rust class, at image-
    build scale: `build`, `merge-manifests`, `promote`, and `release` all run
-   on `lancache-heavy`. A full multi-service image build/push fallback on
-   standard hosted runners would be both slow and, per point 2, would need a
-   credential-exposure decision first.
+   on `lancache-heavy`. Standard hosted runners are slower for this; accepted
+   as the tradeoff for an emergency-only overflow path, same as the arm64
+   lane already accepts for its own always-on lane.
 
-**Recommendation:** image build/push fallback is **not attempted now**. It
-should only be revisited if self-hosted `lancache-heavy` capacity becomes a
-recurring, observed availability problem (not a hypothetical one), and any
-such follow-up must resolve the GHCR credential-exposure question explicitly
-before any hosted job gets `packages: write`. A follow-up issue tracks this
-as an investigation, not an implementation commitment.
+**Resolution (2026-07-23, #686):** `container-scan` (amd64) + `build` (amd64
+leg) + manifest merge now have an opt-in `workflow_dispatch` overflow path,
+`.github/workflows/build-push-hosted-fallback.yml`. `promote` and `release`
+remain self-hosted-only, deferred to a follow-up rather than reimplemented
+alongside this increment -- see that workflow's own header comment.
 
 ## Summary
 
@@ -185,6 +217,7 @@ as an investigation, not an implementation commitment.
 |---|---|---|
 | Cheap lint (file-headers, line-endings, shellcheck, pr-template-check, watchdog_test) | done | Always-on parallel hosted job |
 | `ci_scope_policy` | decided: not feasible | None -- inherits Rust jobs' own unavailability |
-| Rust build/test/audit | acceptable-but-slow | Not implemented; needs opt-in scoping, not always-on. Follow-up issue tracks prototyping. |
-| Image build/push (amd64/publish) | hard, not attempted | Follow-up issue tracks investigation; blocked on a GHCR credential-exposure decision |
+| Rust build/test/audit | acceptable-but-slow | Not implemented; needs opt-in scoping, not always-on. Follow-up issue tracks prototyping (#685). |
+| Image build/scan/merge (amd64/publish) | done (opt-in overflow) | `.github/workflows/build-push-hosted-fallback.yml`, `workflow_dispatch`-gated (issue #686) |
+| Image promote/release | not attempted | Channel-pointer/promote-lock machinery deferred; still self-hosted-only |
 | Image build (arm64) | already done | Native `ubuntu-24.04-arm` lane in `build-arm64` (issue #592) |
