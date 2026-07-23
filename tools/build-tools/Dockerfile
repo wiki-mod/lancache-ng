@@ -19,6 +19,18 @@ ARG DOCKER_BUILDX_VERSION=0.35.0
 # `go get` this exact module up to the fixed version before building instead
 # of carrying the vulnerability forward.
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
+# docker-buildx v0.35.0, docker-compose v5.2.0, AND the Docker CLI v29.6.1
+# (its own vendor.mod pins the same version -- checked when auditing all
+# four source-built tools for this same CVE class, not just the two CI
+# originally flagged) pin google.golang.org/grpc at v1.81.1, which carries a
+# HIGH-severity CVE (GHSA-hrxh-6v49-42gf, gRPC-Go xDS RBAC and HTTP/2
+# vulnerabilities) fixed in 1.82.1 -- confirmed via Trivy scanning this image
+# (CI run 29926535995 on PR #1070; tracked as issue #1080, the third
+# confirmed instance of this CVE class per CLAUDE.md's AG-KD-003). Same
+# reasoning as the containerd override above: neither project has cut a
+# release that resolves this on its own yet, so `go get` the fixed version
+# directly before building.
+ARG GRPC_GO_VERSION=1.82.1
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -47,7 +59,17 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # does not work (the Go toolchain has no module file to resolve against).
 # Cloning the tagged release (which ships its own complete vendor/ directory,
 # so this needs no network access beyond the initial clone) and running its
-# own `scripts/build/binary` reproduces upstream's exact official build.
+# own `scripts/build/binary` reproduces upstream's exact official build. To
+# bump the vendored grpc-go (same GHSA-hrxh-6v49-42gf CVE as buildx/compose
+# below), `go get`/`go mod vendor` need an actual `go.mod` to detect the
+# module root against -- `-modfile=vendor.mod` alone isn't enough, since Go
+# still looks for a literal `go.mod` to establish the root before it will
+# honor which *content* file to read/write. Symlinking `go.mod -> vendor.mod`
+# (and `go.sum -> vendor.sum`) for the duration of the bump, then deleting
+# the symlinks before `scripts/build/binary` runs, gives Go a real module
+# root while still writing through to the real `vendor.mod`/`vendor.sum` the
+# build actually uses -- confirmed working end-to-end (bump, re-vendor,
+# build, run) against this exact tag.
 # docker-compose is a normal Go-modules project, but its go.mod has `exclude`
 # directives, which `go install pkg@version` rejects (it requires treating the
 # target as if it were the main module, and `exclude` is only valid in a
@@ -75,6 +97,7 @@ RUN set -euo pipefail; \
     git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
     ( cd "$buildx_src" \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
@@ -82,13 +105,20 @@ RUN set -euo pipefail; \
     docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
     install -d "$(dirname "$docker_cli_src")"; \
     git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"; \
-    ( cd "$docker_cli_src" && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
+    ( cd "$docker_cli_src" \
+      && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
+      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go mod vendor \
+      && rm go.mod go.sum \
+      && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
     install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker; \
     rm -rf "$(go env GOPATH)/src/github.com"; \
     /out/docker --version; \
     compose_src="$(mktemp -d)"; \
     git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
-    ( cd "$compose_src" && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
+    ( cd "$compose_src" \
+      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
     rm -rf "$compose_src"; \
     /out/docker-compose version
 
