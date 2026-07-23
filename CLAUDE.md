@@ -119,7 +119,18 @@ by configuring which DNS server IP they point to:
   narrow, justified exception to the "Rust and shell only" project-language rule (see above),
   not a general license to add other language toolchains — re-justify it the same way (a real
   Trivy/CVE finding, not a hypothetical one) before reaching for a compiled-from-source
-  dependency in another language again.
+  dependency in another language again. Confirmed a third time (2026-07-22, GHSA-hrxh-6v49-42gf,
+  issue #1080): `docker-buildx` v0.35.0, `docker-compose` v5.2.0, AND the Docker CLI v29.6.1 all
+  pinned `google.golang.org/grpc` at v1.81.1, a HIGH-severity gRPC-Go xDS RBAC/HTTP-2
+  vulnerability fixed in v1.82.1 — found on buildx/compose via CI's Trivy scan, and on the Docker
+  CLI only by then auditing all four source-built tools for the same CVE class rather than
+  stopping at the two CI happened to flag. Fixed by an explicit `go get google.golang.org/grpc@1.82.1`
+  before each tool's build (mirroring the existing `containerd/containerd/v2` override already
+  used for buildx); the Docker CLI's `vendor.mod`-only layout (no real `go.mod`) needed a
+  temporary `go.mod -> vendor.mod` / `go.sum -> vendor.sum` symlink for `go get`/`go mod vendor`
+  to have a module root to write through, removed again before the build itself runs. Verified
+  clean (0 HIGH/CRITICAL across all four binaries) via a real Docker build + real Trivy scan
+  with CI's exact flags, not just a module-graph inspection.
 
 ## Dev vs Prod Split
 
