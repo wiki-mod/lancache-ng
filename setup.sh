@@ -1551,6 +1551,35 @@ sync_repo_to_default_branch() {
         || die "Failed to reset $repo_dir to origin/$default_branch."
 }
 
+# Resolves which git ref the standalone bootstrap (the self-clone path used by
+# the documented `curl | bash` one-liner) should check out. An operator-supplied
+# LANCACHE_SETUP_GIT_REF (mirroring the existing LANCACHE_IMAGE_CHANNEL env-var
+# override pattern) takes priority; unset/empty means "keep today's behavior"
+# (resolve and track origin's default branch) so existing installs, docs, and
+# automation are unaffected by this being introduced (#814).
+resolve_setup_bootstrap_ref() {
+    printf '%s\n' "${LANCACHE_SETUP_GIT_REF:-}"
+}
+
+# Hard-resets a repo checkout to a specific, operator-pinned ref (branch, tag,
+# or commit-ish). Fetches the ref explicitly by name rather than relying on a
+# bare `git fetch --prune origin` (which only guarantees branches land under
+# refs/remotes/origin/* -- tag-following is a local clone/config detail this
+# function should not have to assume) so this works uniformly whether "ref" is
+# a branch or a release tag such as v0.2.0. Refuses to run on a dirty tree,
+# matching sync_repo_to_default_branch's safety behavior above.
+sync_repo_to_ref() {
+    local repo_dir="$1" ref="$2"
+
+    git_repo_is_clean "$repo_dir" \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+
+    git -C "$repo_dir" fetch --prune origin "$ref" \
+        || die "Failed to fetch ref '$ref' for $repo_dir. Check that LANCACHE_SETUP_GIT_REF names a real branch, tag, or commit on origin."
+    git -C "$repo_dir" checkout -B "$ref" FETCH_HEAD \
+        || die "Failed to reset $repo_dir to ref '$ref'."
+}
+
 # Resolves the git repo root two levels above a deploy/prod install_dir
 # (deploy/prod -> repo root), used to locate the manual production repo's
 # other runtime inputs (certs/, config/prod/, cdn-domains.txt).
@@ -1894,7 +1923,7 @@ resume_lancache_convergence_after_failed_update() {
 }
 
 # Image selection is part of the release safety contract: mutable channels such
-# as latest/nightly/dev must resolve to one immutable stack tag before the compose
+# as latest/nightly must resolve to one immutable stack tag before the compose
 # pull, so one installation cannot accidentally mix image versions.
 validate_lancache_image_tag() {
     local tag="$1"
@@ -1940,17 +1969,36 @@ validate_lancache_image_tag() {
 # LANCACHE_IMAGE_CHANNEL=edge is rejected with a clear, actionable error telling
 # the operator to switch to "nightly", rather than being silently accepted as a
 # synonym. This is an intentional v0.3.0 breaking change.
+#
+# "dev" was RETIRED (not renamed) in v0.3.0 (#825/#1141): it used to publish
+# automatically from whichever vX.Y.Z branch was the active pre-release
+# integration branch of the time. Since current_dev became the permanent
+# active-development branch, that role was never re-pointed to it -- the
+# maintainer's decision (#825, 2026-07-23: "master = stable, current_dev =
+# nightly, vY.X.Z = archived release") formally retired dev instead, because
+# archived vY.X.Z branches are frozen release history now, not an active
+# integration branch, so there is nothing left for a dev channel to mean.
+# This is the same HARD CUT treatment as edge, for the same reason: silently
+# keeping dev valid would mean install/update against an increasingly stale,
+# unmaintained image with no warning. dev was never offered by setup.sh's
+# interactive picker or the Admin UI's channel control (see
+# lancache_ui_channel_override_is_valid), so this only affects operators who
+# set LANCACHE_IMAGE_CHANNEL=dev explicitly via .env/shell env or the
+# secondary-node registration flow.
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
-        stable|latest|dev|nightly|pinned)
+        stable|latest|nightly|pinned)
             return 0
             ;;
         edge)
             die "LANCACHE_IMAGE_CHANNEL=edge is no longer supported: the 'edge' channel was renamed to 'nightly' in v0.3.0 (#1056). Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly and re-run setup.sh."
             ;;
+        dev)
+            die "LANCACHE_IMAGE_CHANNEL=dev is no longer supported: the 'dev' channel was retired in v0.3.0 (#825/#1141) -- archived vY.X.Z release branches no longer publish a live channel. Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly (tracks current_dev's ongoing development) or LANCACHE_IMAGE_CHANNEL=stable/latest (tracks the stable release), then re-run setup.sh."
+            ;;
     esac
-    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, dev, nightly, or pinned."
+    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, nightly, or pinned."
 }
 
 # Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
@@ -2114,11 +2162,11 @@ resolve_lancache_image_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# Resolves which release channel (latest/dev/nightly/pinned) this install should
+# Resolves which release channel (latest/nightly/pinned) this install should
 # track, in this precedence order:
 #   1. An explicit LANCACHE_IMAGE_CHANNEL (shell env, then .env).
 #   2. If no channel was set but LANCACHE_IMAGE_TAG names a moving channel
-#      word (latest/dev/nightly), infer that as the channel; if it names an
+#      word (latest/nightly), infer that as the channel; if it names an
 #      immutable tag (sha-*/vX.Y.Z), infer channel=pinned.
 #   3. If still unresolved and this is a git checkout/release archive with a
 #      derivable release tag, infer channel=pinned so that exact release is used.
@@ -2138,7 +2186,7 @@ resolve_lancache_image_channel() {
     fi
 
     case "$tag" in
-        stable|latest|dev|nightly)
+        stable|latest|nightly)
             channel="${channel:-$tag}"
             ;;
         sha-*|v[0-9]*)
@@ -2178,7 +2226,9 @@ resolve_lancache_image_channel() {
 # Note there is deliberately no "edge -> nightly" mapping here: the old "edge"
 # channel was hard-cut, not aliased, in v0.3.0 (#1056) -- an edge value is
 # rejected by validate_lancache_image_channel long before this function, so it
-# never reaches this pointer resolution.
+# never reaches this pointer resolution. The same is true of the retired
+# "dev" channel (#825/#1141): validate_lancache_image_channel rejects it
+# before this function ever sees it, so there is no "dev" case here either.
 lancache_stack_pointer_channel_for() {
     local channel="$1"
     if [[ "$channel" = "stable" ]]; then
@@ -2188,7 +2238,7 @@ lancache_stack_pointer_channel_for() {
     fi
 }
 
-# Turns a mutable channel name (latest/dev/nightly) into one immutable sha-* tag.
+# Turns a mutable channel name (latest/nightly) into one immutable sha-* tag.
 # Channels are published as a tiny "stack:<channel>" pointer image whose only
 # content is a stack.env file naming the current immutable LANCACHE_IMAGE_TAG
 # for that channel; this pulls that pointer image, reads stack.env out of it
@@ -2223,8 +2273,8 @@ resolve_lancache_stack_channel_tag() {
 ${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'nightly' testing channel daily from master, a formal stable release with a
-published 'latest'/'stable' channel tag has not yet been created.
+to the 'nightly' testing channel continuously from current_dev, a formal stable release
+with a published 'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
@@ -2280,7 +2330,7 @@ resolve_lancache_image_tag() {
 
     if [[ -n "$tag" ]]; then
         case "$tag" in
-            stable|latest|dev|nightly)
+            stable|latest|nightly)
                 resolve_lancache_stack_channel_tag "$env_file" "$tag"
                 return 0
                 ;;
@@ -2298,7 +2348,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$channel" in
-        stable|latest|dev|nightly)
+        stable|latest|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$channel"
             return 0
             ;;
@@ -2328,7 +2378,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$tag" in
-        stable|latest|dev|nightly)
+        stable|latest|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$tag"
             return 0
             ;;
@@ -3436,6 +3486,13 @@ Usage: ./setup.sh install
 
 Runs the guided LanCache-NG installer. This is the default command when no
 argument is provided, which preserves the existing curl | bash setup flow.
+
+When no local repo is found (the standalone curl | bash path), this command
+self-clones to /opt/lancache-ng from the remote's default branch (master) by
+default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
+LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
+for validating a pre-release branch the same documented one-liner way that
+LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
 EOF
             ;;
         update)
@@ -3675,7 +3732,12 @@ verify_stack_functional_health() {
     # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
     # container answers a real query at all (AGENTS.md requires a real
     # query/response probe here, not ping/ss), not that every domain resolves.
-    test_fqdn="steamcontent.com"
+    # Must be a bare-apex cdn-domains.txt entry, not a wildcard-only one
+    # (leading-dot, e.g. ".steamcontent.com" since #1073): RPZ wildcard-only
+    # entries never match the bare apex itself, so probing steamcontent.com
+    # directly always came back empty after #1073 and permanently failed this
+    # gate even on a perfectly healthy stack (issue #1149).
+    test_fqdn="content1.steampowered.com"
     if [[ -n "$ip_standard" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
         resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>/dev/null)
@@ -3982,12 +4044,14 @@ cmd_auto_update() {
 # unsuitable here, since an unexpected value from the UI must be a silent
 # no-op tick, not an aborted systemd service run). Only "stable"/"nightly" are
 # accepted, matching exactly what routes/setup.rs's is_valid_ui_channel now
-# offers the operator; this intentionally does not widen to "dev"/"pinned"
-# even once another codepath's validator learns those, since this control was
-# never meant to set them. "edge" (the old name of "nightly", renamed in v0.3.0
-# #1056) is deliberately NOT accepted -- consistent with the hard cut elsewhere.
-# A settings volume still holding "edge" from a pre-rename Admin UI is treated
-# as an unrecognized value and no-op'd here (this must not `die` -- see above --
+# offers the operator; this intentionally does not widen to "pinned" even
+# once another codepath's validator learns it, since this control was never
+# meant to set it. "edge" (the old name of "nightly", renamed in v0.3.0
+# #1056) and "dev" (retired, not renamed, in v0.3.0 #825/#1141) are both
+# deliberately NOT accepted -- consistent with the hard cut elsewhere, and
+# neither was ever offered by the Admin UI to begin with. A settings volume
+# still holding "edge" from a pre-rename Admin UI is treated as an
+# unrecognized value and no-op'd here (this must not `die` -- see above --
 # because it runs inside the auto-update service tick); the operator re-picks a
 # valid channel in the current UI.
 lancache_ui_channel_override_is_valid() {
@@ -5050,7 +5114,11 @@ EOF
     # (visible to anything reading `ps`/`/proc/<pid>/cmdline` on this host),
     # the same exposure class already fixed for kea_ctrl_post's Basic-Auth
     # credential (#955/#956).
-    if ! http_status=$(printf '{"token":"%s","name":"%s"}' "$token" "$name" \
+    # #1084: also report this secondary's chosen DNS bind IP so the primary can
+    # store it and later run an active health probe against it. Harmless if the
+    # primary is older and ignores the field; the primary validates it as a
+    # private IPv4 before storing, so a blank/odd value is simply dropped.
+    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token" "$name" "$listen_ip" \
         | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d @- \
@@ -5154,7 +5222,7 @@ EOF
     if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
         lancache_image_channel="$response_image_channel"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|dev|nightly)$ ]]; then
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|nightly)$ ]]; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -5167,7 +5235,7 @@ EOF
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
         LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|dev|nightly)$ ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|nightly)$ ]]; then
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -5258,7 +5326,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -5432,9 +5500,18 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     if ! command -v git >/dev/null 2>&1; then
         install_git
     fi
+    setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
     if [[ -d "/opt/lancache-ng/.git" ]]; then
-        print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
-        sync_repo_to_default_branch /opt/lancache-ng
+        if [[ -n "$setup_bootstrap_ref" ]]; then
+            print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
+            sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
+        else
+            print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+            sync_repo_to_default_branch /opt/lancache-ng
+        fi
+    elif [[ -n "$setup_bootstrap_ref" ]]; then
+        git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+            || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
     else
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
             || die "Clone failed."
@@ -5568,7 +5645,7 @@ else
     printf "           Recommended for most installs. This is what './setup.sh update'\n"
     printf "           tracks by default, and what most operators should stay on.\n"
     printf "  nightly — the most recently built channel from active development.\n"
-    printf "            Refreshes more often (daily from master), may be less tested\n"
+    printf "            Refreshes continuously from current_dev, may be less tested\n"
     printf "            than stable. Opt in only if you specifically want the newest\n"
     printf "            changes and accept the extra risk.\n\n"
 

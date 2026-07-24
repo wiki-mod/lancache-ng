@@ -90,17 +90,20 @@
 //! per-secondary-identity/revocation property this module delivers.
 
 use crate::AppState;
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
+use argon2::Argon2;
 use base64::Engine as _;
 use nkeys::KeyPair;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256, Sha512_256};
+use sha2::{Digest, Sha512_256};
 use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use subtle::ConstantTimeEq;
 
 const REQUEST_AUTH_SUBJECT: &str = "$SYS.REQ.USER.AUTH";
 /// NATS's implicit default account. No `accounts {}` block is configured
@@ -208,15 +211,31 @@ pub fn load_or_create_issuer_keypair(path: &str) -> Result<KeyPair, String> {
     }
 }
 
-/// SHA-256 hash of a secondary's plaintext NATS password, hex-encoded, for
-/// at-rest storage in `secondaries.nats_password_hash`. Not salted: values
-/// are always 32-byte CSPRNG output (see `routes::secondaries`), never
-/// user-chosen, so per-password salting adds no defense against precomputed
-/// tables that a fixed random value can't already outrun.
-pub fn hash_nats_password(password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hex::encode(hasher.finalize())
+/// Argon2id hash of a secondary's plaintext NATS password, in PHC string
+/// format (`$argon2id$v=19$m=...,t=...,p=...$<b64-salt>$<b64-hash>`), for
+/// at-rest storage in `secondaries.nats_password_hash`. A fresh random salt is
+/// generated per call, so two hashes of the same password differ; verification
+/// therefore cannot re-hash-and-compare and instead uses Argon2's own
+/// `PasswordVerifier::verify_password` (see `authorize_secondary_with_conn`).
+///
+/// This replaces the previous unsalted single-round SHA-256 (#680) as
+/// defense-in-depth. The stored passwords are currently always 32-byte CSPRNG
+/// output (`generate_nats_password`), against which a slow, salted KDF buys
+/// nothing today — but nothing enforces that "always CSPRNG" invariant at the
+/// type level, so Argon2id removes the latent weakness that would appear the
+/// instant any future path let an operator set a *chosen* password, with no
+/// warning under the old scheme.
+///
+/// Returns `Err` only if Argon2 hashing itself fails. That does not happen for
+/// the default parameters plus a freshly generated valid salt, but it is
+/// surfaced as an error rather than panicked because both callers
+/// (`register_secondary`, `rotate_token`) run inside request handlers.
+pub fn hash_nats_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| format!("failed to hash secondary password with Argon2id: {e}"))
 }
 
 /// Subject-level permissions granted to every secondary: identical to the
@@ -243,8 +262,9 @@ fn secondary_permissions() -> Value {
     })
 }
 
-/// Looks up `nats_user` in the `secondaries` table and constant-time-compares
-/// its stored password hash against the presented password's hash. Returns
+/// Looks up `nats_user` in the `secondaries` table and verifies the presented
+/// password against its stored Argon2id hash using Argon2's own verifier
+/// (which does the constant-time comparison internally). Returns
 /// `Some(secondary_name)` on success (used as the issued identity's `name`
 /// claim), `None` on any lookup/verification failure — a missing row (never
 /// registered, or removed via `remove_secondary`) and a wrong password are
@@ -270,11 +290,19 @@ fn authorize_secondary_with_conn(
             |row| row.get(0),
         )
         .ok()?;
-    let presented_hash = hash_nats_password(password);
-    if stored_hash
-        .as_bytes()
-        .ct_eq(presented_hash.as_bytes())
-        .into()
+    // Parse the stored PHC-format Argon2id hash. Two failure modes both
+    // fail closed here: a row whose hash column is NULL (a legacy pre-#583
+    // shared-token row) never reaches this point because query_row above
+    // fails to produce a String; a row whose hash is a non-PHC string (a
+    // legacy pre-#680 unsalted SHA-256 hex digest) fails to parse here and
+    // returns None. The old SHA-256 scheme is deliberately NOT kept as a
+    // verification fallback (#680): there is no in-place upgrade, so any
+    // secondary still holding a SHA-256-era credential must re-register or
+    // rotate to obtain an Argon2id hash before it can authenticate again.
+    let parsed_hash = PasswordHash::new(&stored_hash).ok()?;
+    if Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok()
     {
         Some(nats_user.to_string())
     } else {
@@ -457,7 +485,7 @@ mod tests {
         conn.execute(
             "INSERT INTO secondaries (name, consumer_name, nats_token, nats_user, nats_password_hash, registered_at)
              VALUES (?1, ?1, '', ?1, ?2, 0)",
-            rusqlite::params![name, hash_nats_password(password)],
+            rusqlite::params![name, hash_nats_password(password).unwrap()],
         )
         .unwrap();
     }
@@ -532,7 +560,7 @@ mod tests {
 
         conn.execute(
             "UPDATE secondaries SET nats_password_hash = ?1 WHERE name = 'secondary-a'",
-            [hash_nats_password(&test_secret("new"))],
+            [hash_nats_password(&test_secret("new")).unwrap()],
         )
         .unwrap();
 
@@ -644,13 +672,68 @@ mod tests {
         assert!(decode_jwt_payload("").is_err());
     }
 
+    // #680: Argon2id is deliberately NOT deterministic -- a fresh random salt
+    // per call means two hashes of the same password differ, which is the
+    // whole point (it defeats precomputation). This replaces the old
+    // SHA-256-era "deterministic and distinct" test, which asserted the exact
+    // opposite (same input -> byte-identical hash). Assert the properties that
+    // matter under the new scheme: two hashes of one password differ (the salt
+    // is applied) yet BOTH still verify against that password, and a wrong
+    // password fails to verify.
     #[test]
-    fn hash_nats_password_is_deterministic_and_distinct() {
-        let a = hash_nats_password(&test_secret("one"));
-        let b = hash_nats_password(&test_secret("one"));
-        let c = hash_nats_password(&test_secret("two"));
-        assert_eq!(a, b);
-        assert_ne!(a, c);
+    fn hash_nats_password_salts_and_verifies() {
+        let secret = test_secret("one");
+        let a = hash_nats_password(&secret).expect("hashing succeeds");
+        let b = hash_nats_password(&secret).expect("hashing succeeds");
+        assert_ne!(
+            a, b,
+            "a fresh per-call salt must make the two hashes differ"
+        );
+
+        let parsed_a = PasswordHash::new(&a).expect("hash a is a valid PHC string");
+        let parsed_b = PasswordHash::new(&b).expect("hash b is a valid PHC string");
+        assert!(
+            Argon2::default()
+                .verify_password(secret.as_bytes(), &parsed_a)
+                .is_ok(),
+            "the correct password must verify against hash a"
+        );
+        assert!(
+            Argon2::default()
+                .verify_password(secret.as_bytes(), &parsed_b)
+                .is_ok(),
+            "the correct password must verify against hash b despite a different salt"
+        );
+        assert!(
+            Argon2::default()
+                .verify_password(test_secret("two").as_bytes(), &parsed_a)
+                .is_err(),
+            "a wrong password must not verify"
+        );
+    }
+
+    // #680 migration behavior: a secondary row still holding a legacy pre-#680
+    // unsalted SHA-256 hex digest (not a PHC-format Argon2id string) must fail
+    // closed -- authorize returns None rather than panicking or authorizing --
+    // so the operator must re-register/rotate to obtain an Argon2id credential.
+    // Guards against silently keeping the old weak scheme alive as a
+    // verification fallback.
+    #[test]
+    fn legacy_sha256_hex_hash_is_denied() {
+        let conn = test_db();
+        // A 64-char all-hex string shaped exactly like the old SHA-256 output;
+        // it is not a valid Argon2 PHC string, so PasswordHash::new rejects it.
+        let legacy_hex = "a".repeat(64);
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, nats_user, nats_password_hash, registered_at)
+             VALUES ('legacy-hash', 'legacy-hash', '', 'legacy-hash', ?1, 0)",
+            [legacy_hex],
+        )
+        .unwrap();
+        assert_eq!(
+            authorize_secondary_with_conn(&conn, "legacy-hash", "anything"),
+            None
+        );
     }
 
     #[test]
