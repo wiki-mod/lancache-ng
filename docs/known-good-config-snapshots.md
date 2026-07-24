@@ -975,7 +975,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
     container's own identity runs `rollback_handler` (`NATS_DNS_WRITER_USER`
     on `dns-standard`, `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only
     works if that identity's `publish` allow-list in `nats.conf` (and the
-    byte-identical generators in `deploy/dev`, `deploy/prod`,
+    byte-identical generators in `deploy/prod` and
     `deploy/quickstart/docker-compose.yml`) actually includes that subject.
     It shipped without it: every rollback correctly patched PowerDNS but
     the flush was silently denied server-side, and the `POST /rollback`

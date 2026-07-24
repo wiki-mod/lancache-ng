@@ -177,7 +177,8 @@ fn load_or_create_session_secret() -> Result<[u8; 32]> {
 // manual path ("Or manually: Edit .env ... docker compose up -d") ships either
 // an empty default (deploy/quickstart compose's `${SECONDARY_REGISTRATION_TOKEN:-}`)
 // or a public placeholder (deploy/quickstart/.env's YOUR_..._HERE,
-// deploy/prod/.env's CHANGE_ME_*, deploy/dev compose's lancache-reg-dev-secret).
+// deploy/prod/.env's CHANGE_ME_*, or the now-retired deploy/dev compose's
+// lancache-reg-dev-secret, v0.3.0 #766).
 // Those all previously boot-looped the UI. Generating the same kind of secret
 // setup.sh would -- persisted next to the other /data secrets so it never
 // rotates across restarts (a rotating token would break an already-registered

@@ -92,7 +92,19 @@ to record and correct the transient contradiction.
 
 ## 1. Structural comparison of the four `nats:` service blocks
 
-| Aspect | dev | prod | quickstart | full-setup |
+**UPDATE (v0.3.0, #766): the `dev` column below is historical.**
+`deploy/dev/docker-compose.yml` was deleted outright when the
+`deploy/dev`/`config/dev` environment was retired -- it was never a
+deliberately engineered second deployment, just an over-built AI
+misinterpretation of the maintainer's original, much simpler intent (develop
+on the `current_dev` git branch, not a parallel compose profile). The `dev`
+column and every `dev`-column-specific finding below (in particular the "dead
+bind mount" finding) describe a stack that no longer exists in this
+repository; kept for historical comparison rather than rewritten, matching
+how this file already treats other superseded findings above (see the
+UPDATE/Corrected notes for the monitor-port gap).
+
+| Aspect | dev (retired, v0.3.0) | prod | quickstart | full-setup |
 |---|---|---|---|---|
 | `container_name` | `lancache-nats` | `lancache-nats` | `lancache-nats` | *(none — validation network)* |
 | Image | `nats:2-alpine@sha256:c11af9...` (same digest all 4) | same | same | same |
@@ -111,14 +123,15 @@ to record and correct the transient contradiction.
 
 ### Findings from the table
 
-- **Dead bind mount, dev only.** `deploy/dev/docker-compose.yml` mounts
-  `../../services/nats/nats.conf:/nats-default.conf:ro`, but the entrypoint
-  script never reads `/nats-default.conf` — it generates its own template
-  inline via heredoc and writes straight to `/etc/nats/nats.conf`.
+- **Dead bind mount, dev only (moot since v0.3.0, #766 -- the whole `dev`
+  stack this described was deleted).** `deploy/dev/docker-compose.yml` used
+  to mount `../../services/nats/nats.conf:/nats-default.conf:ro`, but the
+  entrypoint script never read `/nats-default.conf` — it generates its own
+  template inline via heredoc and writes straight to `/etc/nats/nats.conf`.
   `services/nats/nats.conf` is explicitly documented in its own header as
-  "Reference copy only" (accurate), but the dev-only mount of that file into
-  the container itself is dead weight: copied in, never read. prod/quickstart
-  correctly skip it.
+  "Reference copy only" (accurate), and the dev-only mount of that file into
+  the container was dead weight: copied in, never read. prod/quickstart
+  never had it.
 - **`expose: ["4222"]` only in prod.** Documentation-only Compose field (does
   not itself publish anything), but inconsistently present — dev/quickstart/
   full-setup omit it even though the port is equally relevant there.

@@ -1391,7 +1391,6 @@ jobs:
           }
 
           validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
-          validate_compose -f deploy/dev/docker-compose.yml
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
@@ -1402,7 +1401,6 @@ jobs:
           # explicit profile activation so their service definitions are
           # actually parsed and validated, not silently excluded.
           for compose_file in \
-            deploy/dev/docker-compose.yml \
             deploy/prod/docker-compose.yml \
             deploy/quickstart/docker-compose.yml; do
             validate_compose -f "$compose_file" --profile dhcp-kea
@@ -1417,7 +1415,6 @@ jobs:
             local path
 
             for path in \
-              deploy/dev/docker-compose.yml \
               deploy/prod/docker-compose.yml \
               deploy/quickstart/docker-compose.yml
             do
@@ -1463,11 +1460,11 @@ jobs:
           grep -Fq 'write_env_file "${secondary_dir}/.env"' setup.sh \
             || { echo "::error::Secondary setup must use the safe env writer for generated .env files."; exit 1; }
 
-          if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+          if grep -F 'EXEC: "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
             exit 1
           fi
-          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
@@ -1499,7 +1496,7 @@ jobs:
               exit 1
             }
 
-          for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+          for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
             grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
@@ -1598,19 +1595,18 @@ jobs:
                   exit 1
                 }
                 if (saw_environment || saw_interpolated_dhcp_key) {
-                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for dev/prod.\n", compose_file
+                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for prod.\n", compose_file
                   exit 1
                 }
               }
             ' "$compose_file"
           }
 
-          # Dev/prod dhcp-proxy values are written by setup into env files.
+          # Prod dhcp-proxy values are written by setup into env files.
           # Compose interpolation does not read env_file values, so explicit
           # environment entries here would silently erase the configured proxy
           # DHCP settings. Quickstart is intentionally separate because setup
           # writes its single .env file directly.
-          validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
           # Issue #450: dnsmasq relay/proxy optional-option surface. Guards
@@ -1625,7 +1621,7 @@ jobs:
             DHCP_PROXY_BOOT_SERVER
             DHCP_PROXY_CUSTOM_OPTIONS
           )
-          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
             for key in "${dhcp_proxy_optional_keys[@]}"; do
               grep -Eq "^${key}=" "$env_file" \
                 || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the dnsmasq relay/proxy optional-option surface added by issue #450."; exit 1; }
@@ -1648,7 +1644,7 @@ jobs:
             DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
             DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
           )
-          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
             for key in "${dhcp_proxy_pxe_keys[@]}"; do
               grep -Eq "^${key}=" "$env_file" \
                 || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the PXE boot-pointer opt-in surface added by issue #705."; exit 1; }

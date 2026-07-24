@@ -74,10 +74,13 @@ lancache_gen_base64_32() {
 # confirmed via tests/fixtures/placeholder-detection-cases.txt and
 # tests/bats/placeholder_detection_parity.bats:
 #   - This function does NOT recognize the legacy "lancache-*-secret"
-#     template-default shape. This omission IS deliberate:
-#     deploy/dev/docker-compose.yml and deploy/dev/.env ship real, working dev
-#     secrets in exactly that shape (e.g. lancache-nats-ui-dev-secret) that
-#     this read path must accept as configured, not regenerate.
+#     template-default shape. This omission IS deliberate: the now-retired
+#     deploy/dev/docker-compose.yml and deploy/dev/.env (v0.3.0, #766)
+#     shipped real, working dev secrets in exactly that shape (e.g.
+#     lancache-nats-ui-dev-secret) that this read path had to accept as
+#     configured, not regenerate. Kept as a regression pin (see the test
+#     fixtures below) so that shape is never misclassified if an operator's
+#     own secret happens to match it.
 #   - This function does NOT recognize a bare "change-me"/"change_me" infix
 #     without a CHANGE_ME/changeme prefix, unlike setup.sh/Rust. Pre-existing,
 #     not reconciled here (#967 Option B keeps the three pattern sets
