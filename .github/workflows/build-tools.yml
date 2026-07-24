@@ -185,6 +185,14 @@ jobs:
     # capacity on it.
     name: determine build-tools publish scope
     runs-on: ubuntu-latest
+    # Narrows the workflow-level grant (packages/id-token/attestations/
+    # artifact-metadata: write, needed by the build/publish jobs below) down
+    # to what this job actually uses: a checkout plus a git diff to compute an
+    # output. It never logs in to GHCR, pushes an image, or attests anything,
+    # so it has no legitimate use for any of those write scopes (OSPS-AC-04.02
+    # least-privilege audit, refs #1130).
+    permissions:
+      contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
