@@ -40,13 +40,16 @@
 #    open issue (bounded, cheap at this repo's scale), and uses the 5000/hr
 #    REST budget instead of the Search API's much stricter 30/min.
 #
-# 3. Branch exclusion uses an exact-name list (master, badges) plus a glob
-#    pattern (v[0-9]*) for release branches, rather than hardcoding exactly
-#    v0.1.0 and v0.2.0 -- matching gc-pr-staging-images.yml's own
-#    `branches: [master, "v[0-9]*"]` convention and not silently missing a
-#    future v0.3.0. `badges` is excluded because build-push.yml's
-#    coverage-badge-publish job pushes directly to it as a legitimate,
-#    intentionally-shared branch, not because it is genuinely untracked.
+# 3. Branch exclusion uses an exact-name list (master, current_dev, badges)
+#    plus a glob pattern (v[0-9]*) for release branches, rather than
+#    hardcoding exactly v0.1.0 and v0.2.0 -- matching gc-pr-staging-images.yml's
+#    own `branches: [master, current_dev, "v[0-9]*"]` convention and not
+#    silently missing a future v0.3.0. `current_dev` is exact-name (not
+#    glob-matched) because it is today's actual active integration branch
+#    name, not a vX.Y.Z-shaped one (#709). `badges` is excluded because
+#    build-push.yml's coverage-badge-publish job pushes directly to it as a
+#    legitimate, intentionally-shared branch, not because it is genuinely
+#    untracked.
 #
 # --- Failure-mode policy ----------------------------------------------------
 #
@@ -118,9 +121,15 @@ ref_prefix="${REF_PREFIX:-refs/remotes/${remote_name}}"
 sleep_between_calls="${SLEEP_BETWEEN_CALLS:-0.2}"
 
 # Exact-name and glob-pattern exclusions. Layering EXTRA_* on top of (never
-# replacing) these defaults keeps master/badges/release-branches protected
-# even if a caller only meant to widen the list, not narrow it.
-excluded_names=(master badges)
+# replacing) these defaults keeps master/current_dev/badges/release-branches
+# protected even if a caller only meant to widen the list, not narrow it.
+# current_dev added per #709's audit: it is the active development branch
+# today (v0.2.0 is frozen) and does not match the v[0-9]* release-branch
+# glob below, so without an explicit exact-name entry this guard would have
+# been able to flag the project's own primary integration branch itself as
+# orphaned, having neither an open PR (branches merge INTO it, not FROM it)
+# nor necessarily a naming-based exemption.
+excluded_names=(master current_dev badges)
 excluded_patterns=('v[0-9]*')
 if [ -n "${EXTRA_EXCLUDED_BRANCH_NAMES:-}" ]; then
   read -ra extra_names <<<"$EXTRA_EXCLUDED_BRANCH_NAMES"

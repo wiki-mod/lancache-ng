@@ -169,8 +169,9 @@ mock_issue_comments() {
         -- 200 "$body"
 }
 
-@test "excludes master, badges, and release-glob branches regardless of age" {
+@test "excludes master, current_dev, badges, and release-glob branches regardless of age" {
     make_branch_at_age "master" 7200
+    make_branch_at_age "current_dev" 7200
     make_branch_at_age "badges" 7200
     make_branch_at_age "v0.2.0" 7200
     make_branch_at_age "feat/genuinely-orphaned" 7200
@@ -180,6 +181,11 @@ mock_issue_comments() {
     run bash "$script" "$fixture_repo"
     [ "$status" -eq 0 ]
     [[ "$output" != *"'master'"* ]]
+    # #709: current_dev is the active dev branch (v0.2.0 is frozen) and does
+    # not match the v[0-9]* glob, so it needs its own exact-name exclusion --
+    # this asserts the guard never flags the project's own primary
+    # integration branch as orphaned.
+    [[ "$output" != *"'current_dev'"* ]]
     [[ "$output" != *"'badges'"* ]]
     [[ "$output" != *"'v0.2.0'"* ]]
     [[ "$output" == *"feat/genuinely-orphaned"* ]]

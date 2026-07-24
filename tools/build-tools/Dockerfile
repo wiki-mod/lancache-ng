@@ -251,21 +251,24 @@ RUN docker --version; \
 # own (separate, host-interface) dry-run check -- reusing it here keeps the
 # project to one DHCP client implementation instead of two.
 #
-# python3-scapy + tcpdump are needed by
-# scripts/dhcp-proxy-pxe-simulation.sh (issue #705) to craft a synthetic
-# PXE client's DHCPDISCOVER (option 60=PXEClient, option 93=client-system-
+# tcpdump is needed by scripts/dhcp-proxy-pxe-simulation.sh (issue #705) to
+# reliably capture dnsmasq's real DHCPOFFER reply to the synthetic PXE
+# client's DHCPDISCOVER (option 60=PXEClient, option 93=client-system-
 # architecture) -- something no ordinary DHCP client like dhclient can be
-# made to send -- and to reliably capture dnsmasq's real DHCPOFFER reply.
-# Capture goes through tcpdump writing to a pcap file rather than scapy's
-# own live-sniff path (srp1/sniff): confirmed directly during this issue's
-# investigation that scapy's live sniff missed real, verified-via-tcpdump
-# replies from this exact dnsmasq build inside a Docker bridge network,
-# for reasons not fully diagnosed (dnsmasq's replies here carry a
-# deliberately unusual UDP checksum, flagged "bad" by tcpdump itself,
-# which is one plausible cause). Reading the same reply back from a
-# tcpdump-written pcap file with scapy's offline rdpcap() is a separate,
-# already-written-to-disk code path unaffected by that live-capture gap,
-# and was confirmed reliable against the same real replies.
+# made to send. The synthetic client itself is the Rust binary
+# tools/pxe-client-probe (built from source by that script using this
+# image's own Rust toolchain), which crafts and raw-sends the frame; capture
+# goes through tcpdump writing to a pcap file rather than any live in-process
+# sniff. Confirmed directly during this issue's investigation that an
+# in-process live sniff missed real, verified-via-tcpdump replies from this
+# exact dnsmasq build inside a Docker bridge network, for reasons not fully
+# diagnosed (dnsmasq's replies here carry a deliberately unusual UDP
+# checksum, flagged "bad" by tcpdump itself, which is one plausible cause).
+# Reading the same reply back from a tcpdump-written pcap file is a separate,
+# already-written-to-disk code path unaffected by that live-capture gap, and
+# was confirmed reliable against the same real replies. (python3 below is NOT
+# for this script -- it is required by distcc-pump; the former python3-scapy
+# dependency was removed when the probe was rewritten from Python to Rust.)
 #
 # APT_CACHE_BUST (issue #1147): BuildKit's local/gha layer cache has no
 # wall-clock expiry of its own, only cache-key (instruction text) expiry --
@@ -320,7 +323,6 @@ RUN set -euo pipefail; \
       openssl \
       procps \
       python3 \
-      python3-scapy \
       rsync \
       tcpdump; \
     # Base and tool packages can receive security fixes after the upstream
@@ -434,11 +436,6 @@ RUN set -euo pipefail; \
     sccache --version; \
     cargo audit --version; \
     cargo tarpaulin --version; \
-    # python3-scapy has no standalone binary worth checking via command -v
-    # (Debian's package does ship a `scapy` console script, but
-    # scripts/dhcp-proxy-pxe-simulation.sh only ever needs the importable
-    # module) -- verify the actual thing that script depends on instead.
-    python3 -c 'import scapy.all'; \
     actionlint --version; \
     bats --version; \
     shellspec --version; \
