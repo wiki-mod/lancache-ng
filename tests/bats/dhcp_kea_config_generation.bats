@@ -34,6 +34,11 @@ setup() {
     export KEA_CTRL_HOST="0.0.0.0"
     export DDNS_TSIG_KEY="dGVzdC10c2lnLWtleS1iYXNlNjQtZW5jb2RlZA=="
     export DHCP_NTP_OPTION=""
+    # issue #1076: the entrypoint normalizes DHCP_DDNS_ENABLED to a bare
+    # true/false before envsubst splices it into "enable-updates". These tests
+    # bypass the entrypoint and drive envsubst directly, so the already-
+    # normalized boolean literal is exported here.
+    export DHCP_DDNS_ENABLED="true"
     # Fake but plausible: matches the real amd64 multiarch path
     # entrypoint.sh's `find /usr/lib -maxdepth 5 -name
     # libdhcp_lease_cmds.so` resolves at container startup. Only the
@@ -50,7 +55,7 @@ setup() {
     # by whatever happens to be in the shell environment. If this list
     # drifts from entrypoint.sh's, the test stops exercising the real
     # rendering behavior.
-    export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}'
+    export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
 }
 
 # is_ipv4 is the fail-fast address-format gate used by the NTP-resolution
@@ -275,6 +280,38 @@ setup() {
     run jq -e '.Dhcp4["hooks-libraries"][0].library' "$dhcp4_output"
     [ "$status" -eq 0 ]
     [ "$output" = '"/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"' ]
+}
+
+# issue #1076: enable-updates must render as a bare JSON boolean (not a quoted
+# string, which Kea rejects) mirroring DHCP_DDNS_ENABLED, so the first-boot
+# render and the Admin UI DDNS toggle's default agree. A regression that
+# quoted the value or dropped the ${DHCP_DDNS_ENABLED} substitution from the
+# template or ENVSUBST_VARS would be caught here -- an unsubstituted
+# "${DHCP_DDNS_ENABLED}" would render as invalid JSON, and a quoted "true"
+# would fail the boolean-type assertion below.
+@test "DHCP4 config renders dhcp-ddns.enable-updates from DHCP_DDNS_ENABLED" {
+    dhcp4_template="$repo_root/services/dhcp/kea-dhcp4.conf"
+    dhcp4_output="$test_config_dir/kea-dhcp4-ddns.conf"
+
+    ntp_opt="$(build_ntp_option)" || skip "NTP option building failed"
+    export DHCP_NTP_OPTION="$ntp_opt"
+
+    export DHCP_DDNS_ENABLED="true"
+    envsubst "$ENVSUBST_VARS" < "$dhcp4_template" > "$dhcp4_output"
+    run jq -e '.Dhcp4["dhcp-ddns"]["enable-updates"] == true' "$dhcp4_output"
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+
+    export DHCP_DDNS_ENABLED="false"
+    envsubst "$ENVSUBST_VARS" < "$dhcp4_template" > "$dhcp4_output"
+    # jq -e exits nonzero on a false result, so assert on the compared value
+    # (== false -> true) rather than reading the field directly.
+    run jq -e '.Dhcp4["dhcp-ddns"]["enable-updates"] == false' "$dhcp4_output"
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+    # A false value must still leave the whole file valid JSON.
+    run jq empty "$dhcp4_output"
+    [ "$status" -eq 0 ]
 }
 
 @test "DHCP4 config contains NTP server data in option-data" {

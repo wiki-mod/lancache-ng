@@ -115,7 +115,7 @@ services:
       # Matches deploy/quickstart/docker-compose.yml's compliant check (#869):
       # dnsutils/dig is already installed in every profile's dns image
       # (services/dns/Dockerfile), so there's no tooling gap to work around.
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -170,7 +170,7 @@ services:
       # Matches deploy/quickstart/docker-compose.yml's compliant check (#869):
       # dnsutils/dig is already installed in every profile's dns image
       # (services/dns/Dockerfile), so there's no tooling gap to work around.
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
