@@ -15,9 +15,9 @@
 #     the old credential immediately while issuing a new one that works.
 #   - (Issue #682) The auth-callout request/response between nats-server and
 #     the Admin UI's responder is xkey-encrypted, not cleartext -- proven by
-#     packet-capturing the real nats<->ui leg and asserting the presented
-#     password does not appear in it while the nkeys sealed-box "xkv1"
-#     marker does.
+#     packet-capturing the real nats<->ui leg and asserting no plaintext JWT
+#     structure (the standard, otherwise-always-present auth-callout envelope
+#     header) appears in it while the nkeys sealed-box "xkv1" marker does.
 #
 # Reuses the same published-image/health-wait/ephemeral-client pattern
 # already proven in ssl-mitm-cache-simulation.sh and
@@ -49,6 +49,12 @@ registration_token="validation-secondary-registration-token"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 dns_image="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${image_tag}"
+# Pinned to an immutable digest (AG-VAL-026: this script runs as a blocking
+# CI gate in full-setup-sims.yml, so a mutable `:latest` third-party tag
+# could drift between when this was last verified and when a run actually
+# pulls it). Not a project dependency -- used only for this one-off tcpdump
+# capture step, never added to any product Dockerfile/image.
+netshoot_image="nicolaka/netshoot@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70"
 
 cleanup() {
     local status=$?
@@ -432,18 +438,34 @@ if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c \
     exit 1
 fi
 
-if docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F -- '$proof_pass' /shared/xkey-stream.bin" >/dev/null; then
-    echo "::error::The secondary's plaintext NATS password was found in the captured nats<->ui auth-callout traffic -- xkey encryption is NOT actually protecting the payload." >&2
+# Deliberately NOT a search for the raw plaintext password string: manually
+# verified against a real capture that this NEVER appears on the wire even
+# WITHOUT xkey, because the unencrypted auth-callout envelope is still a
+# compact JWT -- base64url(header).base64url(payload).base64url(signature)
+# -- so `connect_opts.pass` only ever appears base64-encoded inside the
+# payload segment, never as a literal byte-for-byte substring. A check for
+# the raw password's absence would trivially "pass" whether or not
+# encryption is on, proving nothing. The real, discriminating signal is
+# whether a plaintext JWT structure is present at all: `jwt_header_marker`
+# below is the literal, fully deterministic base64url encoding of this
+# module's fixed JWT header (`{"typ":"JWT","alg":"ed25519-nkey"}`, see
+# encode_nats_jwt in nats_auth_callout.rs) -- every unencrypted request or
+# response starts with it, and a sealed (xkv1-prefixed) payload cannot
+# contain it, since the whole JWT string is encrypted as one opaque blob
+# before it ever reaches the wire.
+jwt_header_marker="eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ"
+if docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F -- '$jwt_header_marker' /shared/xkey-stream.bin" >/dev/null; then
+    echo "::error::A plaintext JWT header marker was found in the captured nats<->ui auth-callout traffic -- the request/response is NOT actually xkey-encrypted (anyone who captured this could base64-decode it and recover connect_opts.pass in full)." >&2
     exit 1
 fi
-echo "Confirmed: the plaintext password does NOT appear anywhere in the captured nats<->ui auth-callout traffic."
+echo "Confirmed: no plaintext JWT structure appears anywhere in the captured nats<->ui auth-callout traffic -- there is nothing here to base64-decode into the presented password."
 
 # "xkv1" is nkeys' own literal sealed-box version prefix (see
 # nats_auth_callout.rs's module docs) -- its presence is what distinguishes
-# "genuinely encrypted" from "the password just happens not to appear in
-# this particular capture for an unrelated reason" (e.g. a missed capture
-# window). Confirms the payload isn't merely absent the password by
-# coincidence, but is actually using the sealed-box wire format.
+# "genuinely encrypted" from "the capture simply missed the exchange" (e.g. a
+# missed capture window, or a capture on the wrong leg/interface). Confirms
+# the traffic isn't merely absent a JWT structure by coincidence, but is
+# actually using the sealed-box wire format.
 if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F 'xkv1' /shared/xkey-stream.bin" >/dev/null; then
     echo "::error::The nkeys sealed-box version marker 'xkv1' was not found in the captured traffic -- cannot confirm the auth-callout payload is actually xkey-encrypted." >&2
     exit 1
