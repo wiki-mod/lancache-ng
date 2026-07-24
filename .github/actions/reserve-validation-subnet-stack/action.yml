@@ -1,0 +1,250 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Composite action: reserve a collision-free /27 validation subnet (host-local
+# flock + retry loop) and start the full-setup validation stack with it.
+#
+# This is the single source for the "Reserve a validation subnet and start the
+# stack (locked, retries on collision)" step that used to be copy-pasted, and
+# had silently drifted, across full-setup-validate.yml, full-setup-deep-
+# validate.yml, build-push.yml's own full-setup-validate job, and
+# channel-install-smoke.yml (issue #1014). The behavior is preserved exactly:
+# the per-attempt $GITHUB_ENV rederive (#932), the non-retryable-vs-collision
+# distinction, and the lock-holder PID handed to $GITHUB_ENV for the caller's
+# always()-teardown to release (#623/#703/#820/#932).
+#
+# It writes the complete VALIDATION_* set + COMPOSE_PROJECT_NAME +
+# VALIDATION_UI_PORT + VALIDATION_LOCK_HOLDER_PID to $GITHUB_ENV, so the
+# caller's later steps (health check, client simulation, teardown) consume
+# them exactly as before. The caller MUST NOT also set any of those as
+# job-level `env:` -- a job-level entry is re-applied on top of every step's
+# accumulated $GITHUB_ENV state and would silently override this action's
+# per-attempt retry writes, reintroducing the #703 concurrent-run collision on
+# the compose-project name / host UI port (this is the deep-validate.yml drift
+# #1014 documents; the compatible callers deliberately keep those OUT of
+# job-level env for exactly this reason).
+name: Reserve validation subnet and start the stack
+description: >-
+  Reserve a host-locked, collision-checked /27 validation subnet and start the
+  full-setup validation stack inside it, retrying on a genuine subnet collision.
+
+inputs:
+  image-tag:
+    description: >-
+      Tag substituted into LANCACHE_IMAGE_TAG for the full-setup compose file
+      (the image under test -- a workflow_dispatch input, a resolved PR staging
+      tag, or a channel tag, depending on the caller).
+    required: true
+  image-registry:
+    description: LANCACHE_IMAGE_REGISTRY value for the compose file.
+    required: false
+    default: ghcr.io
+  image-prefix:
+    description: LANCACHE_IMAGE_PREFIX value for the compose file.
+    required: false
+    default: wiki-mod/lancache-ng
+  working-directory:
+    description: Directory holding the full-setup docker-compose.yml.
+    required: false
+    default: deploy/full-setup
+  max-attempts:
+    description: Maximum subnet-slot reservation attempts before failing closed.
+    required: false
+    default: "10"
+  lock-root:
+    description: Host-local directory holding the per-slot flock files.
+    required: false
+    default: /tmp/lancache-validation-locks
+  ghcr-retry-username:
+    description: >-
+      Optional. When set together with ghcr-retry-password, the validation-image
+      `docker compose pull` is wrapped in scripts/lib/ghcr-retry.sh's ghcr_retry
+      (GHCR 401/transient resilience -- build-push.yml's own job needs this
+      because it runs on every push/PR and hits registry congestion; the
+      dispatch-only / channel-tag callers leave it empty and pull plainly, which
+      keeps their behavior byte-for-byte what it was before this extraction).
+    required: false
+    default: ""
+  ghcr-retry-password:
+    description: Optional GHCR password/token paired with ghcr-retry-username.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Reserve a validation subnet and start the stack (locked, retries on collision)
+      id: reserve-and-start
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANCACHE_IMAGE_REGISTRY: ${{ inputs.image-registry }}
+        LANCACHE_IMAGE_PREFIX: ${{ inputs.image-prefix }}
+        LANCACHE_IMAGE_TAG: ${{ inputs.image-tag }}
+        RESERVE_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+        RESERVE_LOCK_ROOT: ${{ inputs.lock-root }}
+        GHCR_RETRY_USERNAME: ${{ inputs.ghcr-retry-username }}
+        GHCR_RETRY_PASSWORD: ${{ inputs.ghcr-retry-password }}
+      run: |
+        set -euo pipefail
+
+        : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+        : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+
+        if ! command -v flock >/dev/null 2>&1; then
+          echo "::error::flock is required for safe validation-subnet locking."
+          exit 1
+        fi
+
+        # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+        source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+
+        lock_root="$RESERVE_LOCK_ROOT"
+        max_attempts="$RESERVE_MAX_ATTEMPTS"
+
+        # Defense-in-depth check carried over from the pre-#703 "Check for
+        # a validation subnet collision" step: Docker-managed networks
+        # only cover Docker's own view. A route or interface address
+        # already on the host (another NIC, a VPN, a leftover bridge from
+        # something outside Docker entirely) doesn't show up in
+        # `docker network ls` at all, but the kernel still refuses to
+        # create an overlapping bridge for it -- confirmed for real in
+        # #703's linked run: this exact check found zero Docker-network
+        # conflicts while `docker compose up` still failed with "Pool
+        # overlaps". validation_subnet_conflicts (sourced above) is the
+        # single shared definition of this check -- issue #820 consolidated
+        # what used to be this step's own copy-pasted python block (plus
+        # near-identical copies in the simulation wrapper and the DHCP
+        # simulation scripts) into one place in the lib, closing off exactly
+        # the kind of silent divergence that had left this step's own copy
+        # one step behind (a bare `startswith(own_prefix)` rather than the
+        # delimited-child match the other copies already used).
+
+        # Pull the validation images before reserving a slot. build-push.yml's
+        # own job runs on every push/PR and repeatedly hit GHCR 401/congestion
+        # here, so it passes ghcr-retry credentials and this wraps the pull in
+        # scripts/lib/ghcr-retry.sh. The dispatch-only / channel-tag callers
+        # leave the credentials empty and pull plainly, preserving their exact
+        # prior behavior.
+        if [[ -n "$GHCR_RETRY_USERNAME" && -n "$GHCR_RETRY_PASSWORD" ]]; then
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          ghcr_retry "$LANCACHE_IMAGE_REGISTRY" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose pull --quiet
+        else
+          docker compose pull --quiet
+        fi
+
+        reserved_slot=""
+        holder_pid=""
+        next_attempt=1
+
+        while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
+          reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
+            echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
+            exit 1
+          }
+          attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
+          slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
+          candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+
+          # Rederive the COMPLETE VALIDATION_* set (subnet, gateway, every
+          # service IP, COMPOSE_PROJECT_NAME, VALIDATION_UI_PORT) from THIS
+          # attempt's own candidate slot via the single shared
+          # validation_subnet_export_env (reserve-validation-subnet.sh),
+          # instead of keeping a separate hand-written copy of the export
+          # formula. Both used to come only from compute-validation-network's
+          # job-level outputs -- i.e. from the FIRST slot ever tried, attempt
+          # 1 -- which stayed wrong for the rest of this loop on any actual
+          # retry (a different slot). That mattered in two ways: (1)
+          # validation_subnet_conflicts below reads COMPOSE_PROJECT_NAME to
+          # recognize a leftover Docker network from THIS SAME run's own
+          # earlier (crashed, never torn down) attempt at the CURRENT
+          # candidate slot as "ours" rather than a foreign conflict -- a stale
+          # value would misidentify a genuinely reusable leftover as a foreign
+          # collision and waste a retry; (2) two different, genuinely
+          # concurrent workflow runs that both started from the SAME initial
+          # slot (the exact #703 scenario) but where one loses the lock race
+          # and retries onto a DIFFERENT slot would otherwise keep sharing the
+          # ORIGINAL slot's project name and UI port even after diverging on
+          # subnet -- reintroducing, on the compose project namespace and host
+          # UI port specifically, the very same concurrent-run collision
+          # deriving them per-run was meant to prevent in the first place.
+          validation_subnet_export_env "$slot"
+
+          # Persist THIS ATTEMPT's identifiers to $GITHUB_ENV right away,
+          # every time through the loop -- not only once after the whole
+          # retry loop succeeds below. Issue #932 (CI run 29569378100, job
+          # 87852874801 -- build-push.yml's equivalent "validate full-setup
+          # image" job, same reserve-and-start shape as this step) confirmed
+          # a real production case where `docker compose up -d` a few lines
+          # down failed for a reason classified as non-retryable (Docker's
+          # own "has active endpoints" race while recreating a leftover
+          # network from a stale prior run that reused this same slot
+          # number -- see validation_network_teardown in
+          # reserve-validation-subnet.sh) and the step exited via `exit 1`
+          # below. The write that used to sit only after this whole loop
+          # never ran on that path, so COMPOSE_PROJECT_NAME was still unset
+          # in $GITHUB_ENV when the "Tear down full-setup validation stack"
+          # step ran (it DOES have `if: always()` and DID run) -- its own
+          # fail-closed `[[ -n "${COMPOSE_PROJECT_NAME:-}" ]]` guard, meant
+          # only for the case where no slot was ever derived at all, saw it
+          # empty and silently skipped `validation_project_networks_teardown`,
+          # leaving that attempt's network behind to poison a later run
+          # that reuses the same slot. $GITHUB_ENV takes the last value
+          # written for a repeated key, so writing here on every attempt
+          # keeps this a no-op correctness fix for the common, successful
+          # case (the final attempt's write is simply the last one and
+          # still lands before the "up" call) while covering every failure
+          # exit out of this step (a non-retryable `docker compose up`
+          # failure, or exhausting every retry) with the last attempted
+          # slot's real project name, subnet, and lock-holder PID instead
+          # of nothing at all.
+          {
+            echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+            echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
+            echo "VALIDATION_LOCK_HOLDER_PID=$candidate_pid"
+            echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
+            echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
+            echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
+            echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
+            echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
+            echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
+            echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
+            echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
+            echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
+            echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
+            echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
+          } >> "$GITHUB_ENV"
+
+          conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
+          if [[ -n "$conflict" ]]; then
+            echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
+            validation_subnet_release "$candidate_pid"
+            next_attempt=$((attempt + 1))
+            continue
+          fi
+
+          echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
+          if up_output="$(docker compose up -d 2>&1)"; then
+            echo "$up_output"
+            reserved_slot="$slot"
+            holder_pid="$candidate_pid"
+            break
+          fi
+
+          echo "$up_output"
+          validation_subnet_release "$candidate_pid"
+
+          if ! validation_subnet_output_is_collision "$up_output"; then
+            echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
+            exit 1
+          fi
+
+          echo "docker compose up failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
+          next_attempt=$((attempt + 1))
+        done
+
+        if [[ -z "$reserved_slot" ]]; then
+          echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
+          exit 1
+        fi
+
+        echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."

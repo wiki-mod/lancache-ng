@@ -23,6 +23,10 @@ is_excluded() {
         Cargo.lock | */Cargo.lock) return 0 ;;
         .gitkeep | */.gitkeep) return 0 ;;
         VERSION) return 0 ;;
+        # A LICENSE/COPYING file must contain unmodified license text for
+        # tooling (GitHub's license detector, SPDX scanners) to recognize it;
+        # a prepended repo header would corrupt that.
+        LICENSE | COPYING) return 0 ;;
         # JSON despite the .conf extension — see AGENTS.md for why these
         # three specifically are excluded.
         services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;

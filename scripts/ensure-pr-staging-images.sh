@@ -186,7 +186,10 @@ base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15
 # of the full-setup compose project. dhcp gets its real coverage from the
 # from-source dhcp-kea-lease-flow simulation; dhcp-proxy has no deep job yet
 # (tracked in #705) and so still has no coverage here -- calling it out
-# rather than pretending the compose-service list covers it.
+# rather than pretending the compose-service list covers it. ntp is excluded
+# for the same reason: deploy/full-setup/docker-compose.yml has no ntp
+# service either, and this new service has no dedicated full-setup coverage
+# job yet.
 full_setup_services=(proxy dns watchdog ui build-tools)
 
 declare -A touched_map=(

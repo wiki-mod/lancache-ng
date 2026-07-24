@@ -17,7 +17,10 @@
 # A single script keeps "does this change affect a shipped image?" defined in
 # exactly one place instead of a second, drifting copy.
 #
-# Input (two mutually exclusive forms):
+# Input (three mutually exclusive forms):
+#   - `--all-changed`: emit the maximal "everything changed" verdict without
+#     reading any diff. Used as build-push.yml's push fail-safe when the
+#     before-diff base is absent/unreachable (see the flag's own comment below).
 #   - Positional: classify-image-impact.sh <base_ref> <head_ref>
 #     Diffs from merge-base(base_ref, head_ref) to head_ref. For a base_ref
 #     that is already an ancestor of head_ref (e.g. the last release tag's
@@ -34,6 +37,23 @@
 # machine-readable stream.
 set -euo pipefail
 
+# --all-changed: emit the maximal verdict (every per-path boolean true,
+# IMAGE_IMPACT true, docs_only false) without reading any diff at all.
+# build-push.yml's detect-changes job uses this as its push fail-safe when
+# github.event.before cannot be diffed against -- an all-zeros first push, a
+# force-push, or a GC'd/unreachable base -- so an undeterminable diff degrades
+# to "assume everything changed, do the full work" rather than silently
+# skipping a real change. This mirrors the same fallback build-tools.yml's
+# determine-publish-scope already applies for its own before-diff. Deliberately
+# NOT a second copy of the output-key list: this flag only forces the shared
+# touches_*/docs_only/image_impact predicates below to their true/maximal
+# result, leaving the single emitter block at the end of this script as the one
+# place that enumerates the keys, so the two modes can never drift apart.
+force_all=false
+if [[ "${1:-}" == "--all-changed" ]]; then
+    force_all=true
+fi
+
 changed_files=""
 # Guarded so a CHANGED_FILES-driven run (no temp file created) does not let the
 # guard's own false result become the script's exit code under set -e.
@@ -44,7 +64,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "${CHANGED_FILES:-}" ]]; then
+if [[ "$force_all" == "true" ]]; then
+    : # No diff input is read in --all-changed mode.
+elif [[ -n "${CHANGED_FILES:-}" ]]; then
     changed_files="$CHANGED_FILES"
 else
     base_ref="${1:-}"
@@ -57,10 +79,15 @@ else
     changed_files="$_cii_tmp"
 fi
 
-printf 'Changed files:\n' >&2
-cat "$changed_files" >&2
+if [[ "$force_all" == "true" ]]; then
+    printf 'Changed files:\n(--all-changed: every path treated as changed)\n' >&2
+else
+    printf 'Changed files:\n' >&2
+    cat "$changed_files" >&2
+fi
 
 touches_prefix() {
+    [[ "$force_all" == "true" ]] && return 0
     local prefix="$1" path
     while IFS= read -r path; do
         [[ "$path" == "$prefix"* ]] && return 0
@@ -69,6 +96,7 @@ touches_prefix() {
 }
 
 touches_exact() {
+    [[ "$force_all" == "true" ]] && return 0
     local expected="$1" path
     while IFS= read -r path; do
         [[ "$path" == "$expected" ]] && return 0
@@ -77,6 +105,7 @@ touches_exact() {
 }
 
 touches_docs() {
+    [[ "$force_all" == "true" ]] && return 0
     local path
     while IFS= read -r path; do
         case "$path" in
@@ -90,18 +119,23 @@ touches_docs() {
 
 # docs_only is true only when at least one file changed AND every changed file
 # is documentation. An empty diff is NOT docs_only (nothing to reason about),
-# matching build-push.yml's original handling exactly.
+# matching build-push.yml's original handling exactly. In --all-changed mode the
+# verdict is "everything changed", which is never docs-only.
 docs_only=true
 any_changed=false
-while IFS= read -r path; do
-    any_changed=true
-    case "$path" in
-        *.md | docs/*) ;;
-        *) docs_only=false ;;
-    esac
-done < "$changed_files"
-if [[ "$any_changed" == "false" ]]; then
+if [[ "$force_all" == "true" ]]; then
     docs_only=false
+else
+    while IFS= read -r path; do
+        any_changed=true
+        case "$path" in
+            *.md | docs/*) ;;
+            *) docs_only=false ;;
+        esac
+    done < "$changed_files"
+    if [[ "$any_changed" == "false" ]]; then
+        docs_only=false
+    fi
 fi
 
 # IMAGE_IMPACT is the additive verdict (nothing in build-push.yml's original
@@ -113,15 +147,19 @@ fi
 # when no service image digest moves) still count as impact for changelog/patch
 # traceability, exactly as #819 Point 1 specifies. An empty diff is not impact.
 image_impact=false
-while IFS= read -r path; do
-    case "$path" in
-        *.md | docs/* | .github/* | tests/*)
-            ;;
-        *)
-            image_impact=true
-            ;;
-    esac
-done < "$changed_files"
+if [[ "$force_all" == "true" ]]; then
+    image_impact=true
+else
+    while IFS= read -r path; do
+        case "$path" in
+            *.md | docs/* | .github/* | tests/*)
+                ;;
+            *)
+                image_impact=true
+                ;;
+        esac
+    done < "$changed_files"
+fi
 
 output_bool() {
     local name="$1"
@@ -139,6 +177,7 @@ output_bool "ui" touches_prefix "services/ui/"
 output_bool "watchdog" touches_prefix "services/watchdog/"
 output_bool "dhcp" touches_prefix "services/dhcp/"
 output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
+output_bool "ntp" touches_prefix "services/ntp/"
 
 # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the image at
 # build time (the dns-domains named build context), so a domain-list-only change

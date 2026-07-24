@@ -27,18 +27,22 @@
 # second, divergent one.
 
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
-# channel it publishes to. Mirrors build-push.yml's promote/validate mapping:
-# master publishes nightly, a vX.Y.Z pre-release integration branch publishes
-# dev, and everything else falls back to latest (the stable-release-only
-# channel). `latest` is intentionally never the default for a live branch --
-# see build-push.yml's own comment on why validating a pre-release branch
-# against latest checks the wrong image.
+# channel it publishes to. Mirrors build-push.yml's promote/validate mapping
+# (#825/#1141, decided 2026-07-23: master = stable, current_dev = nightly,
+# archived vY.X.Z release branches = no live channel): current_dev publishes
+# nightly, and everything else -- master, an archived vX.Y.Z release branch,
+# or any other branch -- falls back to latest. This deliberately does NOT
+# special-case vX.Y.Z branches with their own channel word anymore: they are
+# frozen release archives now (still take deliberate backports, but nothing
+# republishes a channel for them), so the same generic "latest" fallback
+# every other non-current_dev branch already got is the right, minimal
+# answer -- inventing a smarter per-branch fallback here would reintroduce
+# exactly the kind of proving-ground complexity #825's own discussion
+# explicitly considered and rejected in favor of this simpler model.
 vit_base_channel_tag() {
     local base_ref="$1"
-    if [[ "$base_ref" == "master" ]]; then
+    if [[ "$base_ref" == "current_dev" ]]; then
         printf 'nightly\n'
-    elif [[ "$base_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        printf 'dev\n'
     else
         printf 'latest\n'
     fi

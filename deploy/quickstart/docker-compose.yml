@@ -1053,7 +1053,7 @@ services:
       # identical publish on dns-standard for the full reasoning.
       - "${IP_STANDARD}:5300:5300/udp"
     healthcheck:
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1104,7 +1104,7 @@ services:
       # identical publish on dns-standard for the full reasoning.
       - "${IP_SSL}:5300:5300/udp"
     healthcheck:
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1252,8 +1252,10 @@ services:
           host="$${KEA_CTRL_HOST:-127.0.0.1}";
           [ "$$host" = "0.0.0.0" ] && host=127.0.0.1;
           token="$${KEA_CTRL_TOKEN:-}";
-          case "$$token" in ""|CHANGE_ME_KEA_CTRL_TOKEN|lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret)
-          token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)" ;; esac;
+          norm="$$(printf '%s' "$$token" | tr '[:upper:]' '[:lower:]' | tr '-' '_')";
+          case "$$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac;
+          case "$$token" in lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) token="" ;; esac;
+          [ -n "$$token" ] || token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)";
           curl -sf -u admin:$$token
           -H 'Content-Type: application/json'
           -d '{"command":"config-get","service":["dhcp4"]}'
@@ -1313,6 +1315,36 @@ services:
       # broken before this issue's new options existed. Matches the dhcp
       # (Kea) service's cap_add, which needs it for the same reason.
       - NET_ADMIN
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
+  # ── LanCache-NG-NTP (chrony) ──────────────────────────────────────────────
+  # Disciplines its own clock against public NTP servers and serves LAN
+  # clients on UDP/123. Opt-in like dhcp/dhcp-proxy above.
+  ntp:
+    profiles: [ntp]
+    container_name: lancache-ntp
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
+    volumes:
+      - ui-data:/data:ro
+      - ${NTP_DATA_DIR:-./ntp}:/var/lib/chrony
+      # Central logging pipeline (#633): chronyd's `log` directive (see
+      # chrony.conf) writes here in addition to the process's own stdout.
+      - ntp-logs:/var/log/chrony
+    environment:
+      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:-0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com}
+      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
+    ports:
+      # No dedicated LAN IP: NTP is plain unicast UDP, not a broadcast
+      # protocol like DHCP, so Docker's normal port-publish DNAT already
+      # preserves real client source IPs without network_mode: host.
+      - "123:123/udp"
+    cap_add:
+      # chronyd needs to step/slew the container HOST's real system clock to
+      # genuinely discipline time -- see services/ntp/Dockerfile's comment.
+      - SYS_TIME
     restart: always
     logging:
       driver: json-file
@@ -1457,6 +1489,16 @@ services:
     container_name: lancache-netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata
+    # pid: host: required by netdata's own official Docker documentation for
+    # apps.plugin to read other containers' /proc/<pid> entries (e.g.
+    # .../io). Without it, netdata's own PID namespace is a sibling of, not
+    # an ancestor of, the host's -- so even with cap_add: SYS_PTRACE below,
+    # the kernel's ptrace_may_access check for a process outside netdata's
+    # own container still fails with Permission denied, which is exactly the
+    # "collector: apps.plugin permission-denied spam per host process" this
+    # file already called out below as noise to keep out of the shared log
+    # view, without this being the actual fix for it.
+    pid: host
     cap_add: [SYS_PTRACE]
     security_opt: [apparmor:unconfined]
     # Central logging pipeline (#633, #847): this netdata build's own log
@@ -1472,8 +1514,9 @@ services:
     # netdata-logs shares that path with fluent-bit, which tails those real
     # files read-only. collector/access/debug stay on their stdout defaults
     # and are NOT collected: collector is extremely high-rate internal
-    # diagnostics (temperature-sensor flapping, apps.plugin permission-denied
-    # spam per host process) that would flood the shared bounded /logs view
+    # diagnostics (temperature-sensor flapping, and previously apps.plugin
+    # permission-denied spam per host process before `pid: host` above fixed
+    # the underlying cause) that would flood the shared bounded /logs view
     # and hide every other source; access is high-rate API chatter; debug is
     # empty unless enabled.
     entrypoint: ["/usr/bin/bash", "-c"]
@@ -1544,6 +1587,10 @@ volumes:
   watchdog-logs:
   nats-logs:
   netdata-logs:
+  # LanCache-NG-NTP (chrony) log output. Not yet wired into the `syslog`
+  # (fluent-bit) central logging pipeline (#633) -- a known, deliberately
+  # deferred follow-up (see docs/architecture-ng.md's logging matrix).
+  ntp-logs:
   logs-syslog-ng:
   pdns-data-standard:
   pdns-data-ssl:

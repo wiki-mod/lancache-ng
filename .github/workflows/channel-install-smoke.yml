@@ -24,11 +24,13 @@
 # workflow's RUNNER CAPACITY NOTE). The install+health check is exactly the
 # "still installable?" coverage #785 asks to restore, and no more.
 #
-# CHANNEL: defaults to `dev` (the channel build-push.yml's promote job actively
-# maintains). `edge` is intentionally NOT included yet -- it is currently stale
-# (missing tools, see #1035) and only gets promoted once master is un-frozen.
-# Add `edge` (e.g. as a second matrix channel, or a second scheduled input)
-# once its channel pointer is actively maintained again.
+# CHANNEL: defaults to `nightly` (published continuously from current_dev --
+# #825/#1141's branch-model decision retired the old `dev` channel this
+# default used to point at: archived vY.X.Z release branches no longer
+# publish a live channel at all). `latest` (published continuously from
+# master under the same decision) is intentionally NOT included yet as a
+# second matrix channel/input -- add it as a deliberate follow-up once
+# smoke-testing both channels is worth the extra scheduled-job runtime.
 #
 # NOTE ON TRIGGERS: `schedule:` only fires from the default branch (master), so
 # this check becomes live once this file is synced from v0.2.0 to master via the
@@ -47,9 +49,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Published channel/tag to install and smoke-test (e.g. dev, edge, a sha-* or vX.Y.Z tag).
+        description: Published channel/tag to install and smoke-test (e.g. nightly, latest, a sha-* or vX.Y.Z tag).
         required: false
-        default: dev
+        default: nightly
 
 permissions:
   contents: read
@@ -62,8 +64,8 @@ jobs:
       LANCACHE_IMAGE_REGISTRY: ghcr.io
       LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
       # On a schedule event `inputs.image_tag` is empty, so fall back to the
-      # actively-maintained `dev` channel; a manual dispatch can override it.
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag || 'dev' }}
+      # actively-maintained `nightly` channel; a manual dispatch can override it.
+      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag || 'nightly' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

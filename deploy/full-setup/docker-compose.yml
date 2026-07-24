@@ -137,7 +137,7 @@ services:
       # so this healthcheck was pure decoration (#869). Matches
       # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
       # is already installed in this image (services/dns/Dockerfile).
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -171,7 +171,7 @@ services:
       # so this healthcheck was pure decoration (#869). Matches
       # deploy/quickstart/docker-compose.yml's compliant check: dnsutils/dig
       # is already installed in this image (services/dns/Dockerfile).
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
       timeout: 5s
       retries: 2
@@ -426,6 +426,13 @@ services:
   netdata:
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata-validation
+    # pid: host: matches the real deploy profiles (deploy/dev, deploy/prod,
+    # deploy/quickstart) -- required by netdata's own official Docker
+    # documentation for apps.plugin to read other containers' /proc/<pid>
+    # entries; see those files' identical comment for the full reasoning.
+    # Kept in sync here so this validation profile actually exercises the
+    # same netdata configuration real deployments run.
+    pid: host
     cap_add:
       - SYS_PTRACE
     security_opt:

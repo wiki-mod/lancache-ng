@@ -1,0 +1,98 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Composite action: wait for the full-setup validation stack to stabilize and
+# assert every container is running, healthy, and not crash-looping.
+#
+# Single source for the "Wait for the stack to stabilize and check container
+# health" step that was copy-pasted (byte-identical apart from a comment)
+# across full-setup-validate.yml, full-setup-deep-validate.yml, build-push.yml's
+# full-setup-validate job, and channel-install-smoke.yml (issue #1014). It reads
+# COMPOSE_PROJECT_NAME (and the compose file in working-directory) from the
+# environment the reserve step already exported, so it must run AFTER
+# reserve-validation-subnet-stack in the same job.
+name: Wait for validation stack health
+description: >-
+  Poll the full-setup validation stack until healthy, then fail closed if any
+  service is missing, not running, unhealthy, or crash-looping.
+
+inputs:
+  working-directory:
+    description: Directory holding the full-setup docker-compose.yml.
+    required: false
+    default: deploy/full-setup
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for the stack to stabilize and check container health
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        # Services with an explicit healthcheck report a real "healthy"
+        # status; docker-socket-proxy has none, so it's only checked for
+        # "running" plus a restart-count ceiling (catches a crash loop
+        # without needing a healthcheck definition for every service).
+        services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
+        all_services="docker-socket-proxy $services_with_healthcheck"
+
+        deadline=$((SECONDS + 90))
+        while (( SECONDS < deadline )); do
+          all_ready=1
+          for service in $services_with_healthcheck; do
+            cid="$(docker compose ps -q "$service")"
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+            if [[ "$status" != "healthy" ]]; then
+              all_ready=0
+            fi
+          done
+          if [[ "$all_ready" -eq 1 ]]; then
+            break
+          fi
+          sleep 5
+        done
+
+        echo "::group::Final container status"
+        docker compose ps
+        echo "::endgroup::"
+
+        failed=0
+        for service in $all_services; do
+          cid="$(docker compose ps -q "$service")"
+          if [[ -z "$cid" ]]; then
+            echo "::error::$service has no running container"
+            failed=1
+            continue
+          fi
+
+          restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
+          container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
+
+          if [[ "$container_status" != "running" ]]; then
+            echo "::error::$service is not running (state: $container_status)"
+            failed=1
+          elif (( restart_count > 1 )); then
+            # > 1, not > 0: a single restart during normal startup
+            # ordering (e.g. waiting on a dependency that wasn't healthy
+            # yet) is expected and not itself a crash loop.
+            echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
+            failed=1
+          fi
+
+          if [[ " $services_with_healthcheck " == *" $service "* ]]; then
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+            if [[ "$health" != "healthy" ]]; then
+              echo "::error::$service did not become healthy (status: $health)"
+              failed=1
+            fi
+          fi
+        done
+
+        if [[ "$failed" -eq 1 ]]; then
+          echo "::group::Logs from all services (failure diagnostics)"
+          docker compose logs --no-color
+          echo "::endgroup::"
+          exit 1
+        fi
+
+        echo "Full-setup stack is stable: all services running and healthy."

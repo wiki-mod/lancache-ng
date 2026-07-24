@@ -2,9 +2,18 @@
 # Release manifest: declares the first-party runtime/tooling/metadata images,
 # their supported platforms and source Dockerfiles, the external
 # (third-party) images used by supported deploy profiles, the mutable/
-# immutable tag channels (sha, dev, nightly, release candidate, stable, latest),
+# immutable tag channels (sha, nightly, release candidate, stable, latest),
 # and the image retention policy. Consumed by the release/promotion CI
 # workflow and validated by scripts/validate-stack-images.sh.
+#
+# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23): master publishes
+# `latest`; current_dev (the permanent active-development branch) publishes
+# `nightly` continuously from its own tip; archived vY.X.Z release branches
+# take deliberate backports but publish no live channel at all. The `dev`
+# channel that used to be published from a vX.Y.Z branch is retired -- see
+# docs/release-versioning.md's "Retired: the dev channel" note for the full
+# history and setup.sh's validate_lancache_image_channel for the operator-
+# facing hard cut (mirrors the earlier edge -> nightly rename precedent).
 schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io
@@ -22,14 +31,10 @@ channels:
     tag: sha-<commit>
     mutable: false
     description: Immutable build identity tag for every first-party image.
-  dev:
-    tag: dev
-    mutable: true
-    description: Explicit development and test channel only.
   nightly:
     tag: nightly
     mutable: true
-    description: Tested pre-stable integration channel built continuously from master.
+    description: Tested pre-stable integration channel built continuously from current_dev.
   release_candidate:
     tag: vX.Y.Z-rc.N
     mutable: false
@@ -41,7 +46,7 @@ channels:
   latest:
     tag: latest
     mutable: true
-    description: Latest stable release only. Master and nightly builds must not move this tag.
+    description: Latest stable release, published continuously from master. Only the gated promote job may move this tag; nightly builds must not.
 runtime:
   - name: proxy
     image: ghcr.io/wiki-mod/lancache-ng/proxy
@@ -82,6 +87,14 @@ runtime:
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
     source: services/dhcp-proxy/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    compose:
+      - deploy/prod/docker-compose.yml
+  - name: ntp
+    image: ghcr.io/wiki-mod/lancache-ng/ntp
+    source: services/ntp/Dockerfile
     platforms:
       - linux/amd64
       - linux/arm64
