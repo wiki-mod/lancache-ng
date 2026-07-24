@@ -1,5 +1,7 @@
 # GitHub Directory Guidance
 
+This file governs `.github/**` work in **`wiki-mod/lancache-ng`** specifically — verify you are in a checkout of this repository (e.g. `git remote -v`) before treating this file, or any other repository's similarly-named `.github/AGENTS.md`, as applying here.
+
 Repository-wide agent governance lives in [`../AGENTS.md`](../AGENTS.md).
 
 Follow the root guidance for all `.github/**` changes too, especially workflow validation, runner-label review, secret/variable handling, and issue/PR linking rules.
