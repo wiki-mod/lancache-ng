@@ -119,6 +119,42 @@ sudo usermod -aG docker actions-runner
 
 Replace `actions-runner` with the actual Linux user that runs the GitHub Actions service. Restart the runner service or log the user out and back in so the new group membership is applied.
 
+## Container privilege model (LXC/Proxmox)
+
+If your self-hosted runner itself runs inside an LXC container (e.g. on
+Proxmox), prefer an **unprivileged** container over a **privileged** one.
+This is counter-intuitive -- "privileged" sounds like it should be strictly
+more permissive -- but two independent, real incidents on this project's own
+runner fleet found the opposite in practice:
+
+- A privileged LXC container's root (UID 0 inside the container, unmapped to
+  the host, i.e. `/proc/self/uid_map` reads `0 0 4294967295`) hit a
+  **stricter** Proxmox-enforced AppArmor/MAC profile than the unprivileged
+  containers running the exact same workload. A `docker run` job needing to
+  write a lease file failed with `Permission denied` even as root against a
+  `chmod 0777` directory -- a signature that is not explainable by ordinary
+  DAC permission bits at all. Proxmox's default AppArmor profile for
+  privileged containers is typically stricter than for unprivileged ones,
+  specifically to compensate for the privileged container's full Linux
+  capability set. The fix was reconciling the container to unprivileged, not
+  loosening file permissions further (which cannot fix a MAC-layer denial).
+- The same privileged/unprivileged divergence separately caused a distinct
+  failure for tooling that needs to mount its own nested `/proc` (e.g.
+  `bwrap`-based sandboxing used by some distributed-compile tooling): the
+  privileged container was missing the LXC **`security.nesting`** feature
+  flag the unprivileged containers had, so nested mount syscalls the tooling
+  needs were rejected with `Operation not permitted`.
+
+If you must use a privileged LXC container for another reason, verify
+`security.nesting=1` is set (needed by any tool that mounts its own nested
+`/proc`, such as `bwrap`-based sandboxes) and be prepared for Proxmox's
+stricter default AppArmor confinement to block operations that succeed
+identically on an unprivileged container running the same workload --
+`chmod`/DAC changes cannot work around a MAC-layer (AppArmor) denial, so
+look at the container's privilege/confinement level first, not file
+permissions, if a process running as root still gets `Permission denied`
+against a world-writable path.
+
 ## Runner labels
 
 When configuring the runner, include the custom `lancache` label plus the
