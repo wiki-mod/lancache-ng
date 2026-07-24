@@ -29,7 +29,7 @@ permissions:
 
 jobs:
 
-  # The nine simulation/validation jobs this suite shares with the per-PR
+  # The ten simulation/validation jobs this suite shares with the per-PR
   # full-setup-deep-validate.yml now live in one reusable workflow (issue
   # #1014); this manual suite invokes them in dispatch mode -- a published
   # channel tag, no PR staging. The two DHCP-proxy/Kea-mutation jobs below are
