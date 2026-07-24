@@ -4299,11 +4299,21 @@ cmd_converge_reconcile() {
     # CACHE_MAX_SIZE from directly (`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`).
     # A manual deploy/prod checkout's proxy service instead reads
     # config/prod/proxy.env via `env_file:`, a file this convergence tick
-    # never touches -- an Admin UI resize on that deployment style is
-    # therefore a no-op today. deploy/prod is the manual/self-hosted-repo
+    # never touches -- but this block still writes .env's CACHE_MAX_GB/
+    # CACHE_MAX_SIZE unconditionally (it does not check which compose style
+    # is in use), and deploy/prod's ui service DOES read CACHE_MAX_GB from
+    # .env. That means an Admin UI resize on a deploy/prod install is worse
+    # than an inert no-op: the dashboard's own "pending" banner clears and
+    # its usage bar starts showing the new target size once `docker compose
+    # up -d` recreates the ui container, while the real proxy container
+    # keeps enforcing the untouched old CACHE_MAX_SIZE from
+    # config/prod/proxy.env -- a misleading display of a resize that never
+    # actually reached nginx. deploy/prod is the manual/self-hosted-repo
     # path, not the setup.sh-managed default this convergence mechanism was
     # built for; see docs/architecture-ng.md for the same caveat stated
-    # operator-facing.
+    # operator-facing. Not fixed here (would mean writing
+    # config/prod/proxy.env from this tick too, a separate, deploy/prod-
+    # specific change out of scope for this PR).
     ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB")
     if [[ -n "$ui_cache_max_gb" ]] && lancache_ui_cache_max_gb_override_is_valid "$ui_cache_max_gb"; then
         ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))

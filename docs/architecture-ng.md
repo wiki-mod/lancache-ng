@@ -351,12 +351,21 @@ processes with that new config on `SIGHUP`); it is this project's own
 before `exec nginx`, with no signal handler to re-render and reload) that
 makes a full recreate the only mechanism available today, not a limitation of
 nginx itself. Scope boundary: this convergence path writes the
-`setup.sh`-managed runtime `.env`, which only
-`deploy/quickstart/docker-compose.yml` (what `setup.sh` actually installs at
-`/opt/lancache-ng`) reads `CACHE_MAX_SIZE` from directly — a manual
-`deploy/prod` checkout's proxy service instead reads `config/prod/proxy.env`
-via `env_file:`, a file this convergence tick never touches, so an Admin UI
-resize on that deployment style is currently a no-op.
+`setup.sh`-managed runtime `.env` unconditionally (it does not check which
+compose style is in use), which only `deploy/quickstart/docker-compose.yml`
+(what `setup.sh` actually installs at `/opt/lancache-ng`) reads
+`CACHE_MAX_SIZE` from directly — a manual `deploy/prod` checkout's proxy
+service instead reads `config/prod/proxy.env` via `env_file:`, a file this
+convergence tick never touches. This makes an Admin UI resize on a
+`deploy/prod` install worse than an inert no-op: `.env`'s `CACHE_MAX_GB` still
+gets updated, so the dashboard's own "pending" banner clears and its usage bar
+starts showing the new target size once `docker compose up -d` recreates the
+`ui` container — while the real `proxy` container keeps enforcing the
+untouched old `CACHE_MAX_SIZE` from `config/prod/proxy.env`. The dashboard
+would misleadingly display a resize that never actually reached nginx on that
+deployment style. Not fixed as part of this capability (would require also
+writing `config/prod/proxy.env` from the same convergence tick, a separate,
+`deploy/prod`-specific change).
 
 **Not yet implemented:** a manual "clear cache now" / purge-by-age / purge-
 by-access / pin-app-ID surface. `services/watchdog/watchdog.sh`'s
