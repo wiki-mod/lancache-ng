@@ -308,10 +308,21 @@ grep -qF 'logging' "$install_dir/.env" \
 # non-invasive way to change one service's environment for this run only,
 # without editing the canonical quickstart compose file. Every other env
 # key watchdog's real service block sets is re-declared here verbatim
-# (docker-compose.yml:944-1009 as of this writing) because Compose's list-
-# form `environment:` merge fully replaces the base file's list for a
-# service, it does not merge per-key -- omitting any of these would silently
-# strip a real, required watchdog setting for this run.
+# (docker-compose.yml:944-1009 as of this writing) purely for clarity/
+# self-documentation, not because it is functionally required: CORRECTION
+# (issue #864, verified live against this project's actual runners, Compose
+# v5.3.0) -- Compose's `environment:` merge across `-f` files is a per-key
+# MAP merge (later file's key wins, unmentioned keys from the base survive),
+# the same behavior documented for `labels:`, not a full-list replace as
+# this comment previously claimed. Confirmed directly: overriding only
+# `CHECK_INTERVAL` on a scratch copy of this compose file left every other
+# base-declared watchdog environment key intact in `docker compose config`'s
+# resolved output. Re-declaring the full list here is therefore redundant
+# but harmless (the values match the base file's own), left as-is rather
+# than rewritten, since removing it is unrelated to #864's actual scope --
+# see this issue's PR for the same finding flagged as a possible
+# cross-cutting correction for other scripts/comments in this repo that may
+# rely on the same now-disproven assumption.
 cat > "$work_dir/logging-test-override.yml" <<EOF
 services:
   watchdog:
@@ -337,19 +348,25 @@ EOF
 # (see this script's header comment for why) via Compose's `!reset` merge
 # tag, which nulls out the base file's `network_mode: host` so `networks:`
 # below can take effect instead -- confirmed live against this project's
-# runners (Compose v5.3.0) before writing this override. `dhcp`'s
-# environment is fully replaced (matching docker-compose.yml's own
-# `dhcp:` block, DHCP_MODE=kea and the test subnet/pool computed above);
-# `dhcp-proxy`'s environment sets only the variables entrypoint.sh actually
-# requires for dnsmasq-proxy mode (DHCP_MODE, DHCP_SUBNET_START,
-# DHCP_DNS_PRIMARY/SECONDARY, UPSTREAM_DHCP_IP) -- confirmed live that the
-# remaining optional PXE-related variables the real service block also sets
-# are safe to leave unset here (entrypoint.sh's own warnings for each are
-# non-fatal, and this narrow logging-path proof does not exercise PXE
-# options at all). cap_add is re-declared explicitly in both blocks rather
-# than relying on the base file's list surviving the override merge, to
-# avoid depending on Compose's per-field list-merge behavior being "additive
-# by default" without directly confirming it here.
+# runners (Compose v5.3.0) before writing this override. Both services'
+# `environment:` below sets only the keys this test actually needs
+# (DHCP_MODE plus the test subnet/pool computed above); Compose merges
+# `environment:` across `-f` files per-key (a key present in the base but
+# not repeated here keeps the base's own resolved value, confirmed live --
+# see the correction on the watchdog override's comment above), so the
+# remaining optional variables (DHCP_PROXY_* PXE options, DDNS_TSIG_KEY,
+# KEA_CTRL_TOKEN, etc.) fall through to whatever setup.sh's own fresh
+# install left them as in $install_dir/.env -- unset/blank for a fresh
+# install with DHCP left at its wizard default, which entrypoint.sh already
+# handles gracefully (non-fatal warnings, no PXE options rendered), and this
+# narrow logging-path proof does not exercise PXE options at all regardless.
+# cap_add is re-declared explicitly in both blocks for clarity/
+# self-documentation (it matches the base file's own values verbatim, so
+# this is not asserted to change anything either way -- not independently
+# re-verified here the way the environment merge behavior above was).
+# `network_mode`/`networks` are the fields that genuinely need the explicit
+# `!reset`/re-declaration treatment in this override, since one is being
+# removed and the other is genuinely new for these two services.
 cat > "$work_dir/dhcp-test-override.yml" <<EOF
 services:
   dhcp:
