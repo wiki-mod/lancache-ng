@@ -3342,18 +3342,25 @@ jobs:
 
               # Per-crate thresholds, not a shared minimum: the two crates'"'"' real
               # coverage differs by an order of magnitude (measured on CI:
-              # ui ~38.6%, nats-subscriber ~0%, since nats-subscriber'"'"'s 4 tests
-              # only cover its data model, not its subscribe/forward logic --
-              # tracked in #504). A single shared "minimum" threshold would
+              # ui ~38.6%, nats-subscriber ~0%). nats-subscriber'"'"'s unit tests
+              # cover its pure conversion logic (dns_record_to_zone_update); its
+              # async subscribe/forward loop needs a live NATS/PowerDNS harness
+              # and is exercised by the full-setup integration jobs, not unit
+              # coverage. A single shared "minimum" threshold would
               # either block ui'"'"'s real coverage from ever mattering (if set low
               # enough for nats-subscriber to pass) or permanently fail
               # nats-subscriber (if set for ui'"'"'s level). Each crate'"'"'s threshold
-              # is raised independently as that crate gains real tests.
+              # is raised independently as that crate gains real unit tests.
+              # STATUS (2026-07-23): dns_threshold stays 0 because the floor has
+              # not been raised since issue #504 (which first flagged this) was
+              # closed -- its pure-logic unit tests landed via PR #515 -- not
+              # because an open gap is still tracked there. Raise it once
+              # nats-subscriber gains unit-testable coverage beyond the model.
               ui_threshold=35
               dns_threshold=0
 
               echo "UI threshold: ${ui_threshold}%"
-              echo "DNS threshold: ${dns_threshold}% (tracked gap: #504)"
+              echo "DNS threshold: ${dns_threshold}% (floor not raised since #504 closed; async loop covered by full-setup integration)"
 
               failed=0
               if (( $(echo "$ui_coverage < $ui_threshold" | bc -l) )); then
