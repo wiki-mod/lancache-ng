@@ -48,11 +48,14 @@ aio         threads=default;
 directio    4m;
 ```
 
-**Cache configuration (all values as env var + configurable in Admin UI):**
+**Cache configuration (env vars set at `setup.sh` install time; see "Cache
+Retention & Cleanup" below for what the Admin UI actually lets an operator
+change after initial setup — currently only `CACHE_MAX_SIZE`, via the
+dashboard's resize control, issue #1069 part 3):**
 
 | Variable | Default | Description |
 |---|---|---|
-| `CACHE_MAX_SIZE` | `50g` | Max cache size — UI checks against available disk space |
+| `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
 | `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
@@ -355,25 +358,80 @@ Epic / GOG: not supported.
 
 ## Cache Retention & Cleanup
 
-**Three mechanisms combined:**
+**Two automatic mechanisms, plus one Admin UI operator control:**
 
 | Mechanism | Trigger | Basis |
 |---|---|---|
 | nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
-| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` |
-| Manual purge | Admin UI on-demand | freely selectable |
+| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` (`services/watchdog/watchdog.sh`'s `maybe_purge()`) |
+| Admin UI cache resize | operator on-demand from the dashboard | requested whole-GB `CACHE_MAX_SIZE`, re-validated against real free disk space (issue #1069 part 3) |
 
-**Manual purging in Admin UI:**
+`setup.sh`'s initial "Cache size in GiB" prompt also validates the requested
+size against real free disk space at `CACHE_DIR`, with a safety buffer that
+scales with the requested size (issue #1069); `CACHE_INACTIVE` is likewise a
+real setup-time prompt, not just a silent default. (This setup-time
+validation shipped on `master`/v0.2.0 via issue #1069's PR #1070; as of this
+writing it has not yet been synced into `current_dev`'s `setup.sh` — a
+branch-hygiene gap, not a design decision. The Admin UI resize control
+described below is independent of that gap: it runs its own real
+disk-space check inside the Admin UI container regardless of whether
+`setup.sh`'s own prompt-time check has landed on this branch.)
 
-| Action | Granularity |
-|---|---|
-| Clear entire cache | Everything |
-| Purge by age | Older than X days — preview "~X GB freed" before confirmation |
-| Purge by access | Not accessed for X days |
-| Delete single title | All chunks of a warmed app ID |
-| Pinning | Protect app ID from LRU + automatic purge |
+**Admin UI cache resize (`services/ui/src/routes/cache.rs`, issue #1069 part
+3):** the dashboard shows current usage, current `CACHE_MAX_SIZE`, and lets an
+operator submit a new whole-GB size. The request is re-validated against real
+free disk space at `CACHE_DIR` with the same buffer-scaled safety check as
+`setup.sh`'s prompt (reject unless
+`available_free_space_at(CACHE_DIR) - buffer(cache_gb) >= cache_gb`; on
+rejection, the largest currently-passing value is suggested). A validated
+request does not take effect synchronously: `CACHE_MAX_SIZE` reaches the
+proxy container via the real deployment `.env`
+(`deploy/quickstart/docker-compose.yml`'s
+`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`), which this container has
+no filesystem access to, and the Admin UI's Docker access deliberately has no
+exec capability to send nginx a reload signal even if it did (see
+`services/ui/src/docker_client.rs`'s header comment). The request is instead
+persisted to the `ui-data`-backed settings file, and `setup.sh`'s
+`cmd_converge_reconcile` (run on the host by `lancache-converge.service`,
+currently every ~5 minutes) folds it into the real `.env` and lets the
+existing `docker compose up -d --remove-orphans` convergence step recreate the
+proxy container — the same host-bridged model issue #819's release-channel
+control already established. This is a full container recreate, not a live
+reload: empirically, nginx itself DOES accept a changed `max_size` for an
+existing cache zone via a plain `nginx -s reload` (verified against nginx's
+own source — `ngx_http_file_cache_init` in `src/http/ngx_http_file_cache.c`
+reuses the shared-memory zone across a reload while recalculating `max_size`
+from the new config, and `ngx_master_process_cycle` in
+`src/os/unix/ngx_process_cycle.c` respawns fresh cache manager/loader
+processes with that new config on `SIGHUP`); it is this project's own
+`services/proxy/entrypoint.sh` (renders `nginx.conf` from its template once,
+before `exec nginx`, with no signal handler to re-render and reload) that
+makes a full recreate the only mechanism available today, not a limitation of
+nginx itself. Scope boundary: this convergence path writes the
+`setup.sh`-managed runtime `.env` unconditionally (it does not check which
+compose style is in use), which only `deploy/quickstart/docker-compose.yml`
+(what `setup.sh` actually installs at `/opt/lancache-ng`) reads
+`CACHE_MAX_SIZE` from directly — a manual `deploy/prod` checkout's proxy
+service instead reads `config/prod/proxy.env` via `env_file:`, a file this
+convergence tick never touches. This makes an Admin UI resize on a
+`deploy/prod` install worse than an inert no-op: `.env`'s `CACHE_MAX_GB` still
+gets updated, so the dashboard's own "pending" banner clears and its usage bar
+starts showing the new target size once `docker compose up -d` recreates the
+`ui` container — while the real `proxy` container keeps enforcing the
+untouched old `CACHE_MAX_SIZE` from `config/prod/proxy.env`. The dashboard
+would misleadingly display a resize that never actually reached nginx on that
+deployment style. Not fixed as part of this capability (would require also
+writing `config/prod/proxy.env` from the same convergence tick, a separate,
+`deploy/prod`-specific change).
 
-**Size validation:** Admin UI checks available disk space when saving `CACHE_MAX_SIZE`. Warning > 90% of available space, error if exceeded.
+**Not yet implemented:** a manual "clear cache now" / purge-by-age / purge-
+by-access / pin-app-ID surface. `services/watchdog/watchdog.sh`'s
+`maybe_purge()` is the only automatic purge path beyond nginx's own
+`inactive` eviction; there is no route or template anywhere in
+`services/ui/src/routes` that clears, previews, or selectively deletes cache
+entries. See issue #1069's own feasibility notes for why an out-of-cycle
+cache-manager sweep needs a bespoke script (nginx has no external signal for
+one) rather than being a given.
 
 ## Monitoring (Admin UI)
 

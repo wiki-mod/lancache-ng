@@ -1038,6 +1038,7 @@ async fn main() -> Result<()> {
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
         .route("/setup/update", post(routes::setup::update_stack_settings))
+        .route("/cache/resize", post(routes::cache::resize_cache))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route(
             "/api/watchdog-status",

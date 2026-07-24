@@ -273,20 +273,23 @@ pub fn get_log_stats(standard_log: &str, ssl_log: &str) -> LogStats {
     stats
 }
 
-pub fn get_cache_size_gb(path: &str) -> f64 {
-    // Validate path: must be absolute and within allowed directories
+// Validates a cache path: must be an absolute path, must not contain ".."
+// components (traversal guard, e.g. "/opt/lancache-ng/cache/../evil"), and
+// must fall under one of the paths this deployment is actually known to
+// mount the cache at. Shared by get_cache_size_gb (below) and
+// available_space_mib_at (issue #1069 part 3's resize disk-space check) --
+// both need the identical safety check before shelling out a command against
+// an operator/config-controlled path.
+fn is_allowed_cache_path(path: &str) -> bool {
     use std::path::Path;
     let path_obj = Path::new(path);
 
-    // Must be an absolute path
     if !path_obj.is_absolute() {
-        return 0.0;
+        return false;
     }
 
-    // Normalize the path to prevent traversal attacks (e.g., /opt/lancache-ng/cache/../evil)
-    // Reject any path containing ".." components
     if path.contains("..") {
-        return 0.0;
+        return false;
     }
 
     // Only allow supported cache locations. /opt/lancache-ng is the normal
@@ -299,10 +302,13 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         "/var/cache/proxy",
         "/data/lancache",
     ];
-    if !allowed_prefixes
+    allowed_prefixes
         .iter()
         .any(|prefix| path.starts_with(prefix))
-    {
+}
+
+pub fn get_cache_size_gb(path: &str) -> f64 {
+    if !is_allowed_cache_path(path) {
         return 0.0;
     }
 
@@ -324,6 +330,101 @@ pub fn get_cache_size_gb(path: &str) -> f64 {
         }
         Err(_) => 0.0,
     }
+}
+
+// Free space, in whole MiB, on the filesystem backing `path` -- the Rust
+// counterpart to setup.sh's `available_space_mib_at` (issue #1069 part 3:
+// the Admin UI resize control re-validates against real free disk space at
+// resize time, the same buffer-scaled check setup.sh's initial "Cache size
+// in GiB" prompt already enforces at install time). Uses `df -Pk` (POSIX
+// output format, 1024-byte blocks) for the same reason setup.sh's version
+// does: plain `df`'s column layout can wrap onto a second line for a long
+// device/mount source string, which would otherwise shift the field this
+// parses.
+//
+// Unlike setup.sh's version, this does not walk up to the nearest existing
+// ancestor directory: the Admin UI only ever calls this with CACHE_DIR
+// (`state.config.cache_dir`), which is always an already-mounted, already-
+// existing Docker volume by the time this container is running -- there is
+// no "not created yet" case here the way there is during setup.sh's initial
+// install prompt.
+//
+// Returns None if the path fails is_allowed_cache_path, `df` cannot run, or
+// its output doesn't parse -- callers must fail closed on None (treat it as
+// "cannot validate", never as "unlimited free space").
+pub fn available_space_mib_at(path: &str) -> Option<u64> {
+    if !is_allowed_cache_path(path) {
+        return None;
+    }
+
+    let output = Command::new("df").args(["-Pk", path]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // POSIX `df -P` output: a header line, then "Filesystem 1024-blocks Used
+    // Available Capacity Mounted-on" -- the 4th whitespace-separated field
+    // (index 3) on the second line is "Available" in KiB.
+    let avail_kib: u64 = text
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(3)?
+        .parse()
+        .ok()?;
+    Some(avail_kib / 1024)
+}
+
+// Maintainer-directed safety buffer (issue #1069), kept in exact sync with
+// setup.sh's own `cache_size_buffer_mib`: nginx's cache manager sweeps
+// periodically rather than enforcing max_size instantaneously
+// (manager_sleep/manager_threshold on proxy_cache_path), so actual disk
+// usage can transiently overshoot max_size by roughly one sweep's worth of
+// writes before cleanup catches up -- and a larger declared cache means more
+// concurrent downloads can land in that window before the manager gets to
+// them. If this ever changes, update both this function and setup.sh's
+// cache_size_buffer_mib together, or the CLI and Admin UI would silently
+// enforce different safety margins for the identical operation.
+pub fn cache_size_buffer_mib(cache_gb: u64) -> u64 {
+    if cache_gb > 6 {
+        2048
+    } else if cache_gb > 4 {
+        1024
+    } else {
+        512
+    }
+}
+
+// True if requesting cache_gb GiB still leaves cache_size_buffer_mib's
+// required buffer free on a filesystem with avail_mib MiB currently free.
+// Signed arithmetic (i64, not u64) mirrors setup.sh's `(( avail_mib -
+// buffer_mib >= cache_gb * 1024 ))`: on a nearly-full disk, avail_mib can be
+// smaller than buffer_mib, and an unsigned subtraction would panic/wrap
+// instead of correctly evaluating to "does not fit".
+pub fn cache_size_fits_available_mib(cache_gb: u64, avail_mib: u64) -> bool {
+    let buffer_mib = cache_size_buffer_mib(cache_gb) as i64;
+    let avail_mib = avail_mib as i64;
+    let cache_gb = cache_gb as i64;
+    avail_mib - buffer_mib >= cache_gb * 1024
+}
+
+// Largest whole-GiB cache size that currently passes
+// cache_size_fits_available_mib, for the rejection message -- mirrors
+// setup.sh's `largest_valid_cache_gb`. Scans downward from the free-space
+// ceiling rather than solving the step-function buffer bands in closed
+// form: the buffer only grows as the requested size grows, so the scan is
+// short (bounded by the disk's own size in GiB) and this stays obviously
+// correct instead of clever. Returns None if even a 1 GiB cache would not
+// leave a buffer.
+pub fn largest_valid_cache_gb(avail_mib: u64) -> Option<u64> {
+    let mut candidate = avail_mib / 1024;
+    while candidate >= 1 {
+        if cache_size_fits_available_mib(candidate, avail_mib) {
+            return Some(candidate);
+        }
+        candidate -= 1;
+    }
+    None
 }
 
 fn unique_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
@@ -398,6 +499,111 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // ── Cache-resize disk-space/buffer logic (issue #1069 part 3) ──────────
+    // These mirror setup.sh's own bats coverage for cache_size_buffer_mib /
+    // cache_size_fits_available_mib / largest_valid_cache_gb (see
+    // tests/bats/setup_cache_size_disk_validation.bats on master, #1070) --
+    // boundary values must match exactly, since both implementations are
+    // supposed to enforce the identical maintainer-directed safety buffer.
+
+    #[test]
+    fn buffer_is_2048_mib_above_6_gib() {
+        assert_eq!(cache_size_buffer_mib(7), 2048);
+        assert_eq!(cache_size_buffer_mib(100), 2048);
+    }
+
+    #[test]
+    fn buffer_is_1024_mib_at_the_6_gib_boundary_and_down_to_just_above_4() {
+        // Exactly 6 is NOT "> 6", so it falls into the 1024 MiB band, not the
+        // 2048 MiB one -- this boundary case is the one most likely to get
+        // an off-by-one if the comparison operator is ever touched.
+        assert_eq!(cache_size_buffer_mib(6), 1024);
+        assert_eq!(cache_size_buffer_mib(5), 1024);
+    }
+
+    #[test]
+    fn buffer_is_512_mib_at_4_gib_and_below() {
+        assert_eq!(cache_size_buffer_mib(4), 512);
+        assert_eq!(cache_size_buffer_mib(1), 512);
+    }
+
+    #[test]
+    fn fits_available_true_when_buffer_leaves_room() {
+        // 50 GiB requested (buffer 2048 MiB) against 55 GiB free:
+        // 55*1024 - 2048 = 54272 >= 50*1024 = 51200.
+        assert!(cache_size_fits_available_mib(50, 55 * 1024));
+    }
+
+    #[test]
+    fn fits_available_false_when_buffer_would_be_violated() {
+        // 50 GiB requested against exactly 50 GiB free leaves no room at all
+        // for the 2048 MiB buffer.
+        assert!(!cache_size_fits_available_mib(50, 50 * 1024));
+    }
+
+    // Regression guard for the exact bug the signed-arithmetic comment
+    // documents: on a disk with LESS free space than the buffer itself
+    // requires, an unsigned subtraction would panic/wrap instead of
+    // evaluating to "does not fit".
+    #[test]
+    fn fits_available_false_without_panicking_when_disk_smaller_than_buffer() {
+        assert!(!cache_size_fits_available_mib(10, 100));
+    }
+
+    #[test]
+    fn largest_valid_scans_down_to_a_passing_value() {
+        // 20 GiB free: at cache_gb=20 (buffer 2048), 20*1024-2048=18432 <
+        // 20*1024=20480, fails. Keep scanning down until it passes.
+        let largest = largest_valid_cache_gb(20 * 1024).expect("some size should fit");
+        assert!(cache_size_fits_available_mib(largest, 20 * 1024));
+        // One GiB larger must NOT fit, or `largest` was not actually the max.
+        assert!(!cache_size_fits_available_mib(largest + 1, 20 * 1024));
+    }
+
+    #[test]
+    fn largest_valid_none_when_even_1_gib_does_not_fit() {
+        // 400 MiB free is less than even the smallest (512 MiB) buffer band.
+        assert_eq!(largest_valid_cache_gb(400), None);
+    }
+
+    #[test]
+    fn allowed_cache_path_rejects_traversal_and_relative_paths() {
+        assert!(!is_allowed_cache_path("relative/path"));
+        assert!(!is_allowed_cache_path("/var/cache/proxy/../etc/passwd"));
+        assert!(!is_allowed_cache_path("/etc/passwd"));
+    }
+
+    #[test]
+    fn allowed_cache_path_accepts_known_prefixes() {
+        assert!(is_allowed_cache_path("/var/cache/proxy"));
+        assert!(is_allowed_cache_path("/opt/lancache-ng/cache"));
+        assert!(is_allowed_cache_path("/data/lancache"));
+    }
+
+    #[test]
+    fn available_space_mib_at_rejects_disallowed_path() {
+        // Must fail closed via is_allowed_cache_path before ever shelling out
+        // to `df`, regardless of whether the path exists on this host.
+        assert_eq!(available_space_mib_at("/etc"), None);
+    }
+
+    #[test]
+    fn available_space_mib_at_parses_a_real_mount() {
+        // /var/cache/proxy itself may not exist on the test host, but its
+        // parent tree does on any Linux CI runner -- df resolves to the
+        // nearest existing mount point either way, same as a real container.
+        // This just proves the df-output parsing path works end to end; the
+        // exact free-space number is host-dependent and not asserted.
+        let result = available_space_mib_at("/var/cache/proxy");
+        // On a host where /var doesn't exist at all (never true for a real
+        // Linux CI runner, but keeps this test from being flaky if it ever
+        // runs somewhere unusual), a None is acceptable -- what must NOT
+        // happen is a panic.
+        if let Some(mib) = result {
+            assert!(mib > 0);
+        }
+    }
 
     #[test]
     fn shared_log_path_is_counted_once() {

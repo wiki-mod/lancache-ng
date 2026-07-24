@@ -670,6 +670,27 @@ impl Config {
             .unwrap_or_else(|| self.lancache_image_channel.clone())
     }
 
+    // Cache resize (issue #1069 part 3): same "consumed entirely on the
+    // host" model as the release-channel override immediately above --
+    // setup.sh's cmd_converge_reconcile reads this CACHE_MAX_GB override off
+    // the same ui_settings_file and, if it differs from .env's current
+    // value, writes both CACHE_MAX_SIZE (nginx's real max_size) and
+    // CACHE_MAX_GB there, then the pre-existing `docker compose up -d`
+    // convergence step recreates the proxy container so nginx's entrypoint
+    // re-renders its config with the new max_size. This container's own
+    // CACHE_MAX_GB env var (`self.cache_max_gb`) reflects what is actually
+    // running RIGHT NOW; this override reflects a resize the operator has
+    // requested but that has not necessarily reached the running proxy yet
+    // (up to ~5 minutes, the same convergence-tick latency #819 already
+    // accepts) -- routes/dashboard.rs uses the difference between the two to
+    // show a "resize pending" notice rather than silently overwriting the
+    // real, currently-enforced value.
+    pub fn effective_cache_max_gb(&self) -> f64 {
+        read_ui_override(&self.ui_settings_file, "CACHE_MAX_GB")
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(self.cache_max_gb)
+    }
+
     pub fn effective_auto_update_enabled(&self) -> bool {
         read_ui_override(&self.ui_settings_file, "AUTO_UPDATE_ENABLED")
             .map(|value| value.trim() == "1")
@@ -1397,6 +1418,40 @@ mod tests {
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    // effective_cache_max_gb() (issue #1069 part 3) must fall back to the
+    // container's own startup CACHE_MAX_GB when no Admin-UI resize override
+    // has ever been written, and must prefer the override once one exists --
+    // same two-layer precedence as effective_dhcp_mode()/
+    // effective_lancache_image_channel_override() above.
+    #[test]
+    fn effective_cache_max_gb_falls_back_to_raw_env_then_prefers_override() {
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-cache-resize-{}.env",
+            std::process::id()
+        ));
+
+        env::set_var("UI_SETTINGS_FILE", &settings_path);
+        env::set_var("CACHE_MAX_GB", "50");
+        let _ = fs::remove_file(&settings_path);
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.cache_max_gb, 50.0);
+        // No override file yet: effective must equal the raw running value.
+        assert_eq!(cfg.effective_cache_max_gb(), 50.0);
+
+        fs::write(&settings_path, "CACHE_MAX_GB=75\n").unwrap();
+        // The raw value is unchanged (it reflects the process env captured
+        // at startup, not a live re-read) -- only the effective getter must
+        // pick up the pending resize.
+        assert_eq!(cfg.cache_max_gb, 50.0);
+        assert_eq!(cfg.effective_cache_max_gb(), 75.0);
+
+        env::remove_var("CACHE_MAX_GB");
+        env::remove_var("UI_SETTINGS_FILE");
+        let _ = fs::remove_file(&settings_path);
     }
 
     // Guards the deliberate fail-closed design: when the two legacy
