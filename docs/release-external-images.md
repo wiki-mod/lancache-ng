@@ -83,6 +83,61 @@ project's own provenance and SBOM for the mirrored digest.
 For upstream external images that are not mirrored, release notes or deployment
 metadata must record the approved upstream digest.
 
+## Verifying Release Provenance
+
+Every first-party image digest (`proxy`, `dns`, `watchdog`, `dhcp`,
+`dhcp-proxy`, `ui`, `build-tools`, and the `stack` channel-pointer image) gets a
+[GitHub Artifact Attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
+pushed to GHCR alongside it (`.github/actions/ghcr-attest-retry`, wrapping
+`actions/attest`). This attestation is a signed, Sigstore-backed statement that
+cryptographically binds the exact image digest to the specific GitHub Actions
+workflow run (repository, workflow file, and commit) that built it, and does
+not depend on trusting GHCR itself as the source of truth.
+
+An operator or downstream consumer can verify both **that a pulled image was
+not tampered with** and **that it was actually built by this project's own
+release pipeline** (not a third party who pushed to a similarly-named tag) with
+the GitHub CLI:
+
+```bash
+# Resolve the tag to its immutable digest first (attestation verification is
+# digest-based, not tag-based, since a mutable tag like `latest` is not itself
+# a fixed subject). Use the immutable `sha-<commit>` tag -- the one tag scheme
+# guaranteed to exist for every first-party image build, per this document's
+# "Core Rule" (see docs/release-versioning.md) -- rather than assuming a
+# per-service `vX.Y.Z` tag was published for a given release; those "may still
+# exist for human inspection" per the promotion pipeline but are not the
+# guaranteed path setup/update itself relies on. Find the exact `sha-<commit>`
+# for a given stable release from that release's own notes/CHANGELOG.md entry,
+# or from `stack.env` inside the matching `ghcr.io/.../stack:<channel>` pointer
+# image (see "Setup And Update Selection" in docs/release-versioning.md).
+digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
+  ghcr.io/wiki-mod/lancache-ng/proxy:sha-<commit>)
+
+# Verify the attestation: confirms the artifact's integrity (the signed digest
+# matches what you pulled) and its authenticity (it was produced by a GitHub
+# Actions workflow run in the wiki-mod/lancache-ng repository, not an
+# unrelated identity).
+gh attestation verify "oci://${digest}" --owner wiki-mod
+```
+
+A successful verification prints the workflow run, repository, and commit SHA
+that produced the image -- this is the "expected identity of the person or
+process authoring the release" for lancache-ng: a specific GitHub Actions
+workflow run in this repository, not an individual's personal signing key.
+Repeat the same two commands with any other first-party service name and
+`sha-<commit>` tag (or a `vX.Y.Z` tag, when one has actually been published
+for that image -- confirm with `docker manifest inspect` or the GHCR package
+page first, since per-service release tags are not guaranteed the way
+`sha-<commit>` is) to verify that image instead. If `gh attestation verify`
+reports no matching attestation, or reports a builder identity outside
+`wiki-mod/lancache-ng`, treat the image as unverified and do not deploy it.
+
+For mirrored or repackaged external images, the same command verifies this
+project's own re-published attestation for the mirrored digest (see above);
+verifying an unmirrored upstream image's own provenance is the responsibility
+of that upstream project's own release process, not this document.
+
 ## Vulnerability Disposition (VEX)
 
 Accepted, deliberately-suppressed vulnerability findings live in the repo-root
@@ -97,7 +152,7 @@ consumer's non-Trivy tooling can parse.
 statement: the vulnerable component is present and the finding is accepted or
 deferred (typically because no fixed upstream version exists to bump to yet), so
 the honest status is `affected` with an `action_statement` that carries the
-acceptance rationale and the mandatory re-review date — not `not_affected`,
+acceptance rationale and the mandatory re-review date -- not `not_affected`,
 which would assert a non-exploitability claim these entries do not make. If a
 future entry genuinely represents non-exploitability, its status mapping must be
 revisited in the generator rather than blanket-applied.

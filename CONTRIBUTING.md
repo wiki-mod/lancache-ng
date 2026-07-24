@@ -85,11 +85,11 @@ Track related work explicitly in the PR body:
 - If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
 - When a PR is merged, completion claims must be checked against the merged code on the active development branch (`current_dev` as of #825, not a hardcoded `master`/`v0.2.0` assumption), not just the PR head or narrative.
 - If no issue exists, that's expected and fine per the "Before you start" guidance above for single, well-scoped work implemented immediately — no need to explain why in that case. If work that genuinely should have had an issue (multi-topic, backlog, needs-discussion) shipped without one, explain why in the PR body instead of leaving the relationship unclear.
-- **`Closes #123` does not auto-close the issue when merging to `current_dev`** — GitHub's built-in closing-keyword behavior only fires on merges to the repository's default branch (`master`). Until this is automated (tracked in #1137), whoever merges a current_dev PR with a closing keyword must manually close the referenced issue(s) and post a real closing report (not just a bare link) — see the next section.
+- **`Closes #123` is now automated on `current_dev` merges too** (`.github/workflows/current-dev-auto-close.yml`, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own workflow now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
 
-### Closing an issue manually (current_dev merges)
+### Closing an issue manually (fallback, current_dev merges)
 
-Because of the `current_dev` auto-close gap above, closing an issue by hand still needs to leave a real record, not just a status change:
+If the automation above did not fire for some reason, closing an issue by hand still needs to leave a real record, not just a status change:
 
 - Post a comment on the issue with an actual closing report before/when closing it: what was resolved, a link to the PR, and the concrete evidence (the PR's own Summary/Changelog content is usually sufficient to paste in directly — it's already required to exist by the PR template).
 - The same applies to any merge-readiness assessment (CI status, mergeability, caveats) — record it as a PR/issue comment, not only as a chat message to whoever asked. GitHub is this project's record of truth, not a chat transcript.
@@ -153,6 +153,23 @@ All actionable static analysis warnings are treated as build failures under the 
 
 **Known exception (tracked in issue #394):**
 GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo check` or `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
+
+#### Testing policy for major changes
+
+A **major change** is any pull request that adds a new feature, changes
+existing runtime/setup/update behavior, or fixes a bug in code that did not
+already have a regression test covering that behavior. A major change must
+add or update an automated test in the relevant test suite (Rust `#[test]`
+functions for `services/ui`/`services/dns/nats-subscriber`, a `.bats` fixture
+under `tests/bats/` for shell/setup logic, or a real end-to-end simulation
+script wired into a CI workflow for full-stack behavior) that exercises the
+new or changed behavior. A pull request that changes behavior with no
+corresponding test change should explain why in the PR body (for example,
+"covered by existing test X" or "no automated coverage is practical for this
+because Y" -- see `docs/threat-model.md`'s own precedent of naming untestable
+gaps explicitly rather than silently shipping without coverage). Purely
+cosmetic changes (docs, comments, formatting) are not major changes and are
+exempt.
 
 Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). Rust security correctness continues to be enforced separately by the `dns_rust_quality`, `ui_rust_quality`, `dns_test`, and `ui_test` jobs, which are independent of CodeQL extraction quality.
 
@@ -318,6 +335,31 @@ configured.
 Avoid hiding operational failures. If the UI cannot read logs, talk to Docker,
 reach PowerDNS or update a service, show a clear error instead of pretending
 that the action succeeded.
+
+## Collaborator access and permission escalation
+
+Write access, merge rights, and secret access to this repository are escalated
+resources, not something granted casually. `CODEOWNERS` currently lists a
+single owner (`@djdomi`), reflecting that this project has one maintainer with
+write access today.
+
+Before any additional collaborator is granted an escalated permission --
+repository write/triage/admin access, `CODEOWNERS` inclusion, or access to any
+repository Secret -- the maintainer reviews:
+
+- the contributor's prior contribution history on this repository (issue/PR
+  quality, adherence to this document and `AGENTS.md`);
+- a justifiable lineage of identity where practical (for example, an
+  established GitHub account with a real contribution history elsewhere, or a
+  known affiliation with a trusted organization) rather than granting access
+  to an anonymous or brand-new account;
+- the specific scope actually needed (for example, triage-only access for
+  someone who reviews issues but does not need to merge, rather than defaulting
+  everyone to full write access).
+
+This review happens before the permission is granted, not retroactively. Any
+future automation that grants repository permissions (for example, a bot or
+GitHub App) must go through the same review before being installed.
 
 ## Security-sensitive changes
 
