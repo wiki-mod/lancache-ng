@@ -294,10 +294,10 @@ validate_ui_session_ttl_seconds() {
 }
 
 # Centralize runtime profile calculation so install and update cannot drift:
-# SSL, Kea DHCP, and dnsmasq proxy mode are represented once in COMPOSE_PROFILES
-# while unrelated profiles are preserved.
+# SSL, Kea DHCP, dnsmasq proxy mode, and LanCache-NG-NTP are represented once
+# in COMPOSE_PROFILES while unrelated profiles are preserved.
 compose_profiles_for_runtime() {
-    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}"
+    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}"
     local profile result="" trimmed
 
     IFS=',' read -r -a profiles <<< "$existing"
@@ -305,7 +305,7 @@ compose_profiles_for_runtime() {
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
         case "$trimmed" in
-            ""|ssl|dhcp-kea|dhcp-proxy) continue ;;
+            ""|ssl|dhcp-kea|dhcp-proxy|ntp) continue ;;
         esac
         case ",$result," in
             *",$trimmed,"*) ;;
@@ -330,6 +330,11 @@ compose_profiles_for_runtime() {
             result+="dhcp-proxy"
             ;;
     esac
+
+    if [[ "$ntp_enabled" = "1" ]]; then
+        [[ -n "$result" ]] && result+=","
+        result+="ntp"
+    fi
 
     printf '%s\n' "$result"
 }
@@ -836,6 +841,57 @@ install_docker() {
     else
         die "No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
     fi
+}
+
+# Shared prerequisite-install flow: curl, Docker engine, a running Docker
+# daemon, and the Docker Compose v2 plugin. Used by the interactive `install`
+# flow below and by the standalone `install-requirements-primary`/
+# `install-requirements-secondary` commands (#1068 item 20) so an operator
+# who only needs the Docker prerequisites -- e.g. a fresh secondary host,
+# where `cmd_secondary` itself only checks for these tools and dies with
+# "docker is not installed" rather than installing them -- can provision
+# exactly that, standalone, without walking through the full interactive
+# installer. Both commands currently call this identical logic: a secondary
+# node needs the same Docker engine + Compose v2 plugin as a primary, nothing
+# less. Kept as two distinct command names anyway (rather than one shared
+# "install-requirements") so the operator-facing entry points stay
+# self-describing and can diverge later without a breaking rename if a
+# primary- or secondary-only requirement is ever added.
+ensure_stack_requirements_installed() {
+    [[ "$(id -u)" = "0" ]] \
+        || die "This command must be run as root (sudo ./setup.sh install-requirements-primary or install-requirements-secondary)."
+
+    if ! command -v curl >/dev/null 2>&1; then
+        install_curl
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        install_docker
+        print_ok "Docker installed"
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        print_warn "Docker daemon not running — starting now..."
+        systemctl enable --now docker \
+            || die "Failed to start Docker daemon."
+    fi
+
+    if ! docker compose version >/dev/null 2>&1; then
+        install_docker_compose
+    fi
+
+    docker compose version >/dev/null 2>&1 \
+        || die "Docker Compose plugin still missing after installing Docker requirements."
+}
+
+cmd_install_requirements_primary() {
+    ensure_stack_requirements_installed
+    print_ok "Primary node requirements installed (curl, Docker, Docker Compose v2). Run ./setup.sh install next."
+}
+
+cmd_install_requirements_secondary() {
+    ensure_stack_requirements_installed
+    print_ok "Secondary node requirements installed (curl, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> next."
 }
 
 # Approximates Docker Compose's own .env value semantics for a value read back
@@ -1915,7 +1971,7 @@ resume_lancache_convergence_after_failed_update() {
 }
 
 # Image selection is part of the release safety contract: mutable channels such
-# as latest/nightly/dev must resolve to one immutable stack tag before the compose
+# as latest/nightly must resolve to one immutable stack tag before the compose
 # pull, so one installation cannot accidentally mix image versions.
 validate_lancache_image_tag() {
     local tag="$1"
@@ -1961,17 +2017,36 @@ validate_lancache_image_tag() {
 # LANCACHE_IMAGE_CHANNEL=edge is rejected with a clear, actionable error telling
 # the operator to switch to "nightly", rather than being silently accepted as a
 # synonym. This is an intentional v0.3.0 breaking change.
+#
+# "dev" was RETIRED (not renamed) in v0.3.0 (#825/#1141): it used to publish
+# automatically from whichever vX.Y.Z branch was the active pre-release
+# integration branch of the time. Since current_dev became the permanent
+# active-development branch, that role was never re-pointed to it -- the
+# maintainer's decision (#825, 2026-07-23: "master = stable, current_dev =
+# nightly, vY.X.Z = archived release") formally retired dev instead, because
+# archived vY.X.Z branches are frozen release history now, not an active
+# integration branch, so there is nothing left for a dev channel to mean.
+# This is the same HARD CUT treatment as edge, for the same reason: silently
+# keeping dev valid would mean install/update against an increasingly stale,
+# unmaintained image with no warning. dev was never offered by setup.sh's
+# interactive picker or the Admin UI's channel control (see
+# lancache_ui_channel_override_is_valid), so this only affects operators who
+# set LANCACHE_IMAGE_CHANNEL=dev explicitly via .env/shell env or the
+# secondary-node registration flow.
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
-        stable|latest|dev|nightly|pinned)
+        stable|latest|nightly|pinned)
             return 0
             ;;
         edge)
             die "LANCACHE_IMAGE_CHANNEL=edge is no longer supported: the 'edge' channel was renamed to 'nightly' in v0.3.0 (#1056). Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly and re-run setup.sh."
             ;;
+        dev)
+            die "LANCACHE_IMAGE_CHANNEL=dev is no longer supported: the 'dev' channel was retired in v0.3.0 (#825/#1141) -- archived vY.X.Z release branches no longer publish a live channel. Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly (tracks current_dev's ongoing development) or LANCACHE_IMAGE_CHANNEL=stable/latest (tracks the stable release), then re-run setup.sh."
+            ;;
     esac
-    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, dev, nightly, or pinned."
+    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, nightly, or pinned."
 }
 
 # Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
@@ -2135,11 +2210,11 @@ resolve_lancache_image_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# Resolves which release channel (latest/dev/nightly/pinned) this install should
+# Resolves which release channel (latest/nightly/pinned) this install should
 # track, in this precedence order:
 #   1. An explicit LANCACHE_IMAGE_CHANNEL (shell env, then .env).
 #   2. If no channel was set but LANCACHE_IMAGE_TAG names a moving channel
-#      word (latest/dev/nightly), infer that as the channel; if it names an
+#      word (latest/nightly), infer that as the channel; if it names an
 #      immutable tag (sha-*/vX.Y.Z), infer channel=pinned.
 #   3. If still unresolved and this is a git checkout/release archive with a
 #      derivable release tag, infer channel=pinned so that exact release is used.
@@ -2159,7 +2234,7 @@ resolve_lancache_image_channel() {
     fi
 
     case "$tag" in
-        stable|latest|dev|nightly)
+        stable|latest|nightly)
             channel="${channel:-$tag}"
             ;;
         sha-*|v[0-9]*)
@@ -2199,7 +2274,9 @@ resolve_lancache_image_channel() {
 # Note there is deliberately no "edge -> nightly" mapping here: the old "edge"
 # channel was hard-cut, not aliased, in v0.3.0 (#1056) -- an edge value is
 # rejected by validate_lancache_image_channel long before this function, so it
-# never reaches this pointer resolution.
+# never reaches this pointer resolution. The same is true of the retired
+# "dev" channel (#825/#1141): validate_lancache_image_channel rejects it
+# before this function ever sees it, so there is no "dev" case here either.
 lancache_stack_pointer_channel_for() {
     local channel="$1"
     if [[ "$channel" = "stable" ]]; then
@@ -2209,7 +2286,7 @@ lancache_stack_pointer_channel_for() {
     fi
 }
 
-# Turns a mutable channel name (latest/dev/nightly) into one immutable sha-* tag.
+# Turns a mutable channel name (latest/nightly) into one immutable sha-* tag.
 # Channels are published as a tiny "stack:<channel>" pointer image whose only
 # content is a stack.env file naming the current immutable LANCACHE_IMAGE_TAG
 # for that channel; this pulls that pointer image, reads stack.env out of it
@@ -2244,8 +2321,8 @@ resolve_lancache_stack_channel_tag() {
 ${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'nightly' testing channel daily from master, a formal stable release with a
-published 'latest'/'stable' channel tag has not yet been created.
+to the 'nightly' testing channel continuously from current_dev, a formal stable release
+with a published 'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
@@ -2301,7 +2378,7 @@ resolve_lancache_image_tag() {
 
     if [[ -n "$tag" ]]; then
         case "$tag" in
-            stable|latest|dev|nightly)
+            stable|latest|nightly)
                 resolve_lancache_stack_channel_tag "$env_file" "$tag"
                 return 0
                 ;;
@@ -2319,7 +2396,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$channel" in
-        stable|latest|dev|nightly)
+        stable|latest|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$channel"
             return 0
             ;;
@@ -2349,7 +2426,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$tag" in
-        stable|latest|dev|nightly)
+        stable|latest|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$tag"
             return 0
             ;;
@@ -2397,6 +2474,7 @@ migrate_env_for_update() {
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
+    local ntp_data_default ntp_data_dir ntp_enabled
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
@@ -2558,6 +2636,15 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
 
+    # LanCache-NG-NTP can stay disabled too; same "keys must exist" reasoning
+    # as DHCP_ENABLED/KEA_DATA_DIR above. No legacy path to migrate from (this
+    # is a new service), so ntp_data_dir is just the plain default rather than
+    # going through legacy_dir_or_default.
+    append_env_key_if_missing NTP_ENABLED "0" "$env_file"
+    ntp_data_default="$state_dir/ntp"
+    ntp_data_dir="$ntp_data_default"
+    set_optional_env_path_override_if_needed NTP_DATA_DIR "$ntp_data_dir" "$ntp_data_default" "$env_file"
+
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
@@ -2678,9 +2765,10 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
+    ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
     set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
+        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled")" \
         "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real
@@ -2757,7 +2845,7 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_dir cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    local cache_dir cache_std cache_ssl kea_dir ntp_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
@@ -2766,6 +2854,7 @@ backup_manifest() {
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
     kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+    ntp_dir=$(get_env_var NTP_DATA_DIR "$env_file")
     nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")
     nats_data_dir=$(get_env_var NATS_DATA_DIR "$env_file")
     pdns_filter_state_dir=$(get_env_var PDNS_FILTER_STATE_DIR "$env_file")
@@ -2774,6 +2863,7 @@ backup_manifest() {
     cache_std="${cache_std:-$state_dir/cache}"
     cache_ssl="${cache_ssl:-$cache_std}"
     kea_dir="${kea_dir:-$state_dir/kea}"
+    ntp_dir="${ntp_dir:-$state_dir/ntp}"
     nats_conf_dir="${nats_conf_dir:-$state_dir/nats-conf}"
     nats_data_dir="${nats_data_dir:-$state_dir/nats}"
     pdns_filter_state_dir="${pdns_filter_state_dir:-$state_dir/pdns-filter-state}"
@@ -2796,6 +2886,7 @@ backup_manifest() {
     [[ -d "$(legacy_state_path nats)" ]] && printf '%s\n' "$(legacy_state_path nats)"
     [[ -d "$(legacy_state_path nats-conf)" ]] && printf '%s\n' "$(legacy_state_path nats-conf)"
     [[ -n "${kea_dir:-}" && -d "$kea_dir" ]] && printf '%s\n' "$kea_dir"
+    [[ -n "${ntp_dir:-}" && -d "$ntp_dir" ]] && printf '%s\n' "$ntp_dir"
     if [[ "$mode" = "full" ]]; then
         [[ -n "${cache_dir:-}" && -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
         [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
@@ -2812,6 +2903,22 @@ path_is_inside() {
     child=$(realpath -m "$child")
     parent=$(realpath -m "$parent")
     [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
+}
+
+# Shared "no stack at this path" failure (#1068 item 22), used by every
+# command that operates on an existing install directory defaulting to
+# /opt/lancache-ng (backup, restore, update/auto-update, debug,
+# create-logs-for-issue, reset-to-last-known-good-config, update-ip). A
+# secondary DNS node's stack lives in its own --name-derived directory under
+# wherever cmd_secondary was run (see cmd_secondary's own secondary_dir
+# handling), never /opt/lancache-ng -- so any of these commands, run bare on
+# a fresh secondary host, hits this by default. The previous plain "Run
+# ./setup.sh first." read as if only a primary install were possible, which
+# is actively misleading for that case; point at both real fixes instead of
+# guessing which one applies.
+die_no_stack_found() {
+    local install_dir="$1"
+    die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh (or ./setup.sh install). If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
 }
 
 # Compose helpers are deliberately no-ops when the stack is unavailable so
@@ -3051,7 +3158,7 @@ cmd_backup() {
     install_dir=$(realpath -m "$install_dir")
     backup_root=$(realpath -m "$backup_root")
     [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
     local stamp dest archive rel path old_umask stack_stopped=0 stack_was_running=0 backup_paused_convergence=0
@@ -3403,6 +3510,13 @@ Commands:
   install              Run the guided first-time setup. This is also the
                        default when no command is given, so this remains safe
                        for curl | bash installation.
+  install-requirements-primary
+                       Install only the Docker prerequisites (curl, Docker
+                       engine, Docker Compose v2) for a primary node, without
+                       running the rest of the interactive installer.
+  install-requirements-secondary
+                       Install only the Docker prerequisites for a secondary
+                       DNS node, without running ./setup.sh secondary.
   update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
   update-ip [install-dir]
                        Change the configured standard and SSL listener IPs.
@@ -3449,6 +3563,29 @@ default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
 LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
 for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
+EOF
+            ;;
+        install-requirements-primary)
+            cat <<EOF
+Usage: ./setup.sh install-requirements-primary
+
+Installs only the Docker prerequisites (curl, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin) for a primary node, then stops --
+does not run the rest of the interactive installer. Useful for provisioning a
+host's requirements ahead of time, or standalone, separately from the guided
+setup. Must be run as root. Follow with ./setup.sh install.
+EOF
+            ;;
+        install-requirements-secondary)
+            cat <<EOF
+Usage: ./setup.sh install-requirements-secondary
+
+Installs only the Docker prerequisites (curl, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin) for a secondary DNS node, then
+stops. ./setup.sh secondary itself only checks for these tools and fails with
+"docker is not installed" if they are missing -- this command lets an
+operator install exactly what a secondary needs, standalone, before running
+./setup.sh secondary. Must be run as root.
 EOF
             ;;
         update)
@@ -3614,12 +3751,32 @@ dc_update() {
 # from "starting"/"unhealthy" rather than guessing. For a container with no
 # healthcheck at all, the best available signal is that it is actually in the
 # "running" state (weaker, but honestly the most this project can assert for
-# those services today).
+# those services today) -- EXCEPT for a deliberately one-shot utility
+# container (Compose `restart: "no"`, e.g. `dhcp-probe`, the #377 broadcast
+# conflict-discovery probe): that class of service is *expected* to exit on
+# its own once its job is done, so requiring "running" for it can never
+# succeed once it finishes normally. Confirmed as a real, 100%-reproducible
+# bug (issue #1155): every real `setup.sh update` run against deploy/quickstart
+# recreates dhcp-probe as part of "Starting non-UI services", and once it
+# exits 0 (as designed, usually well under a minute), this check kept
+# requiring "running" forever, so wait_for_stack_health always burned its
+# full 180s budget and declared the whole non-UI set unhealthy -- even though
+# every real long-running service (proxy, dns-standard, nats, watchdog,
+# netdata, docker-socket-proxy) was already healthy the entire time. A
+# one-shot container is therefore treated as satisfying this check once it
+# has exited cleanly (exit code 0); a non-zero exit still fails closed, since
+# that is a real probe failure, not a normal one-shot completion.
 service_container_is_healthy() {
     local service="$1"
-    local container_id health status
+    local container_id health status restart_policy exit_code
 
-    container_id=$(dc_update ps -q "$service" 2>/dev/null)
+    # -a/--all: without it, `docker compose ps -q` only lists currently
+    # RUNNING containers, so a one-shot service (dhcp-probe) that already
+    # exited would look up as "no container id at all" and return 1 here
+    # before the one-shot-exit-0 handling below is ever reached -- confirmed
+    # directly while validating the issue #1155 fix (the fix below alone was
+    # not sufficient; this lookup itself was the second half of the bug).
+    container_id=$(dc_update ps -a -q "$service" 2>/dev/null)
     [[ -n "$container_id" ]] || return 1
 
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id" 2>/dev/null)
@@ -3629,7 +3786,16 @@ service_container_is_healthy() {
     fi
 
     status=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null)
-    [[ "$status" = "running" ]]
+    [[ "$status" = "running" ]] && return 0
+
+    restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id" 2>/dev/null)
+    if [[ "$status" = "exited" && "$restart_policy" = "no" ]]; then
+        exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null)
+        [[ "$exit_code" = "0" ]]
+        return $?
+    fi
+
+    return 1
 }
 
 # A missing tool must never look identical to "the thing it would have
@@ -3688,7 +3854,12 @@ verify_stack_functional_health() {
     # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
     # container answers a real query at all (AGENTS.md requires a real
     # query/response probe here, not ping/ss), not that every domain resolves.
-    test_fqdn="steamcontent.com"
+    # Must be a bare-apex cdn-domains.txt entry, not a wildcard-only one
+    # (leading-dot, e.g. ".steamcontent.com" since #1073): RPZ wildcard-only
+    # entries never match the bare apex itself, so probing steamcontent.com
+    # directly always came back empty after #1073 and permanently failed this
+    # gate even on a perfectly healthy stack (issue #1149).
+    test_fqdn="content1.steampowered.com"
     if [[ -n "$ip_standard" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
         resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>/dev/null)
@@ -3831,7 +4002,7 @@ apply_stack_update_ordered() {
 perform_stack_update_flow() {
     local install_dir="$1"
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
     # Installed up front, before anything is mutated, so the post-update
     # verify_stack_functional_health gate below actually runs its DNS/HTTP
@@ -3942,7 +4113,7 @@ cmd_auto_update() {
 
     install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     # Re-checked here, not just trusted from whatever gated the systemd timer
@@ -3995,12 +4166,14 @@ cmd_auto_update() {
 # unsuitable here, since an unexpected value from the UI must be a silent
 # no-op tick, not an aborted systemd service run). Only "stable"/"nightly" are
 # accepted, matching exactly what routes/setup.rs's is_valid_ui_channel now
-# offers the operator; this intentionally does not widen to "dev"/"pinned"
-# even once another codepath's validator learns those, since this control was
-# never meant to set them. "edge" (the old name of "nightly", renamed in v0.3.0
-# #1056) is deliberately NOT accepted -- consistent with the hard cut elsewhere.
-# A settings volume still holding "edge" from a pre-rename Admin UI is treated
-# as an unrecognized value and no-op'd here (this must not `die` -- see above --
+# offers the operator; this intentionally does not widen to "pinned" even
+# once another codepath's validator learns it, since this control was never
+# meant to set it. "edge" (the old name of "nightly", renamed in v0.3.0
+# #1056) and "dev" (retired, not renamed, in v0.3.0 #825/#1141) are both
+# deliberately NOT accepted -- consistent with the hard cut elsewhere, and
+# neither was ever offered by the Admin UI to begin with. A settings volume
+# still holding "edge" from a pre-rename Admin UI is treated as an
+# unrecognized value and no-op'd here (this must not `die` -- see above --
 # because it runs inside the auto-update service tick); the operator re-picks a
 # valid channel in the current UI.
 lancache_ui_channel_override_is_valid() {
@@ -4096,7 +4269,7 @@ cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     cd "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -4368,7 +4541,7 @@ cmd_create_logs_for_issue() {
     install_dir=$(realpath -m "$install_dir")
     dest_root=$(realpath -m "$dest_root")
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     install_missing_tools tar
 
     local env_file cache_env_file state_dir
@@ -4646,7 +4819,7 @@ reset_kea_to_last_known_good_config() {
     local sid config_json
 
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
@@ -4747,7 +4920,7 @@ cmd_update_ip() {
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh update-ip [install-dir])."
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
@@ -5171,7 +5344,7 @@ EOF
     if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
         lancache_image_channel="$response_image_channel"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|dev|nightly)$ ]]; then
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|nightly)$ ]]; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -5184,7 +5357,7 @@ EOF
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
         LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|dev|nightly)$ ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|nightly)$ ]]; then
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -5275,7 +5448,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -5328,6 +5501,18 @@ case "${1:-install}" in
             exit 0
         fi
         ;;
+    install-requirements-primary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install-requirements-primary
+            exit 0
+        fi
+        cmd_install_requirements_primary; exit 0 ;;
+    install-requirements-secondary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install-requirements-secondary
+            exit 0
+        fi
+        cmd_install_requirements_secondary; exit 0 ;;
     update)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help update
@@ -5422,27 +5607,7 @@ print_step "Checking prerequisites"
 
 assert_prebuilt_image_platform_supported
 
-if ! command -v curl >/dev/null 2>&1; then
-    install_curl
-fi
-
-if ! command -v docker >/dev/null 2>&1; then
-    install_docker
-    print_ok "Docker installed"
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    print_warn "Docker daemon not running — starting now..."
-    systemctl enable --now docker \
-        || die "Failed to start Docker daemon."
-fi
-
-if ! docker compose version >/dev/null 2>&1; then
-    install_docker_compose
-fi
-
-docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose plugin still missing after installing Docker requirements."
+ensure_stack_requirements_installed
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
@@ -5590,13 +5755,17 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
-    printf "  stable — the channel promoted after the full release validation gate.\n"
-    printf "           Recommended for most installs. This is what './setup.sh update'\n"
-    printf "           tracks by default, and what most operators should stay on.\n"
     printf "  nightly — the most recently built channel from active development.\n"
-    printf "            Refreshes more often (daily from master), may be less tested\n"
-    printf "            than stable. Opt in only if you specifically want the newest\n"
-    printf "            changes and accept the extra risk.\n\n"
+    printf "            Refreshes continuously from current_dev. Currently the\n"
+    printf "            practical default: this project is pre-1.0 and has not cut\n"
+    printf "            a stable release yet (see below), so this is what most new\n"
+    printf "            installs should pick.\n"
+    printf "  stable — the channel promoted after the full release validation gate,\n"
+    printf "           once a stable release exists. NOT YET AVAILABLE: no stable\n"
+    printf "           release has been cut for this project yet, so choosing it now\n"
+    printf "           will fail during image pull with an explanation of how to\n"
+    printf "           proceed instead. Once a stable release ships, this becomes the\n"
+    printf "           recommended default again.\n\n"
 
     # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
     # resolve_lancache_image_channel already checks first (see its precedence
@@ -5604,17 +5773,27 @@ else
     # "stable" and "latest" resolve to the identical published stack pointer
     # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
     # friendlier, self-explanatory name this prompt writes for new installs.
+    #
+    # Default answer and recommendation deliberately flipped from "stable" to
+    # "nightly" (#1068 field-testing finding): pre-1.0, accepting the prior
+    # default silently walked a new operator straight into a "manifest
+    # unknown" dead end (resolve_lancache_stack_channel_tag's own die()
+    # message already explains this gracefully if reached, so "stable" stays
+    # a valid, non-rejected answer here for the operator who explicitly wants
+    # it or is running this after a real stable release exists -- only the
+    # picker's own default/recommendation changes, not what inputs it
+    # accepts).
     while true; do
-        ask "Release channel [stable/nightly]" "stable"
+        ask "Release channel [nightly/stable]" "nightly"
         case "${REPLY,,}" in
-            stable)
-                LANCACHE_IMAGE_CHANNEL="stable"
-                print_ok "Using the stable channel (recommended)."
-                break
-                ;;
             nightly)
                 LANCACHE_IMAGE_CHANNEL="nightly"
-                print_warn "Using the nightly channel — more recent, less tested than stable."
+                print_ok "Using the nightly channel (recommended pre-1.0)."
+                break
+                ;;
+            stable)
+                LANCACHE_IMAGE_CHANNEL="stable"
+                print_warn "Using the stable channel -- this will fail during image pull unless a stable release already exists."
                 break
                 ;;
             # "edge" was the old name of the nightly channel (renamed in v0.3.0,
@@ -5863,7 +6042,32 @@ else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
 
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE")"
+# ── 7b. LanCache-NG-NTP ───────────────────────────────────────────────────────
+# Kept minimal and non-interactive by design: the container's own upstream
+# server list and the DHCP auto-populate toggle are Admin-UI-configured
+# settings (requirement 2 of the issue this service was built for), not
+# install-wizard prompts -- this section only decides whether the container
+# is created at all (NTP_ENABLED / the `ntp` Compose profile), matching how
+# little SSL_ENABLED asks up front for its own similarly toggle-shaped
+# feature above.
+print_step "LanCache-NG-NTP"
+
+printf "  A small, self-contained NTP server, disciplined against public NTP\n"
+printf "  servers, that serves time to LAN clients on UDP/123. Enable/disable and\n"
+printf "  upstream server list are then configured from the Admin UI.\n"
+printf "  Default: disabled.\n\n"
+
+ask "Enable LanCache-NG-NTP? [y/N]" "N"
+NTP_ENABLED=0
+NTP_DATA_DIR="$INSTALL_DIR/ntp"
+if [[ "${REPLY,,}" = "y" ]]; then
+    NTP_ENABLED=1
+    print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
+else
+    print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
+fi
+
+COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED")"
 
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
@@ -5984,6 +6188,8 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
     "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
+    "NTP_ENABLED=${NTP_ENABLED}" \
+    "NTP_DATA_DIR=${NTP_DATA_DIR}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -6079,6 +6285,13 @@ DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
 DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
 DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
 
+# ── LanCache-NG-NTP ────────────────────────────────────────────────────────────
+# Enable/disable, upstream server list, and the DHCP auto-populate toggle are
+# configured from the Admin UI's NTP page; this only controls whether the
+# container is created at all (see the \`ntp\` Compose profile).
+NTP_ENABLED=${NTP_ENABLED}
+NTP_DATA_DIR=${NTP_DATA_DIR}
+
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
 
@@ -6140,6 +6353,10 @@ print_ok "Cache:          $CACHE_DIR"
 if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
     mkdir -p "$KEA_DATA_DIR"
     print_ok "Kea data:       $KEA_DATA_DIR"
+fi
+if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
+    mkdir -p "$NTP_DATA_DIR"
+    print_ok "NTP data:       $NTP_DATA_DIR"
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
@@ -6285,6 +6502,11 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
+fi
+if [[ "$NTP_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"
+else
+    printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
 fi
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"

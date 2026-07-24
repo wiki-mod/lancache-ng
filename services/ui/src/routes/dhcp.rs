@@ -491,6 +491,14 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         "dhcp_proxy_custom_options_form",
         &dhcp_proxy_custom_options_form,
     );
+    // Issue #1079: lets dhcp.html warn that the per-subnet NTP field is
+    // currently auto-managed by LanCache-NG-NTP (see
+    // apply_ntp_lan_ip_to_all_subnets), rather than an operator discovering
+    // that only after their manual edit gets silently overwritten.
+    ctx.insert(
+        "ntp_auto_dhcp_active",
+        &(state.config.effective_ntp_enabled() && state.config.effective_ntp_auto_dhcp()),
+    );
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     // Leases and reservations don't depend on each other, so they're
@@ -607,7 +615,83 @@ async fn reconcile_dhcp_mode(
                 .map_err(|err| DhcpError::config_error(err.to_string()))?;
         }
     }
+
+    // Issue #1079's requirement 4: if LanCache-NG-NTP's "auto-set as DHCP
+    // NTP server" toggle is already on when DHCP switches into Kea mode,
+    // push this container's LAN address into every subnet immediately
+    // instead of waiting for the next unrelated NTP/DHCP settings save.
+    // Best-effort and non-fatal: Kea's control-agent may not have finished
+    // starting yet (start_service above just requested the container start,
+    // it does not wait for readiness), and a transient failure here must
+    // never fail the DHCP mode switch itself.
+    if mode.is_kea()
+        && state.config.effective_ntp_enabled()
+        && state.config.effective_ntp_auto_dhcp()
+    {
+        if let Err(err) = apply_ntp_lan_ip_to_all_subnets(state).await {
+            tracing::warn!(
+                error = %err,
+                "failed to push LanCache-NG-NTP's LAN address into Kea subnets after switching to Kea mode; it will be retried on the next NTP/DHCP settings save"
+            );
+        }
+    }
+
     Ok(())
+}
+
+// Forces every Kea subnet's ntp-servers option to LanCache-NG-NTP's
+// configured LAN address (state.config.standard_ip) -- issue #1079's
+// requirement 4. Deliberately overrides any per-subnet value an operator
+// set manually via add_subnet/update_subnet for as long as the "auto-set as
+// DHCP NTP server" toggle stays on; see restore_default_ntp_on_all_subnets
+// for the counterpart that hands control back when the toggle turns off.
+// A no-op (Ok(())) when DHCP isn't actually running in reachable Kea mode.
+pub(crate) async fn apply_ntp_lan_ip_to_all_subnets(state: &AppState) -> Result<(), DhcpError> {
+    if !kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
+        return Ok(());
+    }
+    set_ntp_option_on_all_subnets(state, state.config.standard_ip.clone()).await
+}
+
+// Restores every Kea subnet's ntp-servers option to the project-wide
+// configured default (effective_dhcp_ntp_servers(), resolved to IPv4 the
+// same way add_subnet/update_subnet already do) -- called when the "auto-set
+// as DHCP NTP server" toggle turns off, so subnets converge back to one
+// well-known, documented value (AG-OP-014) instead of whatever they
+// individually held before auto-populate took them over. A no-op when DHCP
+// isn't actually running in reachable Kea mode.
+pub(crate) async fn restore_default_ntp_on_all_subnets(state: &AppState) -> Result<(), DhcpError> {
+    if !kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
+        return Ok(());
+    }
+    let resolved = resolve_ntp_servers(&state.config.effective_dhcp_ntp_servers())
+        .await
+        .unwrap_or_default();
+    set_ntp_option_on_all_subnets(state, resolved).await
+}
+
+// Shared plumbing for the two reconcile entry points above: rewrites every
+// subnet's ntp-servers option to the same already-resolved value via
+// set_subnet_ntp_option, leaving every other subnet field untouched.
+async fn set_ntp_option_on_all_subnets(
+    state: &AppState,
+    ntp_servers: String,
+) -> Result<(), DhcpError> {
+    kea_config_modify(state, move |config| {
+        let subnets = dhcp4_subnets_mut(config)?;
+        for subnet in subnets.iter_mut() {
+            set_subnet_ntp_option(subnet, &ntp_servers)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))
 }
 
 // Best-effort pre-flight check that update_dhcp_mode runs BEFORE
@@ -740,6 +824,122 @@ pub(crate) fn persist_stack_settings(
                 "AUTO_UPDATE_ENABLED",
                 if auto_update_enabled { "1" } else { "0" }.to_string(),
             ),
+            // LanCache-NG-NTP settings: this route never edits these, but
+            // write_ui_settings_file overwrites the whole file each call --
+            // carried through unchanged so a release-channel save never
+            // silently reverts an operator's NTP configuration back to its
+            // env default.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+        ],
+    )
+}
+
+// Counterpart to persist_stack_settings for routes/ntp.rs's own settings
+// save (update_ntp_settings): writes the three NTP_* keys plus every current
+// DHCP/release-channel value unchanged, for the same whole-file-overwrite
+// reason documented on write_ui_settings_file. `pub(crate)` so routes/ntp.rs
+// can call it without duplicating this file's ownership of the settings
+// file's write contract.
+pub(crate) fn persist_ntp_settings(
+    state: &AppState,
+    ntp_enabled: bool,
+    ntp_upstream_servers: &str,
+    ntp_auto_dhcp: bool,
+) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_ENABLED",
+                if ntp_enabled { "1" } else { "0" }.to_string(),
+            ),
+            ("NTP_UPSTREAM_SERVERS", ntp_upstream_servers.to_string()),
+            (
+                "NTP_AUTO_DHCP",
+                if ntp_auto_dhcp { "1" } else { "0" }.to_string(),
+            ),
         ],
     )
 }
@@ -787,6 +987,15 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         // function's doc comment for the full read path.
         "LANCACHE_IMAGE_CHANNEL",
         "AUTO_UPDATE_ENABLED",
+        // LanCache-NG-NTP settings, written by routes/ntp.rs's
+        // update_ntp_settings (via persist_ntp_settings below). Same
+        // whole-file-overwrite contract: every other save site in this file
+        // must keep carrying these three keys through unchanged, or an
+        // unrelated DHCP/release-channel save would silently reset them to
+        // their env defaults.
+        "NTP_ENABLED",
+        "NTP_UPSTREAM_SERVERS",
+        "NTP_AUTO_DHCP",
     ] {
         if let Some(value) = map.get(key) {
             content.push_str(key);
@@ -927,6 +1136,31 @@ pub async fn update_dhcp_mode(
             (
                 "AUTO_UPDATE_ENABLED",
                 if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // LanCache-NG-NTP settings: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED above -- this route
+            // never edits these either.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
                     "1"
                 } else {
                     "0"
@@ -1114,6 +1348,31 @@ pub async fn update_dhcp_proxy(
                 }
                 .to_string(),
             ),
+            // LanCache-NG-NTP settings: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED above -- this route
+            // never edits these either.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -1136,8 +1395,10 @@ fn is_valid_interface_name(raw: &str) -> bool {
 
 // Checks the whole dotted name against DNS's own length rules (each label
 // max 63 bytes, the full name max 253) before checking each label's
-// characters via is_valid_dns_label below.
-fn is_valid_domain_name(raw: &str) -> bool {
+// characters via is_valid_dns_label below. `pub(crate)`: routes/ntp.rs
+// reuses this to validate NTP_UPSTREAM_SERVERS hostname entries rather than
+// duplicating DNS label-syntax validation.
+pub(crate) fn is_valid_domain_name(raw: &str) -> bool {
     let name = raw.trim();
     !name.is_empty()
         && name.len() <= 253
@@ -3117,7 +3378,9 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     Ok(lease_time)
 }
 
-fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
+// `pub(crate)`: routes/ntp.rs reuses this to validate NTP_UPSTREAM_SERVERS
+// IPv4-literal entries rather than duplicating the same parse.
+pub(crate) fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
     Ipv4Addr::from_str(ip).ok()
 }
 
@@ -3670,6 +3933,33 @@ fn format_ntp_server_option(ntp_servers: &str) -> Option<String> {
 
 fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
+}
+
+// Rewrites ONLY a subnet's ntp-servers option-data entry in place, leaving
+// every other option (routers, DNS, domain, custom options, reservations)
+// untouched. Used by reconcile_ntp_dhcp_option (issue #1079's requirement 4)
+// instead of apply_subnet_value/build_subnet_options: those two rebuild a
+// subnet's ENTIRE option-data array from an add_subnet/update_subnet form
+// submission, which this reconcile pass never has -- it only ever knows the
+// one NTP value it needs to push (or restore), not the subnet's current
+// gateway/DNS/domain, so reusing them would silently blank those out.
+fn set_subnet_ntp_option(subnet: &mut Value, ntp_servers: &str) -> Result<(), &'static str> {
+    let options = subnet
+        .get_mut("option-data")
+        .and_then(|value| value.as_array_mut())
+        .ok_or("subnet option-data missing or not an array")?;
+
+    options.retain(|option| {
+        !is_dhcp4_option_space(option)
+            || !(option.get("name").and_then(|value| value.as_str()) == Some("ntp-servers")
+                || option.get("code").and_then(|value| value.as_u64()) == Some(42))
+    });
+
+    if let Some(data) = format_ntp_server_option(ntp_servers) {
+        options.push(json!({"name": "ntp-servers", "data": data}));
+    }
+
+    Ok(())
 }
 
 // One entry of a parsed NTP server list, split into the three shapes
@@ -6991,5 +7281,90 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // Issue #1079: same bug class as write_ui_settings_file_persists_
+    // release_channel_and_auto_update_keys above -- a key left off
+    // write_ui_settings_file's fixed list is silently dropped even if
+    // persist_ntp_settings/persist_stack_settings/update_dhcp_mode/
+    // update_dhcp_proxy all pass it in `values`.
+    #[test]
+    fn write_ui_settings_file_persists_ntp_keys() {
+        let dir = temp_snapshot_root("ntp-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(
+            &target,
+            &[
+                ("NTP_ENABLED", "1".to_string()),
+                (
+                    "NTP_UPSTREAM_SERVERS",
+                    "0.debian.pool.ntp.org time.cloudflare.com".to_string(),
+                ),
+                ("NTP_AUTO_DHCP", "0".to_string()),
+            ],
+        );
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content,
+            "NTP_ENABLED=1\nNTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org time.cloudflare.com\nNTP_AUTO_DHCP=0\n"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // set_subnet_ntp_option must replace an existing ntp-servers entry
+    // (matched by name OR by its well-known code 42, same dual-match
+    // is_ui_managed_subnet_option already relies on) while leaving every
+    // other option-data entry -- including custom, non-UI-managed ones --
+    // completely untouched. This is the core invariant
+    // apply_ntp_lan_ip_to_all_subnets/restore_default_ntp_on_all_subnets
+    // depend on: unlike apply_subnet_value, this function must never touch
+    // gateway/DNS/domain/custom options it was never given.
+    #[test]
+    fn set_subnet_ntp_option_replaces_only_the_ntp_entry() {
+        let mut subnet = json!({
+            "id": 1,
+            "option-data": [
+                {"name": "routers", "data": "10.0.0.1"},
+                {"name": "ntp-servers", "data": "203.0.113.1"},
+                {"code": 99, "data": "custom-value"}
+            ]
+        });
+
+        set_subnet_ntp_option(&mut subnet, "192.0.2.50").expect("must succeed");
+
+        let options = subnet["option-data"].as_array().expect("array");
+        assert_eq!(options.len(), 3, "routers/custom entries must be preserved");
+        assert!(options
+            .iter()
+            .any(|o| o["name"] == "routers" && o["data"] == "10.0.0.1"));
+        assert!(options.iter().any(|o| o["code"] == 99));
+        assert!(options
+            .iter()
+            .any(|o| o["name"] == "ntp-servers" && o["data"] == "192.0.2.50"));
+    }
+
+    // An empty target value (the resolved project-wide default when nothing
+    // is configured) must remove the ntp-servers entry entirely rather than
+    // leave a Kea-invalid empty-string option-data value, matching
+    // format_ntp_server_option's own "empty means omit" contract that
+    // build_subnet_options already relies on.
+    #[test]
+    fn set_subnet_ntp_option_with_empty_value_removes_the_entry() {
+        let mut subnet = json!({
+            "id": 1,
+            "option-data": [
+                {"name": "ntp-servers", "data": "203.0.113.1"}
+            ]
+        });
+
+        set_subnet_ntp_option(&mut subnet, "").expect("must succeed");
+
+        let options = subnet["option-data"].as_array().expect("array");
+        assert!(!options.iter().any(|o| o["name"] == "ntp-servers"));
     }
 }

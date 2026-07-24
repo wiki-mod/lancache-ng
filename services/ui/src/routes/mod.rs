@@ -11,6 +11,7 @@ pub mod dns_snapshots;
 pub mod domains;
 pub mod logs;
 pub mod netdata_proxy;
+pub mod ntp;
 pub mod secondaries;
 pub mod setup;
 pub mod stats;

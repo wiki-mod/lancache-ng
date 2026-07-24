@@ -171,18 +171,45 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
 require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-tools.yml \
   'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
-require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
+require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 
 forbidden_latest_default_branch='type=raw,value=latest,enable={{is_default'
 forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
 if grep -Fq "$forbidden_latest_default_branch" "$repo_root/.github/workflows/build-push.yml"; then
-  fail 'default branch must not publish latest; latest is stable-release only'
+  fail 'default branch must not publish latest via an unaudited build-time tag; latest may only move through the gated promote job'
 fi
-require_grep 'channel_tags\+=\(nightly\)' \
-  .github/workflows/build-push.yml \
-  'default branch promotion must publish the tested nightly channel'
+# #825/#1141 branch-model decision: master -> latest, current_dev -> nightly,
+# archived vY.X.Z branches -> no live channel. Scoped to each branch's own
+# if/elif arm (not a flat grep for the channel_tags line alone) so a
+# regression that keeps both literal strings in the file but ties them to
+# the wrong branch would still be caught -- mirrors the equivalent guard in
+# build-push.yml's own governance-guards job.
+if ! awk '
+  /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
+  in_branch && /^ *elif/ { in_branch=0 }
+  in_branch && /channel_tags\+=\(latest\)/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$repo_root/.github/workflows/build-push.yml"; then
+  fail 'master branch promotion must publish the latest channel'
+fi
+if ! awk '
+  /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
+  in_branch && /^ *elif/ { in_branch=0 }
+  in_branch && /channel_tags\+=\(nightly\)/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$repo_root/.github/workflows/build-push.yml"; then
+  fail 'current_dev branch promotion must publish the nightly channel'
+fi
+if ! awk '
+  /^ *channel_tags=\(\)$/ { in_scope=1; next }
+  in_scope && /if \(\( \$\{#channel_tags\[@\]\} == 0 \)\)/ { in_scope=0 }
+  in_scope && /elif \[\[ "\$GITHUB_REF" = refs\/heads\/v\[0-9\]\* \]\]; then/ { found=1 }
+  END { exit found ? 1 : 0 }
+' "$repo_root/.github/workflows/build-push.yml"; then
+  fail "archived vY.X.Z release branches must not publish a live channel tag; the old 'dev' channel mapping was retired (#825/#1141)"
+fi
 require_grep 'channel_tags\+=\(latest\)' \
   .github/workflows/build-push.yml \
   'stable release promotion must publish latest'
@@ -310,7 +337,7 @@ require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-\$\
 require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
   .github/workflows/build-push.yml \
   'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
-require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack' \
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \

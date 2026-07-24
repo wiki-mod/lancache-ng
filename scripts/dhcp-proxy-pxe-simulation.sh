@@ -33,10 +33,12 @@
 # depends on the opt-in DHCP_PROXY_PXE_BOOT_SERVER/_FILENAME_* variables
 # this script sets being present at all).
 #
-# See scripts/lib/pxe-client-probe.py for how the synthetic PXE client
-# itself is built (scapy, since no off-the-shelf DHCP client can be made
-# to send a real PXE-tagged DISCOVER) and why reply capture goes through
-# a tcpdump-written pcap file rather than scapy's own live sniff.
+# See tools/pxe-client-probe/ for how the synthetic PXE client itself is
+# built (a small Rust binary using a raw layer-2 send, since no off-the-shelf
+# DHCP client can be made to send a real PXE-tagged DISCOVER) and why reply
+# capture goes through a tcpdump-written pcap file rather than any live
+# in-process sniff. The probe is compiled once below with the build-tools
+# image and mounted into the client container.
 #
 # Safety model, mirroring scripts/dhcp-kea-lease-flow-simulation.sh's own
 # (see that script's header comment for the fuller rationale): both the
@@ -44,8 +46,9 @@
 # Docker containers on a throwaway, per-run bridge network this script
 # creates and destroys itself, never bridged to any host interface or the
 # runner's real LAN. Nothing here ever calls `ip addr add`/`ip route` on
-# any interface; the synthetic client only ever sends/receives via scapy
-# on its own container's already-Docker-assigned interface.
+# any interface; the synthetic client only ever sends/receives via the
+# probe's raw socket on its own container's already-Docker-assigned
+# interface.
 #
 # What this script does NOT verify: PXE boot menu behavior (this project
 # deliberately implements none -- dnsmasq's role is only to point a PXE
@@ -65,7 +68,7 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
-client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing python3-scapy and tcpdump, e.g. the build-tools image)}"
+client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing the Rust toolchain to compile tools/pxe-client-probe and tcpdump to capture the reply, e.g. the build-tools image)}"
 
 work_dir="$repo_root/.dhcp-proxy-pxe-simulation-tmp"
 rm -rf "$work_dir"
@@ -74,8 +77,8 @@ mkdir -p "$work_dir"
 # dhcp-kea-lease-flow-simulation.sh's own client-state directory is:
 # a throwaway, per-run temp directory scoped to this one invocation, not
 # a shared or security-sensitive path, and the client container's own
-# unprivileged runtime user needs to write the pcap files scapy/tcpdump
-# produce into it.
+# unprivileged runtime user needs to write the compiled probe binary and
+# the pcap files tcpdump produces into it.
 chmod 0777 "$work_dir"
 
 # Docker OBJECT NAMES need collision avoidance independent of the subnet
@@ -264,21 +267,43 @@ if [[ "$dhcp_ready" -ne 1 ]]; then
 fi
 echo "dhcp-proxy is up (subnet: 172.29.${octet}.0, PXE boot server: $pxe_boot_server)."
 
+echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with the build-tools image =="
+# Build the Rust probe once, up front, with the SAME image that will run it
+# so the resulting binary's glibc/ABI matches the client container exactly.
+# The crate is mounted read-only; this runs on the default Docker bridge
+# (crates.io access needed) rather than the isolated per-run test network
+# below. --locked builds against the committed Cargo.lock, matching how the
+# Rust service images build.
+#
+# CARGO_TARGET_DIR points at a container-internal path, NOT a host bind
+# mount: the build container runs as root, so a host-mounted target tree
+# would leave root-owned nested build directories in $work_dir that the
+# non-root user running cleanup()'s `rm -rf "$work_dir"` cannot delete
+# (removing a file needs write on its parent dir, and cargo's nested dirs
+# are root-owned 0755). Only the single finished binary is copied out to
+# $work_dir -- a top-level file whose 0777 parent makes it removable during
+# cleanup regardless of its root ownership.
+docker run --rm \
+    -v "$repo_root/tools/pxe-client-probe:/crate:ro" \
+    -v "$work_dir:/out" \
+    -e CARGO_TARGET_DIR=/build-target \
+    "$client_tool_image" \
+    bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /crate/Cargo.toml; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
+
 echo "== Starting the synthetic PXE client container =="
-# NET_RAW/NET_ADMIN: scapy needs a raw socket to craft and send an
-# arbitrary Ethernet/IP/UDP/BOOTP frame, and to receive on the interface
-# via the separate tcpdump capture scripts/lib/pxe-client-probe.py drives
-# -- matching dhcp-kea-lease-flow-simulation.sh's own dhclient client
-# container capability rationale.
+# NET_RAW/NET_ADMIN: the probe needs a raw socket to craft and send an
+# arbitrary Ethernet/IP/UDP/BOOTP frame, and tcpdump needs to capture on the
+# interface -- matching dhcp-kea-lease-flow-simulation.sh's own dhclient
+# client container capability rationale. The compiled probe is reached at
+# /work/pxe-client-probe via the shared work-dir mount below.
 docker run -d --name "$client_container" \
     --network "$network_name" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
-    -v "$repo_root/scripts/lib:/pxe-lib:ro" \
     -v "$work_dir:/work" \
     "$client_tool_image" \
     sleep 300 >/dev/null
 
-# run_probe <label> <extra pxe-client-probe.py args...>
+# run_probe <label> <extra pxe-client-probe args...>
 # Runs one synthetic-client probe inside $client_container and prints its
 # raw KEY='value' output to stdout, capturing nothing else -- callers
 # parse the result with dhcp_lease_field (sourced above), which works
@@ -289,14 +314,14 @@ run_probe() {
     shift
     echo "== PXE probe: $label ==" >&2
     docker exec "$client_container" \
-        python3 /pxe-lib/pxe-client-probe.py --iface eth0 --pcap-out "/work/${label}.pcap" "$@"
+        /work/pxe-client-probe --iface eth0 --pcap-out "/work/${label}.pcap" "$@"
 }
 
 fail=0
 
 # Under `set -euo pipefail`, a bare `result="$(run_probe ...)"` with no adjacent check
-# would abort the whole script silently the instant the underlying `docker exec`/scapy
-# probe failed -- errexit fires right at the assignment, before any diagnostic ever
+# would abort the whole script silently the instant the underlying `docker exec`/probe
+# invocation failed -- errexit fires right at the assignment, before any diagnostic ever
 # prints. Wrap each so a broken probe invocation reports its own cause instead of a
 # bare "Process completed with exit code 1".
 if ! bios_result="$(run_probe bios --arch 0)"; then
@@ -371,8 +396,8 @@ fi
 # summarize_probe <parsed_result>
 # Formats one probe's result for the human-readable report below. Checks
 # the got_reply field's actual VALUE ("1" vs "0"), not merely whether the
-# field is present -- got_reply is always emitted by
-# scripts/lib/pxe-client-probe.py (unlike file/siaddr, which are only
+# field is present -- got_reply is always emitted by the probe
+# (tools/pxe-client-probe, unlike file/siaddr, which are only
 # printed when non-empty), so testing for presence alone would always be
 # true and never report "<no reply>" even when a probe correctly found
 # none.
