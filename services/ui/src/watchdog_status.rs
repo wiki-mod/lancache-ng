@@ -296,7 +296,9 @@ mod tests {
             .unwrap_or(false);
         if !touch_ok {
             fs::remove_file(&path).ok();
-            eprintln!("skipping stale_file_is_reported_as_stale_not_fresh: `touch -d` unavailable on this host");
+            eprintln!(
+                "skipping stale_file_is_reported_as_stale_not_fresh: `touch -d` unavailable on this host"
+            );
             return;
         }
 

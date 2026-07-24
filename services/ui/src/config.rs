@@ -850,10 +850,7 @@ impl Config {
                 "/data/lancache-nats-issuer.seed",
             ),
             nats_issuer_seed: env_opt("NATS_ISSUER_SEED"),
-            nats_xkey_seed_path: env_str(
-                "NATS_XKEY_SEED_PATH",
-                "/data/lancache-nats-xkey.seed",
-            ),
+            nats_xkey_seed_path: env_str("NATS_XKEY_SEED_PATH", "/data/lancache-nats-xkey.seed"),
             nats_xkey_seed: env_opt("NATS_XKEY_SEED"),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             // Kept as separate fields so the UI can display the running
