@@ -63,7 +63,7 @@ jobs:
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
@@ -115,7 +115,7 @@ jobs:
     # (not reading compute-validation-network's output at all) -- see each
     # job's own header comment.
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build full-setup validation image
         run: |
@@ -529,7 +529,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # BUILD_TOOLS_REQUIRE_PUBLISHED=true: this job's own client checks
@@ -579,7 +579,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # BUILD_TOOLS_REQUIRE_PUBLISHED=true: same reasoning as
@@ -623,7 +623,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true: this workflow
@@ -753,7 +753,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
@@ -816,7 +816,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
@@ -872,7 +872,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # Unlike dhcp-kea-lease-flow-simulation (which genuinely needs
@@ -947,7 +947,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
@@ -1003,7 +1003,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # This job's script only drives a curl check against the real ui
@@ -1053,7 +1053,7 @@ jobs:
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
         # This job's own script only drives curl checks against the real ui
