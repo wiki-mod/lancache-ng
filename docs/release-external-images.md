@@ -83,9 +83,17 @@ the GitHub CLI:
 ```bash
 # Resolve the tag to its immutable digest first (attestation verification is
 # digest-based, not tag-based, since a mutable tag like `latest` is not itself
-# a fixed subject).
+# a fixed subject). Use the immutable `sha-<commit>` tag -- the one tag scheme
+# guaranteed to exist for every first-party image build, per this document's
+# "Core Rule" (see docs/release-versioning.md) -- rather than assuming a
+# per-service `vX.Y.Z` tag was published for a given release; those "may still
+# exist for human inspection" per the promotion pipeline but are not the
+# guaranteed path setup/update itself relies on. Find the exact `sha-<commit>`
+# for a given stable release from that release's own notes/CHANGELOG.md entry,
+# or from `stack.env` inside the matching `ghcr.io/.../stack:<channel>` pointer
+# image (see "Setup And Update Selection" in docs/release-versioning.md).
 digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
-  ghcr.io/wiki-mod/lancache-ng/proxy:v0.3.0)
+  ghcr.io/wiki-mod/lancache-ng/proxy:sha-<commit>)
 
 # Verify the attestation: confirms the artifact's integrity (the signed digest
 # matches what you pulled) and its authenticity (it was produced by a GitHub
@@ -99,7 +107,10 @@ that produced the image -- this is the "expected identity of the person or
 process authoring the release" for lancache-ng: a specific GitHub Actions
 workflow run in this repository, not an individual's personal signing key.
 Repeat the same two commands with any other first-party service name and
-release tag (`vX.Y.Z`) to verify that image instead. If `gh attestation verify`
+`sha-<commit>` tag (or a `vX.Y.Z` tag, when one has actually been published
+for that image -- confirm with `docker manifest inspect` or the GHCR package
+page first, since per-service release tags are not guaranteed the way
+`sha-<commit>` is) to verify that image instead. If `gh attestation verify`
 reports no matching attestation, or reports a builder identity outside
 `wiki-mod/lancache-ng`, treat the image as unverified and do not deploy it.
 

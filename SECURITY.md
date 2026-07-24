@@ -205,12 +205,22 @@ Static Application Security Testing (SAST) remediation policy.
 - **License findings**: dependency license compliance is not currently
   automated by a dedicated SCA license-scanning tool (e.g. `cargo-deny`'s
   license checks). This is a known gap; license review today is manual.
-- **Enforcement**: the `cargo-audit (dns/nats-subscriber)` and
-  `cargo-audit (ui)` jobs feed into the `CI scope policy` job in
-  `.github/workflows/build-push.yml`, which is a **required status check** on
-  `master` (branch protection) -- a failing SCA result blocks both merge and
-  the release/publish pipeline. This applies before every release, not only
-  on ad hoc PRs.
+- **Enforcement status**: the `cargo-audit (dns/nats-subscriber)` and
+  `cargo-audit (ui)` jobs run on every pull request and push to `current_dev`
+  (the active development branch, per issue #825's branch-model decision) and
+  feed into the `CI scope policy` job in `.github/workflows/build-push.yml`.
+  `CI scope policy` **is** a required branch-protection status check on
+  `master` -- but `master` receives only occasional stable-release promotions,
+  not day-to-day merges. **`current_dev`, where pull requests actually land,
+  currently has no branch protection rule at all** (confirmed via
+  `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection`, which
+  returns 404 "Branch not protected"). In practice this means a failing
+  `cargo-audit` result is clearly visible as a red check on a `current_dev`
+  PR, but nothing in GitHub's own repository configuration currently stops
+  that PR from being merged anyway. Closing this gap requires enabling branch
+  protection on `current_dev` with `CI scope policy` (or an equivalent
+  aggregate check) as a required status check -- a repository-settings change
+  for the maintainer to make, tracked as a Level 3 follow-up in issue #1130.
 
 ### SAST (static analysis) findings
 
@@ -225,13 +235,19 @@ Static Application Security Testing (SAST) remediation policy.
   release, matching this project's existing warnings-as-errors posture for
   every other static check (`cargo clippy`, `shellcheck`, `actionlint`; see
   `CONTRIBUTING.md`'s "Warning-as-errors policy").
-- **Enforcement status**: CodeQL results are visible as GitHub code scanning
-  alerts, but the CodeQL analysis job itself is **not yet** wired as a
-  required status check the way `cargo-audit` is (tracked in issue #1130 --
-  Level 3 follow-up), so a CodeQL finding does not yet automatically block a
-  merge or a release the way an SCA finding does. Until that CI gate lands,
-  enforcement of this threshold relies on manual review of the repository's
-  Security tab before each release.
+- **Enforcement status**: CodeQL already runs on every `current_dev` pull
+  request and push (`.github/workflows/codeql.yml`'s `branches:` list
+  explicitly includes `current_dev`, added by issue #709 specifically so
+  CodeQL keeps scanning the branch real work actually lands on), and results
+  are visible as GitHub code scanning alerts. Two things still need to happen
+  before a CodeQL finding actually blocks a merge, both tracked as Level 3
+  follow-ups in issue #1130: (1) the CodeQL analysis result is not yet fed
+  into the `CI scope policy` gate (or an equivalent check) the way
+  `cargo-audit` is, and (2) as described just above, `current_dev` has no
+  branch protection at all today, so even a check that is technically
+  required would not yet be enforced there. Until both land, enforcement of
+  this threshold relies on manual review of the repository's Security tab
+  before each release.
 
 ## Deployment Scope
 
