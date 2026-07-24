@@ -213,7 +213,8 @@ check_services_arrays() {
 # design decision outside the scope of this 3-file extension.
 declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
     ["ensure-pr-staging-images.sh"]="dhcp
-dhcp-proxy"
+dhcp-proxy
+ntp"
 )
 
 # Checks every `full_setup_services=(...)` array in $1. For files listed in

@@ -140,7 +140,7 @@ jobs:
           # that tooling image has its own build/publish workflow and mutable
           # channel, so mixing it here would make a stable product backfill race
           # with normal toolchain refreshes.
-          services=(proxy dns watchdog dhcp dhcp-proxy ui)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)
           source_stack="ghcr.io/${REPOSITORY}/stack:${SOURCE_RELEASE_TAG}"
           container_id=""
           stack_env=""

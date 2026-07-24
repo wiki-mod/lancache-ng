@@ -177,6 +177,7 @@ output_bool "ui" touches_prefix "services/ui/"
 output_bool "watchdog" touches_prefix "services/watchdog/"
 output_bool "dhcp" touches_prefix "services/dhcp/"
 output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
+output_bool "ntp" touches_prefix "services/ntp/"
 
 # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the image at
 # build time (the dns-domains named build context), so a domain-list-only change

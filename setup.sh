@@ -297,10 +297,10 @@ validate_ui_session_ttl_seconds() {
 }
 
 # Centralize runtime profile calculation so install and update cannot drift:
-# SSL, Kea DHCP, and dnsmasq proxy mode are represented once in COMPOSE_PROFILES
-# while unrelated profiles are preserved.
+# SSL, Kea DHCP, dnsmasq proxy mode, and LanCache-NG-NTP are represented once
+# in COMPOSE_PROFILES while unrelated profiles are preserved.
 compose_profiles_for_runtime() {
-    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}"
+    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}"
     local profile result="" trimmed
 
     IFS=',' read -r -a profiles <<< "$existing"
@@ -308,7 +308,7 @@ compose_profiles_for_runtime() {
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
         case "$trimmed" in
-            ""|ssl|dhcp-kea|dhcp-proxy) continue ;;
+            ""|ssl|dhcp-kea|dhcp-proxy|ntp) continue ;;
         esac
         case ",$result," in
             *",$trimmed,"*) ;;
@@ -338,6 +338,11 @@ compose_profiles_for_runtime() {
             result+="dhcp-proxy"
             ;;
     esac
+
+    if [[ "$ntp_enabled" = "1" ]]; then
+        [[ -n "$result" ]] && result+=","
+        result+="ntp"
+    fi
 
     printf '%s\n' "$result"
 }
@@ -2477,6 +2482,7 @@ migrate_env_for_update() {
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
+    local ntp_data_default ntp_data_dir ntp_enabled
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
@@ -2638,6 +2644,15 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
 
+    # LanCache-NG-NTP can stay disabled too; same "keys must exist" reasoning
+    # as DHCP_ENABLED/KEA_DATA_DIR above. No legacy path to migrate from (this
+    # is a new service), so ntp_data_dir is just the plain default rather than
+    # going through legacy_dir_or_default.
+    append_env_key_if_missing NTP_ENABLED "0" "$env_file"
+    ntp_data_default="$state_dir/ntp"
+    ntp_data_dir="$ntp_data_default"
+    set_optional_env_path_override_if_needed NTP_DATA_DIR "$ntp_data_dir" "$ntp_data_default" "$env_file"
+
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
@@ -2773,9 +2788,10 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
+    ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
     set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
+        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled")" \
         "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real
@@ -2852,7 +2868,7 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_dir cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    local cache_dir cache_std cache_ssl kea_dir ntp_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
@@ -2861,6 +2877,7 @@ backup_manifest() {
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
     kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+    ntp_dir=$(get_env_var NTP_DATA_DIR "$env_file")
     nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")
     nats_data_dir=$(get_env_var NATS_DATA_DIR "$env_file")
     pdns_filter_state_dir=$(get_env_var PDNS_FILTER_STATE_DIR "$env_file")
@@ -2869,6 +2886,7 @@ backup_manifest() {
     cache_std="${cache_std:-$state_dir/cache}"
     cache_ssl="${cache_ssl:-$cache_std}"
     kea_dir="${kea_dir:-$state_dir/kea}"
+    ntp_dir="${ntp_dir:-$state_dir/ntp}"
     nats_conf_dir="${nats_conf_dir:-$state_dir/nats-conf}"
     nats_data_dir="${nats_data_dir:-$state_dir/nats}"
     pdns_filter_state_dir="${pdns_filter_state_dir:-$state_dir/pdns-filter-state}"
@@ -2891,6 +2909,7 @@ backup_manifest() {
     [[ -d "$(legacy_state_path nats)" ]] && printf '%s\n' "$(legacy_state_path nats)"
     [[ -d "$(legacy_state_path nats-conf)" ]] && printf '%s\n' "$(legacy_state_path nats-conf)"
     [[ -n "${kea_dir:-}" && -d "$kea_dir" ]] && printf '%s\n' "$kea_dir"
+    [[ -n "${ntp_dir:-}" && -d "$ntp_dir" ]] && printf '%s\n' "$ntp_dir"
     if [[ "$mode" = "full" ]]; then
         [[ -n "${cache_dir:-}" && -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
         [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
@@ -6071,7 +6090,32 @@ else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
 
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE")"
+# ── 7b. LanCache-NG-NTP ───────────────────────────────────────────────────────
+# Kept minimal and non-interactive by design: the container's own upstream
+# server list and the DHCP auto-populate toggle are Admin-UI-configured
+# settings (requirement 2 of the issue this service was built for), not
+# install-wizard prompts -- this section only decides whether the container
+# is created at all (NTP_ENABLED / the `ntp` Compose profile), matching how
+# little SSL_ENABLED asks up front for its own similarly toggle-shaped
+# feature above.
+print_step "LanCache-NG-NTP"
+
+printf "  A small, self-contained NTP server, disciplined against public NTP\n"
+printf "  servers, that serves time to LAN clients on UDP/123. Enable/disable and\n"
+printf "  upstream server list are then configured from the Admin UI.\n"
+printf "  Default: disabled.\n\n"
+
+ask "Enable LanCache-NG-NTP? [y/N]" "N"
+NTP_ENABLED=0
+NTP_DATA_DIR="$INSTALL_DIR/ntp"
+if [[ "${REPLY,,}" = "y" ]]; then
+    NTP_ENABLED=1
+    print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
+else
+    print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
+fi
+
+COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED")"
 
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
@@ -6193,6 +6237,8 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
     "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
+    "NTP_ENABLED=${NTP_ENABLED}" \
+    "NTP_DATA_DIR=${NTP_DATA_DIR}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -6291,6 +6337,13 @@ DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
 DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
 DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
 
+# ── LanCache-NG-NTP ────────────────────────────────────────────────────────────
+# Enable/disable, upstream server list, and the DHCP auto-populate toggle are
+# configured from the Admin UI's NTP page; this only controls whether the
+# container is created at all (see the \`ntp\` Compose profile).
+NTP_ENABLED=${NTP_ENABLED}
+NTP_DATA_DIR=${NTP_DATA_DIR}
+
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
 
@@ -6352,6 +6405,10 @@ print_ok "Cache:          $CACHE_DIR"
 if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
     mkdir -p "$KEA_DATA_DIR"
     print_ok "Kea data:       $KEA_DATA_DIR"
+fi
+if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
+    mkdir -p "$NTP_DATA_DIR"
+    print_ok "NTP data:       $NTP_DATA_DIR"
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
@@ -6497,6 +6554,11 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
+fi
+if [[ "$NTP_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"
+else
+    printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
 fi
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"
