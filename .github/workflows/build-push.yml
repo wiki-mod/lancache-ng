@@ -2299,8 +2299,8 @@ jobs:
             || { echo "::error::setup.sh must keep latest as the normal stable default; nightly must be explicit."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=latest' README.md >/dev/null \
             || { echo "::error::README must document latest as the normal install default."; exit 1; }
-          grep -F 'nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`' docs/release-versioning.md >/dev/null \
-            || { echo "::error::Release docs must keep nightly opt-in, not default."; exit 1; }
+          grep -F 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' docs/release-versioning.md >/dev/null \
+            || { echo "::error::Release docs must document nightly as the pre-1.0 default (see #1068 item 1 / #1120)."; exit 1; }
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
