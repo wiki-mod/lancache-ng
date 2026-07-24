@@ -627,7 +627,7 @@ _is_valid_domain() {
     # Must not be empty after normalization
     [ -n "$domain" ] || return 1
 
-    # Must be <= 253 chars total
+    # Must be <= 253 chars total (RFC 1035 domain name length limit)
     [ ${#domain} -le 253 ] || return 1
 
     # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)
@@ -1000,6 +1000,8 @@ fi
 {
     echo "\$ORIGIN rpz."
     echo "\$TTL 60"
+    # SOA fields after the serial, in standard RFC 1035 order:
+    # refresh=3600s (1h) retry=900s (15m) expire=604800s (7d) minimum-ttl=60s (1m)
     echo "@ SOA localhost. admin.rpz. $SERIAL 3600 900 604800 60"
     echo "@ NS localhost."
     echo ""
