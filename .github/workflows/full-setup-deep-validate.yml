@@ -62,8 +62,13 @@ on:
   # against an unprotected branch isn't covered by branch-protection
   # required-status-checks anyway (see the BRANCH PROTECTION NOTE above), so
   # skipping this workflow entirely for it loses nothing.
+  #
+  # current_dev was missing here even though build-push.yml's own
+  # pull_request.branches already listed it -- found during #709's audit of
+  # hardcoded/drifted branch-trigger lists. Restored to match exactly, as
+  # this comment has always claimed it does.
   pull_request:
-    branches: [master, "v[0-9]*"]
+    branches: [master, current_dev, "v[0-9]*"]
   workflow_dispatch:
     inputs:
       image_tag:
