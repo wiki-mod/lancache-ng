@@ -40,13 +40,18 @@ setup() {
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
 # (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
 # NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583),
-# NATS_SYS_USER/NATS_SYS_PASSWORD (#681), and AUTO_UPDATE_ENABLED
-# (#819): migrate_env_for_update() backfills all of these unconditionally when
-# missing, so a fixture predating any of these features would no longer be
-# "fully converged" and would make the no-op test below fail on its first
-# run, not just its second -- confirmed the hard way when #819's own PR
-# broke this exact test on first CI run, which is exactly the failure mode
-# this comment exists to warn the next feature about.
+# NATS_SYS_USER/NATS_SYS_PASSWORD (#681), AUTO_UPDATE_ENABLED (#819), and
+# NTP_ENABLED (#1082): migrate_env_for_update() backfills all of these
+# unconditionally when missing, so a fixture predating any of these features
+# would no longer be "fully converged" and would make the no-op test below
+# fail on its first run, not just its second -- confirmed the hard way when
+# #819's own PR broke this exact test on first CI run, which is exactly the
+# failure mode this comment exists to warn the next feature about. (#1082
+# itself repeated the exact same mistake, undetected until #681 found this
+# fixture failing on a clean, unmodified current_dev checkout -- i.e. before
+# any #681 change ever touched this file. Fixed here, incidentally, as part
+# of #681 only because that PR was already editing this exact fixture for its
+# own NATS_SYS_* addition; the NTP_ENABLED gap itself is unrelated to #681.)
 write_converged_env_fixture() {
     printf '%s\n' \
         'IP_STANDARD=192.0.2.10' \
@@ -106,6 +111,7 @@ write_converged_env_fixture() {
         'UI_AUTH_PASSWORD=RealAdminPassword123' \
         'ALLOW_INSECURE_UI=false' \
         'AUTO_UPDATE_ENABLED=0' \
+        'NTP_ENABLED=0' \
         > "$env_file"
 }
 
