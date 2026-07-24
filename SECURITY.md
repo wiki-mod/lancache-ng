@@ -50,7 +50,11 @@ releases are not actively maintained.
    - Potential impact
    - Suggested fix (if you have one)
 3. **Response**: We will acknowledge receipt within 48 hours and work to address the issue.
-4. **Disclosure**: Once a fix is released, the vulnerability will be disclosed responsibly.
+4. **Disclosure**: Once a fix is released, the vulnerability will be disclosed responsibly and
+   publicly, as a [GitHub Security Advisory](https://github.com/wiki-mod/lancache-ng/security/advisories)
+   on this repository. That page is the authoritative, public record of every vulnerability
+   confirmed in lancache-ng; an empty list there means no vulnerability has been confirmed yet,
+   not that this project does not publish them.
 
 ## Known Security Tradeoffs and Design Decisions
 
