@@ -454,3 +454,5 @@ RUN set -euo pipefail; \
 WORKDIR /workspace
 
 CMD ["bash"]
+
+# scratch AG-CI-012 positive-trigger check for #1198, will be reverted
