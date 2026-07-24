@@ -252,10 +252,22 @@ jobs:
         id: build-tools-image
         env:
           EVENT_NAME: ${{ github.event_name }}
+          # Read via env: + a quoted shell variable instead of interpolating
+          # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
+          # hardening, refs #1130): matches this file's own
+          # LANCACHE_IMAGE_TAG/env-var convention elsewhere and avoids the
+          # documented GitHub Actions script-injection anti-pattern, even
+          # though image_tag only ever holds a raw workflow_dispatch value
+          # when pr_staging_available is false (see scripts/lib/
+          # validation-image-tag.sh's vit_pr_staging_available/vit_resolve_tag).
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -311,10 +323,19 @@ jobs:
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
         id: build-tools-image
+        # See ssl-mitm-cache-simulation's "Resolve build-tools image" step
+        # above for why these are read via env: + quoted shell variables
+        # instead of interpolating `${{ }}` expressions directly into the
+        # run: script (OSPS-BR-01.04 hardening, refs #1130).
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -385,13 +406,22 @@ jobs:
         # silently run against `latest` instead of the PR's own image
         # (Codex review finding on #764).
         id: build-tools-image
+        # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
+        # why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/REPOSITORY are
+        # read via env: + quoted shell variables instead of interpolating
+        # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
+        # hardening, refs #1130).
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
             image="$(bash scripts/select-build-tools-image.sh)"
@@ -467,13 +497,22 @@ jobs:
         # `latest` FAILS its smoke test, which a same-PR build-tools change
         # would often still pass (Codex review finding on #764).
         id: build-tools-image
+        # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
+        # why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/REPOSITORY are
+        # read via env: + quoted shell variables instead of interpolating
+        # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
+        # hardening, refs #1130).
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
             image="$(bash scripts/select-build-tools-image.sh)"
@@ -522,10 +561,19 @@ jobs:
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
         id: build-tools-image
+        # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
+        # why these are read via env: + quoted shell variables instead of
+        # interpolating `${{ }}` expressions directly into the run: script
+        # (OSPS-BR-01.04 hardening, refs #1130).
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -585,10 +633,19 @@ jobs:
         # tools/build-tools override below still applies for the same reason
         # documented there.
         id: build-tools-image
+        # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
+        # why these are read via env: + quoted shell variables instead of
+        # interpolating `${{ }}` expressions directly into the run: script
+        # (OSPS-BR-01.04 hardening, refs #1130).
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -648,10 +705,19 @@ jobs:
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
         id: build-tools-image
+        # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
+        # why these are read via env: + quoted shell variables instead of
+        # interpolating `${{ }}` expressions directly into the run: script
+        # (OSPS-BR-01.04 hardening, refs #1130).
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"

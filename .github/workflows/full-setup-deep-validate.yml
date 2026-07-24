@@ -282,10 +282,20 @@ jobs:
         # BUILD_TOOLS_REQUIRE_PUBLISHED: this job's dig/curl/jq client checks
         # only need tools already in every published build-tools image.
         id: build-tools-image
+        # Read via env: + quoted shell variables instead of interpolating
+        # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
+        # hardening, refs #1130): matches this file's own LANCACHE_IMAGE_TAG
+        # env-var convention above and avoids the documented GitHub Actions
+        # script-injection anti-pattern.
+        env:
+          PR_STAGING_AVAILABLE: ${{ needs.plan.outputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -347,10 +357,19 @@ jobs:
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
         id: build-tools-image
+        # See dns-zone-rollback-simulation's "Resolve build-tools image" step
+        # above for why these are read via env: + quoted shell variables
+        # instead of interpolating `${{ }}` expressions directly into the
+        # run: script (OSPS-BR-01.04 hardening, refs #1130).
+        env:
+          PR_STAGING_AVAILABLE: ${{ needs.plan.outputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -407,13 +426,22 @@ jobs:
         # setup-cli-simulation above, for the same reason (Codex review
         # finding on #764).
         id: build-tools-image
+        # See dns-zone-rollback-simulation's "Resolve build-tools image" step
+        # for why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/
+        # REPOSITORY are read via env: + quoted shell variables instead of
+        # interpolating `${{ }}` expressions directly into the run: script
+        # (OSPS-BR-01.04 hardening, refs #1130).
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_STAGING_AVAILABLE: ${{ needs.plan.outputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
             image="$(bash scripts/select-build-tools-image.sh)"
