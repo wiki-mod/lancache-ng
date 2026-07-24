@@ -26,8 +26,8 @@ PURGE_STAMP="/var/run/watchdog/purge.stamp"
 SYSLOG_ENABLED="${SYSLOG_ENABLED:-false}"
 SYSLOG_PRUNE_STAMP="/var/run/watchdog/syslog-prune.stamp"
 
-F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0
-H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
 # Some diagnostics (resolve_cache_dir()'s fail-closed error, the CONTAINER_*
@@ -100,6 +100,26 @@ if [ "$SSL_ENABLED" = "1" ]; then
 else
     C_DNS_SSL=""
 fi
+# nats (#842): unlike C_DNS_SSL above, nats is never profile/flag-gated --
+# the compose service has no `profiles:` entry and runs in every deployment
+# mode, so it is always monitored, the same way C_PROXY/C_DNS_STD are.
+#
+# Why nats specifically, and not the other five services #842 raised
+# (ui, dhcp, dhcp-proxy, netdata, syslog/syslog-ng), is documented in that
+# issue's closing PR body rather than repeated in full here, but the two
+# load-bearing facts are: (1) scripts/docker-socket-proxy.sh's allowlist
+# already permits both inspecting AND restarting lancache-nats (added for
+# the Admin UI's own config-apply restart, e.g.
+# services/ui/src/routes/secondaries.rs::update_nats_conf) -- adding it here
+# needs no allowlist change, unlike ui/dhcp, which the allowlist does not
+# (yet) permit a restart for; (2) the Admin UI's auth-callout responder
+# (services/ui/src/nats_auth_callout.rs::run_auth_callout) already runs
+# inside an unconditional reconnect loop with capped exponential backoff
+# (1s up to 30s) that treats "connection dropped, retry" as its normal
+# steady state -- a watchdog-triggered nats restart is just another
+# disconnect/reconnect cycle to that loop, not a novel failure mode it was
+# never built to handle.
+C_NATS="${CONTAINER_NATS:-lancache-nats}"
 
 if [ "$C_PROXY" != "lancache-proxy" ]; then
     log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-proxy'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
@@ -111,6 +131,10 @@ if [ "$C_DNS_STD" != "lancache-dns-standard" ]; then
 fi
 if [ "$SSL_ENABLED" = "1" ] && [ "$C_DNS_SSL" != "lancache-dns-ssl" ]; then
     log_err "FATAL: CONTAINER_DNS_SSL=${C_DNS_SSL} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-dns-ssl'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
+    exit 1
+fi
+if [ "$C_NATS" != "lancache-nats" ]; then
+    log_err "FATAL: CONTAINER_NATS=${C_NATS} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-nats'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_NATS to the default."
     exit 1
 fi
 
@@ -296,7 +320,8 @@ write_status() {
   "updated": "$ts",
   "services": {
     "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
-  "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD}${ssl_services}
+  "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD},
+  "$C_NATS":   {"status": "$(health_color "$H_NATS")",   "health": "$H_NATS",   "failures": $F_NATS}${ssl_services}
   },
   "disk": {
     "cache": ${disk_cache}
@@ -607,7 +632,7 @@ maybe_prune_syslog() {
     mkdir -p "$(dirname "$SYSLOG_PRUNE_STAMP")"
     echo "$now" > "$SYSLOG_PRUNE_STAMP"
 }
-log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL (SSL_ENABLED=$SSL_ENABLED)"
+log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED)"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 
@@ -617,6 +642,7 @@ while true; do
     if [ "$SSL_ENABLED" = "1" ]; then
         check_and_maybe_restart "$C_DNS_SSL"   F_DNS_SSL   H_DNS_SSL
     fi
+    check_and_maybe_restart "$C_NATS" F_NATS H_NATS
     write_status
     maybe_purge
     maybe_prune_syslog
