@@ -26,7 +26,8 @@
 # Usage:
 #   scripts/collect-changelog-entries.sh [--base <branch>] [--since <ref-or-date>]
 #
-#   --base <branch>       Branch to collect merged PRs against (default: v0.2.0).
+#   --base <branch>       Branch to collect merged PRs against (default: current_dev,
+#                         the active development branch -- v0.2.0 is frozen; #709).
 #   --since <ref-or-date> Git ref (tag/commit) or ISO date (YYYY-MM-DD) to collect
 #                         from. Defaults to the most recent vX.Y.Z tag reachable
 #                         from --base, or the branch's root commit if no tag exists
@@ -46,7 +47,9 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 cd "$repo_root"
 
-base_branch="v0.2.0"
+# current_dev is today's active development branch (v0.2.0 is frozen); see
+# #709's audit of hardcoded v0.2.0 branch-name references.
+base_branch="current_dev"
 since_ref=""
 
 while [ $# -gt 0 ]; do
