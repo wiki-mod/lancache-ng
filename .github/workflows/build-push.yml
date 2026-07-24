@@ -48,6 +48,42 @@ on:
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
+    # Issue #1095 Part 1: mirrors the pull_request trigger's own paths-ignore
+    # below (added for #1203) onto push. Before this, a doc-only merge commit
+    # landing on master/current_dev via `push` (the only way it CAN land --
+    # AG-GOV-004 forbids direct pushes) still unconditionally re-ran this
+    # entire workflow, including the full 8-service container-scan/build/
+    # build-arm64/merge-manifests/promote pipeline on the scarce self-hosted
+    # lancache-heavy pool, even though the identical diff would have been
+    # skipped entirely had it stayed as an open PR. Confirmed live for real
+    # (2026-07-24, run 30084334029): a push touching only two unrelated shell
+    # scripts still ran all 18 self-hosted-heavy jobs end to end.
+    #
+    # Same semantics as the pull_request block: GitHub only skips a push run
+    # when EVERY changed file in the push matches an ignore pattern -- a
+    # merge commit that touches both docs AND service/code files still runs
+    # the full pipeline, so this cannot mask a real image-affecting change
+    # riding along with a docs change in the same push.
+    #
+    # Force-push / no-common-ancestor pushes (a new branch's first push, or a
+    # history rewrite) are NOT a blind spot: GitHub's own paths-ignore
+    # evaluation fails open and runs the workflow whenever it cannot compute
+    # a definitive changed-file list for the push, the same fail-safe
+    # philosophy detect-changes' own before/after diff below already relies
+    # on (see that job's "No usable push diff base" fallback to
+    # --all-changed). Tags never hit this path at all -- paths-ignore/paths
+    # filters only apply to branch pushes, never to tag pushes (GitHub does
+    # not evaluate path filters for `tags:`), so a release tag always runs
+    # the full pipeline regardless of this block.
+    #
+    # `!CHANGELOG.md` kept un-ignored for the same reason as the
+    # pull_request block: check-changelog-direct-edit.sh (this workflow's
+    # `shellcheck` job) needs to still see and warn on a CHANGELOG-only push
+    # that bypassed the automated release flow.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
     # Issue #1203: skip the ENTIRE workflow run (no job is ever scheduled, so
@@ -283,6 +319,84 @@ jobs:
               bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
             fi
           fi
+
+  # Issue #1095 Part 1 (Option B): a start-of-job supersession self-skip for
+  # the heavy publish-path jobs (build/build-arm64/container-scan), mirroring
+  # the pattern `promote` already trusts for itself (see that job's own
+  # "Promote coherent stack tags" step, the `git ls-remote origin
+  # "$GITHUB_REF"` debounce check) rather than inventing a new mechanism.
+  # This is a START gate only, evaluated once per job before any heavy work
+  # begins -- NOT `cancel-in-progress` on an already-running job, which is
+  # exactly what #979 showed starves the channel (see build's own
+  # concurrency-group comment). The newest push in a burst always still
+  # resolves itself as the current tip and runs its full pipeline; only a
+  # push that is provably already superseded before its heavy jobs even
+  # start self-skips.
+  #
+  # Deliberately its own job with NO `if:`/`needs:` of its own (same shape as
+  # validate-compose today): this can only ever resolve to
+  # success/failure/cancelled, never "skipped", so consumers that read its
+  # `superseded` output through an already-existing `needs:` edge (build,
+  # build-arm64, container-scan) do not reintroduce the implicit-success()-
+  # over-a-skippable-dependency hazard documented at length on container-scan
+  # and promote's own `if:` blocks in this file. It intentionally does NOT
+  # touch validate-compose (which must keep surviving to completion on push
+  # per its own documented invariant, and runs on the light tier, not the
+  # scarce lancache-heavy pool this issue is about) or any of
+  # merge-manifests/promote's existing tag-move logic.
+  #
+  # Runs on the light tier: it only ever does one `git ls-remote`, no build
+  # or scan work of its own.
+  push-supersession-check:
+    name: check for a newer push already superseding this one
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    outputs:
+      superseded: ${{ steps.check.outputs.superseded }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check whether this push is already superseded
+        id: check
+        env:
+          CHECK_GITHUB_REF: ${{ github.ref }}
+          CHECK_GITHUB_SHA: ${{ github.sha }}
+          CHECK_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          superseded=false
+
+          # Only meaningful for a push to a mutable branch ref -- a tag ref
+          # can never be superseded by a later push to the SAME ref (tags
+          # are immutable and pushed exactly once), and every other event
+          # this workflow handles (pull_request, schedule, workflow_dispatch)
+          # has no "a newer push already landed" concept at all. Those cases
+          # all fall through to the `superseded=false` default below, which
+          # is the correct, safe answer for them (never skip).
+          if [ "$CHECK_EVENT_NAME" = "push" ]; then
+            case "$CHECK_GITHUB_REF" in
+              refs/heads/*)
+                # Deliberately fails OPEN, not closed, unlike promote's own
+                # copy of this check (which fails closed with `exit 1`):
+                # promote refusing to guess blind only risks delaying a
+                # channel move by one run, but here the asymmetric risk runs
+                # the other way -- wrongly reporting `superseded=true` for a
+                # build/scan that is NOT actually superseded would skip the
+                # only job that ever builds that commit's image, with no
+                # other retry path. So an unresolvable ls-remote here must
+                # never cause a skip.
+                current_tip="$(git ls-remote origin "$CHECK_GITHUB_REF" | cut -f1 || true)"
+                if [ -z "$current_tip" ]; then
+                  echo "::warning::Could not resolve the current remote tip of ${CHECK_GITHUB_REF}; failing open (treating this push as NOT superseded, so build/container-scan still run)."
+                elif [ "$current_tip" != "$CHECK_GITHUB_SHA" ]; then
+                  echo "::notice::${CHECK_GITHUB_REF} has already moved to ${current_tip} since this run was triggered for ${CHECK_GITHUB_SHA}; a newer push already supersedes this one, skipping the heavy build/container-scan work for this run."
+                  superseded=true
+                fi
+                ;;
+            esac
+          fi
+
+          echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
   file-headers:
     # Cheap repository hygiene gate. It runs before expensive Rust/image work so
@@ -4202,18 +4316,20 @@ jobs:
     # This bare `if:` (implicit `&& success()`) is deliberately NOT hardened
     # with `!cancelled()` like promote/release/publish_coverage_badge, because
     # the implicit success() only walks this job's transitive needs graph --
-    # here just `validate-compose`, a root job with no `if:`/`needs:` of its
-    # own, so it can never be legitimately *skipped* (only success/failure/
-    # cancelled). With no skippable upstream, the implicit-success() silent-skip
-    # trap that bit publish_coverage_badge (#677) and promote (#532) cannot fire
-    # here. INVARIANT: this holds ONLY while validate-compose stays a root job.
-    # If validate-compose ever gains an `if:` or a `needs:` on something that
-    # can skip, this bare condition would start silently skipping container-scan
-    # (and, transitively, weakening the build gate) -- switch it to
+    # here `validate-compose` and (since #1095 Part 1) `push-supersession-check`,
+    # both root jobs with no `if:`/`needs:` of their own, so neither can ever be
+    # legitimately *skipped* (only success/failure/cancelled). With no skippable
+    # upstream, the implicit-success() silent-skip trap that bit
+    # publish_coverage_badge (#677) and promote (#532) cannot fire here.
+    # INVARIANT: this holds ONLY while validate-compose AND push-supersession-check
+    # both stay root jobs with no `if:`/`needs:` of their own. If either ever
+    # gains an `if:` or a `needs:` on something that can skip, this bare
+    # condition would start silently skipping container-scan (and,
+    # transitively, weakening the build gate) -- switch it to
     # `!cancelled() && needs['validate-compose'].result == 'success' && ...`
     # then, matching the established fix pattern.
     if: github.event_name != 'pull_request'
-    needs: validate-compose
+    needs: [validate-compose, push-supersession-check]
     # Job-level concurrency (#888): keyed per matrix row (service + platform)
     # and per ref. cancel-in-progress is pull_request-only -- see `build`'s
     # group comment for the full #979 rationale. On push, `build`'s `if:`
@@ -4590,7 +4706,16 @@ jobs:
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Build local scan image
-        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        # Issue #1095 Part 1 (Option B): this is the actual heavy compute in
+        # this job (a full docker buildx build), so it -- along with the
+        # Trivy scan step below -- is the one gated on
+        # push-supersession-check's output. The cheaper prep steps above
+        # (Buildx setup, secret/cache prep) are deliberately left ungated:
+        # gating every step in this job for a marginal saving was judged not
+        # worth the added editing surface on a file with this much incident
+        # history; see this job's `needs:` comment for the invariant this
+        # relies on.
+        if: (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           CARGO_BUILD_JOBS: ${{ steps.docker-build-jobs.outputs.jobs }}
           SCCACHE_REDIS_FILE: ${{ steps.sccache-secret.outputs.redis-file }}
@@ -4801,7 +4926,10 @@ jobs:
           mkdir -p -- "$TRIVY_CACHE_DIR"
           touch -- "$stamp"
       - name: Scan image with Trivy
-        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        # Same push-supersession-check gate as "Build local scan image"
+        # above (this step scans the image that step builds -- if that step
+        # was skipped there is nothing here to scan).
+        if: (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') && needs['push-supersession-check'].outputs.superseded != 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }}
@@ -4870,6 +4998,7 @@ jobs:
       - pr-tracking-metadata-check
       - pr-title-convention-check
       - line-endings
+      - push-supersession-check
     if: >-
       ${{
         always() &&
@@ -4989,6 +5118,7 @@ jobs:
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
+          SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
         run: |
           set -euo pipefail
 
@@ -5019,6 +5149,21 @@ jobs:
             # Build-tools publishes the sha-* source image on every trusted ref
             # so the promotion job always has a source image to move.
             should_build=true
+          fi
+
+          # Issue #1095 Part 1 (Option B): on push, a newer commit may have
+          # already superseded this one before this job even started (see
+          # push-supersession-check's own comment). Applies uniformly to
+          # every service, including build-tools -- an already-superseded
+          # push gets no exception. Deliberately placed AFTER both branches
+          # above (not folded into either) so it can override should_build
+          # back to false regardless of which branch set it true, and
+          # deliberately does NOT apply on pull_request (build/container-scan
+          # already get real per-commit cancellation there via their own
+          # job-level concurrency groups, not this check).
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
+            echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
+            should_build=false
           fi
 
           case "$should_build" in
@@ -5618,6 +5763,7 @@ jobs:
       - pr-tracking-metadata-check
       - pr-title-convention-check
       - line-endings
+      - push-supersession-check
     if: >-
       ${{
         always() &&
@@ -5706,6 +5852,7 @@ jobs:
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
+          SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
         run: |
           set -euo pipefail
 
@@ -5734,6 +5881,13 @@ jobs:
             fi
           elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
             should_build=true
+          fi
+
+          # Issue #1095 Part 1 (Option B): mirrors build's own copy of this
+          # check exactly -- see that job's comment for the full reasoning.
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
+            echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
+            should_build=false
           fi
 
           case "$should_build" in
