@@ -225,7 +225,7 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ensure-pr-staging-images.sh
 
-  # The nine simulation/validation jobs this suite shares with the manual
+  # The ten simulation/validation jobs this suite shares with the manual
   # full-setup-validate.yml now live in one reusable workflow (issue #1014).
   # This per-PR gate invokes them with the PR's own resolved staging tag; the
   # caller keeps its own trigger, plan gating, and ensure-pr-staging-images
@@ -538,9 +538,9 @@ jobs:
           SHOULD_RUN: ${{ needs.plan.outputs.should_run }}
           PLAN_RESULT: ${{ needs.plan.result }}
           ENSURE_RESULT: ${{ needs['ensure-pr-staging-images'].result }}
-          # One combined result for the nine shared jobs now in the reusable
+          # One combined result for the ten shared jobs now in the reusable
           # full-setup-sims.yml (compute-validation-network + full-setup-validate
-          # + the seven simulations). A reusable-workflow caller job reports
+          # + the eight simulations). A reusable-workflow caller job reports
           # 'failure' if ANY job inside it failed, so this single result is a
           # faithful pass/fail for the whole shared set; GitHub's checks UI still
           # lists each inner job so a failure is attributable.
@@ -565,7 +565,7 @@ jobs:
           # check() helper below: the shared full-setup-sims suite contains
           # compute-validation-network (the per-run subnet/IP derivation every
           # job relies on for collision-free isolation) plus full-setup-validate
-          # and the seven simulations. should_run is already 'true' here, so this
+          # and the eight simulations. should_run is already 'true' here, so this
           # suite must have actually run and succeeded -- never merely be
           # 'skipped' (which check() treats as fine and would let this required
           # gate go green after silently losing the isolation guarantee, the
