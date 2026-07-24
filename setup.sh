@@ -3635,12 +3635,32 @@ dc_update() {
 # from "starting"/"unhealthy" rather than guessing. For a container with no
 # healthcheck at all, the best available signal is that it is actually in the
 # "running" state (weaker, but honestly the most this project can assert for
-# those services today).
+# those services today) -- EXCEPT for a deliberately one-shot utility
+# container (Compose `restart: "no"`, e.g. `dhcp-probe`, the #377 broadcast
+# conflict-discovery probe): that class of service is *expected* to exit on
+# its own once its job is done, so requiring "running" for it can never
+# succeed once it finishes normally. Confirmed as a real, 100%-reproducible
+# bug (issue #1155): every real `setup.sh update` run against deploy/quickstart
+# recreates dhcp-probe as part of "Starting non-UI services", and once it
+# exits 0 (as designed, usually well under a minute), this check kept
+# requiring "running" forever, so wait_for_stack_health always burned its
+# full 180s budget and declared the whole non-UI set unhealthy -- even though
+# every real long-running service (proxy, dns-standard, nats, watchdog,
+# netdata, docker-socket-proxy) was already healthy the entire time. A
+# one-shot container is therefore treated as satisfying this check once it
+# has exited cleanly (exit code 0); a non-zero exit still fails closed, since
+# that is a real probe failure, not a normal one-shot completion.
 service_container_is_healthy() {
     local service="$1"
-    local container_id health status
+    local container_id health status restart_policy exit_code
 
-    container_id=$(dc_update ps -q "$service" 2>/dev/null)
+    # -a/--all: without it, `docker compose ps -q` only lists currently
+    # RUNNING containers, so a one-shot service (dhcp-probe) that already
+    # exited would look up as "no container id at all" and return 1 here
+    # before the one-shot-exit-0 handling below is ever reached -- confirmed
+    # directly while validating the issue #1155 fix (the fix below alone was
+    # not sufficient; this lookup itself was the second half of the bug).
+    container_id=$(dc_update ps -a -q "$service" 2>/dev/null)
     [[ -n "$container_id" ]] || return 1
 
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id" 2>/dev/null)
@@ -3650,7 +3670,16 @@ service_container_is_healthy() {
     fi
 
     status=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null)
-    [[ "$status" = "running" ]]
+    [[ "$status" = "running" ]] && return 0
+
+    restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id" 2>/dev/null)
+    if [[ "$status" = "exited" && "$restart_policy" = "no" ]]; then
+        exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null)
+        [[ "$exit_code" = "0" ]]
+        return $?
+    fi
+
+    return 1
 }
 
 # A missing tool must never look identical to "the thing it would have
