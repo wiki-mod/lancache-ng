@@ -17,6 +17,26 @@
 # Reuses the same published-image/health-wait/ephemeral-client pattern
 # already proven in ssl-mitm-cache-simulation.sh and
 # ui-nats-dns-integration-simulation.sh.
+#
+# Issue #681 addition: every connect check above this point is short-lived
+# (`timeout 5 nats-subscriber`) and only proves that a *future* reconnect
+# attempt is rejected after removal/rotation -- it never holds a connection
+# open across the removal/rotation itself, so it could never have caught the
+# exact gap #681 closes (a secondary already connected at the moment it's
+# removed/rotated kept its access for up to 90 days). This file now also:
+#   - Starts a genuinely long-held-open nats-subscriber connection for
+#     secondary 'authcallout-a' and confirms it is live (visible in NATS's
+#     own connz) BEFORE removing that secondary.
+#   - After the removal, polls the same real nats-server's connz endpoint
+#     (not the HTTP DELETE response, which only proves the API call
+#     succeeded) until that connection is actually gone, and captures the
+#     nats-server log line proving a real disconnect happened.
+#   - Confirms the no-live-connection case is a graceful no-op: every
+#     existing short-lived-connect check below already exercises removing/
+#     rotating a secondary with no live connection open (the connection
+#     always closes 5s after attempt_nats_connect returns), so the existing
+#     200 status assertions on those DELETE/rotate calls already are that
+#     proof -- called out explicitly at each call site below.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -39,12 +59,20 @@ network_name="${compose_project}_validation"
 # review finding on #764).
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 registration_token="validation-secondary-registration-token"
+# Issue #681: defined here (not just at first use) so `cleanup`'s `docker rm
+# -f "$live_container_name"` is never an unbound-variable failure under
+# `set -u` if the script exits before the live-connection phase runs.
+live_container_name="${compose_project}-live-a"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 dns_image="${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${image_tag}"
 
 cleanup() {
     local status=$?
+    # Issue #681: the held-open live connection container isn't part of the
+    # compose project (it's a plain `docker run`, same as run_client's
+    # ephemeral clients), so `compose down` below never touches it.
+    docker rm -f "$live_container_name" >/dev/null 2>&1 || true
     docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
         down -v --remove-orphans >/dev/null 2>&1 || true
     # `down` above can lose the "has active endpoints" race (see
@@ -288,7 +316,49 @@ echo "== Verifying both freshly registered secondaries can connect to NATS with 
 assert_connects "a-initial" "$a_url" "$a_user" "$a_pass" "$a_consumer"
 assert_connects "b-initial" "$b_url" "$b_user" "$b_pass" "$b_consumer"
 
-echo "== Removing secondary 'authcallout-a' via DELETE /api/secondary/authcallout-a =="
+# Issue #681: does the real nats-server (reached over its own read-only,
+# unauthenticated-on-this-internal-network HTTP monitor at :8222, port
+# already enabled -- see deploy/full-setup/docker-compose.yml's nats
+# service) still report a live connection whose `authorized_user` matches
+# the given secondary's NATS username. Deliberately independent of
+# nats_kick.rs's own CONNZ call: this is the test's own proof, not a reuse
+# of the code under test.
+connz_has_live_connection() {
+    local nats_user="$1"
+    run_client "curl -sS 'http://nats:8222/connz?auth=1&user=$nats_user' -o /shared/connz-check.json"
+    grep -q "\"authorized_user\": *\"$nats_user\"" "$work_dir/shared/connz-check.json"
+}
+
+echo "== Establishing a LIVE, held-open NATS connection for secondary 'authcallout-a' (issue #681) =="
+# Unlike assert_connects/attempt_nats_connect above (a `timeout 5` probe that
+# always disconnects on its own well before any removal/rotation below), this
+# container holds its nats-subscriber connection open indefinitely so the
+# removal step further down proves ACTIVE disconnection of an
+# already-established session -- not just that a *future* reconnect attempt
+# gets rejected, which every check above already covers.
+docker run -d --name "$live_container_name" --network "$network_name" \
+    -e "NATS_URL=$a_url" -e "NATS_USER=$a_user" -e "NATS_PASSWORD=$a_pass" \
+    -e "NATS_CONSUMER=$a_consumer" -e "PDNS_API_KEY=validation-pdns-key" \
+    --entrypoint sh "$dns_image" -c 'exec nats-subscriber' >/dev/null
+
+echo "Waiting for the live connection to actually establish (confirmed via NATS connz, not container status alone)..."
+live_deadline=$((SECONDS + 20))
+a_live_connected=0
+while (( SECONDS < live_deadline )); do
+    if connz_has_live_connection "$a_user"; then
+        a_live_connected=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$a_live_connected" -ne 1 ]]; then
+    echo "::error::The held-open connection for secondary 'authcallout-a' never appeared in NATS connz within 20s." >&2
+    docker logs "$live_container_name" >&2 || true
+    exit 1
+fi
+echo "Live connection for 'authcallout-a' confirmed established (visible in NATS connz)."
+
+echo "== Removing secondary 'authcallout-a' via DELETE /api/secondary/authcallout-a WHILE its connection is still live =="
 # Same errexit hazard as elsewhere in this file: wrap the run_client
 # invocation so a failing docker/curl call reports its own cause instead of
 # aborting silently before the HTTP-code check below ever runs.
@@ -302,15 +372,54 @@ if [[ "$remove_http_code" != "200" ]]; then
     echo "::error::DELETE /api/secondary/authcallout-a returned HTTP $remove_http_code, expected 200." >&2
     exit 1
 fi
-echo "Secondary 'authcallout-a' removed."
+echo "Secondary 'authcallout-a' removed (HTTP response only -- not yet proof of an actual disconnect, see below)."
 
-echo "== Verifying the removed secondary's OLD credential is now rejected =="
+echo "== Verifying the LIVE connection was actually kicked, not just that the DELETE API call succeeded (issue #681) =="
+# The real proof this issue asks for: poll nats-server's own connz (never the
+# HTTP DELETE response above) until the live connection genuinely disappears.
+# nats_kick.rs's kick call is spawned in the background (see
+# routes/secondaries.rs), so a short poll window -- not an instant check --
+# is the correct, non-flaky way to observe it.
+kick_deadline=$((SECONDS + 20))
+a_live_gone=0
+while (( SECONDS < kick_deadline )); do
+    if ! connz_has_live_connection "$a_user"; then
+        a_live_gone=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$a_live_gone" -ne 1 ]]; then
+    echo "::error::Secondary 'authcallout-a' was removed, but its live NATS connection is STILL present in connz after 20s -- active disconnection did not happen." >&2
+    run_client "curl -sS 'http://nats:8222/connz?auth=1'" >&2 || true
+    exit 1
+fi
+echo "Live connection for removed secondary 'authcallout-a' is confirmed gone from NATS connz -- actively disconnected, not merely left to expire."
+
+# Corroborating, independent evidence beyond connz: nats-server itself logs a
+# real disconnect for the kicked connection. Not treated as fatal on its own
+# (the connz poll above is the authoritative check) since log line wording is
+# more likely to drift across nats-server versions than the connz JSON shape.
+if "${compose[@]}" logs --no-color nats 2>/dev/null | grep -qi "authcallout-a\|Client Kicked\|Client connection closed"; then
+    echo "nats-server's own log also shows evidence of the disconnect."
+else
+    echo "::warning::nats-server's log did not show an obviously matching disconnect line (non-fatal -- connz poll above is the authoritative proof)."
+fi
+
+echo "== Verifying the removed secondary's OLD credential is also rejected on a fresh reconnect attempt =="
 assert_rejected "a-after-remove" "$a_url" "$a_user" "$a_pass" "$a_consumer"
 
 echo "== Verifying the still-registered secondary 'authcallout-b' is completely unaffected =="
 assert_connects "b-after-a-removed" "$b_url" "$b_user" "$b_pass" "$b_consumer"
 
-echo "== Rotating secondary 'authcallout-b's credential via POST rotate-token =="
+# Issue #681, no-live-connection graceful-no-op case: 'authcallout-b' has had
+# no live NATS connection open since its short-lived assert_connects probe
+# above returned (each attempt_nats_connect call disconnects on its own after
+# 5s), so nats_kick.rs's CONNZ lookup inside rotate_token below will find
+# zero matching connections -- the common, expected case. The 200 status
+# check right after this call is that proof: a no-live-connection kick must
+# never turn an otherwise-successful rotation into an error response.
+echo "== Rotating secondary 'authcallout-b's credential via POST rotate-token (no live connection open -- exercises the graceful no-op path) =="
 rotate_file="$work_dir/shared/rotate-b.json"
 # Same errexit hazard as the DELETE call above: wrap the run_client
 # invocation so a failing docker/curl call reports its own cause instead of
@@ -348,4 +457,4 @@ assert_rejected "b-old-cred-after-rotate" "$b_url" "$b_user" "$b_pass" "$b_consu
 echo "== Verifying authcallout-b's NEW (post-rotation) credential works =="
 assert_connects "b-new-cred-after-rotate" "$b_url" "$b_user" "$b_new_pass" "$b_consumer"
 
-echo "nats-secondary-auth-callout-simulation passed: per-secondary NATS identity, immediate revocation on removal, isolation between secondaries, and credential rotation all verified end-to-end against a real nats-server and the real nats-subscriber client."
+echo "nats-secondary-auth-callout-simulation passed: per-secondary NATS identity, immediate DB-level revocation on removal, active disconnection of an already-live connection (issue #681, confirmed via real nats-server connz, not just the HTTP response), the no-live-connection graceful no-op case, isolation between secondaries, and credential rotation all verified end-to-end against a real nats-server and the real nats-subscriber client."

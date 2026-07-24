@@ -1269,6 +1269,8 @@ jobs:
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
           NATS_CALLOUT_PASSWORD: ci-nats-callout-password
           NATS_CALLOUT_USER: ci-nats-callout
+          NATS_SYS_PASSWORD: ci-nats-sys-password
+          NATS_SYS_USER: ci-nats-sys
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -1309,6 +1311,8 @@ jobs:
             --env NATS_DNS_WRITER_USER \
             --env NATS_CALLOUT_PASSWORD \
             --env NATS_CALLOUT_USER \
+            --env NATS_SYS_PASSWORD \
+            --env NATS_SYS_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \
@@ -1636,6 +1640,8 @@ jobs:
             NATS_DNS_WRITER_USER
             NATS_CALLOUT_PASSWORD
             NATS_CALLOUT_USER
+            NATS_SYS_PASSWORD
+            NATS_SYS_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             PDNS_API_KEY
@@ -1681,6 +1687,8 @@ jobs:
             NATS_DNS_WRITER_USER
             NATS_CALLOUT_PASSWORD
             NATS_CALLOUT_USER
+            NATS_SYS_PASSWORD
+            NATS_SYS_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             NGINX_UPSTREAM_RESOLVER
@@ -2456,6 +2464,8 @@ jobs:
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
           NATS_CALLOUT_PASSWORD: ci-nats-callout-password
           NATS_CALLOUT_USER: ci-nats-callout
+          NATS_SYS_PASSWORD: ci-nats-sys-password
+          NATS_SYS_USER: ci-nats-sys
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -2496,6 +2506,8 @@ jobs:
             --env NATS_DNS_WRITER_USER \
             --env NATS_CALLOUT_PASSWORD \
             --env NATS_CALLOUT_USER \
+            --env NATS_SYS_PASSWORD \
+            --env NATS_SYS_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \

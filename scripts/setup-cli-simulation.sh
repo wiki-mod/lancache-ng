@@ -378,7 +378,7 @@ echo "== Phase 2b: repeat-run idempotence (setup.sh update run twice in a row, s
 # real CLI -- not just the extracted function -- lands on the same fixed
 # point instead of drifting or rotating secrets.
 cp "$install_dir/.env" "$install_dir/.env.after-first-update"
-secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
+secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
 grep -E "$secret_keys" "$install_dir/.env.after-first-update" | sort > "$install_dir/.secrets-after-first-update"
 
 bash setup.sh update "$install_dir"

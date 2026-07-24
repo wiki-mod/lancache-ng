@@ -8,7 +8,7 @@
 //! stanza) at process startup only -- see `nats_auth_callout.rs` for why
 //! register/rotate/remove no longer need to rewrite that file or restart NATS.
 
-use crate::{docker_client, nats_auth_callout, nats_config, AppState};
+use crate::{docker_client, nats_auth_callout, nats_config, nats_kick, AppState};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
@@ -270,7 +270,9 @@ pub async fn remove_secondary(
             .db
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        db.execute("DELETE FROM secondaries WHERE name = ?", [name])
+        // name.clone(), not a move: the kick call below needs it after this
+        // block too (issue #681).
+        db.execute("DELETE FROM secondaries WHERE name = ?", [name.clone()])
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
@@ -283,6 +285,32 @@ pub async fn remove_secondary(
     // auth-callout responder re-checks this table on every connection
     // attempt, so deleting the row alone revokes this secondary's access on
     // its very next reconnect, with zero effect on any other secondary.
+    //
+    // Issue #681: the row is already gone at this point, so it's now safe to
+    // actively kick this secondary's current live connection, if it has one
+    // -- if the kick makes it reconnect, that reconnect now fails
+    // auth-callout instead of quietly succeeding (see nats_kick.rs's module
+    // docs on why this ordering is load-bearing). Spawned in the background:
+    // a slow/unreachable NATS system account must not add latency to this
+    // HTTP response -- the DB-level revocation above is what actually
+    // matters; this only shrinks the exposure window for an already-open
+    // connection, it is not required for correctness.
+    let kick_state = state.clone();
+    let kick_name = name.clone();
+    tokio::spawn(async move {
+        match nats_kick::disconnect_secondary(&kick_state, &kick_name).await {
+            Ok(0) => tracing::debug!(
+                "nats_kick: removed secondary {kick_name} had no live NATS connection to disconnect"
+            ),
+            Ok(n) => tracing::info!(
+                "nats_kick: disconnected {n} live NATS connection(s) for removed secondary {kick_name}"
+            ),
+            Err(err) => tracing::warn!(
+                "nats_kick: failed to actively disconnect removed secondary {kick_name}: {err}"
+            ),
+        }
+    });
+
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -434,6 +462,31 @@ pub async fn rotate_token(
     if rows_affected == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
+
+    // Issue #681: the password hash is already overwritten at this point, so
+    // it's now safe to actively kick this secondary's current live
+    // connection, if it has one -- if the kick makes it reconnect, that
+    // reconnect now presents the OLD (now-invalid) password and fails
+    // auth-callout instead of quietly continuing on the credential this
+    // rotation was meant to retire (see nats_kick.rs's module docs on why
+    // this ordering is load-bearing). Spawned in the background for the same
+    // reason as remove_secondary above: a slow/unreachable NATS system
+    // account must not add latency to this HTTP response.
+    let kick_state = state.clone();
+    let kick_name = nats_user.clone();
+    tokio::spawn(async move {
+        match nats_kick::disconnect_secondary(&kick_state, &kick_name).await {
+            Ok(0) => tracing::debug!(
+                "nats_kick: rotated secondary {kick_name} had no live NATS connection to disconnect"
+            ),
+            Ok(n) => tracing::info!(
+                "nats_kick: disconnected {n} live NATS connection(s) for rotated secondary {kick_name}"
+            ),
+            Err(err) => tracing::warn!(
+                "nats_kick: failed to actively disconnect rotated secondary {kick_name}: {err}"
+            ),
+        }
+    });
 
     Ok(Json(serde_json::json!({
         "nats_user": nats_user,

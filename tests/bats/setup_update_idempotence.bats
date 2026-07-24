@@ -39,7 +39,8 @@ setup() {
 # DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
 # (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
-# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583), and AUTO_UPDATE_ENABLED
+# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583),
+# NATS_SYS_USER/NATS_SYS_PASSWORD (#681), and AUTO_UPDATE_ENABLED
 # (#819): migrate_env_for_update() backfills all of these unconditionally when
 # missing, so a fixture predating any of these features would no longer be
 # "fully converged" and would make the no-op test below fail on its first
@@ -97,6 +98,8 @@ write_converged_env_fixture() {
         'NATS_DNS_REPLICA_PASSWORD=gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg' \
         'NATS_CALLOUT_USER=lancache-nats-callout' \
         'NATS_CALLOUT_PASSWORD=hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh' \
+        'NATS_SYS_USER=lancache-nats-sys' \
+        'NATS_SYS_PASSWORD=iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii' \
         'SECONDARY_REGISTRATION_TOKEN=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
         'COMPOSE_PROFILES=ssl' \
         'UI_AUTH_USER=admin' \
@@ -161,7 +164,7 @@ write_legacy_env_fixture() {
     grep -qx 'PROXY_SECURITY_MODE=lazy' "$env_file"
 
     after_first_run=$(cat "$env_file")
-    secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
+    secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
     # Second run against the now-converged file must not change anything --
     # in particular it must not rotate any of the secrets it just generated.
@@ -169,7 +172,7 @@ write_legacy_env_fixture() {
     [ "$status" -eq 0 ]
 
     after_second_run=$(cat "$env_file")
-    secrets_after_second_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
+    secrets_after_second_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
     [ "$after_first_run" = "$after_second_run" ]
     [ "$secrets_after_first_run" = "$secrets_after_second_run" ]

@@ -18,6 +18,7 @@ mod docker_client;
 mod kea_snapshots;
 mod nats_auth_callout;
 mod nats_config;
+mod nats_kick;
 mod nginx_client;
 mod reverse_dns;
 mod routes;

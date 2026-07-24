@@ -182,6 +182,16 @@ pub struct Config {
     // authorization requests for secondaries and needs no other permissions.
     pub nats_callout_user: String,
     pub nats_callout_password: Option<String>,
+    // Issue #681: the sole member of a new NATS `SYS` account (see
+    // services/nats/nats.conf's `accounts {}` block) -- used ONLY by
+    // nats_kick.rs to look up (CONNZ) and force-disconnect
+    // ($SYS.REQ.SERVER.*.KICK) a removed/rotated secondary's live connection.
+    // Every other NATS role in this struct lives in the implicit default
+    // account ($G), which nats-server does not permit to reach the
+    // $SYS.REQ.SERVER.* system-services API at all -- confirmed against a
+    // real nats-server 2.14.3 (see nats_kick.rs's module docs).
+    pub nats_sys_user: String,
+    pub nats_sys_password: Option<String>,
     // Where the auth-callout issuer NKey seed is persisted (generated on
     // first run, mirrors ui_session_secret's file-based persistence). This
     // keypair signs every per-secondary user JWT the callout responder
@@ -343,6 +353,11 @@ impl fmt::Debug for Config {
                     .nats_callout_password
                     .as_ref()
                     .map(|_| "***REDACTED***"),
+            )
+            .field("nats_sys_user", &self.nats_sys_user)
+            .field(
+                "nats_sys_password",
+                &self.nats_sys_password.as_ref().map(|_| "***REDACTED***"),
             )
             .field("nats_issuer_seed_path", &self.nats_issuer_seed_path)
             .field(
@@ -775,6 +790,8 @@ impl Config {
             nats_dns_replica_password: env_opt("NATS_DNS_REPLICA_PASSWORD"),
             nats_callout_user: env_str("NATS_CALLOUT_USER", ""),
             nats_callout_password: env_opt("NATS_CALLOUT_PASSWORD"),
+            nats_sys_user: env_str("NATS_SYS_USER", ""),
+            nats_sys_password: env_opt("NATS_SYS_PASSWORD"),
             nats_issuer_seed_path: env_str(
                 "NATS_ISSUER_SEED_PATH",
                 "/data/lancache-nats-issuer.seed",

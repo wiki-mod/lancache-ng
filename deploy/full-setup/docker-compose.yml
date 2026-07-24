@@ -303,6 +303,22 @@ services:
           # error).
           include "auth_callout.conf"
         }
+        # Issue #681: a minimal system account, additive alongside the flat
+        # `authorization {}` block above -- mirrors dev/prod/quickstart's
+        # entrypoint (see those files' matching comment for the full
+        # rationale: nats-server only exposes the $SYS.REQ.SERVER.* system-
+        # services API, used by nats_kick.rs to look up and force-disconnect a
+        # removed/rotated secondary's live connection, to system-account
+        # clients). Fixed literal credentials, same convention as every other
+        # role in this harness above.
+        accounts {
+          SYS: {
+            users: [
+              { user: validation-nats-sys, password: validation-nats-sys-password }
+            ]
+          }
+        }
+        system_account: SYS
         EOF
         cat > /etc/nats/auth_callout.conf <<'EOF'
         auth_callout {
@@ -397,6 +413,11 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=validation-nats-password
       - NATS_CALLOUT_USER=validation-nats-callout
       - NATS_CALLOUT_PASSWORD=validation-nats-callout-password
+      # Issue #681: lets nats_kick.rs connect as the NATS system account to look
+      # up (CONNZ) and force-disconnect (KICK) a removed/rotated secondary's
+      # live connection. Must match the nats service's prebaked SYS account user.
+      - NATS_SYS_USER=validation-nats-sys
+      - NATS_SYS_PASSWORD=validation-nats-sys-password
       # Fixed literal seed (not the file-based NATS_ISSUER_SEED_PATH default)
       # so its public half can be baked into the nats service's static
       # bootstrap config below ahead of time -- this validation harness has

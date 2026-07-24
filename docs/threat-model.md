@@ -340,6 +340,34 @@ record changes, or subscribes to read cache/DNS metadata.
   secondary's very next reconnect, with zero effect on any other secondary —
   there is no shared token whose compromise or rotation affects the whole
   fleet, and no static config file to rewrite per secondary.
+- **Active connection termination (issue #681), closing #621/#583's own
+  documented gap.** The DB-level revocation above only ever took effect on a
+  secondary's *next reconnect* — a secondary already holding its streaming
+  NATS connection open at the moment it was removed/rotated kept using its
+  already-issued user JWT (90-day TTL, `USER_JWT_TTL_SECS` in
+  `nats_auth_callout.rs`) until it happened to reconnect on its own. Both
+  `remove_secondary` and `rotate_token` (`services/ui/src/routes/
+  secondaries.rs`) now additionally force-disconnect that secondary's current
+  live connection immediately after committing the DB write, via
+  `services/ui/src/nats_kick.rs` (NATS's `$SYS.REQ.SERVER.*` system-services
+  API: `CONNZ` to find the connection, `KICK` to disconnect it). This is
+  best-effort, fire-and-forget, and additive — a NATS outage or a slow kick
+  never blocks or fails the Admin UI's HTTP response, and the DB-level
+  revocation above (which nothing here weakens or replaces) is still what
+  actually prevents the *next* reconnect from succeeding, kick or no kick.
+- **New static role, new secret class: `NATS_SYS_USER`/`NATS_SYS_PASSWORD`
+  (issue #681).** The sole member of a newly introduced NATS `SYS` account
+  (`services/nats/nats.conf`'s `accounts {}` block, the first `accounts {}`
+  this project has ever needed — every other role, including every
+  callout-authenticated secondary, still lives in the implicit default
+  account `$G`, unaffected). Holding this credential grants read access to
+  every live NATS connection's metadata network-wide (`CONNZ`: IP, username,
+  subscriptions) and the ability to forcibly disconnect any of them (`KICK`)
+  — treat it as at least as sensitive as the other static NATS role
+  passwords, not as a narrower "just a kick switch" credential. It carries no
+  application subject permissions of its own (no `lancache.dns.*`/JetStream
+  access), so a compromise of this one credential alone cannot forge or read
+  DNS records — only enumerate/disconnect connections.
 - Remote/secondary access is opt-in only via
   `deploy/prod/docker-compose.nats-secondary.yml` with `NATS_BIND_IP` bound to a
   trusted LAN/VPN interface, and must be firewalled to that scope.
@@ -367,6 +395,17 @@ but does not eliminate what a compromised *writer* credential could do (forge DN
 A compromised *secondary* credential is scoped to exactly that one secondary's
 consume-only JetStream permissions (same scope the old shared reader role
 had) and can be individually revoked without touching any other secondary.
+Issue #681's active-disconnect kick narrows, but does not eliminate, the old
+"up to 90 days on an already-open connection" exposure window: it is
+best-effort (a NATS outage at the exact moment of removal/rotation means the
+kick itself cannot run, though the DB-level revocation above still blocks the
+next reconnect regardless), and a secondary that never reconnects and is
+never actively kicked in time keeps whatever access its still-open connection
+already had until the kick eventually lands or the connection drops on its
+own. A compromise of the new `NATS_SYS_USER`/`PASSWORD` credential itself
+adds a distinct, narrower risk: network-wide read access to live-connection
+metadata and the ability to disconnect any connection (including
+non-secondary static roles), but no ability to forge or read DNS records.
 
 ---
 
