@@ -274,9 +274,12 @@ adapter) is:
 
 2. **If the Admin UI is unreachable, use the CLI fallback:**
    ```bash
-   ./setup.sh reset-to-last-known-good-config dns lan. [--yes]
+   ./setup.sh reset-to-last-known-good-config dns /opt/lancache-ng lan [--yes]
+   # Replace "/opt/lancache-ng" with your install directory if different -- this
+   # argument is REQUIRED here even if you're using the default, because the
+   # zone argument that follows it is positional (there is no way to skip it)
    # Replace "dns" with "dns-standard" or "dns-ssl" to target a specific container
-   # Replace "lan." with the zone you want to fix (use without trailing dot; script adds it)
+   # Replace "lan" with the zone you want to fix (with or without a trailing dot -- both work)
    ```
    
    This command:
