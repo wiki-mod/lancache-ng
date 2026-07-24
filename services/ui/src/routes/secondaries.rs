@@ -540,6 +540,7 @@ pub async fn update_nats_conf(
         &state.config.nats_dns_writer_user,
         &state.config.nats_dns_replica_user,
         &state.config.nats_callout_user,
+        &state.config.nats_sys_user,
         &state.nats_issuer_public_key,
     );
 
@@ -567,6 +568,7 @@ fn render_nats_auth_callout(
     writer_user: &str,
     replica_user: &str,
     callout_user: &str,
+    sys_user: &str,
     issuer_public_key: &str,
 ) -> String {
     // This is the fragment `include`d by the nats container's own nats.conf
@@ -592,7 +594,18 @@ auth_callout {{
   # 2.14.3; see nats_auth_callout.rs's module docs). Only external secondaries,
   # deliberately absent from both this list and nats.conf's static `users`
   # list, are meant to go through the callout.
-  auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}"]
+  #
+  # Issue #681: auth_callout's interception is server-wide, not scoped to the
+  # $G account the four roles above live in -- an unrecognized username is
+  # routed to the callout regardless of which account (accounts {{}} block)
+  # its own static `users` entry lives under. Confirmed the hard way against a
+  # real nats-server 2.14.3: omitting the new NATS_SYS_USER (services/nats/
+  # nats.conf's separate `SYS` account) from this list made every system-
+  # account connection attempt fall through to the callout instead, which
+  # correctly denies it (it is not a row in `secondaries`) -- silently
+  # breaking nats_kick.rs's CONNZ/KICK calls with "authorization violation"
+  # instead of ever reaching the SYS account's own static credential check.
+  auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}", "{sys_user}"]
 }}
 "#
     )
@@ -716,6 +729,7 @@ mod tests {
                 "lancache-dns-writer",
                 "lancache-dns-replica",
                 "lancache-nats-callout",
+                "lancache-nats-sys",
                 "issuer-public-key-abc123",
             )
         };
@@ -735,6 +749,7 @@ mod tests {
             "lancache-dns-writer",
             "lancache-dns-replica",
             "lancache-nats-callout",
+            "lancache-nats-sys",
             "issuer-public-key-abc123",
             "auth_callout",
             "auth_users",
@@ -781,6 +796,7 @@ mod tests {
             "lancache-dns-writer",
             "lancache-dns-replica",
             "lancache-nats-callout",
+            "lancache-nats-sys",
             "issuer-public-key-abc123",
         );
         write_nats_conf_atomically(path_str, &rendered_first).unwrap();
@@ -795,6 +811,7 @@ mod tests {
             "lancache-dns-writer",
             "lancache-dns-replica",
             "lancache-nats-callout",
+            "lancache-nats-sys",
             "issuer-public-key-abc123",
         );
         write_nats_conf_atomically(path_str, &rendered_second).unwrap();
