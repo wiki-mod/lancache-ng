@@ -1,0 +1,90 @@
+{# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+   LanCache-NG-NTP settings page: enable/disable the chrony-based NTP
+   container, edit its upstream public NTP server list, and toggle whether
+   its LAN address is auto-populated into Kea's DHCP ntp-servers option. #}
+{% extends "base.html" %}
+{% block title %} – NTP{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto space-y-8">
+
+  <div>
+    <h1 class="text-xl font-bold text-white">LanCache-NG-NTP</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      Ein eigener NTP-Server, der seine Zeit gegen mehrere öffentliche NTP-Server
+      synchronisiert und sie im LAN auf UDP/123 bereitstellt.
+    </p>
+  </div>
+
+  <div class="card space-y-4">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 class="font-semibold text-slate-200">Status</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          Startet/stoppt den `ntp`-Container. Erfordert, dass das `ntp`-Compose-Profil beim
+          letzten Setup aktiviert wurde (siehe setup.sh) -- ist der Container nie erstellt
+          worden, schlägt das Aktivieren mit einer klaren Fehlermeldung fehl.
+        </p>
+      </div>
+      <span class="text-xs px-2 py-1 rounded {% if ntp_enabled %}bg-emerald-700 text-emerald-100{% else %}bg-slate-700 text-slate-200{% endif %}">
+        {% if ntp_enabled %}aktiviert{% else %}deaktiviert{% endif %}
+      </span>
+    </div>
+
+    <form method="post" action="/ntp/settings" class="space-y-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <div class="flex items-center gap-2">
+        <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"
+               {% if ntp_enabled %}checked{% endif %}
+               class="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500">
+        <label for="ntp_enabled" class="text-sm text-slate-300">
+          LanCache-NG-NTP aktivieren
+        </label>
+      </div>
+
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Upstream-NTP-Server</label>
+        <textarea name="ntp_upstream_servers" rows="3" required
+          class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono"
+          placeholder="0.debian.pool.ntp.org 1.debian.pool.ntp.org time.cloudflare.com">{{ ntp_upstream_servers }}</textarea>
+        <p class="text-xs text-slate-500 mt-1">
+          Leerzeichen- oder kommagetrennt. Hostnamen oder IPv4/IPv6-Adressen. Mindestens ein
+          Eintrag ist erforderlich -- dieser Dienst läuft nie als eigenständige Zeitquelle.
+        </p>
+      </div>
+
+      <div class="rounded border border-slate-700 bg-slate-900/50 p-3 space-y-2">
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="ntp_auto_dhcp" name="ntp_auto_dhcp" value="1"
+                 {% if ntp_auto_dhcp %}checked{% endif %}
+                 {% if not dhcp_has_kea %}disabled{% endif %}
+                 class="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500 disabled:opacity-40">
+          <label for="ntp_auto_dhcp" class="text-sm text-slate-300">
+            Als DHCP-NTP-Server automatisch eintragen ({{ standard_ip }})
+          </label>
+        </div>
+        <p class="text-xs text-slate-500">
+          Nur wirksam, wenn LanCache-NG-NTP aktiviert UND der DHCP-Server (Kea) aktiv ist.
+          Solange dieser Schalter an ist, überschreibt er das ntp-servers-Feld JEDES
+          Kea-Subnetzes mit der obigen LAN-Adresse -- ein manuell pro Subnetz gesetzter Wert
+          wird dabei nicht erhalten. Beim Ausschalten kehren alle Subnetze zum projektweiten
+          Standardwert zurück (siehe DHCP-Seite, Feld "NTP servers").
+        </p>
+        {% if not dhcp_has_kea %}
+        <p class="text-xs text-amber-300">
+          DHCP läuft derzeit nicht im Kea-Modus -- dieser Schalter greift erst, sobald Kea
+          aktiv ist.
+        </p>
+        {% endif %}
+      </div>
+
+      <button type="submit"
+              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        Speichern
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

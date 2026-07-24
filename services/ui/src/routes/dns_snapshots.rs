@@ -31,7 +31,7 @@ use axum::extract::{Form, State};
 use axum::http::HeaderMap;
 use axum::response::Redirect;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[derive(Serialize, Clone)]

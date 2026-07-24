@@ -10,8 +10,8 @@ Scope examined (all against `origin/v0.2.0`):
 - `services/dhcp-proxy/Dockerfile`, `.dockerignore`
 - `services/dhcp-proxy/dnsmasq.conf.template`
 - `services/dhcp-proxy/entrypoint.sh` (675 lines)
-- `config/dev/dhcp-proxy.env`, `config/prod/dhcp-proxy.env`
-- `deploy/dev/docker-compose.yml`, `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
+- `config/prod/dhcp-proxy.env`
+- `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
 - `scripts/dhcp-proxy-pxe-simulation.sh` (389 lines)
 - `tests/bats/dhcp_proxy_known_good_snapshot.bats`, `tests/bats/dhcp_proxy_optional_directives.bats` + their helpers
 - `docs/dhcp-modes.md`
@@ -25,9 +25,15 @@ Scope examined (all against `origin/v0.2.0`):
 DHCP relay in the RFC 1542/BOOTP-relay sense despite "relay" appearing in its
 own comments and `docs/dhcp-modes.md`'s mode name. It runs alongside an
 existing DHCP server that keeps owning real leases; dnsmasq only answers the
-supplemental PXE/ProxyDHCP exchange. It is one of three DHCP modes
-(`disabled` / `kea` / `dnsmasq-proxy`), mutually exclusive with
-`services/dhcp` (Kea) — both bind UDP/67.
+supplemental PXE/ProxyDHCP exchange. It is one of four DHCP modes
+(`disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay`), mutually exclusive
+with `services/dhcp` (Kea) — both bind UDP/67. **Update (#844):** this same
+`dhcp-proxy` container also serves the new `dnsmasq-relay` mode (a real DHCP
+relay to `UPSTREAM_DHCP_IP`, giaddr = `DHCP_RELAY_LOCAL_ADDR`); the entrypoint
+reads `DHCP_MODE` and renders `dnsmasq-relay.conf.template` instead of the
+ProxyDHCP `dnsmasq.conf.template`. In relay mode `UPSTREAM_DHCP_IP` stops being
+documentation-only (see the caveat below) and becomes the real forwarding
+target.
 
 **Naming caveat (own finding, not previously flagged anywhere in code/docs):**
 `UPSTREAM_DHCP_IP` is **documentation-only** — confirmed by entrypoint.sh's

@@ -1,7 +1,7 @@
 # lancache-ng Threat Model
 
-> **Last reviewed against release: `v0.2.0`**
-> **Last review date: 2026-07-09**
+> **Last reviewed against release: `v0.3.0`**
+> **Last review date: 2026-07-24**
 >
 > This document must be re-audited for every release. It describes the security
 > posture of a *specific* architecture, and that architecture changes between
@@ -43,6 +43,7 @@ the top is a signal that its threats need re-checking.
 | NATS event bus + role-scoped credentials | `deploy/quickstart/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
 | Secondary-node registration / remote NATS | `deploy/prod/docker-compose.nats-secondary.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
+| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/rollback_listener.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
 
 ---
 
@@ -245,6 +246,19 @@ appliance spoofs.
   validated before being written into the RPZ zone. DNS record changes flow only
   over the authenticated NATS event bus and the PowerDNS API (see T5), not from
   arbitrary clients.
+- **Zone/record rollback listener (issue #628, added since v0.2.0)**:
+  `services/dns/nats-subscriber/src/rollback_listener.rs` exposes a local HTTP
+  API (`DNS_ROLLBACK_LISTEN_ADDR`, default `0.0.0.0:8083`) the Admin UI calls to
+  list known-good zone/record snapshots and trigger an operator-selected
+  rollback — another path, besides NATS and the PowerDNS API, that can mutate
+  live DNS record data. It is not published to the host/LAN (`deploy/*/
+  docker-compose.yml` uses `expose:`, not `ports:`, for this port — reachable
+  only from other containers on the same Compose network, same treatment as
+  PowerDNS's own 8081/8082 APIs), and every request still requires
+  `X-API-Key: <PDNS_API_KEY>` regardless of network placement, matching the
+  same handshake-secret convention as the PowerDNS API itself (see above) —
+  network placement is defense-in-depth here, not the trust boundary. Rollback
+  is always operator-selected, never automatic on startup.
 - The PowerDNS API key is a shared handshake secret bootstrapped safely (issue
   #858): `services/dns/entrypoint.sh` resolves `PDNS_API_KEY` through the
   shared-secrets volume so PowerDNS and the Admin UI's PowerDNS REST client
@@ -340,6 +354,34 @@ record changes, or subscribes to read cache/DNS metadata.
   secondary's very next reconnect, with zero effect on any other secondary —
   there is no shared token whose compromise or rotation affects the whole
   fleet, and no static config file to rewrite per secondary.
+- **Active connection termination (issue #681), closing #621/#583's own
+  documented gap.** The DB-level revocation above only ever took effect on a
+  secondary's *next reconnect* — a secondary already holding its streaming
+  NATS connection open at the moment it was removed/rotated kept using its
+  already-issued user JWT (90-day TTL, `USER_JWT_TTL_SECS` in
+  `nats_auth_callout.rs`) until it happened to reconnect on its own. Both
+  `remove_secondary` and `rotate_token` (`services/ui/src/routes/
+  secondaries.rs`) now additionally force-disconnect that secondary's current
+  live connection immediately after committing the DB write, via
+  `services/ui/src/nats_kick.rs` (NATS's `$SYS.REQ.SERVER.*` system-services
+  API: `CONNZ` to find the connection, `KICK` to disconnect it). This is
+  best-effort, fire-and-forget, and additive — a NATS outage or a slow kick
+  never blocks or fails the Admin UI's HTTP response, and the DB-level
+  revocation above (which nothing here weakens or replaces) is still what
+  actually prevents the *next* reconnect from succeeding, kick or no kick.
+- **New static role, new secret class: `NATS_SYS_USER`/`NATS_SYS_PASSWORD`
+  (issue #681).** The sole member of a newly introduced NATS `SYS` account
+  (`services/nats/nats.conf`'s `accounts {}` block, the first `accounts {}`
+  this project has ever needed — every other role, including every
+  callout-authenticated secondary, still lives in the implicit default
+  account `$G`, unaffected). Holding this credential grants read access to
+  every live NATS connection's metadata network-wide (`CONNZ`: IP, username,
+  subscriptions) and the ability to forcibly disconnect any of them (`KICK`)
+  — treat it as at least as sensitive as the other static NATS role
+  passwords, not as a narrower "just a kick switch" credential. It carries no
+  application subject permissions of its own (no `lancache.dns.*`/JetStream
+  access), so a compromise of this one credential alone cannot forge or read
+  DNS records — only enumerate/disconnect connections.
 - Remote/secondary access is opt-in only via
   `deploy/prod/docker-compose.nats-secondary.yml` with `NATS_BIND_IP` bound to a
   trusted LAN/VPN interface, and must be firewalled to that scope.
@@ -367,6 +409,17 @@ but does not eliminate what a compromised *writer* credential could do (forge DN
 A compromised *secondary* credential is scoped to exactly that one secondary's
 consume-only JetStream permissions (same scope the old shared reader role
 had) and can be individually revoked without touching any other secondary.
+Issue #681's active-disconnect kick narrows, but does not eliminate, the old
+"up to 90 days on an already-open connection" exposure window: it is
+best-effort (a NATS outage at the exact moment of removal/rotation means the
+kick itself cannot run, though the DB-level revocation above still blocks the
+next reconnect regardless), and a secondary that never reconnects and is
+never actively kicked in time keeps whatever access its still-open connection
+already had until the kick eventually lands or the connection drops on its
+own. A compromise of the new `NATS_SYS_USER`/`PASSWORD` credential itself
+adds a distinct, narrower risk: network-wide read access to live-connection
+metadata and the ability to disconnect any connection (including
+non-secondary static roles), but no ability to forge or read DNS records.
 
 ---
 
@@ -455,10 +508,19 @@ or saturating the proxy.
   over HTTP/HTTPS — it is not enforced for the standard-mode `stream{}`
   SNI-passthrough listener (`:8443`), so a flood over that listener is not
   mitigated by this control (see T2).
-- Disk-usage warnings/alarms via the watchdog and Netdata.
+- Disk-usage warnings/alarms via the watchdog: since issue #870, the
+  watchdog-computed cache-disk yellow/red color is rendered live on the
+  Admin UI dashboard's "Service health" card (`services/ui/src/
+  watchdog_status.rs`), closing the visibility gap #849 observability
+  finding #3 identified. Netdata's own stock alarm templates still have no
+  notification integration or Admin UI surface of their own (its native
+  dashboard, port 19999, is never published to the host) -- that half of
+  this mitigation remains not operator-visible without direct `docker
+  exec`/Netdata-API access.
 
 **Residual risk**: Medium — there is no per-client request rate limiting by
-default; the operator must configure limits and monitor disk.
+default; the operator must configure limits, and must still reach Netdata
+directly for its half of disk/resource monitoring.
 
 ---
 

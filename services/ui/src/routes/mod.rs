@@ -5,12 +5,14 @@
 //! insertion/verification against the per-session token carried in request
 //! headers by the `basic_auth` middleware.
 
+pub mod cache;
 pub mod dashboard;
 pub mod dhcp;
 pub mod dns_snapshots;
 pub mod domains;
 pub mod logs;
 pub mod netdata_proxy;
+pub mod ntp;
 pub mod secondaries;
 pub mod setup;
 pub mod stats;

@@ -21,7 +21,7 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional scheduled automatic updates, and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
@@ -40,6 +40,7 @@ LanCache NG combines several services into one Docker based stack:
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
+  - optional LanCache-NG-NTP server (chrony), disciplined against public NTP servers, serving LAN clients on UDP/123, with an opt-in DHCP auto-populate toggle
   - optional scheduled automatic updates (ordered, health-gated, Admin UI last)
   - optional watchdog and convergence checks
   - optional secondary DNS nodes synced through NATS
@@ -454,7 +455,7 @@ For SSL mode, only point clients to the SSL IP after the CA certificate was inst
 
 LanCache NG only caches traffic for clients that resolve CDN hostnames through
 its DNS servers. DHCP is the most reliable way to hand those DNS servers to
-clients. `setup.sh` lets you pick one of three DHCP modes (stored as
+clients. `setup.sh` lets you pick one of four DHCP modes (stored as
 `DHCP_MODE` in `.env`):
 
 - `disabled` — LanCache NG does not manage or proxy DHCP. You point clients at
@@ -472,10 +473,17 @@ clients. `setup.sh` lets you pick one of three DHCP modes (stored as
   enabled and cannot be disabled. It does not own leases and is limited to
   proxy/PXE clients; it does not reliably replace the DNS option handed out by
   a normal router DHCP server.
+- `dnsmasq-relay` — LanCache NG runs dnsmasq as a real DHCP relay, forwarding
+  each client's DHCP request to an upstream DHCP server on **another network
+  segment** and relaying the reply back. Use this when clients and their DHCP
+  server are on different subnets/VLANs and the client broadcasts can't reach
+  the server directly. It injects nothing of its own — the upstream server owns
+  the whole lease.
 
-The three modes are mutually exclusive — Kea and dnsmasq both bind DHCP port
+The four modes are mutually exclusive — Kea and dnsmasq both bind DHCP port
 `67/udp`, so setup activates exactly one, and switching modes in the Admin UI
-stops the other service.
+stops the other service. The two dnsmasq modes (`dnsmasq-proxy` and
+`dnsmasq-relay`) share one container and are also mutually exclusive.
 
 Important: do not run two normal DHCP servers in the same network unless you
 planned it carefully. If your router already provides DHCP, either keep using
@@ -484,6 +492,21 @@ the router (and set DNS another way) or switch DHCP fully to LanCache NG.
 See [docs/dhcp-modes.md](docs/dhcp-modes.md) for when to use each mode, what is
 not available in `dnsmasq-proxy` mode, how to set the upstream DHCP IP, and how
 to verify clients actually receive the LanCache NG DNS servers.
+
+## Optional NTP
+
+LanCache-NG-NTP is a small, self-contained NTP server (chrony) you can enable
+from the Admin UI's NTP page. It disciplines its own clock against a curated
+set of public NTP servers (never operating as a standalone/undisciplined time
+source) and serves that time to LAN clients on `123/udp`. The upstream server
+list is editable from the same page.
+
+A separate "auto-set this as the DHCP NTP server" toggle, off by default, only
+takes effect when both LanCache-NG-NTP and the Kea DHCP server are enabled: it
+pushes this container's LAN address into Kea's `ntp-servers` DHCP option for
+every subnet, so clients no longer need a manually-typed third-party NTP
+server address. Turning the container on does not enable this by itself —
+the DHCP auto-populate toggle is always a separate, explicit choice.
 
 ## Admin UI
 
@@ -502,6 +525,7 @@ The Admin UI can be used for:
 - domain management
 - LAN DNS records
 - DHCP leases
+- NTP settings
 - settings
 - secondary DNS management
 
@@ -762,6 +786,7 @@ NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
 NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
 NATS_CALLOUT_PASSWORD=<generate-a-secret>
+NATS_SYS_PASSWORD=<generate-a-secret>
 ```
 
 `SECONDARY_REGISTRATION_TOKEN` is different from the values above: it is
@@ -873,6 +898,7 @@ If SSL mode is enabled, the container requires a second usable LAN IPs.
 | `8080` | TCP | Admin UI |
 | `67` | UDP | optional DHCP server |
 | `8000` | TCP | optional Kea control agent |
+| `123` | UDP | optional LanCache-NG-NTP server |
 
 Keep these ports inside your LAN.  
 Do not expose them directly to the internet.
@@ -893,6 +919,7 @@ services/ui/             Admin UI
 services/watchdog/       Watchdog service
 services/dhcp/           Kea DHCP service
 services/dhcp-proxy/     DHCP proxy service
+services/ntp/            LanCache-NG-NTP (chrony) service
 services/nats/           NATS sync service
 certs/                   Generated or mounted certificates
 ```

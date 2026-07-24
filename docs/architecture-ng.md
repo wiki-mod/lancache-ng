@@ -2,15 +2,27 @@
 
 ## Services
 
+Every service below (proxy, PowerDNS, Kea DHCP, dhcp-proxy, Watchdog, Admin UI)
+already existed before this project's first version tag (`v0.1.0`, cut
+2026-07-06) was created, so a per-service "included since vX.Y.Z" column
+would not actually differentiate anything -- every real row would read the
+same "v0.1.0" regardless of which service is genuinely older or newer
+(verified against each service directory's first commit in git history, not
+assumed). The one row below that a version field genuinely would
+differentiate is Cache Warmer, which is called out explicitly instead: it is
+not shipped in any tagged version, current or planned, only a design
+document.
+
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
 | nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
-| Kea DHCP / DHCP modes | off | — | Configurable tri-state: `disabled` / `kea` / `dnsmasq-proxy`; requires PowerDNS (DDNS via nsupdate). See [docs/dhcp-modes.md](dhcp-modes.md). |
+| Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
+| LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog-ng | off (`--profile logging`) | — | Central log receiver; fluent-bit forwards logs from every wired service to it (#453) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| Cache Warmer | off | — | steamcmd, startable on demand |
+| Cache Warmer | not implemented | — | **Design-only, not shipped**: no `services/` code, no Compose service, nothing runnable exists yet under this name. See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the current proactive cache-warming design plan and its open maintainer decisions. Do not treat this row as an existing on/off feature until that design actually lands. |
 
 ## nginx
 
@@ -37,13 +49,13 @@ directio    4m;
 ```
 
 **Cache configuration (env vars set at `setup.sh` install time; see "Cache
-Retention & Cleanup" below for what the Admin UI does and does not yet expose
-for these — it currently only displays cache usage, it does not let an
-operator edit any of these values after initial setup):**
+Retention & Cleanup" below for what the Admin UI actually lets an operator
+change after initial setup — currently only `CACHE_MAX_SIZE`, via the
+dashboard's resize control, issue #1069 part 3):**
 
 | Variable | Default | Description |
 |---|---|---|
-| `CACHE_MAX_SIZE` | `50g` | Max cache size — `setup.sh` validates the requested value against real free disk space at `CACHE_DIR` (issue #1069); no Admin UI resize exists yet |
+| `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
 | `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
@@ -81,8 +93,8 @@ proxy_cache_valid   206 $CACHE_VALID_HIT;
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/dev/dns-*.env` explicitly override it to `0`, `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
-| Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) |
+| `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
+| Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
 | `ENABLE_SECONDARY` | — | Not read by any code — a documentation-only narrative convention for when to include `deploy/prod/docker-compose.nats-secondary.yml`. The actual secondary-sync mechanism is NATS-based (see `NATS_BIND_IP`/`NATS_ADVERTISE_URL` below and `docs/dns-admin-ui-scope.md` §3); PowerDNS's own native secondary/AXFR mode is not implemented at all — `SECONDARY_MASTERS`/`SECONDARY_ZONES` (previously listed here) appear nowhere in this repository. |
 | `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
 | `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
@@ -178,6 +190,7 @@ itself publishes.
 - DDNS → PowerDNS: lease = automatically an A record (in the configured DHCP domain) and a PTR record (in the matching private reverse zone) via TSIG-secured nsupdate (RFC 2136). PTR updates were **not** applied in production until issue #768's fix: Kea's D2 daemon used to send every reverse update's on-wire zone as the literal `in-addr.arpa.`, which had no matching PowerDNS zone (only narrower private-range subzones exist), so PowerDNS rejected every PTR update regardless of octet; `reverse-ddns` now lists one entry per real private reverse zone instead. See [docs/dhcp-modes.md](dhcp-modes.md) for the full detail.
 - DDNS enable/disable (issue #1076): whether Kea writes those DNS records is a separate control from whether Kea DHCP is running at all. The `DHCP_DDNS_ENABLED` env var (`config/{dev,prod}/dhcp.env`) sets the first-boot default for Kea's `dhcp-ddns.enable-updates`, and the Admin UI's DHCP page carries an independent "Enable DDNS Updates" toggle that flips `enable-updates` live via the Kea Control API. It defaults **off** for a fresh install (opt-in, matching Kea's own default), while an already-running install keeps whatever value it already has — `migrate_dhcp4_config()` merges the persisted `dhcp-ddns` block over the default, so the toggle's choice (and any existing install's on-state) survives restarts.
 - REST API (Kea Control Agent) for Admin UI
+- NTP option (`ntp-servers`, DHCPv4 option 42): each subnet's value is a plain operator-editable field (`routes/dhcp.rs`'s `add_subnet`/`update_subnet`), defaulting to the project-wide `DHCP_NTP_SERVERS` setting. When the LanCache-NG-NTP container is enabled AND its separate "auto-set as DHCP NTP server" toggle is on, `routes/dhcp.rs`'s `apply_ntp_lan_ip_to_all_subnets` instead forces every subnet's `ntp-servers` option to that container's LAN address (`STANDARD_IP`), overriding any per-subnet manual value for as long as the toggle stays on; turning it off restores the project-wide default via `restore_default_ntp_on_all_subnets`. The toggle is deliberately independent from the NTP container's own enable/disable switch — enabling the container never auto-populates DHCP by itself.
 - **Multi-threading is explicitly disabled** (`"multi-threading": {"enable-multi-threading": false}` in `services/dhcp/kea-dhcp4.conf`, re-asserted on every migration by `services/dhcp/entrypoint.sh`'s `migrate_dhcp4_config`). This is a deliberate override, not an oversight: Kea has shipped multi-threaded packet processing enabled by default since 2.4.0, but that feature targets high-query-rate ISP/carrier deployments processing thousands of leases per second across many CPU cores -- this project's DHCP server serves one LAN/lab-scale subnet, so the added concurrency surface (interacting with the `lease_cmds` hook, the DDNS-forwarding path, and the Admin UI's config-write/rollback machinery, none of which were designed against concurrent packet handlers) buys no real benefit here. No project history (commit messages, linked PRs) documents an incompatibility that was actually hit; this is a preventive simplicity choice, re-stated here so it isn't mistaken for an unexamined default. An operator with a genuinely large multi-subnet deployment can re-enable it (Kea's own default), but should first re-verify it against the hooks/DDNS paths above.
 
 ## Admin UI security headers
@@ -208,17 +221,58 @@ entry here is watched and restarted by the watchdog daemon.
 
 **Auto-restart:** X failed checks → `docker restart <container>`. Scope,
 verified against `services/watchdog/watchdog.sh`: the daemon's own
-`check_and_maybe_restart` loop only polls and auto-restarts `proxy`,
-`dns-standard`, and (when `SSL_ENABLED=1`) `dns-ssl` -- the three container
-names it takes via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+`check_and_maybe_restart` loop polls and auto-restarts `proxy`,
+`dns-standard`, `nats` (always monitored, not flag-gated), and (when
+`SSL_ENABLED=1`) `dns-ssl` -- the container names it takes via
+`CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_NATS`/
 `CONTAINER_DNS_SSL`. `watchdog.sh` writes this state to a `status.json` file
 every 30 seconds, but as of this writing the Admin UI has no route or
 template that reads that file -- there is no per-service dashboard status
 indicator today (UI delivery debt; see "Status" below).
-Kea, syslog-ng, fluent-bit, `nats`, and `ui` all have a real Docker
-healthcheck too (so `docker inspect`/`docker compose ps` and CI's own
-wait-for-healthy scripts can see it), but the watchdog daemon does not poll
-or restart any of those five itself.
+
+Kea, syslog-ng, fluent-bit, and `ui` all have a real Docker healthcheck too
+(so `docker inspect`/`docker compose ps` and CI's own wait-for-healthy
+scripts can see it), but the watchdog daemon does not poll or restart any of
+those four itself (issue #842's per-service decision, not an oversight):
+
+- **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
+  adding either to watchdog's blind restart-on-unhealthy loop would need the
+  Docker socket proxy's allowlist (`scripts/docker-socket-proxy.sh`) widened
+  first -- `ui` has no allowlist entry at all today (a deliberate boundary
+  documented in `docs/naming-conventions.md`'s "Operator-visible
+  consistency" section: nothing currently calls the Docker API to manage it
+  by name), and `dhcp` is only allowlisted for `start`/`stop`
+  (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
+  Widening that allowlist is a security-relevant architectural change in its
+  own right, not a side effect of extending a monitored-container list, so
+  #842 left both out of scope for a follow-up PR to decide deliberately
+  rather than as a byproduct of this change.
+- **`dhcp-proxy` (dnsmasq) and `netdata`**: neither has a Docker `healthcheck:`
+  block at all in any Compose file, so `get_health()` would always read
+  `.State.Health.Status` as absent ("none") for either -- adding either to
+  the monitored list today would be a silent no-op, not real coverage.
+  Defining a meaningful health probe for dnsmasq (no HTTP/control-socket API
+  the way Kea's Control Agent has) or for netdata is its own separate
+  scoping question, deferred rather than bolted on here.
+- **`syslog` (fluent-bit) and `syslog-ng`**: `syslog` has no `container_name:`
+  set in any Compose file at all (Compose auto-generates one), so it cannot
+  be addressed by a fixed name the way every other allowlisted/monitored
+  container is; its own healthcheck (`fluent-bit -V`) only proves the binary
+  is intact, not that the tailing pipeline actually works (see the compose
+  comment next to that healthcheck). Both are also gated behind the
+  optional `logging` profile, off by default.
+- **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
+  API. If it is down or hung, watchdog cannot reach any container through
+  it -- including this one -- so "restart docker-socket-proxy via
+  docker-socket-proxy" cannot work by construction. It also has no Docker
+  healthcheck defined. Docker's own `restart: always` already covers a hard
+  process crash, which is the only failure mode watchdog could conceivably
+  help with here anyway.
+
+All of the above still get Docker's own `restart: always`/`restart: "no"`
+policy (`deploy/*/docker-compose.yml`), which restarts a container that
+*exits*; watchdog's gap is specifically for a container that is still
+running but reports unhealthy (hung, wedged) without ever exiting.
 
 **Scheduled purge (cron, daily):**
 - Remove cache entries older than `CACHE_VALID_DAYS` (`config/{dev,prod}/watchdog.env`, `find -mtime`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `config/{dev,prod}/proxy.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
@@ -228,20 +282,25 @@ or restart any of those five itself.
 **Disk monitoring:**
 - `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
   color and writes it into `status.json` every 30 seconds, monitoring actual
-  disk usage, not just nginx `max_size` -- but, same gap as "Status" above,
-  nothing in the Admin UI reads or renders that file, so this warning/alarm
-  is not currently operator-visible in the UI (see #849 observability
-  finding #3). The dashboard's own cache-usage bar (`cache_pct` in
-  `services/ui/src/routes/dashboard.rs`) is a separate, independently
-  computed value (used cache bytes vs. `CACHE_MAX_GB`), not this disk-usage
-  color.
+  disk usage, not just nginx `max_size`. Since issue #870, the Admin UI's
+  dashboard reads this file (`services/ui/src/watchdog_status.rs`) and
+  renders the color in the "Service health" card's "Cache disk" indicator,
+  polling `GET /api/watchdog-status` every 10 seconds to stay live -- this
+  closes #849 observability finding #3. The dashboard's own cache-usage bar
+  (`cache_pct` in `services/ui/src/routes/dashboard.rs`) remains a separate,
+  independently computed value (used cache bytes vs. `CACHE_MAX_GB`), not
+  this disk-usage color.
 
 **Status:** `watchdog.sh` computes per-service health and disk-usage color
-(green/yellow/red) into `status.json` every 30 seconds, but nothing in the
-Admin UI (`services/ui/src/routes/dashboard.rs`, `templates/dashboard.html`)
-reads or renders that file as of this writing -- there is no per-service
-"traffic light" indicator in the UI today. Treat this as unfinished Admin UI
-delivery, not a shipped feature (see "Feature Completeness" in `AGENTS.md`).
+(green/yellow/red) into `status.json` every 30 seconds. Since issue #870,
+the Admin UI (`services/ui/src/routes/dashboard.rs`,
+`services/ui/src/watchdog_status.rs`, `templates/dashboard.html`) reads and
+renders that file as a per-service "traffic light" indicator in the
+dashboard's "Service health" card, sharing `status.json` via the
+`watchdog-status` named volume (mounted read-only into the `ui` container --
+see `deploy/*/docker-compose.yml`'s `ui:` service). A missing or stale
+`status.json` (watchdog not running, or crashed) renders as an explicit
+"unavailable"/"stale" state rather than a silently frozen last-known color.
 
 ## syslog-ng
 
@@ -276,6 +335,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | nats | Via fluent-bit → syslog-ng | Like dnsmasq, nats-server logs to exactly one destination — no dual-output mode exists — so `log_file: /var/log/lancache-nats/nats.log` (set both in the compose-generated boot config and, authoritatively, by the Admin UI's `update_nats_conf`) means `docker logs` goes quiet on this container while the `logging` profile is active; same accepted trade-off as dhcp-proxy |
 | netdata | Via fluent-bit → syslog-ng | The pinned netdata image ships its default `/var/log/netdata/*.log` paths as symlinks to `/dev/stdout`/`/dev/stderr` (nothing for fluent-bit to tail), so — same "no local repo checkout to bind-mount a config file from" constraint as `syslog`/`syslog-ng` below — an inline `entrypoint` override writes a `netdata.conf` that redirects the `[logs]` `collector`/`daemon`/`health` sources to real files at `/var/log/netdata/*.file.log`, then `exec`s the image's own `/usr/sbin/run.sh`; that path is mounted onto the `netdata-logs` volume, which fluent-bit tails read-only. `access`/`debug` stay on their stdout defaults (high-rate/empty). netdata v2 has no separate `error` log key — error-level events land in `daemon`/`collector` |
 | dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
+| ntp | Not yet wired (local container stdout + `/var/log/chrony` file only) | chronyd's own `log` directive (see `services/ntp/chrony.conf`) writes `tracking`/`measurements`/`statistics` to `/var/log/chrony` alongside its normal stdout, but the `ntp-logs` volume is not yet tailed by fluent-bit into the central pipeline — a known, deliberately deferred follow-up, same class as the two "Not implemented yet" items above |
 | fluent-bit (`syslog`) | Local container stdout only | No self-log forwarding to syslog-ng yet (no open tracking issue as of this writing — see the "Not implemented yet" note above); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build) |
 | syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
 | docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
@@ -298,42 +358,91 @@ Epic / GOG: not supported.
 
 ## Cache Retention & Cleanup
 
-**Two mechanisms implemented today:**
+**Two automatic mechanisms, plus one Admin UI operator control:**
 
 | Mechanism | Trigger | Basis |
 |---|---|---|
 | nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
 | Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` (`services/watchdog/watchdog.sh`'s `maybe_purge()`) |
+| Admin UI cache resize | operator on-demand from the dashboard | requested whole-GB `CACHE_MAX_SIZE`, re-validated against real free disk space (issue #1069 part 3) |
 
-`setup.sh`'s initial "Cache size in GiB" prompt validates the requested size
-against real free disk space at `CACHE_DIR`, with a safety buffer that scales
-with the requested size (issue #1069). `CACHE_INACTIVE` is likewise a real
-setup-time prompt now, not just a silent default.
+`setup.sh`'s initial "Cache size in GiB" prompt also validates the requested
+size against real free disk space at `CACHE_DIR`, with a safety buffer that
+scales with the requested size (issue #1069); `CACHE_INACTIVE` is likewise a
+real setup-time prompt, not just a silent default. (This setup-time
+validation shipped on `master`/v0.2.0 via issue #1069's PR #1070; it had not
+yet been synced into `current_dev`'s `setup.sh` before this branch merged
+`master` back in — a branch-hygiene gap, not a design decision, now closed by
+that merge. The Admin UI resize control described below is independent of
+that history either way: it runs its own real disk-space check inside the
+Admin UI container regardless of whether `setup.sh`'s own prompt-time check
+has landed.)
 
-**Not yet implemented — planned Admin UI cache-management surface (issue
-#1069), tracked separately from the setup-time work above:** the Admin UI
-dashboard (`services/ui/src/routes/dashboard.rs`) only reads and displays
-cache usage (used GB, max GB, percentage); it has no route or template that
-writes `CACHE_MAX_SIZE`, re-validates disk space at resize time, or triggers
-any purge. None of the following exists in code yet:
+**Admin UI cache resize (`services/ui/src/routes/cache.rs`, issue #1069 part
+3):** the dashboard shows current usage, current `CACHE_MAX_SIZE`, and lets an
+operator submit a new whole-GB size. The request is re-validated against real
+free disk space at `CACHE_DIR` with the same buffer-scaled safety check as
+`setup.sh`'s prompt (reject unless
+`available_free_space_at(CACHE_DIR) - buffer(cache_gb) >= cache_gb`; on
+rejection, the largest currently-passing value is suggested). A validated
+request does not take effect synchronously: `CACHE_MAX_SIZE` reaches the
+proxy container via the real deployment `.env`
+(`deploy/quickstart/docker-compose.yml`'s
+`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`), which this container has
+no filesystem access to, and the Admin UI's Docker access deliberately has no
+exec capability to send nginx a reload signal even if it did (see
+`services/ui/src/docker_client.rs`'s header comment). The request is instead
+persisted to the `ui-data`-backed settings file, and `setup.sh`'s
+`cmd_converge_reconcile` (run on the host by `lancache-converge.service`,
+currently every ~5 minutes) folds it into the real `.env` and lets the
+existing `docker compose up -d --remove-orphans` convergence step recreate the
+proxy container — the same host-bridged model issue #819's release-channel
+control already established. This is a full container recreate, not a live
+reload: empirically, nginx itself DOES accept a changed `max_size` for an
+existing cache zone via a plain `nginx -s reload` (verified against nginx's
+own source — `ngx_http_file_cache_init` in `src/http/ngx_http_file_cache.c`
+reuses the shared-memory zone across a reload while recalculating `max_size`
+from the new config, and `ngx_master_process_cycle` in
+`src/os/unix/ngx_process_cycle.c` respawns fresh cache manager/loader
+processes with that new config on `SIGHUP`); it is this project's own
+`services/proxy/entrypoint.sh` (renders `nginx.conf` from its template once,
+before `exec nginx`, with no signal handler to re-render and reload) that
+makes a full recreate the only mechanism available today, not a limitation of
+nginx itself. Scope boundary: this convergence path writes the
+`setup.sh`-managed runtime `.env` unconditionally (it does not check which
+compose style is in use), which only `deploy/quickstart/docker-compose.yml`
+(what `setup.sh` actually installs at `/opt/lancache-ng`) reads
+`CACHE_MAX_SIZE` from directly — a manual `deploy/prod` checkout's proxy
+service instead reads `config/prod/proxy.env` via `env_file:`, a file this
+convergence tick never touches. This makes an Admin UI resize on a
+`deploy/prod` install worse than an inert no-op: `.env`'s `CACHE_MAX_GB` still
+gets updated, so the dashboard's own "pending" banner clears and its usage bar
+starts showing the new target size once `docker compose up -d` recreates the
+`ui` container — while the real `proxy` container keeps enforcing the
+untouched old `CACHE_MAX_SIZE` from `config/prod/proxy.env`. The dashboard
+would misleadingly display a resize that never actually reached nginx on that
+deployment style. Not fixed as part of this capability (would require also
+writing `config/prod/proxy.env` from the same convergence tick, a separate,
+`deploy/prod`-specific change).
 
-| Action | Granularity |
-|---|---|
-| Live resize of `CACHE_MAX_SIZE` (re-checking disk space at resize time, not just at initial setup) | — |
-| Clear entire cache | Everything |
-| Purge by age | Older than X days — preview "~X GB freed" before confirmation |
-| Purge by access | Not accessed for X days |
-| Delete single title | All chunks of a warmed app ID |
-| Pinning | Protect app ID from LRU + automatic purge |
+**Not yet implemented:** a manual "clear cache now" / purge-by-age / purge-
+by-access / pin-app-ID surface. `services/watchdog/watchdog.sh`'s
+`maybe_purge()` is the only automatic purge path beyond nginx's own
+`inactive` eviction; there is no route or template anywhere in
+`services/ui/src/routes` that clears, previews, or selectively deletes cache
+entries. See issue #1069's own feasibility notes for why an out-of-cycle
+cache-manager sweep needs a bespoke script (nginx has no external signal for
+one) rather than being a given.
 
 ## Monitoring (Admin UI)
 
 - Netdata integrated (proxy via `/api/netdata`)
 - Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
 - Dashboard: cache fill level, hit/miss rate, active connections
-- Watchdog per-service traffic light bar: **not yet implemented** -- `watchdog.sh`
-  computes the underlying `status.json` state, but the Admin UI does not read
-  or render it (see the "Status" note under Watchdog above)
+- Watchdog per-service traffic light bar: one indicator per service
+  (green/yellow/red) plus a cache-disk usage indicator, persistently visible
+  in the dashboard's "Service health" card, live-polled every 10 seconds
+  (issue #870; see the "Status" note under Watchdog above)
 
 ## Admin UI
 

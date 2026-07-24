@@ -50,6 +50,49 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
+    # Issue #1203: skip the ENTIRE workflow run (no job is ever scheduled, so
+    # none of them queue for a lancache-light runner slot at all) when every
+    # changed file is documentation. This is a TRIGGER-level filter, distinct
+    # from and additional to detect-changes'/ci_scope_policy's existing
+    # job-level `if:` scoping below -- that scoping can only skip work AFTER
+    # a job already started competing for a runner slot; it cannot stop the
+    # job from being scheduled and queued in the first place. Confirmed for
+    # real (#1203): detect-changes/validate-compose/file-headers themselves
+    # sat queued for 17+ minutes with no runner ever assigned
+    # (`runner_name: ""`) behind unrelated PRs' work, for a PR whose entire
+    # diff was one .md file -- the job-level skip inside detect-changes can
+    # never fire before detect-changes itself gets a runner.
+    #
+    # Pattern mirrors scripts/classify-image-impact.sh's own touches_docs()/
+    # docs_only definition (`*.md | docs/*`) for consistency with the
+    # job-level scoping this trigger-level filter sits alongside.
+    # `!CHANGELOG.md` keeps that one file un-ignored: scripts/
+    # check-changelog-direct-edit.sh (run inside this same workflow's
+    # `shellcheck` job) is a warn-only guard that specifically fires when a
+    # PR edits CHANGELOG.md directly outside the automated release flow --
+    # a blanket `**/*.md` exclude would silently skip the whole workflow (and
+    # so that warning) for a CHANGELOG-only PR.
+    #
+    # RISK, deliberately not resolved by this comment alone -- see the PR
+    # that introduced this block for the full writeup: `master` and `v0.2.0`
+    # both require several of this workflow's jobs via branch protection
+    # (`shellcheck`, `validate-compose`, `CI scope policy`,
+    # `file purpose headers`, `PR template validation`,
+    # `PR tracking metadata (labels/milestone/project)`, `coverage (Rust)`,
+    # `validate full-setup image`). `paths-ignore` cannot be scoped per
+    # target branch within one trigger block -- if this workflow run never
+    # starts at all for a doc-only PR opened DIRECTLY against master or
+    # v0.2.0, none of those required checks can ever report, and GitHub
+    # blocks that PR from merging forever ("Expected -- Waiting for status
+    # to be reported"), not just slowly. `current_dev` -- where #1186/#1189/
+    # #1196 and effectively all day-to-day PRs land -- has NO branch
+    # protection at all (confirmed via the GitHub API), so this is safe
+    # where the problem actually occurs; it is a real, accepted risk only
+    # for the rare direct-to-master/v0.2.0 release/hotfix path.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "!CHANGELOG.md"
     # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
     # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
     # the github.event.pull_request webhook snapshot for this run (see that job's
@@ -149,18 +192,42 @@ defaults:
     shell: bash
 
 jobs:
-  # PR-only change classification: skips per-crate/per-service heavy work only
-  # when a PR clearly cannot affect it. Service-image decisions are based on
-  # each Dockerfile's COPY graph, while docs/governance/setup/deploy/release
-  # classes stay visible for policy checks. Build-affecting workflow or
-  # composite-action changes are treated as touching runtime services, since the
-  # CI logic itself changed. Dedicated release helper workflows remain release
-  # contract changes, and build-tools rebuilds stay tied to build-tools inputs.
-  # Master/tag pushes are never scoped: they always run the full pipeline.
+  # Change classification for PR path-scoping and (as of #1095) push-event
+  # scoping of the four redundant Rust jobs. On a pull_request it diffs the PR's
+  # merge-base..head; on a push it diffs github.event.before..github.sha (the
+  # commits that push actually introduced), degrading to --all-changed when that
+  # base is absent/unreachable (all-zeros first push, force-push, GC'd base) so
+  # an undeterminable diff fails safe to the full pipeline. Service-image
+  # decisions are based on each Dockerfile's COPY graph, while docs/governance/
+  # setup/deploy/release classes stay visible for policy checks. Build-affecting
+  # workflow or composite-action changes are treated as touching runtime
+  # services, since the CI logic itself changed. Dedicated release helper
+  # workflows remain release contract changes, and build-tools rebuilds stay
+  # tied to build-tools inputs.
+  #
+  # SCOPE (#1095): the push-event outputs currently gate ONLY dns_test/ui_test/
+  # dns_cargo_audit/ui_cargo_audit -- work that already ran and passed on the PR
+  # that produced the push (AG-WF-004 forbids direct master pushes), so skipping
+  # it on a push that did not touch the relevant crate reuses that known-good
+  # result. build/build-arm64/container-scan still run the FULL per-service set
+  # on push: their should-build/should-scan gates keep their push branch
+  # unchanged here, because per-service build/scan reuse on push additionally
+  # needs a safe way to re-tag a prior commit's already-built sha-* image, which
+  # depends on cross-run ordering this job cannot provide by itself. That is
+  # deferred to Part 1 of #1095. workflow_dispatch is left unscoped (detect-
+  # changes does not run for it); the four jobs' own if: fail safe to running
+  # whenever this job did not produce a successful classification.
   detect-changes:
     name: detect changed paths
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real recent runs (30+ samples across pull_request/push events, 2026-07):
+    # this job's own git-diff/classify-image-impact.sh work completes in
+    # 6-17s. 15 minutes is a generous, round floor (not derived by scaling
+    # that tiny number -- see the shared job-timeout rollout PR for why every
+    # cheap self-hosted script job in this file uses the same 15-minute
+    # floor) that still turns any future hang into a fast, bounded failure.
+    timeout-minutes: 15
     outputs:
       dns_rust: ${{ steps.filter.outputs.dns_rust }}
       dns_image: ${{ steps.filter.outputs.dns_image }}
@@ -168,6 +235,7 @@ jobs:
       watchdog: ${{ steps.filter.outputs.watchdog }}
       dhcp: ${{ steps.filter.outputs.dhcp }}
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
+      ntp: ${{ steps.filter.outputs.ntp }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       workflow: ${{ steps.filter.outputs.workflow }}
@@ -187,10 +255,10 @@ jobs:
         id: filter
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          : "${BASE_SHA:?pull request base SHA is required}"
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
           # The per-path classification -- and the merge-base #536 fix that
@@ -201,13 +269,36 @@ jobs:
           # "Changed files:" listing to stderr and the key=value booleans (plus
           # the additive IMAGE_IMPACT verdict, unused by this job) to stdout.
           # checkout above runs with fetch-depth: 0, which merge-base needs.
-          bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            : "${BASE_SHA:?pull request base SHA is required}"
+            bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            # push (branch or tag): diff exactly the commits this push
+            # introduced (github.event.before..github.sha). Fail safe to
+            # --all-changed when that base is unusable -- an all-zeros first
+            # push, or a base commit not present even under fetch-depth: 0 (a
+            # force-push that discarded the old tip, or a GC'd/unreachable ref)
+            # -- so an undeterminable diff runs the full set instead of silently
+            # skipping a real change. Mirrors build-tools.yml's own before-diff
+            # fallback (determine-publish-scope).
+            if [ -z "$BEFORE_SHA" ] \
+              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); classifying all paths as changed."
+              bash scripts/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+            else
+              bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
   file-headers:
     # Cheap repository hygiene gate. It runs before expensive Rust/image work so
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its
+    # comment) -- generous relative to real observed duration, not tight.
+    timeout-minutes: 15
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): a superseded commit's file-headers run gets
     # reclaimed instead of running to completion. Safe to cancel mid-flight:
@@ -234,6 +325,9 @@ jobs:
     name: PR template validation
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-12s (one live `gh pr view` call + a bash script). Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -280,6 +374,9 @@ jobs:
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: 5-7s on ubuntu-latest. Same 15-minute floor as
+    # detect-changes' self-hosted equivalent above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -324,6 +421,9 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-12s (gh pr view calls + one docker run of the build-tools
+    # image). Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -396,6 +496,11 @@ jobs:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: up to ~1 min (build-tools image resolution + gh pr view
+    # calls on ubuntu-latest, slower than the self-hosted twin since it
+    # cannot reuse validate-compose's already-selected image). Same
+    # 15-minute floor as detect-changes above -- still ~15x the observed max.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -487,6 +592,8 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-10s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -542,6 +649,9 @@ jobs:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: up to ~50s (build-tools image resolution on ubuntu-latest +
+    # gh pr view). Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -596,6 +706,8 @@ jobs:
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
@@ -616,6 +728,8 @@ jobs:
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-11s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs['line-endings'].result == 'success'`
@@ -650,6 +764,8 @@ jobs:
   line-endings-hosted:
     name: line endings (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
@@ -686,6 +802,13 @@ jobs:
     # to be installed on the runner host.
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real full-job runs: 30-85s. Must exceed the "Run ShellCheck and
+    # ActionLint" step's own 15-minute timeout below (a job-level bound
+    # tighter than a step it contains would fail the job before that step's
+    # own deliberate 15-minute allowance ever gets to run out) -- 25 minutes
+    # covers that step's 15-minute budget plus this job's other steps
+    # (governance guardrails, changelog-edit guard) with real headroom.
+    timeout-minutes: 25
     # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs.shellcheck.result == 'success'`
@@ -717,7 +840,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Real incident (2026-07-24): actionlint's default invocation embeds its
+      # own shellcheck integration, which was found to hang indefinitely (not
+      # merely slow) -- reproduced 3/3 times on a real self-hosted runner.
+      # With no timeout, GitHub's own 360-minute job default was the only
+      # backstop, and this job's own workflow-level concurrency group
+      # (build-push.yml's top-level `{workflow}-{ref}` group, cancel-in-progress
+      # false for pull_request) meant the hang also blocked every subsequent
+      # push to the same PR from ever starting a new Build & Push run at all --
+      # confirmed live: a stuck run sat at this exact step for 5+ hours,
+      # occupying a runner slot and wedging the PR's own concurrency group
+      # the whole time, even though other runners were idle. A real run of
+      # this step normally completes in ~1-2 minutes; 15 minutes is a
+      # generous bound that still turns an unbounded hang into a fast,
+      # automatic failure instead of a silent multi-hour stall.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
@@ -927,6 +1065,10 @@ jobs:
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real full-job runs: 58-84s. 25 minutes, same as the self-hosted
+    # shellcheck job above, for the same reason: must exceed this job's own
+    # "Run ShellCheck and ActionLint" step timeout added below.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
@@ -946,7 +1088,16 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      # Parity fix: this step runs the exact same actionlint invocation as
+      # the self-hosted shellcheck job's own "Run ShellCheck and ActionLint"
+      # step (see that job's comment for the real 2026-07-24 incident -- a
+      # 5+ hour indefinite hang, reproduced 3/3 times, from actionlint's
+      # embedded shellcheck integration). That fix only covered the
+      # self-hosted job; this hosted fallback carried the identical
+      # unbounded-hang risk and had no timeout at all until now. Same
+      # 15-minute bound, for the same reason.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
@@ -1016,6 +1167,14 @@ jobs:
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 20-72s (the docker-run/grep checks in this job are cheap).
+    # 30 minutes rather than the 15-minute floor used by the other light
+    # script jobs in this file: select-build-tools-image.sh's resolution
+    # step can fall back to a local Docker build of the (large) build-tools
+    # image if the published one is unavailable or fails its smoke test --
+    # real work this job's own comment below explicitly calls out -- and
+    # that fallback build is not represented in the fast-path samples above.
+    timeout-minutes: 30
     # Job-level concurrency (#891 follow-up): cancel-in-progress is
     # pull_request-only -- see `build`'s group comment for the full #979
     # rationale. validate-compose is the shared `needs:` root that exports the
@@ -1231,6 +1390,8 @@ jobs:
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
           NATS_CALLOUT_PASSWORD: ci-nats-callout-password
           NATS_CALLOUT_USER: ci-nats-callout
+          NATS_SYS_PASSWORD: ci-nats-sys-password
+          NATS_SYS_USER: ci-nats-sys
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -1271,6 +1432,8 @@ jobs:
             --env NATS_DNS_WRITER_USER \
             --env NATS_CALLOUT_PASSWORD \
             --env NATS_CALLOUT_USER \
+            --env NATS_SYS_PASSWORD \
+            --env NATS_SYS_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \
@@ -1306,7 +1469,6 @@ jobs:
           }
 
           validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
-          validate_compose -f deploy/dev/docker-compose.yml
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
@@ -1317,7 +1479,6 @@ jobs:
           # explicit profile activation so their service definitions are
           # actually parsed and validated, not silently excluded.
           for compose_file in \
-            deploy/dev/docker-compose.yml \
             deploy/prod/docker-compose.yml \
             deploy/quickstart/docker-compose.yml; do
             validate_compose -f "$compose_file" --profile dhcp-kea
@@ -1332,7 +1493,6 @@ jobs:
             local path
 
             for path in \
-              deploy/dev/docker-compose.yml \
               deploy/prod/docker-compose.yml \
               deploy/quickstart/docker-compose.yml
             do
@@ -1378,11 +1538,11 @@ jobs:
           grep -Fq 'write_env_file "${secondary_dir}/.env"' setup.sh \
             || { echo "::error::Secondary setup must use the safe env writer for generated .env files."; exit 1; }
 
-          if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+          if grep -F 'EXEC: "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
             exit 1
           fi
-          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
@@ -1414,7 +1574,7 @@ jobs:
               exit 1
             }
 
-          for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+          for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
             grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
@@ -1513,19 +1673,18 @@ jobs:
                   exit 1
                 }
                 if (saw_environment || saw_interpolated_dhcp_key) {
-                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for dev/prod.\n", compose_file
+                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for prod.\n", compose_file
                   exit 1
                 }
               }
             ' "$compose_file"
           }
 
-          # Dev/prod dhcp-proxy values are written by setup into env files.
+          # Prod dhcp-proxy values are written by setup into env files.
           # Compose interpolation does not read env_file values, so explicit
           # environment entries here would silently erase the configured proxy
           # DHCP settings. Quickstart is intentionally separate because setup
           # writes its single .env file directly.
-          validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
           # Issue #450: dnsmasq relay/proxy optional-option surface. Guards
@@ -1540,7 +1699,7 @@ jobs:
             DHCP_PROXY_BOOT_SERVER
             DHCP_PROXY_CUSTOM_OPTIONS
           )
-          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
             for key in "${dhcp_proxy_optional_keys[@]}"; do
               grep -Eq "^${key}=" "$env_file" \
                 || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the dnsmasq relay/proxy optional-option surface added by issue #450."; exit 1; }
@@ -1563,7 +1722,7 @@ jobs:
             DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
             DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
           )
-          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
             for key in "${dhcp_proxy_pxe_keys[@]}"; do
               grep -Eq "^${key}=" "$env_file" \
                 || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the PXE boot-pointer opt-in surface added by issue #705."; exit 1; }
@@ -1598,6 +1757,8 @@ jobs:
             NATS_DNS_WRITER_USER
             NATS_CALLOUT_PASSWORD
             NATS_CALLOUT_USER
+            NATS_SYS_PASSWORD
+            NATS_SYS_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             PDNS_API_KEY
@@ -1643,6 +1804,8 @@ jobs:
             NATS_DNS_WRITER_USER
             NATS_CALLOUT_PASSWORD
             NATS_CALLOUT_USER
+            NATS_SYS_PASSWORD
+            NATS_SYS_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             NGINX_UPSTREAM_RESOLVER
@@ -1745,7 +1908,7 @@ jobs:
             /^cmd_update\(\) \{/ { in_update=1; pause_seen=0; next }
             /^# .*debug subcommand/ { in_update=0 }
             in_update && /pause_lancache_convergence_for_update/ { pause_seen=1 }
-            in_update && !pause_seen && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ { print FILENAME ":" FNR ":" $0; found=1 }
+            in_update && !pause_seen && !/^[[:space:]]*#/ && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ { print FILENAME ":" FNR ":" $0; found=1 }
             END { exit found ? 0 : 1 }
           ' setup.sh; then
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
@@ -2262,8 +2425,8 @@ jobs:
             || { echo "::error::setup.sh must keep latest as the normal stable default; nightly must be explicit."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=latest' README.md >/dev/null \
             || { echo "::error::README must document latest as the normal install default."; exit 1; }
-          grep -F 'nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`' docs/release-versioning.md >/dev/null \
-            || { echo "::error::Release docs must keep nightly opt-in, not default."; exit 1; }
+          grep -F 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' docs/release-versioning.md >/dev/null \
+            || { echo "::error::Release docs must document nightly as the pre-1.0 default (see #1068 item 1 / #1120)."; exit 1; }
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
@@ -2357,6 +2520,24 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-workflow-service-lists.sh
 
+      - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
+        # OSPS-VM-04.02: the committed OpenVEX document (vex.openvex.json) must
+        # be regenerated from .trivyignore.yaml whenever the accepted-
+        # vulnerability list changes. This guard fails closed if it drifts, so
+        # a PR editing .trivyignore.yaml without regenerating the VEX document
+        # cannot ship a stale supply-chain artifact. Runs in the build-tools
+        # container because scripts/check-vex-drift.sh needs jq, same as the
+        # naming/service-list guards above.
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-vex-drift.sh
+
       - name: Check config-writer idempotence test coverage (#640)
         run: |
           set -euo pipefail
@@ -2418,6 +2599,8 @@ jobs:
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
           NATS_CALLOUT_PASSWORD: ci-nats-callout-password
           NATS_CALLOUT_USER: ci-nats-callout
+          NATS_SYS_PASSWORD: ci-nats-sys-password
+          NATS_SYS_USER: ci-nats-sys
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -2458,6 +2641,8 @@ jobs:
             --env NATS_DNS_WRITER_USER \
             --env NATS_CALLOUT_PASSWORD \
             --env NATS_CALLOUT_USER \
+            --env NATS_SYS_PASSWORD \
+            --env NATS_SYS_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \
@@ -2504,6 +2689,8 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-9s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     outputs:
       subnet: ${{ steps.derive.outputs.subnet }}
       gateway: ${{ steps.derive.outputs.gateway }}
@@ -2558,6 +2745,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 30-71s (pulls the just-published multi-platform image set,
+    # brings the full stack up via docker compose, smoke-tests it, tears it
+    # down). 30 minutes, not the 15-minute lint-job floor, because this job
+    # depends on a real docker-compose stack startup (image pulls, container
+    # health checks) whose cold-cache worst case is not represented by these
+    # warm-cache samples.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -2888,222 +3082,14 @@ jobs:
       # stabilize" step below: #450/#485, dnsmasq trying to bind an
       # already-used port).
       - name: Reserve a validation subnet and start the stack (locked, retries on collision)
-        id: reserve-and-start
-        working-directory: deploy/full-setup
-        env:
-          LANCACHE_IMAGE_REGISTRY: ghcr.io
-          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-          LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
-          : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
-
-          if ! command -v flock >/dev/null 2>&1; then
-            echo "::error::flock is required for safe validation-subnet locking."
-            exit 1
-          fi
-
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-
-          lock_root="/tmp/lancache-validation-locks"
-          max_attempts=10
-
-          # #832 inventory finding: this step used to carry its OWN separate,
-          # inline copy of the conflict-check python block (a bare
-          # `name.startswith(own_prefix)` match) instead of calling
-          # validation_subnet_conflicts (sourced above from
-          # reserve-validation-subnet.sh) like every other caller already
-          # does -- despite that shared function's own docstring claiming
-          # issue #820 had consolidated every copy. A bare startswith is
-          # exactly the footgun validation_subnet_conflicts's own_prefix
-          # argument guards against (e.g. project "lancache-ng-validation-22"
-          # would wrongly swallow "lancache-ng-validation-220..." as "ours").
-          # Removed in favor of calling the shared, already-fixed function
-          # directly below, closing this divergence for good instead of
-          # patching the duplicate in place.
-
-          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose pull --quiet
-
-          reserved_slot=""
-          holder_pid=""
-          next_attempt=1
-
-          while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
-              echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
-              exit 1
-            }
-            attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-            slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
-            candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
-
-            # Rederive the COMPLETE VALIDATION_* set from THIS attempt's own
-            # candidate slot via the single shared validation_subnet_export_env
-            # (reserve-validation-subnet.sh) -- the SAME function every other
-            # reservation site in this project now calls (see
-            # full-setup-validate.yml/full-setup-deep-validate.yml's own
-            # "Reserve a validation subnet and start the stack" steps), instead
-            # of this step's own former hand-written copy. Matters both for
-            # validation_subnet_conflicts's own_prefix check right below and
-            # for avoiding a compose-project/UI-port collision between two
-            # concurrent runs that started from the same initial slot but
-            # diverged on a retry.
-            validation_subnet_export_env "$slot"
-
-            # Persist THIS ATTEMPT's identifiers to $GITHUB_ENV right away,
-            # every time through the loop -- not only once after the whole
-            # retry loop succeeds below. Issue #932 (CI run 29569378100, job
-            # 87852874801) confirmed a real production case where `docker
-            # compose up -d` a few lines down failed for a reason classified
-            # as non-retryable (Docker's own "has active endpoints" race
-            # while recreating a leftover network from a stale prior run that
-            # reused this same slot number -- see validation_network_teardown
-            # in reserve-validation-subnet.sh) and the step exited via `exit
-            # 1` below. The write that used to sit only after this whole loop
-            # never ran on that path, so COMPOSE_PROJECT_NAME was still unset
-            # in $GITHUB_ENV when the "Tear down full-setup validation stack"
-            # step ran (it DOES have `if: always()` and DID run) -- its own
-            # fail-closed `[[ -n "${COMPOSE_PROJECT_NAME:-}" ]]` guard, meant
-            # only for the case where no slot was ever derived at all, saw it
-            # empty and silently skipped `validation_project_networks_teardown`,
-            # leaving that attempt's network behind to poison a later run
-            # that reuses the same slot. $GITHUB_ENV takes the last value
-            # written for a repeated key, so writing here on every attempt
-            # keeps this a no-op correctness fix for the common, successful
-            # case (the final attempt's write is simply the last one and
-            # still lands before the "up" call) while covering every failure
-            # exit out of this step (a non-retryable `docker compose up`
-            # failure, or exhausting every retry) with the last attempted
-            # slot's real project name, subnet, and lock-holder PID instead
-            # of nothing at all.
-            {
-              echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
-              echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
-              echo "VALIDATION_LOCK_HOLDER_PID=$candidate_pid"
-              echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
-              echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
-              echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
-              echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
-              echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
-              echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
-              echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
-              echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
-              echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
-              echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
-              echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
-            } >> "$GITHUB_ENV"
-
-            conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
-            if [[ -n "$conflict" ]]; then
-              echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
-              validation_subnet_release "$candidate_pid"
-              next_attempt=$((attempt + 1))
-              continue
-            fi
-
-            echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
-            if up_output="$(docker compose up -d 2>&1)"; then
-              echo "$up_output"
-              reserved_slot="$slot"
-              holder_pid="$candidate_pid"
-              break
-            fi
-
-            echo "$up_output"
-            validation_subnet_release "$candidate_pid"
-
-            if ! validation_subnet_output_is_collision "$up_output"; then
-              echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
-              exit 1
-            fi
-
-            echo "docker compose up failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
-            next_attempt=$((attempt + 1))
-          done
-
-          if [[ -z "$reserved_slot" ]]; then
-            echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
-            exit 1
-          fi
-
-          echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
+        uses: ./.github/actions/reserve-validation-subnet-stack
+        with:
+          image-tag: ${{ steps.channel.outputs.tag }}
+          ghcr-retry-username: ${{ github.actor }}
+          ghcr-retry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the stack to stabilize and check container health
-        working-directory: deploy/full-setup
-        run: |
-          set -euo pipefail
-
-          # Services with an explicit healthcheck report a real "healthy"
-          # status; docker-socket-proxy has none, so it's only checked for
-          # "running" plus a restart-count ceiling (catches a crash loop
-          # without needing a healthcheck definition for every service).
-          services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
-          all_services="docker-socket-proxy $services_with_healthcheck"
-
-          deadline=$((SECONDS + 90))
-          while (( SECONDS < deadline )); do
-            all_ready=1
-            for service in $services_with_healthcheck; do
-              cid="$(docker compose ps -q "$service")"
-              status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-              if [[ "$status" != "healthy" ]]; then
-                all_ready=0
-              fi
-            done
-            if [[ "$all_ready" -eq 1 ]]; then
-              break
-            fi
-            sleep 5
-          done
-
-          echo "::group::Final container status"
-          docker compose ps
-          echo "::endgroup::"
-
-          failed=0
-          for service in $all_services; do
-            cid="$(docker compose ps -q "$service")"
-            if [[ -z "$cid" ]]; then
-              echo "::error::$service has no running container"
-              failed=1
-              continue
-            fi
-
-            restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
-            container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
-
-            if [[ "$container_status" != "running" ]]; then
-              echo "::error::$service is not running (state: $container_status)"
-              failed=1
-            elif (( restart_count > 1 )); then
-              echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
-              failed=1
-            fi
-
-            if [[ " $services_with_healthcheck " == *" $service "* ]]; then
-              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-              if [[ "$health" != "healthy" ]]; then
-                echo "::error::$service did not become healthy (status: $health)"
-                failed=1
-              fi
-            fi
-          done
-
-          if [[ "$failed" -eq 1 ]]; then
-            echo "::group::Logs from all services (failure diagnostics)"
-            docker compose logs --no-color
-            echo "::endgroup::"
-            exit 1
-          fi
-
-          echo "Full-setup stack is stable: all services running and healthy."
+        uses: ./.github/actions/wait-validation-stack-health
 
       # Unlike the failure-only log dump above, this always runs -- #626's
       # whole point is that a *green* run here must be verifiable as having
@@ -3186,6 +3172,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 31s-3.3min. But this job's own "cargo clippy"
+    # step already carries a 35-minute timeout (a deliberately generous
+    # bound for sccache/sccache-dist fallback to a full local compile) -- a
+    # job-level timeout must exceed every step timeout it contains, or the
+    # job would fail before that step's own allowance runs out. 45 minutes
+    # covers the clippy step's 35-minute budget plus this job's other steps.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
@@ -3244,6 +3237,10 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning as dns_rust_quality above: this job's own "cargo
+    # clippy" step below already carries a 35-minute timeout, so the
+    # job-level bound must exceed it. Real warm-cache runs: 50s-3.3min.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
@@ -3292,18 +3289,36 @@ jobs:
     # whether the regression is lint/format level or behavioral.
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095). detect-changes now runs
+    # on push too (diffing github.event.before..github.sha), so this consults its
+    # outputs uniformly instead of the old `github.event_name != 'pull_request'`
+    # always-run-on-push short-circuit: on a push that did not touch the crate
+    # (nor the workflow), the PR that produced that push already ran and passed
+    # this exact test (AG-WF-004), so skipping reuses that known-good result.
+    # `detect-changes.result != 'success'` fails safe to running whenever the
+    # classification is unavailable (workflow_dispatch, or an infra failure of
+    # detect-changes) rather than silently skipping. ci_scope_policy tolerates
+    # the resulting `skipped` on push (require_success_or_intentional_cancellation)
+    # and re-derives strict per-path required-ness on pull_request.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (needs.dns_rust_quality.result == 'success' || needs.dns_rust_quality.result == 'skipped') &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 26-56s. Same class of risk as dns_rust_quality's
+    # clippy step above (this job's own "test" step compiles the crate via
+    # the same cargo-with-sccache-fallback path, so an sccache/sccache-dist
+    # miss forces the same full local recompile) -- 45 minutes matches
+    # dns_rust_quality/ui_rust_quality's bound for that reason, not derived
+    # from the fast warm-cache samples alone.
+    timeout-minutes: 45
     # Job-level concurrency (#891 follow-up, extending #888/#892/#915's
     # proven pattern): dns_test is on the scarce self-hosted lancache-heavy
     # pool, so reclaiming a superseded commit's run matters for real
@@ -3362,18 +3377,26 @@ jobs:
     # docs/setup-only PRs from paying for unrelated Rust test work.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning (reuse of the PR-time known-good
+    # result on an unchanged push, fail-safe run when classification is
+    # unavailable, ci_scope_policy tolerance of the resulting push `skipped`).
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (needs.ui_rust_quality.result == 'success' || needs.ui_rust_quality.result == 'skipped') &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_test above (compiles via the same
+    # cargo-with-sccache-fallback path, so shares its cold-compile risk).
+    # Real warm-cache runs: 40-51s.
+    timeout-minutes: 45
     # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
     # above for the same reason): scarce lancache-heavy capacity, safe to
     # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
@@ -3438,6 +3461,14 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 1.3-6.6min. 60 minutes rather than a tighter
+    # multiple of that: cargo-tarpaulin instruments and recompiles both
+    # crates for coverage (its own build path, separate from the
+    # sccache-fallback compiles elsewhere in this file), and this job can
+    # also fall back to a branch-local build-tools image rebuild (see the
+    # step comment below) when a PR's own Dockerfile change hasn't been
+    # published yet -- neither cold path is represented by the samples above.
+    timeout-minutes: 60
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): rust_coverage is on the scarce self-hosted
     # lancache-heavy pool, same as build/container-scan, so reclaiming a
@@ -3652,6 +3683,8 @@ jobs:
     needs: rust_coverage
     if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 10-12s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # Job-level concurrency, keyed per source ref: the top-level group (see
     # top of file) is run_id-suffixed for push events and therefore never
     # collides, so it no longer serializes same-branch badge publishes the
@@ -3806,6 +3839,9 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 6-13s (bash -n + a file-permission check, no compilation).
+    # Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: test (watchdog)
@@ -3825,6 +3861,8 @@ jobs:
     # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
@@ -3840,17 +3878,24 @@ jobs:
     # filtering proves the crate and workflow contract did not change.
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 10-14s. cargo-audit checks Cargo.lock against the advisory
+    # database using a prebuilt binary (AG-KD-003) -- it does not compile
+    # the crate, so it does not share dns_test's cold-compile risk. 20
+    # minutes covers a slow advisory-database fetch with real headroom.
+    timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_test above): scarce lancache-heavy capacity, no other consumer
     # besides ci_scope_policy, whose push-branch check on this job's result
@@ -3896,17 +3941,22 @@ jobs:
     # serializing independent Rust checks.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (
-          github.event_name != 'pull_request' ||
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
+    # binary, no crate compilation). Real runs: 10-18s.
+    timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_cargo_audit above): scarce lancache-heavy capacity, no other
     # consumer besides ci_scope_policy, whose push-branch check on this
@@ -4012,6 +4062,20 @@ jobs:
     # for the pull_request path, where the validate-compose skip-cascade still
     # applies.
     #
+    # (#1095 update) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit now have a
+    # SECOND legitimate `skipped` source on push, independent of the
+    # concurrency-cancellation one above: detect-changes runs on push events too
+    # (not just pull_request), and these four jobs' own `if:` gates skip on a
+    # push that did not touch the relevant crate (nor the workflow) -- the PR
+    # that produced that push already ran and passed them (AG-WF-004), so the
+    # skip reuses that known-good result. require_success_or_intentional_cancellation()
+    # already tolerates `skipped`, so it covers this new source with no change;
+    # this note just records that on push a `skipped` here can now mean
+    # "path-scoped out by detect-changes" as well as "superseded mid-flight".
+    # watchdog_test and rust_coverage are NOT path-scoped on push (rust_coverage
+    # stays unconditional for the badge, and still runs the crates' tests under
+    # tarpaulin regardless), so this change does not touch their tolerance.
+    #
     # dns_rust_quality/ui_rust_quality are deliberately left on strict
     # require_success(): they are not in #891's enumerated candidate list
     # (PR #915 explicitly flagged them, and watchdog_test, as out of scope so
@@ -4044,6 +4108,10 @@ jobs:
       - ui_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-14s (this job only reads its upstream needs' results and
+    # runs a policy script; no compilation or Docker work of its own). Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # cancel-in-progress is pull_request-only -- see `build`'s group comment
     # for the full #979 rationale. build/build-arm64 require
     # `needs.ci_scope_policy.result == 'success'` unconditionally, so on push
@@ -4307,6 +4375,14 @@ jobs:
     # self-hosted pool would reintroduce the emulated-Rust-compile risk this
     # scan is meant to catch before build/build-arm64 push anything real.
     runs-on: ${{ fromJSON(matrix.runner) }}
+    # Real per-service runs: 24s-7min (this job's own comment above notes it
+    # "routinely dominates PR runtime" -- it builds a full service image,
+    # amd64 on self-hosted or native arm64 on a hosted runner, then Trivy
+    # scans it). 60 minutes gives real headroom for a cold Docker layer
+    # cache or a Trivy vulnerability-database refresh, neither of which
+    # shows up in the warm-cache samples above; still far under build's own
+    # 150-minute bound for the same class of work at full multi-arch scale.
+    timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     strategy:
@@ -4349,6 +4425,13 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/amd64
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
             platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
@@ -4400,6 +4483,13 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
             platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -5016,6 +5106,10 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5050,6 +5144,7 @@ jobs:
               watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5728,6 +5823,10 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5762,6 +5861,7 @@ jobs:
               watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -6034,6 +6134,11 @@ jobs:
     needs: [build, build-arm64]
     if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
+    # manifest list from two already-pushed digests -- no image rebuild).
+    # 30 minutes covers the ghcr_retry backoff windows on its GHCR calls
+    # (max ~2 minutes total) plus real headroom for registry slowness.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -6076,7 +6181,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
 
@@ -6097,6 +6202,7 @@ jobs:
             [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
             [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
@@ -6192,7 +6298,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -6299,6 +6405,15 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest }}
 
+      - name: Attest ntp merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.ntp_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/ntp
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.ntp_digest }}
+
       - name: Attest ui merged manifest provenance
         if: steps.create-trusted-manifests.outputs.ui_digest != ''
         uses: ./.github/actions/ghcr-attest-retry
@@ -6366,6 +6481,15 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
 
+      - name: Attest ntp PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.ntp_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/ntp
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.ntp_digest }}
+
       - name: Attest ui PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.ui_digest != ''
         uses: ./.github/actions/ghcr-attest-retry
@@ -6414,6 +6538,15 @@ jobs:
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 17s-3.6min for this job's own promotion work, but
+    # scripts/lib/promote-lock.sh's promote_lock_acquire_with_retry is
+    # called with (max_attempts=40, backoff_seconds=15), a legitimate
+    # non-hang wait of up to ~10 minutes for the shared cross-run lock under
+    # real contention (concurrent promotions from a merge cascade), before
+    # this job's own work even starts. 45 minutes covers that real lock-wait
+    # ceiling plus this job's own work with headroom, so normal lock
+    # contention can never be mistaken for a hang.
+    timeout-minutes: 45
     # Promote only repoints already-built, already-pushed sha-* images at
     # mutable channel tags -- it is idempotent and fast, unlike the rest of
     # this workflow (build/test/scan/build-images), which is slow and where
@@ -6552,7 +6685,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
@@ -6917,6 +7050,25 @@ jobs:
           # and -- like the `-c` form it replaces -- this is set only for
           # this one command's environment, never written to `.git/config`.
           push_url="https://github.com/${REPOSITORY}.git"
+          # actions/checkout (persist-credentials: true, the default used
+          # throughout this workflow) already wrote its own GITHUB_TOKEN
+          # `Authorization` extraheader into this job's local .git/config,
+          # scoped to the bare https://github.com/ host. That entry and the
+          # PROJECT_AUTOMATION_PAT-scoped one set below both match this
+          # push's URL, and git's http backend sends every matching
+          # extraheader as its own `Authorization` header on the same
+          # request -- GitHub's HTTP endpoint rejects a request carrying two
+          # `Authorization` headers with a 400. This is a real, confirmed
+          # regression (every real run 2026-07-19 through 2026-07-24 hit
+          # this exact failure, distinct from the two bugs #1054 already
+          # fixed; see #819's verification comment for the affected run
+          # IDs). Clearing checkout's host-scoped entry immediately before
+          # this push ensures only the PAT-scoped header is sent. Nothing
+          # later in this job needs the original GITHUB_TOKEN git
+          # credential -- the next step authenticates its own registry call
+          # explicitly via secrets.GITHUB_TOKEN, not via this ambient git
+          # config.
+          git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0="http.${push_url}.extraheader" \
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
@@ -6977,6 +7129,17 @@ jobs:
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # NO REAL RUN DATA: this job only runs on an actual `refs/tags/v*` push,
+    # and no such run of this workflow has completed in the recorded history
+    # checked for this rollout (2026-07, ~3800 total workflow runs) -- tags
+    # v0.1.0/v0.2.0/v0.3.0/v0.3.1 exist as GitHub releases, but none was
+    # created by a tag push that triggered this exact job. This value is
+    # therefore an estimate, not a measurement: 30 minutes, anchored to
+    # promote's/merge-manifests' class of work (source archive creation +
+    # GitHub Releases API calls, no compilation), not scaled from any
+    # observed duration. Flagged explicitly rather than guessed silently --
+    # revisit once a real tag-push run of this job exists to measure.
+    timeout-minutes: 30
     # Job-level concurrency, keyed per tag ref: this job's GET-then-create-or-
     # PATCH logic against the GitHub Releases API is only safe if at most one
     # instance runs per tag at a time (two concurrent instances for the same
@@ -7016,7 +7179,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -7056,7 +7219,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
@@ -7129,7 +7292,8 @@ jobs:
             printf -- '- golang:latest -> %s\n' "$golang_base_digest"
             printf '\nProvenance and SBOM status:\n\n'
             printf -- '- Provenance attestations are pushed to GHCR for every first-party service image digest and the stack channel-pointer digest.\n'
-            printf -- '- SBOM artifacts are not generated by this workflow yet; release notes must not claim SBOM coverage until an SBOM-producing job is added.\n'
+            printf -- '- CycloneDX SBOMs are generated per released first-party image digest (via Trivy) and attached to this GitHub release as <service>.cdx.json assets by the release-sbom job.\n'
+            printf -- '- An OpenVEX document generated from .trivyignore.yaml is attached to this release as vex.openvex.json.\n'
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
@@ -7217,3 +7381,210 @@ jobs:
             exit 1
           fi
           UPDATE_RELEASE
+
+      - name: Attach OpenVEX document to the release
+        # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json,
+        # kept in sync with .trivyignore.yaml by the validate-compose drift
+        # guard) as a release asset, so downstream consumers get this project's
+        # accepted-vulnerability dispositions in a standard, tool-parseable
+        # format alongside the release. Idempotent: an existing same-named asset
+        # (e.g. on a workflow rerun for the same tag) is deleted before
+        # re-upload. curl/jq run in the tag-scoped build-tools image (guaranteed
+        # built for a release tag per AG-CI-010), same as the release-notes step
+        # above, rather than assuming host tooling (AG-CI-001).
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -s vex.openvex.json ]; then
+            echo "::error::vex.openvex.json is missing from the checkout." >&2
+            exit 1
+          fi
+
+          build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+          docker run --rm \
+            -e GITHUB_TOKEN \
+            -e REPOSITORY \
+            -e TAG_NAME \
+            -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
+            "$build_tools_image" \
+            bash -s <<'UPLOAD_VEX'
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPOSITORY}"
+          uploads="https://uploads.github.com/repos/${REPOSITORY}"
+          auth="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept="Accept: application/vnd.github+json"
+          version="X-GitHub-Api-Version: 2022-11-28"
+          asset_name="vex.openvex.json"
+
+          release_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/tags/$TAG_NAME" | jq -r '.id')"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "Could not resolve release id for $TAG_NAME." >&2
+            exit 1
+          fi
+
+          existing_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/$release_id/assets" | jq -r --arg n "$asset_name" '.[] | select(.name == $n) | .id')"
+          if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
+            curl -fsS -X DELETE -H "$auth" -H "$accept" -H "$version" "$api/releases/assets/$existing_id" >/dev/null
+          fi
+
+          curl -fsS -X POST \
+            -H "$auth" -H "$accept" -H "$version" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/vex.openvex.json \
+            "$uploads/releases/$release_id/assets?name=$asset_name" >/dev/null
+          echo "Uploaded $asset_name to release $TAG_NAME."
+          UPLOAD_VEX
+
+  release-sbom:
+    # OSPS-QA-02.02: every released first-party image must ship with an SBOM.
+    # Scoped to release tags (the same gate as `release`) because the
+    # requirement is about *released* assets; generating SBOMs on every push
+    # would only redo the per-digest work container-scan already does, with no
+    # release-evidence gain. Reuses Trivy -- already this project's pinned,
+    # vetted image scanner (AG-KD-003) -- to emit a CycloneDX SBOM per released
+    # image digest, then attaches each as a <service>.cdx.json GitHub release
+    # asset. That delivery path mirrors how provenance evidence rides alongside
+    # the release and needs only contents:write, with no attestation-permission
+    # expansion. A GHCR OCI-referrer SBOM attestation (actions/attest-sbom) is a
+    # possible future complement, deliberately not added here to keep a single,
+    # fully release-asset-based publication path.
+    name: publish SBOM for ${{ matrix.service }}
+    needs: release
+    if: "!cancelled() && needs.release.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
+    # Container image scanning is memory-heavy, so it takes the heavy tier the
+    # same way container-scan does (AG-CI-002).
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # NO REAL RUN DATA: same gap as `release` above -- this job only runs on
+    # a tag push, and none has completed in recorded history. Anchored
+    # instead to container-scan's per-service class of real data (24s-7min
+    # per service for a full image build + Trivy scan; this job only pulls
+    # an already-built digest and re-runs Trivy for the CycloneDX SBOM
+    # output, so it is never slower than that per-service work). 45 minutes
+    # gives real headroom over container-scan's own per-service worst case.
+    # Flagged explicitly as an estimate, not a measurement.
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Trivy-scanned first-party image set (container-scan's matrix).
+        # `stack` is intentionally excluded: it is a busybox channel-pointer
+        # image, not a compiled software asset, and is not vuln-scanned either.
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve released image digest
+        id: digest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SERVICE: ${{ matrix.service }}
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          image="ghcr.io/${REPOSITORY}/${SERVICE}:${TAG_NAME}"
+          # Scan by the immutable digest, never the mutable vX.Y.Z tag
+          # (AG-VAL-026): resolve tag -> digest right before the scan consumes
+          # it so the SBOM is bound to the exact released image content.
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"
+          digest="${digest#\"}"
+          if [[ -z "$digest" || "$digest" == "null" ]]; then
+            echo "::error::Could not resolve digest for $image." >&2
+            exit 1
+          fi
+          echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate CycloneDX SBOM with Trivy
+        # Same pinned trivy-action the scan jobs use, in SBOM mode. Scans the
+        # digest-qualified reference resolved above (mirrors build-arm64's
+        # "Scan pushed build-tools digest with Trivy" step, which likewise
+        # scans a ghcr.io/...@sha256:... reference after the GHCR login).
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.digest.outputs.image-ref }}
+          format: cyclonedx
+          output: ${{ matrix.service }}.cdx.json
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+
+      - name: Attach SBOM to the release
+        # Idempotent same-named-asset replace, curl/jq in the tag-scoped
+        # build-tools image -- same delivery mechanism as the release job's
+        # OpenVEX upload above.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          asset="${SERVICE}.cdx.json"
+          if [ ! -s "$asset" ]; then
+            echo "::error::Trivy did not produce $asset." >&2
+            exit 1
+          fi
+
+          build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+          docker run --rm \
+            -e GITHUB_TOKEN \
+            -e REPOSITORY \
+            -e TAG_NAME \
+            -e ASSET_NAME="$asset" \
+            -v "$PWD/$asset:/tmp/$asset:ro" \
+            "$build_tools_image" \
+            bash -s <<'UPLOAD_SBOM'
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPOSITORY}"
+          uploads="https://uploads.github.com/repos/${REPOSITORY}"
+          auth="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept="Accept: application/vnd.github+json"
+          version="X-GitHub-Api-Version: 2022-11-28"
+
+          release_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/tags/$TAG_NAME" | jq -r '.id')"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "Could not resolve release id for $TAG_NAME." >&2
+            exit 1
+          fi
+
+          existing_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/$release_id/assets" | jq -r --arg n "$ASSET_NAME" '.[] | select(.name == $n) | .id')"
+          if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
+            curl -fsS -X DELETE -H "$auth" -H "$accept" -H "$version" "$api/releases/assets/$existing_id" >/dev/null
+          fi
+
+          curl -fsS -X POST \
+            -H "$auth" -H "$accept" -H "$version" \
+            -H "Content-Type: application/json" \
+            --data-binary "@/tmp/$ASSET_NAME" \
+            "$uploads/releases/$release_id/assets?name=$ASSET_NAME" >/dev/null
+          echo "Uploaded $ASSET_NAME to release $TAG_NAME."
+          UPLOAD_SBOM

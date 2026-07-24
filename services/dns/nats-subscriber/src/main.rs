@@ -9,7 +9,7 @@ use async_nats::jetstream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
@@ -791,21 +791,23 @@ async fn handle_dns_record(
             // somehow does we cannot order this write, so apply it unguarded
             // (no worse than the pre-#772 behavior) rather than silently
             // dropping what may be a real update.
-            eprintln!("Could not read JetStream message info for stale-write guard (applying unguarded): {e}");
+            eprintln!(
+                "Could not read JetStream message info for stale-write guard (applying unguarded): {e}"
+            );
             None
         }
     };
-    if let Some(seq) = stream_seq {
-        if applied_seqs.is_stale(&key, seq) {
-            // Ack (return true): the message has been superseded by a newer
-            // sequence for the same key, so there is nothing left to apply and
-            // JetStream must stop redelivering it.
-            println!(
-                "Skipping stale DNS record redelivery: zone={} name={} type={} seq={} (a newer sequence for this key was already applied)",
-                record.zone, record.name, record.record_type, seq
-            );
-            return true;
-        }
+    if let Some(seq) = stream_seq
+        && applied_seqs.is_stale(&key, seq)
+    {
+        // Ack (return true): the message has been superseded by a newer
+        // sequence for the same key, so there is nothing left to apply and
+        // JetStream must stop redelivering it.
+        println!(
+            "Skipping stale DNS record redelivery: zone={} name={} type={} seq={} (a newer sequence for this key was already applied)",
+            record.zone, record.name, record.record_type, seq
+        );
+        return true;
     }
 
     let url = format!(

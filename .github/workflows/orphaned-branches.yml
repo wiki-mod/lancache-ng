@@ -21,12 +21,14 @@
 # only fires a workflow's `schedule:` trigger from the copy of the workflow
 # file present on the repository's *default* branch (currently `master`),
 # not from whichever branch a PR adding it merges into. This repo's active
-# development currently lands on `v0.2.0` (see e.g. PR #974's "backport
-# missing required checks into master" precedent for the same class of gap).
-# Until this workflow is promoted/backported to `master`, its `schedule:`
-# trigger will not actually fire on a cron -- but `workflow_dispatch` still
-# works immediately from `v0.2.0` (manually selectable per-branch in the
-# Actions UI), so the guard is usable right away, just not yet on autopilot.
+# development currently lands on `current_dev` (v0.2.0 is frozen; see e.g.
+# PR #974's "backport missing required checks into master" precedent for the
+# same class of gap, and #709's audit for the branch-model update this
+# comment itself needed). Until this workflow is promoted/backported to
+# `master`, its `schedule:` trigger will not actually fire on a cron -- but
+# `workflow_dispatch` still works immediately from `current_dev` (manually
+# selectable per-branch in the Actions UI), so the guard is usable right
+# away, just not yet on autopilot.
 name: Orphaned Branch Guard
 
 on:

@@ -57,9 +57,12 @@ COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 # "dns-domains" name is a named additional build context — services/dns/ is
 # outside this Dockerfile's own build context (services/proxy/), and Docker
 # build contexts can't reach outside their own tree without one (see
-# deploy/dev/docker-compose.yml's additional_contexts, or --build-context
-# for a plain `docker build`). dev/prod always shadow this baked default
-# with a live bind-mount of the real file at container start.
+# .github/workflows/build-push.yml's `build-contexts: dns-domains=services/dns`
+# / `--build-context` for a plain `docker build`; no remaining compose file
+# builds this image locally via a compose-level `additional_contexts:` key --
+# the former `deploy/dev/docker-compose.yml` did, before being retired in
+# v0.3.0, #766). prod always shadows this baked default with a live
+# bind-mount of the real file at container start.
 COPY --from=dns-domains cdn-domains.txt /etc/nginx/cdn-domains.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

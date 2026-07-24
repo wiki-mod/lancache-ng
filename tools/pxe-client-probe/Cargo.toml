@@ -1,0 +1,27 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Rust package manifest for the pxe-client-probe binary: the synthetic
+# PXE-client DHCPDISCOVER probe driven by scripts/dhcp-proxy-pxe-simulation.sh.
+# Replaces the former scripts/lib/pxe-client-probe.py (scapy) to keep the
+# project to its Rust+shell-only language rule (AG-GOV-003 / AG-REL-001).
+
+[package]
+name = "pxe-client-probe"
+version = "0.3.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[[bin]]
+name = "pxe-client-probe"
+path = "src/main.rs"
+
+[dependencies]
+# Raw layer-2 send of a hand-built Ethernet/IP/UDP/BOOTP/DHCP frame and
+# reading the send interface's own MAC. Only the datalink half of pnet is
+# needed -- the packet bytes and their checksums are built by hand -- so this
+# depends on the leaner pnet_datalink crate rather than the pnet umbrella.
+pnet_datalink = "0.35"
+# SIGTERM the tcpdump child before falling back to SIGKILL, mirroring the
+# Python version's terminate()-then-kill() sequence. std's Child::kill sends
+# SIGKILL only, so libc::kill is used for the graceful SIGTERM.
+libc = "0.2"
+anyhow = "1"

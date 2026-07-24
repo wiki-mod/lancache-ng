@@ -39,9 +39,9 @@
 # verifies is missing from the smoke test without an explicit exclusion. It
 # does not assert the reverse (a smoke-test entry the Dockerfile does not
 # install), because the smoke test legitimately verifies capabilities the
-# Dockerfile expresses differently (e.g. scapy via `python3 -c import
-# scapy.all`, not a `required_tools` entry). The Pattern G failure mode is
-# always the missing-from-smoke direction.
+# Dockerfile expresses differently (e.g. a capability checked via a
+# subcommand invocation rather than a `required_tools` array entry). The
+# Pattern G failure mode is always the missing-from-smoke direction.
 #
 # Deliberately plain bash + a single awk array-extractor (no YAML/Dockerfile
 # parser, no non-shell runtime -- Rule-Ref: AG-REL-001), matching the sibling

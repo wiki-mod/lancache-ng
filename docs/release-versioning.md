@@ -84,13 +84,32 @@ control, so this cut affects only operators who set
 secondary-node registration flow.
 
 `setup.sh`'s interactive install flow offers exactly two operator-facing
-channel names: `stable` (default) and `nightly`, each with an inline explanation
-of what it means. `stable` is not a new GHCR tag -- `resolve_lancache_stack_channel_tag`
-maps it onto the existing `latest` pointer before pulling, so introducing it
-required no change to the promotion/release pipeline. `pinned` remains a
-valid `LANCACHE_IMAGE_CHANNEL` value (env var / `.env`, or the secondary-node
-registration flow) but is not offered by the interactive picker -- it is a
-request for one specific immutable tag, not a moving channel choice.
+channel names: `nightly` (default pre-1.0) and `stable`, each with an inline
+explanation of what it means. `stable` is not a new GHCR tag --
+`resolve_lancache_stack_channel_tag` maps it onto the existing `latest`
+pointer before pulling, so introducing it required no change to the
+promotion/release pipeline. `pinned` remains a valid `LANCACHE_IMAGE_CHANNEL`
+value (env var / `.env`, or the secondary-node registration flow) but is not
+offered by the interactive picker -- it is a request for one specific
+immutable tag, not a moving channel choice.
+
+**Pre-1.0 default (#1068)**: the picker's default answer and its
+"recommended" label were originally on `stable`, matching the plan when this
+channel was introduced (#819) for a project that would soon cut a stable
+release. In practice pre-1.0 has lasted long enough that this silently
+walked a new operator's default "just press enter" choice into a
+`docker pull` failure (`stack:latest` does not exist yet, since it is the
+same underlying pointer `stable` maps to). The default and recommendation
+were changed to `nightly` for as long as this project has no stable release;
+`stable` remains a fully valid, non-removed answer -- choosing it explicitly
+pre-1.0 still hits `resolve_lancache_stack_channel_tag`'s own clear
+explanation rather than a raw Docker error, and it automatically becomes the
+right default again once a real `vX.Y.Z` stable release exists and moves
+`latest`. The Admin UI's own channel selector (`services/ui/src/routes/setup.rs`
+/ `setup.html`) was checked separately and needs no equivalent change: it only
+ever displays and edits an *existing* install's already-resolved channel
+value, so it has no "default a new choice" moment the way the CLI installer
+does.
 
 ## Promotion
 
@@ -125,11 +144,13 @@ the install contract.
 
 Default behavior:
 
-- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=stable` (written by
-  `setup.sh`'s interactive picker); `LANCACHE_IMAGE_CHANNEL=latest` remains
-  valid and resolves identically for existing installs and manual overrides
-- nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`, or choose
-  `nightly` at `setup.sh`'s interactive channel prompt
+- fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0
+  (written by `setup.sh`'s interactive picker's default answer -- see the
+  "Pre-1.0 default" note above); an operator can still explicitly choose
+  `stable` at the same prompt, or set `LANCACHE_IMAGE_CHANNEL=stable`/`latest`
+  directly, once a stable release exists
+- `LANCACHE_IMAGE_CHANNEL=latest` remains valid and resolves identically to
+  `stable` for existing installs and manual overrides
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`

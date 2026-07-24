@@ -263,7 +263,8 @@ expect_prompt {Cache size in GiB} "5"
 expect_prompt {Cache RAM buffer in MB} ""
 expect_prompt {Cache entry max age} ""
 expect_prompt {Enable scheduled automatic updates\?} ""
-expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy\)} ""
+expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy, dnsmasq-relay\)} ""
+expect_prompt {Enable LanCache-NG-NTP\? \[y/N\]} ""
 expect_prompt {Protect Admin-UI with password\? \[Y/n\]} ""
 expect_prompt {Username[^\n]*\[admin\]} ""
 expect_prompt {Start now\? \[Y/n\]} ""
@@ -383,7 +384,7 @@ echo "== Phase 2b: repeat-run idempotence (setup.sh update run twice in a row, s
 # real CLI -- not just the extracted function -- lands on the same fixed
 # point instead of drifting or rotating secrets.
 cp "$install_dir/.env" "$install_dir/.env.after-first-update"
-secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
+secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
 grep -E "$secret_keys" "$install_dir/.env.after-first-update" | sort > "$install_dir/.secrets-after-first-update"
 
 bash setup.sh update "$install_dir"

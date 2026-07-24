@@ -58,32 +58,40 @@ open at the time this doc was originally written, merged later the same day).
 
 ## 2. netdata — what's wired vs. what's available but unused
 
-### 2.1 Deployment wiring (all 4 compose files compared)
+### 2.1 Deployment wiring (4 compose files compared as they existed at the
+time of this pass; `deploy/dev` was retired outright in v0.3.0, #766 — its
+row below is kept for historical comparison, see the finding update
+immediately after the table)
 
 | Compose file | `netdata-logs` volume (own logs → fluent-bit) | `logs:/var/log/lancache:ro` mount (web_log source file) | `netdata-web_log.conf` bind-mount (web_log job config) | Healthcheck |
 |---|---|---|---|---|
-| `deploy/dev` | yes | yes | yes | **none** |
+| `deploy/dev` (retired, v0.3.0) | yes | yes | yes | **none** |
 | `deploy/quickstart` | yes | yes | **no** | **none** |
 | `deploy/prod` | yes | **no** | **no** | **none** |
 | `deploy/full-setup` (CI validation only) | **no** (no logging profile at all here) | n/a | n/a | yes — `curl http://127.0.0.1:19999/api/v1/info` |
 
-**Finding (new, not previously flagged in #453/#633 threads):** Netdata's
-`web_log` collector (live per-request nginx analytics: per-status-code
-counters, response time, etc., configured via
-`services/syslog/netdata-web_log.conf` pointing at
-`/var/log/lancache/nginx-proxy.log`) is only fully wired in `dev`. In
+**Finding (new, not previously flagged in #453/#633 threads), UPDATED for
+v0.3.0's dev-folder retirement (#766):** Netdata's `web_log` collector (live
+per-request nginx analytics: per-status-code counters, response time, etc.,
+configured via `services/syslog/netdata-web_log.conf` pointing at
+`/var/log/lancache/nginx-proxy.log`) used to be only fully wired in `dev`. In
 `quickstart` the source file mount exists but the collector config
 bind-mount does not, so netdata has no `web_log` job at all. In `prod`
 neither exists, even though the file is actually produced there (fluent-bit's
-`file=nginx-proxy.log` output is present in all three real deployment
-composes — confirmed at `deploy/{dev,prod,quickstart}/docker-compose.yml`,
-the `syslog` service's fluent-bit command args). This is a three-way
-inconsistency across dev/quickstart/prod for one specific netdata collector,
+`file=nginx-proxy.log` output is present in both surviving deployment
+composes — confirmed at `deploy/{prod,quickstart}/docker-compose.yml`, the
+`syslog` service's fluent-bit command args). **Now that `deploy/dev` is gone,
+this collector is not fully wired in any surviving deployment profile at
+all** — retiring `dev` did not fix this pre-existing quickstart/prod gap, it
+just removed the one profile that happened to have it wired, so the gap is
+now worse in coverage terms (0 of 2 real profiles instead of 1 of 3). Still
 independent of and in addition to the general central-logging matrix that
-#633 already closed out.
+#633 already closed out; tracked as a small follow-up in #1219 to wire the
+missing `netdata-web_log.conf` bind-mount into `prod`/`quickstart` (not
+attempted here — out of scope for a dev-folder retirement).
 
-**Finding:** netdata has **no Docker `HEALTHCHECK`** in `dev`, `prod`, or
-`quickstart` — only the CI-only `full-setup` compose defines one (and that
+**Finding:** netdata has **no Docker `HEALTHCHECK`** in `prod` or
+`quickstart` (nor, historically, in the now-retired `dev`) — only the CI-only `full-setup` compose defines one (and that
 one is unrelated to any real deployment target). `ui`'s `depends_on: netdata`
 has no `condition: service_healthy` anywhere real, so this doesn't currently
 break anything, but it does mean an operator has no Docker-native signal if
@@ -225,7 +233,7 @@ to the operator anywhere in this project:**
   bring-up design since both DHCP modes would contend for the same
   host-network ports).
 
-### 3.2 Fluent-bit (`syslog` service) wiring — verified directly in `deploy/dev/docker-compose.yml` (1307 lines; `prod`/`quickstart` structurally identical)
+### 3.2 Fluent-bit (`syslog` service) wiring — verified directly in `deploy/prod/docker-compose.yml` (`quickstart` structurally identical; the now-retired `deploy/dev`, v0.3.0 #766, was too at the time this was written)
 
 Image: `cr.fluentbit.io/fluent/fluent-bit:3.2.10` (pinned by digest).
 Config delivered entirely as CLI flags (`command:` list), not a bind-mounted

@@ -209,6 +209,17 @@ setup() {
     [[ "$output" == *"CONTAINER_DNS_SSL=my-renamed-ssl is not supported"* ]]
 }
 
+# CONTAINER_NATS (#842): unlike CONTAINER_DNS_SSL, nats is never
+# profile/flag-gated, so a mismatch is always fatal, the same as
+# CONTAINER_PROXY/CONTAINER_DNS_STANDARD above.
+@test "watchdog.sh exits non-zero when CONTAINER_NATS does not match the socket-proxy allowlist" {
+    run timeout 5 env CONTAINER_NATS=my-renamed-nats DOCKER_PROXY_URL="http://127.0.0.1:1" \
+        STATUS_FILE="$BATS_TEST_TMPDIR/sub-status.json" CACHE_DIR="$BATS_TEST_TMPDIR/sub-nonexistent-cache" \
+        bash "$repo_root/services/watchdog/watchdog.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CONTAINER_NATS=my-renamed-nats is not supported"* ]]
+}
+
 # A mismatched CONTAINER_DNS_SSL must NOT be fatal when SSL is disabled --
 # dns-ssl is not monitored at all in that mode, so its name is irrelevant.
 @test "watchdog.sh does not fail on a CONTAINER_DNS_SSL mismatch when SSL_ENABLED=0" {

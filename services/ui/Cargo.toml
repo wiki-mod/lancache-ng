@@ -4,7 +4,7 @@
 [package]
 name = "lancache-ui"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 license = "AGPL-3.0-or-later"
 
 [[bin]]
@@ -36,7 +36,11 @@ sha2 = "0.11"
 # replacing the previous unsalted SHA-256. Default features provide the
 # `password-hash` PHC string API plus the OsRng salt source used below.
 argon2 = "0.5"
-nkeys = "0.4"
+# "xkeys" feature pulls in crypto_box for the X25519/curve25519 XKey type
+# (issue #682: NATS auth-callout request/response encryption). Not enabled by
+# default upstream since most nkeys consumers only need the Ed25519 NKey
+# signing type this crate is named for.
+nkeys = { version = "0.4", features = ["xkeys"] }
 data-encoding = "2"
 # Transparent decompression of syslog-ng's rotated log output (#633:
 # syslog_client.rs). syslog-ng compresses rotated files with zstd, falling

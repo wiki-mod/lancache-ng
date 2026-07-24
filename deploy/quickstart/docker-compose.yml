@@ -138,6 +138,20 @@ services:
           echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_CALLOUT_PASSWORD to a real value (openssl rand -hex 32)." >&2
           exit 1
         fi
+        # Issue #681: the Admin UI's system-account identity, used ONLY to look
+        # up (CONNZ) and force-disconnect ($$SYS.REQ.SERVER.<id>.KICK) a removed/
+        # rotated secondary's live connection. Every other static role above
+        # lives in the implicit default account ($$G); this one is deliberately
+        # the sole member of a new `SYS` account (see the `accounts {}` block
+        # below), because nats-server only exposes the $$SYS.REQ.SERVER.*
+        # system-services API to system-account clients -- confirmed against a
+        # real nats-server 2.14.3 (see nats_kick.rs's module docs).
+        if secret_is_placeholder "$$NATS_SYS_PASSWORD"; then NATS_SYS_PASSWORD=""; fi
+        if ! NATS_SYS_PASSWORD="$$(resolve_shared_secret nats-sys-password "$$NATS_SYS_PASSWORD" lancache_gen_hex32)"; then
+          echo "[lancache-nats] FATAL: NATS_SYS_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
+          echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_SYS_PASSWORD to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
         mkdir -p /etc/nats
         mkdir -p /var/log/lancache-nats
         escape_sed() {
@@ -279,6 +293,25 @@ services:
           # included auth_callout goes fully live -- also verified against 2.14.3.
           include "auth_callout.conf"
         }
+        # Issue #681: a minimal system account, additive alongside the flat
+        # `authorization {}` block above -- confirmed against a real
+        # nats-server 2.14.3 that the two coexist with no effect on where the
+        # four static roles/callout-authenticated secondaries live (still the
+        # implicit default account, $$G) or on JetStream's LANCACHE_DNS stream
+        # (still owned by $$G, unaffected). This is the ONLY account this
+        # process is a member of, and it carries no application subject
+        # permissions of its own -- it exists solely so the Admin UI can reach
+        # the $$SYS.REQ.SERVER.* system-services API (CONNZ to look up a
+        # secondary's live connection ID, KICK to force-disconnect it), which
+        # nats-server does not expose to $$G clients at all.
+        accounts {
+          SYS: {
+            users: [
+              { user: "__NATS_SYS_USER__", password: "__NATS_SYS_PASSWORD__" }
+            ]
+          }
+        }
+        system_account: SYS
         EOF
         sed \
           -e "s|__NATS_UI_USER__|$$(escape_sed "$$NATS_UI_USER")|g" \
@@ -289,6 +322,8 @@ services:
           -e "s|__NATS_DNS_REPLICA_PASSWORD__|$$(escape_sed "$$NATS_DNS_REPLICA_PASSWORD")|g" \
           -e "s|__NATS_CALLOUT_USER__|$$(escape_sed "$$NATS_CALLOUT_USER")|g" \
           -e "s|__NATS_CALLOUT_PASSWORD__|$$(escape_sed "$$NATS_CALLOUT_PASSWORD")|g" \
+          -e "s|__NATS_SYS_USER__|$$(escape_sed "$$NATS_SYS_USER")|g" \
+          -e "s|__NATS_SYS_PASSWORD__|$$(escape_sed "$$NATS_SYS_PASSWORD")|g" \
           /tmp/nats.conf.template > "$$tmp_nats_conf"
         chown 10001:10001 "$$tmp_nats_conf"
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
@@ -320,6 +355,10 @@ services:
       # against the static user this entrypoint writes above (issue #811 / #583).
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
+      # Issue #681: system-account identity (see the entrypoint's `accounts {}`
+      # comment above). MUST match the ui service's NATS_SYS_USER/PASSWORD.
+      - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
+      - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins NATS_*_PASSWORD, plus the
       # canonical helper (installed into ./scripts by setup.sh) sourced above.
@@ -1163,6 +1202,7 @@ services:
       - CONTAINER_PROXY=lancache-proxy
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
+      - CONTAINER_NATS=lancache-nats
       - SSL_ENABLED=${SSL_ENABLED:-0}
       # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
       # watchdog does not touch this path at all on installs that never opt
@@ -1320,6 +1360,36 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
+  # ── LanCache-NG-NTP (chrony) ──────────────────────────────────────────────
+  # Disciplines its own clock against public NTP servers and serves LAN
+  # clients on UDP/123. Opt-in like dhcp/dhcp-proxy above.
+  ntp:
+    profiles: [ntp]
+    container_name: lancache-ntp
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
+    volumes:
+      - ui-data:/data:ro
+      - ${NTP_DATA_DIR:-./ntp}:/var/lib/chrony
+      # Central logging pipeline (#633): chronyd's `log` directive (see
+      # chrony.conf) writes here in addition to the process's own stdout.
+      - ntp-logs:/var/log/chrony
+    environment:
+      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:-0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com}
+      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
+    ports:
+      # No dedicated LAN IP: NTP is plain unicast UDP, not a broadcast
+      # protocol like DHCP, so Docker's normal port-publish DNAT already
+      # preserves real client source IPs without network_mode: host.
+      - "123:123/udp"
+    cap_add:
+      # chronyd needs to step/slew the container HOST's real system clock to
+      # genuinely discipline time -- see services/ntp/Dockerfile's comment.
+      - SYS_TIME
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
   # DHCP servers" feature. Reuses the UI image (already has nmap and dhclient
@@ -1369,6 +1439,14 @@ services:
       # results, not fail, so this is required for SYSLOG_ENABLED=true to
       # actually show anything on /logs or the dashboard.
       - logs-syslog-ng:/var/log/lancache-syslog-ng:ro
+      # Issue #870: read-only reader for watchdog's status.json (per-service
+      # health + cache-disk usage color, rendered as the dashboard's
+      # "Service health" card). watchdog is the sole writer of this volume
+      # (see its own service block below); a missing mount here would make
+      # watchdog_status::read_status() see the file as simply absent, not
+      # fail, so this is required for the health card to show real data
+      # instead of its "unavailable" fallback state.
+      - watchdog-status:/var/run/watchdog:ro
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
@@ -1407,6 +1485,11 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
+      # Issue #681: lets nats_kick.rs connect as the NATS system account to look
+      # up (CONNZ) and force-disconnect (KICK) a removed/rotated secondary's
+      # live connection. MUST match the nats service's NATS_SYS_USER/PASSWORD.
+      - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
+      - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
@@ -1557,6 +1640,10 @@ volumes:
   watchdog-logs:
   nats-logs:
   netdata-logs:
+  # LanCache-NG-NTP (chrony) log output. Not yet wired into the `syslog`
+  # (fluent-bit) central logging pipeline (#633) -- a known, deliberately
+  # deferred follow-up (see docs/architecture-ng.md's logging matrix).
+  ntp-logs:
   logs-syslog-ng:
   pdns-data-standard:
   pdns-data-ssl:

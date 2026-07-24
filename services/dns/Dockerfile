@@ -184,6 +184,7 @@ RUN set -eu; \
     nano \
     lsof \
     ripgrep \
+    curl \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
@@ -191,6 +192,14 @@ RUN set -eu; \
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # nano/lsof/ripgrep: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.
+# curl: unlike Kea's Control Agent (reachable from the host directly via
+# network_mode: host), nats-subscriber's zone-rollback listener (port 8083,
+# see rollback_listener.rs) is only `expose`d to the Compose network, never
+# published to the host -- so `setup.sh reset-to-last-known-good-config
+# dns`/`pdns` reaches it via `docker compose exec` into THIS container
+# rather than calling it directly from the host. dhcp/proxy/ui/watchdog
+# already carry curl for comparable internal/operational HTTP calls; this
+# is the same justification, not a new pattern.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 

@@ -8,7 +8,7 @@
 //! stanza) at process startup only -- see `nats_auth_callout.rs` for why
 //! register/rotate/remove no longer need to rewrite that file or restart NATS.
 
-use crate::{docker_client, nats_auth_callout, nats_config, AppState};
+use crate::{AppState, docker_client, nats_auth_callout, nats_config, nats_kick};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};
@@ -270,7 +270,9 @@ pub async fn remove_secondary(
             .db
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        db.execute("DELETE FROM secondaries WHERE name = ?", [name])
+        // name.clone(), not a move: the kick call below needs it after this
+        // block too (issue #681).
+        db.execute("DELETE FROM secondaries WHERE name = ?", [name.clone()])
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
@@ -283,6 +285,32 @@ pub async fn remove_secondary(
     // auth-callout responder re-checks this table on every connection
     // attempt, so deleting the row alone revokes this secondary's access on
     // its very next reconnect, with zero effect on any other secondary.
+    //
+    // Issue #681: the row is already gone at this point, so it's now safe to
+    // actively kick this secondary's current live connection, if it has one
+    // -- if the kick makes it reconnect, that reconnect now fails
+    // auth-callout instead of quietly succeeding (see nats_kick.rs's module
+    // docs on why this ordering is load-bearing). Spawned in the background:
+    // a slow/unreachable NATS system account must not add latency to this
+    // HTTP response -- the DB-level revocation above is what actually
+    // matters; this only shrinks the exposure window for an already-open
+    // connection, it is not required for correctness.
+    let kick_state = state.clone();
+    let kick_name = name.clone();
+    tokio::spawn(async move {
+        match nats_kick::disconnect_secondary(&kick_state, &kick_name).await {
+            Ok(0) => tracing::debug!(
+                "nats_kick: removed secondary {kick_name} had no live NATS connection to disconnect"
+            ),
+            Ok(n) => tracing::info!(
+                "nats_kick: disconnected {n} live NATS connection(s) for removed secondary {kick_name}"
+            ),
+            Err(err) => tracing::warn!(
+                "nats_kick: failed to actively disconnect removed secondary {kick_name}: {err}"
+            ),
+        }
+    });
+
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -362,8 +390,9 @@ pub async fn check_secondary_health(
         })));
     };
 
-    // Prod secondaries serve DNS on the standard port 53 (the dev 5300 offset
-    // is a local-Windows-conflict workaround, not a secondary concern).
+    // Secondaries serve DNS on the standard port 53 -- the now-retired
+    // deploy/dev stack's 5300 offset (v0.3.0, #766) was a local-Windows-conflict
+    // workaround that never applied to secondaries in the first place.
     let result = crate::dns_probe::probe_secondary_soa(addr, 53).await;
 
     // Only a genuinely healthy authoritative answer advances last_seen.
@@ -435,6 +464,31 @@ pub async fn rotate_token(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    // Issue #681: the password hash is already overwritten at this point, so
+    // it's now safe to actively kick this secondary's current live
+    // connection, if it has one -- if the kick makes it reconnect, that
+    // reconnect now presents the OLD (now-invalid) password and fails
+    // auth-callout instead of quietly continuing on the credential this
+    // rotation was meant to retire (see nats_kick.rs's module docs on why
+    // this ordering is load-bearing). Spawned in the background for the same
+    // reason as remove_secondary above: a slow/unreachable NATS system
+    // account must not add latency to this HTTP response.
+    let kick_state = state.clone();
+    let kick_name = nats_user.clone();
+    tokio::spawn(async move {
+        match nats_kick::disconnect_secondary(&kick_state, &kick_name).await {
+            Ok(0) => tracing::debug!(
+                "nats_kick: rotated secondary {kick_name} had no live NATS connection to disconnect"
+            ),
+            Ok(n) => tracing::info!(
+                "nats_kick: disconnected {n} live NATS connection(s) for rotated secondary {kick_name}"
+            ),
+            Err(err) => tracing::warn!(
+                "nats_kick: failed to actively disconnect rotated secondary {kick_name}: {err}"
+            ),
+        }
+    });
+
     Ok(Json(serde_json::json!({
         "nats_user": nats_user,
         "nats_password": nats_password
@@ -487,7 +541,9 @@ pub async fn update_nats_conf(
         &state.config.nats_dns_writer_user,
         &state.config.nats_dns_replica_user,
         &state.config.nats_callout_user,
+        &state.config.nats_sys_user,
         &state.nats_issuer_public_key,
+        &state.nats_callout_xkey_public_key,
     );
 
     write_nats_conf_atomically(&state.config.nats_auth_callout_path, &fragment)
@@ -514,7 +570,9 @@ fn render_nats_auth_callout(
     writer_user: &str,
     replica_user: &str,
     callout_user: &str,
+    sys_user: &str,
     issuer_public_key: &str,
+    xkey_public_key: &str,
 ) -> String {
     // This is the fragment `include`d by the nats container's own nats.conf
     // INSIDE its authorization {} block (issue #811). It must therefore be the
@@ -531,6 +589,14 @@ fn render_nats_auth_callout(
 # entrypoint-generated nats.conf.
 auth_callout {{
   issuer: "{issuer_public_key}"
+  # Public half of the responder's own static X25519 encryption keypair
+  # (issue #682). Setting this makes nats-server seal the auth-callout
+  # request to this key and expect the response sealed back to a fresh
+  # per-connection ephemeral key it supplies -- see nats_auth_callout.rs's
+  # xkey module docs for the full request/response mechanism. The matching
+  # private seed is held only by the callout responder task, never written
+  # to this config file.
+  xkey: "{xkey_public_key}"
   # Every static user in nats.conf's `users` list must be listed here, not just
   # the callout responder itself: nats-server only checks a connecting user's
   # password against that static list for names in auth_users. Any username
@@ -539,7 +605,18 @@ auth_callout {{
   # 2.14.3; see nats_auth_callout.rs's module docs). Only external secondaries,
   # deliberately absent from both this list and nats.conf's static `users`
   # list, are meant to go through the callout.
-  auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}"]
+  #
+  # Issue #681: auth_callout's interception is server-wide, not scoped to the
+  # $G account the four roles above live in -- an unrecognized username is
+  # routed to the callout regardless of which account (accounts {{}} block)
+  # its own static `users` entry lives under. Confirmed the hard way against a
+  # real nats-server 2.14.3: omitting the new NATS_SYS_USER (services/nats/
+  # nats.conf's separate `SYS` account) from this list made every system-
+  # account connection attempt fall through to the callout instead, which
+  # correctly denies it (it is not a row in `secondaries`) -- silently
+  # breaking nats_kick.rs's CONNZ/KICK calls with "authorization violation"
+  # instead of ever reaching the SYS account's own static credential check.
+  auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}", "{sys_user}"]
 }}
 "#
     )
@@ -663,7 +740,9 @@ mod tests {
                 "lancache-dns-writer",
                 "lancache-dns-replica",
                 "lancache-nats-callout",
+                "lancache-nats-sys",
                 "issuer-public-key-abc123",
+                "xkey-public-key-def456",
             )
         };
 
@@ -682,7 +761,9 @@ mod tests {
             "lancache-dns-writer",
             "lancache-dns-replica",
             "lancache-nats-callout",
+            "lancache-nats-sys",
             "issuer-public-key-abc123",
+            "xkey-public-key-def456",
             "auth_callout",
             "auth_users",
         ] {
@@ -728,7 +809,9 @@ mod tests {
             "lancache-dns-writer",
             "lancache-dns-replica",
             "lancache-nats-callout",
+            "lancache-nats-sys",
             "issuer-public-key-abc123",
+            "xkey-public-key-def456",
         );
         write_nats_conf_atomically(path_str, &rendered_first).unwrap();
         let first_write = fs::read_to_string(&path).unwrap();
@@ -742,7 +825,9 @@ mod tests {
             "lancache-dns-writer",
             "lancache-dns-replica",
             "lancache-nats-callout",
+            "lancache-nats-sys",
             "issuer-public-key-abc123",
+            "xkey-public-key-def456",
         );
         write_nats_conf_atomically(path_str, &rendered_second).unwrap();
         let second_write = fs::read_to_string(&path).unwrap();

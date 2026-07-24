@@ -8,13 +8,13 @@
 //! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
 //! one-shot helper container that can only be started, waited on, and logged.
 
-use crate::{docker_client, kea_snapshots, AppState};
+use crate::{AppState, docker_client, kea_snapshots};
 use anyhow::Context as AnyhowContext;
+use axum::Json;
 use axum::extract::{Form, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Json;
 use bollard::container::LogOutput;
 // The DHCP probe path deliberately uses only start/stop/wait/logs operations
 // because Docker exec and generic container creation are banned from the UI's
@@ -25,7 +25,7 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
@@ -432,6 +432,18 @@ pub struct UpdateDhcpProxyForm {
     pub dhcp_proxy_custom_options: String,
 }
 
+// Issue #844: the DHCP-relay-mode settings form. Distinct from
+// UpdateDhcpProxyForm because relay mode has an entirely different, much
+// smaller config surface -- only its own client-facing local address (the
+// giaddr source) and the upstream DHCP server it forwards to. Everything the
+// ProxyDHCP form carries (subnet/DNS/PXE) is meaningless to a relay.
+#[derive(Deserialize)]
+pub struct UpdateDhcpRelayForm {
+    pub csrf_token: String,
+    pub dhcp_relay_local_addr: String,
+    pub upstream_dhcp_ip: String,
+}
+
 #[derive(Deserialize)]
 pub struct RollbackKeaSnapshotForm {
     pub csrf_token: String,
@@ -466,6 +478,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let dhcp_ntp_servers = state.config.effective_dhcp_ntp_servers();
     let dhcp_proxy_subnet_start = state.config.effective_dhcp_proxy_subnet_start();
     let dhcp_upstream_dhcp_ip = state.config.effective_dhcp_upstream_dhcp_ip();
+    let dhcp_relay_local_addr = state.config.effective_dhcp_relay_local_addr();
     let dhcp_proxy_interface = state.config.effective_dhcp_proxy_interface();
     let dhcp_proxy_router = state.config.effective_dhcp_proxy_router();
     let dhcp_proxy_domain = state.config.effective_dhcp_proxy_domain();
@@ -482,6 +495,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert("dhcp_ntp_servers", &dhcp_ntp_servers);
     ctx.insert("dhcp_proxy_subnet_start", &dhcp_proxy_subnet_start);
     ctx.insert("dhcp_upstream_dhcp_ip", &dhcp_upstream_dhcp_ip);
+    ctx.insert("dhcp_relay_local_addr", &dhcp_relay_local_addr);
     ctx.insert("dhcp_proxy_interface", &dhcp_proxy_interface);
     ctx.insert("dhcp_proxy_router", &dhcp_proxy_router);
     ctx.insert("dhcp_proxy_domain", &dhcp_proxy_domain);
@@ -490,6 +504,14 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert(
         "dhcp_proxy_custom_options_form",
         &dhcp_proxy_custom_options_form,
+    );
+    // Issue #1079: lets dhcp.html warn that the per-subnet NTP field is
+    // currently auto-managed by LanCache-NG-NTP (see
+    // apply_ntp_lan_ip_to_all_subnets), rather than an operator discovering
+    // that only after their manual edit gets silently overwritten.
+    ctx.insert(
+        "ntp_auto_dhcp_active",
+        &(state.config.effective_ntp_enabled() && state.config.effective_ntp_auto_dhcp()),
     );
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
@@ -570,7 +592,35 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
         "disabled" => Some(crate::config::DhcpMode::Disabled),
         "kea" => Some(crate::config::DhcpMode::Kea),
         "dnsmasq-proxy" => Some(crate::config::DhcpMode::DnsmasqProxy),
+        "dnsmasq-relay" => Some(crate::config::DhcpMode::DnsmasqRelay),
         _ => None,
+    }
+}
+
+// Turns a start_service failure into a DhcpError, adding actionable
+// create-the-container guidance when the underlying cause is a 404 (see
+// docker_client::is_container_not_created's own comment for why that
+// specific status code means "never created", not "crashed"). Without this,
+// an operator switching to a DHCP mode that was never active before saw only
+// "Failed to start 'dhcp-proxy'" with no indication of what to actually do
+// (issue #1068 item 6) -- the docker-socket-proxy allowlist this module
+// talks through has no create capability, so the Admin UI itself cannot
+// bring the missing container up; the operator (or the host's
+// lancache-converge.timer, once installed) has to run `docker compose up`
+// with the matching profile at least once.
+fn start_service_error(err: anyhow::Error, service_name: &str, profile: &str) -> DhcpError {
+    if docker_client::is_container_not_created(&err) {
+        DhcpError::config_error(format!(
+            "The '{service_name}' container has not been created yet: this Compose stack was \
+             never started with the '{profile}' profile active, so Docker has no container for \
+             the Admin UI to start (it is only allowed to start/stop existing containers, never \
+             create new ones). Fix: in the lancache-ng install directory, run \
+             `docker compose --profile {profile} up -d {service_name}` once to create it, then \
+             switch DHCP mode again here. If a `lancache-converge.timer` is installed, it will \
+             also pick this up automatically within a few minutes after that."
+        ))
+    } else {
+        DhcpError::config_error(format!("{err:#}"))
     }
 }
 
@@ -585,29 +635,110 @@ async fn reconcile_dhcp_mode(
         crate::config::DhcpMode::Disabled => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
         crate::config::DhcpMode::Kea => {
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
-        crate::config::DhcpMode::DnsmasqProxy => {
+        // Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in the
+        // same `dhcp-proxy` container -- it renders one config or the other
+        // from the DHCP_MODE it reads out of the persisted UI settings -- so
+        // reconciliation is identical: ensure Kea is stopped and the
+        // dhcp-proxy container is running. The container itself, on (re)start,
+        // reads the new mode and renders the matching config.
+        crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
         }
     }
+
+    // Issue #1079's requirement 4: if LanCache-NG-NTP's "auto-set as DHCP
+    // NTP server" toggle is already on when DHCP switches into Kea mode,
+    // push this container's LAN address into every subnet immediately
+    // instead of waiting for the next unrelated NTP/DHCP settings save.
+    // Best-effort and non-fatal: Kea's control-agent may not have finished
+    // starting yet (start_service above just requested the container start,
+    // it does not wait for readiness), and a transient failure here must
+    // never fail the DHCP mode switch itself.
+    if mode.is_kea()
+        && state.config.effective_ntp_enabled()
+        && state.config.effective_ntp_auto_dhcp()
+        && let Err(err) = apply_ntp_lan_ip_to_all_subnets(state).await
+    {
+        tracing::warn!(
+            error = %err,
+            "failed to push LanCache-NG-NTP's LAN address into Kea subnets after switching to Kea mode; it will be retried on the next NTP/DHCP settings save"
+        );
+    }
+
     Ok(())
+}
+
+// Forces every Kea subnet's ntp-servers option to LanCache-NG-NTP's
+// configured LAN address (state.config.standard_ip) -- issue #1079's
+// requirement 4. Deliberately overrides any per-subnet value an operator
+// set manually via add_subnet/update_subnet for as long as the "auto-set as
+// DHCP NTP server" toggle stays on; see restore_default_ntp_on_all_subnets
+// for the counterpart that hands control back when the toggle turns off.
+// A no-op (Ok(())) when DHCP isn't actually running in reachable Kea mode.
+pub(crate) async fn apply_ntp_lan_ip_to_all_subnets(state: &AppState) -> Result<(), DhcpError> {
+    if !kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
+        return Ok(());
+    }
+    set_ntp_option_on_all_subnets(state, state.config.standard_ip.clone()).await
+}
+
+// Restores every Kea subnet's ntp-servers option to the project-wide
+// configured default (effective_dhcp_ntp_servers(), resolved to IPv4 the
+// same way add_subnet/update_subnet already do) -- called when the "auto-set
+// as DHCP NTP server" toggle turns off, so subnets converge back to one
+// well-known, documented value (AG-OP-014) instead of whatever they
+// individually held before auto-populate took them over. A no-op when DHCP
+// isn't actually running in reachable Kea mode.
+pub(crate) async fn restore_default_ntp_on_all_subnets(state: &AppState) -> Result<(), DhcpError> {
+    if !kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
+        return Ok(());
+    }
+    let resolved = resolve_ntp_servers(&state.config.effective_dhcp_ntp_servers())
+        .await
+        .unwrap_or_default();
+    set_ntp_option_on_all_subnets(state, resolved).await
+}
+
+// Shared plumbing for the two reconcile entry points above: rewrites every
+// subnet's ntp-servers option to the same already-resolved value via
+// set_subnet_ntp_option, leaving every other subnet field untouched.
+async fn set_ntp_option_on_all_subnets(
+    state: &AppState,
+    ntp_servers: String,
+) -> Result<(), DhcpError> {
+    kea_config_modify(state, move |config| {
+        let subnets = dhcp4_subnets_mut(config)?;
+        for subnet in subnets.iter_mut() {
+            set_subnet_ntp_option(subnet, &ntp_servers)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))
 }
 
 // Best-effort pre-flight check that update_dhcp_mode runs BEFORE
@@ -708,6 +839,10 @@ pub(crate) fn persist_stack_settings(
                 state.config.effective_dhcp_upstream_dhcp_ip(),
             ),
             (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
+            (
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
@@ -740,6 +875,239 @@ pub(crate) fn persist_stack_settings(
                 "AUTO_UPDATE_ENABLED",
                 if auto_update_enabled { "1" } else { "0" }.to_string(),
             ),
+            // LanCache-NG-NTP settings: this route never edits these, but
+            // write_ui_settings_file overwrites the whole file each call --
+            // carried through unchanged so a release-channel save never
+            // silently reverts an operator's NTP configuration back to its
+            // env default.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // Issue #1069 part 3: this route never edits a pending cache
+            // resize, but write_ui_settings_file overwrites the whole file
+            // each call -- carried through unchanged so a release-channel
+            // save never silently reverts an operator's requested resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )
+}
+
+// Counterpart to persist_stack_settings for routes/ntp.rs's own settings
+// save (update_ntp_settings): writes the three NTP_* keys plus every current
+// DHCP/release-channel value unchanged, for the same whole-file-overwrite
+// reason documented on write_ui_settings_file. `pub(crate)` so routes/ntp.rs
+// can call it without duplicating this file's ownership of the settings
+// file's write contract.
+pub(crate) fn persist_ntp_settings(
+    state: &AppState,
+    ntp_enabled: bool,
+    ntp_upstream_servers: &str,
+    ntp_auto_dhcp: bool,
+) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_ENABLED",
+                if ntp_enabled { "1" } else { "0" }.to_string(),
+            ),
+            ("NTP_UPSTREAM_SERVERS", ntp_upstream_servers.to_string()),
+            (
+                "NTP_AUTO_DHCP",
+                if ntp_auto_dhcp { "1" } else { "0" }.to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // persist_stack_settings's own CACHE_MAX_GB line -- this route
+            // never edits a pending cache resize either.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )
+}
+
+// Cache resize (issue #1069 part 3): counterpart to persist_stack_settings/
+// persist_ntp_settings for routes/cache.rs's own settings save
+// (resize_cache). Writes the requested CACHE_MAX_GB plus every current
+// DHCP/release-channel/NTP value unchanged, for the same whole-file-
+// overwrite reason documented on write_ui_settings_file. `pub(crate)` so
+// routes/cache.rs can call it without duplicating this file's ownership of
+// the settings file's write contract. Callers are expected to have already
+// validated `cache_gb` (a positive whole number of GiB that leaves the
+// required safety buffer on the real cache disk) before calling this --
+// this function only persists, it does not re-validate.
+pub(crate) fn persist_cache_settings(state: &AppState, cache_gb: u64) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            ("CACHE_MAX_GB", cache_gb.to_string()),
         ],
     )
 }
@@ -769,6 +1137,9 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         "DHCP_DNS_PRIMARY",
         "DHCP_DNS_SECONDARY",
         "UPSTREAM_DHCP_IP",
+        // Issue #844: DHCP-relay-mode local address. Same whitelist rule as
+        // the keys around it -- must be listed here or persist silently drops it.
+        "DHCP_RELAY_LOCAL_ADDR",
         "DHCP_NTP_SERVERS",
         // Issue #450's optional relay/PXE fields -- this key list is the
         // authoritative whitelist of what this file can ever contain, so a
@@ -787,6 +1158,22 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         // function's doc comment for the full read path.
         "LANCACHE_IMAGE_CHANNEL",
         "AUTO_UPDATE_ENABLED",
+        // LanCache-NG-NTP settings, written by routes/ntp.rs's
+        // update_ntp_settings (via persist_ntp_settings below). Same
+        // whole-file-overwrite contract: every other save site in this file
+        // must keep carrying these three keys through unchanged, or an
+        // unrelated DHCP/release-channel save would silently reset them to
+        // their env defaults.
+        "NTP_ENABLED",
+        "NTP_UPSTREAM_SERVERS",
+        "NTP_AUTO_DHCP",
+        // Cache resize (issue #1069 part 3), written by routes/cache.rs's
+        // resize_cache (via persist_cache_settings below). Same
+        // whole-file-overwrite contract: every other save site in this file
+        // must keep carrying this key through unchanged, or an unrelated
+        // DHCP/release-channel/NTP save would silently drop a pending
+        // resize back to the container's raw startup CACHE_MAX_GB.
+        "CACHE_MAX_GB",
     ] {
         if let Some(value) = map.get(key) {
             content.push_str(key);
@@ -883,6 +1270,10 @@ pub async fn update_dhcp_mode(
                 state.config.effective_dhcp_upstream_dhcp_ip(),
             ),
             (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
+            (
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
@@ -933,6 +1324,38 @@ pub async fn update_dhcp_mode(
                 }
                 .to_string(),
             ),
+            // LanCache-NG-NTP settings: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED above -- this route
+            // never edits these either.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/NTP_* above -- this route never edits a
+            // pending cache resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
         ],
     );
 
@@ -941,19 +1364,19 @@ pub async fn update_dhcp_mode(
         // they're already on; reconcile_dhcp_mode is then a no-op repeat of
         // the current state, so there is nothing to roll back to and doing
         // so would just repeat the exact same persist failure.
-        if mode != previous_mode {
-            if let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await {
-                return Err(DhcpError::config_error(format!(
-                    "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
-                     back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
-                     are now running in '{}' mode but the UI may still report '{}' until this is \
-                     resolved manually.",
-                    mode.as_str(),
-                    previous_mode.as_str(),
-                    mode.as_str(),
-                    previous_mode.as_str()
-                )));
-            }
+        if mode != previous_mode
+            && let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await
+        {
+            return Err(DhcpError::config_error(format!(
+                "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
+                 back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
+                 are now running in '{}' mode but the UI may still report '{}' until this is \
+                 resolved manually.",
+                mode.as_str(),
+                previous_mode.as_str(),
+                mode.as_str(),
+                previous_mode.as_str()
+            )));
         }
         return Err(persist_err);
     }
@@ -1077,6 +1500,14 @@ pub async fn update_dhcp_proxy(
             ("DHCP_DNS_PRIMARY", form.dhcp_dns_primary),
             ("DHCP_DNS_SECONDARY", form.dhcp_dns_secondary),
             ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            // #844: this ProxyDHCP-settings route never edits the relay local
+            // address, but persist rewrites the whole file, so carry the
+            // current value through unchanged (via effective_*, not the form)
+            // rather than blanking it when an operator saves proxy settings.
+            (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
             ("DHCP_NTP_SERVERS", form.dhcp_ntp_servers.trim().to_string()),
             (
                 "DHCP_PROXY_INTERFACE",
@@ -1114,6 +1545,133 @@ pub async fn update_dhcp_proxy(
                 }
                 .to_string(),
             ),
+            // LanCache-NG-NTP settings: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED above -- this route
+            // never edits these either.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/NTP_* above -- this route never edits a
+            // pending cache resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )?;
+    Ok(Redirect::to("/dhcp"))
+}
+
+// Saves the DHCP-relay-mode settings (issue #844). Mirrors update_dhcp_proxy's
+// persist-only contract (no container mutation here; the dhcp-proxy container
+// re-renders from the persisted DHCP_MODE/relay settings on its next start),
+// but with relay's own two required, IPv4-validated fields. Every ProxyDHCP
+// setting is carried through unchanged via effective_* so switching between
+// the two dnsmasq modes never silently discards the other mode's config.
+pub async fn update_dhcp_relay(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateDhcpRelayForm>,
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    if parse_ipv4(&form.dhcp_relay_local_addr).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Relay local address must be a valid IPv4 address (this relay's own IP on the client network).",
+        ));
+    }
+    if parse_ipv4(&form.upstream_dhcp_ip).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Upstream DHCP server must be a valid IPv4 address.",
+        ));
+    }
+
+    persist_ui_settings(
+        &state,
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            // ProxyDHCP settings carried through unchanged (relay ignores them,
+            // but a later switch back to ProxyDHCP mode must not lose them).
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            // The two values this form actually edits.
+            ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            ("DHCP_RELAY_LOCAL_ADDR", form.dhcp_relay_local_addr),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -1136,8 +1694,10 @@ fn is_valid_interface_name(raw: &str) -> bool {
 
 // Checks the whole dotted name against DNS's own length rules (each label
 // max 63 bytes, the full name max 253) before checking each label's
-// characters via is_valid_dns_label below.
-fn is_valid_domain_name(raw: &str) -> bool {
+// characters via is_valid_dns_label below. `pub(crate)`: routes/ntp.rs
+// reuses this to validate NTP_UPSTREAM_SERVERS hostname entries rather than
+// duplicating DNS label-syntax validation.
+pub(crate) fn is_valid_domain_name(raw: &str) -> bool {
     let name = raw.trim();
     !name.is_empty()
         && name.len() <= 253
@@ -1725,10 +2285,10 @@ async fn fetch_lease_hostname(state: &AppState, ip: &str) -> Option<String> {
 async fn cleanup_lease_ddns_records(state: &AppState, ip: &str, hostname: Option<&str>) {
     // Forward A record: keyed by Kea's own FQDN for the lease. Skipped when the
     // lease had no hostname (nothing was ever registered forward).
-    if let Some(hostname) = hostname {
-        if let Some((zone, name)) = forward_record_zone_and_name(hostname) {
-            publish_dns_record_delete(state, &zone, &name, "A").await;
-        }
+    if let Some(hostname) = hostname
+        && let Some((zone, name)) = forward_record_zone_and_name(hostname)
+    {
+        publish_dns_record_delete(state, &zone, &name, "A").await;
     }
     // Reverse PTR record: name + zone derive purely from the IPv4, so this runs
     // even when the lease carried no hostname.
@@ -2719,14 +3279,14 @@ fn extract_dhcp_offer_details(output: &str) -> Vec<DhcpProbeDetail> {
     for line in output.lines() {
         let line = normalize_nmap_line(line);
 
-        if let Some(rest) = line.strip_prefix("Response ") {
-            if rest.contains(" of ") {
-                response_blocks_seen += 1;
-                if response_blocks_seen > 1 {
-                    break;
-                }
-                continue;
+        if let Some(rest) = line.strip_prefix("Response ")
+            && rest.contains(" of ")
+        {
+            response_blocks_seen += 1;
+            if response_blocks_seen > 1 {
+                break;
             }
+            continue;
         }
 
         // `.iter().copied()` (not a bare `for label in DHCP_OFFER_DETAIL_LABELS`)
@@ -3117,7 +3677,9 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     Ok(lease_time)
 }
 
-fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
+// `pub(crate)`: routes/ntp.rs reuses this to validate NTP_UPSTREAM_SERVERS
+// IPv4-literal entries rather than duplicating the same parse.
+pub(crate) fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
     Ipv4Addr::from_str(ip).ok()
 }
 
@@ -3672,6 +4234,33 @@ fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
 }
 
+// Rewrites ONLY a subnet's ntp-servers option-data entry in place, leaving
+// every other option (routers, DNS, domain, custom options, reservations)
+// untouched. Used by reconcile_ntp_dhcp_option (issue #1079's requirement 4)
+// instead of apply_subnet_value/build_subnet_options: those two rebuild a
+// subnet's ENTIRE option-data array from an add_subnet/update_subnet form
+// submission, which this reconcile pass never has -- it only ever knows the
+// one NTP value it needs to push (or restore), not the subnet's current
+// gateway/DNS/domain, so reusing them would silently blank those out.
+fn set_subnet_ntp_option(subnet: &mut Value, ntp_servers: &str) -> Result<(), &'static str> {
+    let options = subnet
+        .get_mut("option-data")
+        .and_then(|value| value.as_array_mut())
+        .ok_or("subnet option-data missing or not an array")?;
+
+    options.retain(|option| {
+        !is_dhcp4_option_space(option)
+            || !(option.get("name").and_then(|value| value.as_str()) == Some("ntp-servers")
+                || option.get("code").and_then(|value| value.as_u64()) == Some(42))
+    });
+
+    if let Some(data) = format_ntp_server_option(ntp_servers) {
+        options.push(json!({"name": "ntp-servers", "data": data}));
+    }
+
+    Ok(())
+}
+
 // One entry of a parsed NTP server list, split into the three shapes
 // resolve_ntp_servers below has to handle differently: an entry that is
 // already the IPv4 literal Kea's ntp-servers option-42 data requires
@@ -3993,6 +4582,56 @@ mod tests {
     use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::Arc;
+
+    // Issue #1068 item 6: switching to a DHCP mode whose container was never
+    // created (the docker-socket-proxy allowlist has no create capability --
+    // see docker_client's own module comment) used to surface as a bare
+    // "Failed to start 'dhcp-proxy'" with no indication of what to do about
+    // it. Confirms the 404 case is rewritten into the actionable
+    // create-it-yourself guidance instead of the raw Docker error text.
+    #[test]
+    fn start_service_error_gives_actionable_guidance_for_a_missing_container() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container: lancache-dhcp-proxy".to_string(),
+        };
+        let err: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp-proxy'");
+        let dhcp_err = start_service_error(err, "dhcp-proxy", "dhcp-proxy");
+        assert_eq!(dhcp_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            dhcp_err.message.contains("has not been created yet"),
+            "expected actionable guidance, got: {}",
+            dhcp_err.message
+        );
+        assert!(
+            dhcp_err
+                .message
+                .contains("docker compose --profile dhcp-proxy up -d dhcp-proxy"),
+            "expected the exact fix command, got: {}",
+            dhcp_err.message
+        );
+    }
+
+    // A real operational failure (not a missing container) must still
+    // surface as an honest error -- this must not be misclassified as the
+    // "run this command" bootstrap case, which would send an operator
+    // chasing a fix that cannot possibly help.
+    #[test]
+    fn start_service_error_passes_through_other_failures_unchanged() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "container crashed on start".to_string(),
+        };
+        let err: anyhow::Error = anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
+        let dhcp_err = start_service_error(err, "dhcp", "dhcp-kea");
+        assert!(
+            !dhcp_err.message.contains("has not been created yet"),
+            "a real failure must not get the missing-container message: {}",
+            dhcp_err.message
+        );
+        assert!(dhcp_err.message.contains("container crashed on start"));
+    }
 
     // Wraps validate_dhcp_form's 9-field DhcpFormValidation struct literal
     // so individual tests below can call it with plain positional
@@ -4644,7 +5283,12 @@ mod tests {
         // The mode-switch form is the only writer of DHCP_MODE from the UI, so
         // every supported value must parse back to its enum, and unknown input
         // must be rejected rather than silently coerced to a default.
-        for mode in [DhcpMode::Disabled, DhcpMode::Kea, DhcpMode::DnsmasqProxy] {
+        for mode in [
+            DhcpMode::Disabled,
+            DhcpMode::Kea,
+            DhcpMode::DnsmasqProxy,
+            DhcpMode::DnsmasqRelay,
+        ] {
             assert_eq!(parse_dhcp_mode_input(mode.as_str()), Some(mode));
         }
         // Case/whitespace tolerance mirrors the setup.sh prompt handling.
@@ -4652,8 +5296,32 @@ mod tests {
             parse_dhcp_mode_input("  Dnsmasq-Proxy "),
             Some(DhcpMode::DnsmasqProxy)
         );
+        // Issue #844: the new relay mode parses (incl. case/whitespace) and
+        // stays distinct from proxy -- not silently coerced to it or dropped.
+        assert_eq!(
+            parse_dhcp_mode_input(" DNSMASQ-RELAY "),
+            Some(DhcpMode::DnsmasqRelay)
+        );
         assert_eq!(parse_dhcp_mode_input("dnsmasq"), None);
         assert_eq!(parse_dhcp_mode_input(""), None);
+    }
+
+    // Issue #844: the DhcpMode helpers must classify the relay variant
+    // correctly -- is_dnsmasq covers both dnsmasq modes (they share the
+    // dhcp-proxy container), is_dnsmasq_relay is relay-only, and is_kea stays
+    // false for it. A miss here would render the wrong Admin UI panel or start
+    // the wrong container.
+    #[test]
+    fn dhcp_mode_relay_classification_helpers() {
+        use crate::config::DhcpMode;
+        assert!(DhcpMode::DnsmasqRelay.is_dnsmasq());
+        assert!(DhcpMode::DnsmasqProxy.is_dnsmasq());
+        assert!(!DhcpMode::Kea.is_dnsmasq());
+        assert!(!DhcpMode::Disabled.is_dnsmasq());
+        assert!(DhcpMode::DnsmasqRelay.is_dnsmasq_relay());
+        assert!(!DhcpMode::DnsmasqProxy.is_dnsmasq_relay());
+        assert!(!DhcpMode::DnsmasqRelay.is_kea());
+        assert_eq!(DhcpMode::DnsmasqRelay.as_str(), "dnsmasq-relay");
     }
 
     // validate_dhcp_form's containment/range checks are exactly the kind of
@@ -5993,34 +6661,50 @@ mod tests {
         // a code with "routers", and (3) fresh UI-managed entries reflect
         // this save's new form values.
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 3 && is_dhcp4_option_space(option)));
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 15 && is_dhcp4_option_space(option)));
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 119 && is_dhcp4_option_space(option)));
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 3 && is_dhcp4_option_space(option))
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 15 && is_dhcp4_option_space(option))
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 119 && is_dhcp4_option_space(option))
+        );
         assert!(options.iter().any(|option| option["space"] == "vendor-foo"
             && option["code"] == 3
             && option["data"] == "keep-vendor-route"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.1.2, 10.0.1.3"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name-servers"
+                    && option["data"] == "10.0.1.2, 10.0.1.3")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan")
+        );
     }
 
     // Kea's own config-get response identifies well-known options by numeric
@@ -6103,13 +6787,17 @@ mod tests {
 
         let options = subnet["option-data"].as_array().expect("option-data array");
         assert_eq!(options.len(), 4);
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.2.2, 10.0.2.3"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name-servers"
+                    && option["data"] == "10.0.2.2, 10.0.2.3")
+        );
         assert!(!options.iter().any(|option| option["name"] == "ntp-servers"));
     }
 
@@ -6139,15 +6827,21 @@ mod tests {
         .expect("subnet value");
 
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4")
+        );
     }
 
     // The custom-option form (add_subnet_option) must refuse the 5 codes
@@ -6600,15 +7294,19 @@ mod tests {
 
         let options = custom_subnet_options(&subnet);
         assert_eq!(options.len(), 2);
-        assert!(options
-            .iter()
-            .any(|option| option.code == 66 && option.data == "10.0.0.20"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option.code == 66 && option.data == "10.0.0.20")
+        );
 
         remove_custom_subnet_option(&mut subnet, 67, "bootx64.efi").expect("remove option");
         let raw_options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(raw_options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1"));
+        assert!(
+            raw_options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1")
+        );
         assert!(!raw_options.iter().any(|option| option["code"] == 67));
     }
 
@@ -6651,15 +7349,21 @@ mod tests {
             compatible_reservations_for_subnet(&subnet, "10.0.2.0/24").expect("reservations");
 
         assert_eq!(reservations.len(), 2);
-        assert!(reservations
-            .iter()
-            .any(|reservation| reservation["ip-address"] == "10.0.2.50"));
-        assert!(!reservations
-            .iter()
-            .any(|reservation| reservation["ip-address"] == "10.0.3.50"));
-        assert!(reservations
-            .iter()
-            .any(|reservation| reservation["client-id"] == "01:02:03"));
+        assert!(
+            reservations
+                .iter()
+                .any(|reservation| reservation["ip-address"] == "10.0.2.50")
+        );
+        assert!(
+            !reservations
+                .iter()
+                .any(|reservation| reservation["ip-address"] == "10.0.3.50")
+        );
+        assert!(
+            reservations
+                .iter()
+                .any(|reservation| reservation["client-id"] == "01:02:03")
+        );
     }
 
     // Regression coverage for a real bug found by driving real Kea 2.6.3
@@ -6747,8 +7451,8 @@ mod tests {
     // kea_config_modify_strips_hash_from_config_get_before_reuse already
     // uses for the `hash`-field regression, applied to this bug instead.
     #[tokio::test]
-    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope(
-    ) {
+    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope()
+     {
         let config_get_response = kea_config_get_response(json!({
             "Dhcp4": {
                 "subnet4": [{"id": 1, "reservations": []}]
@@ -6991,5 +7695,154 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // Issue #1079: same bug class as write_ui_settings_file_persists_
+    // release_channel_and_auto_update_keys above -- a key left off
+    // write_ui_settings_file's fixed list is silently dropped even if
+    // persist_ntp_settings/persist_stack_settings/update_dhcp_mode/
+    // update_dhcp_proxy all pass it in `values`.
+    #[test]
+    fn write_ui_settings_file_persists_ntp_keys() {
+        let dir = temp_snapshot_root("ntp-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(
+            &target,
+            &[
+                ("NTP_ENABLED", "1".to_string()),
+                (
+                    "NTP_UPSTREAM_SERVERS",
+                    "0.debian.pool.ntp.org time.cloudflare.com".to_string(),
+                ),
+                ("NTP_AUTO_DHCP", "0".to_string()),
+            ],
+        );
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content,
+            "NTP_ENABLED=1\nNTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org time.cloudflare.com\nNTP_AUTO_DHCP=0\n"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Issue #1069 part 3: same bug class as write_ui_settings_file_persists_
+    // release_channel_and_auto_update_keys/write_ui_settings_file_persists_
+    // ntp_keys above -- CACHE_MAX_GB must be on write_ui_settings_file's
+    // fixed whitelist, or routes/cache.rs's persist_cache_settings would
+    // silently drop every resize request it tries to save.
+    #[test]
+    fn write_ui_settings_file_persists_cache_max_gb_key() {
+        let dir = temp_snapshot_root("cache-resize-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(&target, &[("CACHE_MAX_GB", "75".to_string())]);
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(content, "CACHE_MAX_GB=75\n");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Every existing whole-file save site (update_dhcp_mode, update_dhcp_proxy,
+    // persist_stack_settings, persist_ntp_settings) must carry a pending
+    // CACHE_MAX_GB resize through unchanged, per the same "every other save
+    // site must re-include every key" contract documented on
+    // write_ui_settings_file's fixed key list. This directly exercises
+    // persist_ntp_settings (the one call site that does NOT take an AppState,
+    // making it callable here without a live Docker/NATS connection) writing
+    // a values slice that omits CACHE_MAX_GB, mirroring the shape a caller
+    // that forgot the carry-through line would produce, and asserts the
+    // result is what the *whitelist* alone determines -- i.e. that this
+    // failure class is caught by inspecting the actual call sites in this
+    // file (see the CACHE_MAX_GB carry-through lines added to all four save
+    // sites), not by this generic function silently reintroducing a dropped
+    // key on its own.
+    #[test]
+    fn write_ui_settings_file_omitted_cache_max_gb_is_dropped_not_silently_kept() {
+        let dir = temp_snapshot_root("cache-resize-omission-guard");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        // First write establishes a pending resize override.
+        write_ui_settings_file(&target, &[("CACHE_MAX_GB", "75".to_string())])
+            .expect("expected a clean first write");
+
+        // A whole-file save that forgets to carry CACHE_MAX_GB through (the
+        // exact bug this test guards every real call site against) silently
+        // wipes the pending resize -- proving why every persist_* function
+        // above must always include it.
+        write_ui_settings_file(&target, &[("NTP_ENABLED", "1".to_string())])
+            .expect("expected a clean second write");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content, "NTP_ENABLED=1\n",
+            "CACHE_MAX_GB must be re-included by every caller or it is lost, exactly as asserted here"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // set_subnet_ntp_option must replace an existing ntp-servers entry
+    // (matched by name OR by its well-known code 42, same dual-match
+    // is_ui_managed_subnet_option already relies on) while leaving every
+    // other option-data entry -- including custom, non-UI-managed ones --
+    // completely untouched. This is the core invariant
+    // apply_ntp_lan_ip_to_all_subnets/restore_default_ntp_on_all_subnets
+    // depend on: unlike apply_subnet_value, this function must never touch
+    // gateway/DNS/domain/custom options it was never given.
+    #[test]
+    fn set_subnet_ntp_option_replaces_only_the_ntp_entry() {
+        let mut subnet = json!({
+            "id": 1,
+            "option-data": [
+                {"name": "routers", "data": "10.0.0.1"},
+                {"name": "ntp-servers", "data": "203.0.113.1"},
+                {"code": 99, "data": "custom-value"}
+            ]
+        });
+
+        set_subnet_ntp_option(&mut subnet, "192.0.2.50").expect("must succeed");
+
+        let options = subnet["option-data"].as_array().expect("array");
+        assert_eq!(options.len(), 3, "routers/custom entries must be preserved");
+        assert!(
+            options
+                .iter()
+                .any(|o| o["name"] == "routers" && o["data"] == "10.0.0.1")
+        );
+        assert!(options.iter().any(|o| o["code"] == 99));
+        assert!(
+            options
+                .iter()
+                .any(|o| o["name"] == "ntp-servers" && o["data"] == "192.0.2.50")
+        );
+    }
+
+    // An empty target value (the resolved project-wide default when nothing
+    // is configured) must remove the ntp-servers entry entirely rather than
+    // leave a Kea-invalid empty-string option-data value, matching
+    // format_ntp_server_option's own "empty means omit" contract that
+    // build_subnet_options already relies on.
+    #[test]
+    fn set_subnet_ntp_option_with_empty_value_removes_the_entry() {
+        let mut subnet = json!({
+            "id": 1,
+            "option-data": [
+                {"name": "ntp-servers", "data": "203.0.113.1"}
+            ]
+        });
+
+        set_subnet_ntp_option(&mut subnet, "").expect("must succeed");
+
+        let options = subnet["option-data"].as_array().expect("array");
+        assert!(!options.iter().any(|o| o["name"] == "ntp-servers"));
     }
 }

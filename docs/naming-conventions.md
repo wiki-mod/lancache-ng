@@ -69,8 +69,8 @@ interchangeable strings.
 
 ### Compose project name
 
-Rule: every top-level, human-run deployment mode (`deploy/dev`,
-`deploy/prod`, `deploy/quickstart`) declares `name: lancache-ng` at the top
+Rule: every top-level, human-run deployment mode (`deploy/prod`,
+`deploy/quickstart`) declares `name: lancache-ng` at the top
 of its `docker-compose.yml`. This fixes the Compose project name so
 generated resource names (`lancache-ng-<service>-1` for anything without an
 explicit `container_name:`, network names, the implicit default network)
@@ -96,17 +96,17 @@ Documented exceptions:
 
 Rule: lowercase, hyphen-separated, one word per logical responsibility —
 `proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
-`nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
+`ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
 These names are also the DNS aliases used for
 service-to-service HTTP calls inside a Compose network (see "Two separate
-name namespaces" above). They must be identical across `deploy/dev`,
-`deploy/prod`, and `deploy/quickstart` for the same logical service — a
+name namespaces" above). They must be identical across `deploy/prod`
+and `deploy/quickstart` for the same logical service — a
 service must not be called `dns-standard` in one file and `dns_standard` or
 `standard-dns` in another.
 
 ### Container names (`container_name:`)
 
-Rule: every service defined in `deploy/dev`, `deploy/prod`, and
+Rule: every service defined in `deploy/prod` and
 `deploy/quickstart` gets an explicit `container_name: lancache-<service>`
 (the Compose service name, prefixed with `lancache-`; `dns-standard`
 becomes `lancache-dns-standard`, not `lancache-dnsstandard` or
@@ -168,10 +168,11 @@ explicitly scoped change adds the volume migration logic.
 Rule: everything under the shared `LANCACHE_STATE_DIR` (default
 `/opt/lancache-ng`) uses lowercase, hyphen-separated subdirectory names that
 match the service that owns them: `cache`, `pdns-standard`, `pdns-ssl`,
-`pdns-filter-state`, `nats`, `nats-conf`, `kea`. See `docs/backup-restore.md`
+`pdns-filter-state`, `nats`, `nats-conf`, `kea`, `ntp`. See `docs/backup-restore.md`
 and `docs/how-to-change-ip.md` for the full `LANCACHE_STATE_DIR` contract
 and its override variables (`PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`,
-`PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`).
+`PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`,
+`NTP_DATA_DIR`).
 This document does not duplicate that contract; it only asserts that new
 state directories must follow the same naming shape.
 
@@ -179,7 +180,7 @@ state directories must follow the same naming shape.
 
 Rule: `ghcr.io/wiki-mod/lancache-ng/<service>` for every first-party image,
 where `<service>` is the same lowercase-hyphenated name as the Compose
-service (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ui`,
+service (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`,
 `build-tools`, `stack`). This is already fully governed by
 `release/stack-images.yml` (the machine-readable inventory) and
 `docs/release-versioning.md` — this document does not duplicate that
@@ -227,7 +228,7 @@ it must match is also a fixed, non-configurable set of strings.
 
 Rule: `scripts/docker-socket-proxy.sh` is the **single source of truth**
 for the allowlist. It is mounted read-only into the `docker-socket-proxy`
-container identically from `deploy/dev`, `deploy/prod`, and
+container identically from `deploy/prod` and
 `deploy/quickstart` — there is exactly one copy of the allowlist logic, not
 one per Compose file. Every container name in the allowlist regexes must be
 a real `container_name:` declared in the same Compose file that mounts this
@@ -267,14 +268,14 @@ it.
 
 | Category | Canonical source | Also appears in |
 |---|---|---|
-| Compose project name | `deploy/{dev,prod,quickstart}/docker-compose.yml` `name:` | — |
-| Compose service names | `deploy/{dev,prod,quickstart}/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/{dev,prod,quickstart}/docker-compose.yml` env values that build internal URLs |
-| Container names | `deploy/{dev,prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` (`CONTAINER_*` defaults), `config/{dev,prod}/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
-| Docker volumes | `deploy/{dev,prod,quickstart}/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same files |
+| Compose project name | `deploy/{prod,quickstart}/docker-compose.yml` `name:` | — |
+| Compose service names | `deploy/{prod,quickstart}/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/{prod,quickstart}/docker-compose.yml` env values that build internal URLs |
+| Container names | `deploy/{prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` (`CONTAINER_*` defaults), `config/prod/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
+| Docker volumes | `deploy/{prod,quickstart}/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same files |
 | Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
-| GHCR image/package names | `release/stack-images.yml` | `docs/release-versioning.md`, all three Compose files' `image:` lines |
-| Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/watchdog/watchdog.sh`, `config/{dev,prod}/*.env` |
-| Socket proxy allowlist | `scripts/docker-socket-proxy.sh` | (mounted read-only, unchanged, into all three Compose files' `docker-socket-proxy` service) |
+| GHCR image/package names | `release/stack-images.yml` | `docs/release-versioning.md`, both Compose files' `image:` lines |
+| Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/watchdog/watchdog.sh`, `config/prod/*.env` |
+| Socket proxy allowlist | `scripts/docker-socket-proxy.sh` | (mounted read-only, unchanged, into both Compose files' `docker-socket-proxy` service) |
 
 ## CI guard
 
@@ -283,15 +284,15 @@ job in `.github/workflows/build-push.yml` on every PR and checks the parts
 of this contract that are mechanically verifiable:
 
 - Every allowlist container name in `scripts/docker-socket-proxy.sh` has a
-  matching `container_name:` in `deploy/dev`, `deploy/prod`, and
+  matching `container_name:` in `deploy/prod` and
   `deploy/quickstart`.
 - Every container-name literal `services/ui/src/docker_client.rs` can
   resolve to is a subset of that same allowlist.
 - Every `CONTAINER_*` default in `services/watchdog/watchdog.sh` is a
   subset of that same allowlist.
 - The `*_SERVICE` defaults in `services/ui/src/config.rs` match a real
-  Compose service name (not a container name) in all three Compose files.
-- `deploy/dev`, `deploy/prod`, and `deploy/quickstart` all declare
+  Compose service name (not a container name) in both Compose files.
+- `deploy/prod` and `deploy/quickstart` both declare
   `name: lancache-ng`.
 
 It does not (and cannot) verify the human-judgment parts of this document —
