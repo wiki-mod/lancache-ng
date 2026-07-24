@@ -32,7 +32,7 @@
 # matched dot form would silently miss it.
 #
 # WHAT COUNTS AS "PROTECTED": the same job's body must ALSO contain one of
-# two things this repo's existing jobs actually use:
+# three things this repo's existing jobs actually use:
 #   1. An actual invocation of the wrapper, `bash scripts/lib/
 #      run-in-validation-subnet.sh` -- not just a comment mentioning the
 #      filename. Several jobs' own header comments mention
@@ -44,11 +44,16 @@
 #   2. Inline reservation equivalent: an actual call to
 #      `validation_subnet_reserve_slot "` (opening quote for its first
 #      arg -- distinguishes a real call from a comment merely naming the
-#      function). This is what full-setup-validate's own job in both files
-#      uses: it holds the lock across several SEPARATE steps (up, health
-#      check, client simulation, teardown), so it can't use the
+#      function). A job holding the lock across several SEPARATE steps (up,
+#      health check, client simulation, teardown) can't use the
 #      single-invocation wrapper and instead sources reserve-validation-
 #      subnet.sh directly and re-derives its own reservation loop.
+#   3. Composite-action reservation (#1014): `uses: ./.github/actions/
+#      reserve-validation-subnet-stack`. full-setup-validate's own
+#      cross-several-steps reservation loop (form 2) was extracted into this
+#      composite action; the action.yml still calls
+#      validation_subnet_reserve_slot, so a job reserving via it is protected
+#      exactly as the inline loop was.
 #
 # A job that references the raw output but has NEITHER protection is exactly
 # the #896/#907 bug class: it will build its compose stack directly from the
@@ -73,6 +78,11 @@ cd "$repo_root"
 WORKFLOW_FILES=(
     ".github/workflows/full-setup-validate.yml"
     ".github/workflows/full-setup-deep-validate.yml"
+    # #1014 moved the shared simulation jobs (the raw-output consumers this
+    # guard exists to protect) into this reusable workflow; the two files above
+    # became thin callers. Scanning it here keeps the same jobs under this
+    # guard's coverage in their new home.
+    ".github/workflows/full-setup-sims.yml"
 )
 
 # Every syntactic form GitHub Actions accepts for referencing
@@ -85,6 +95,13 @@ RAW_OUTPUT_MARKERS=(
 )
 WRAPPER_INVOCATION_MARKER='bash scripts/lib/run-in-validation-subnet.sh'
 INLINE_RESERVATION_MARKER='validation_subnet_reserve_slot "'
+# #1014 extracted full-setup-validate's own inline reservation loop into a
+# composite action. A job that reserves via that action (`uses:
+# ./.github/actions/reserve-validation-subnet-stack`) holds the same
+# flock-locked, retry-on-collision reservation across its separate steps as the
+# inline loop did -- the action's own action.yml calls
+# validation_subnet_reserve_slot. So this is an equally valid protection form.
+COMPOSITE_RESERVATION_MARKER='uses: ./.github/actions/reserve-validation-subnet-stack'
 
 failures=0
 jobs_examined_with_raw_output=0
@@ -175,7 +192,10 @@ check_job_body() {
     if [[ "$body" == *"$INLINE_RESERVATION_MARKER"* ]]; then
         return 0
     fi
-    fail "check-validation-subnet-wrapper-coverage: $file job '$job_name' references compute-validation-network's raw outputs (needs.compute-validation-network.outputs.* or the bracket-form equivalent) directly but has neither a '$WRAPPER_INVOCATION_MARKER' invocation nor an inline '$INLINE_RESERVATION_MARKER' reservation call -- this is the exact #820/#896/#907 collision class: two concurrent runs deriving the same subnet will race 'docker compose up' with no lock and no retry. Wrap this job's stack-starting invocation in scripts/lib/run-in-validation-subnet.sh (see e.g. ssl-mitm-cache-simulation in either workflow file), or add an equivalent inline reservation loop if the job must hold the lock across multiple separate steps (see full-setup-validate's own job in either file)."
+    if [[ "$body" == *"$COMPOSITE_RESERVATION_MARKER"* ]]; then
+        return 0
+    fi
+    fail "check-validation-subnet-wrapper-coverage: $file job '$job_name' references compute-validation-network's raw outputs (needs.compute-validation-network.outputs.* or the bracket-form equivalent) directly but has none of: a '$WRAPPER_INVOCATION_MARKER' invocation, an inline '$INLINE_RESERVATION_MARKER' reservation call, or a '$COMPOSITE_RESERVATION_MARKER' composite-action step -- this is the exact #820/#896/#907 collision class: two concurrent runs deriving the same subnet will race 'docker compose up' with no lock and no retry. Wrap this job's stack-starting invocation in scripts/lib/run-in-validation-subnet.sh (see e.g. ssl-mitm-cache-simulation in full-setup-sims.yml), or use the reserve-validation-subnet-stack composite action if the job must hold the lock across multiple separate steps (see full-setup-validate's own job in full-setup-sims.yml)."
 }
 
 # check_workflow_file <file>
