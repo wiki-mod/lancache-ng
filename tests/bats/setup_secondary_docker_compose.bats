@@ -57,7 +57,7 @@ extract_cmd_secondary_heredoc() {
     # actually resolves). Assert both the presence of the new probe and the
     # explicit absence of the old one, so a partial revert (e.g. someone
     # merging an older heredoc back in) fails loudly.
-    echo "$extracted_heredoc" | grep -qF 'test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]' \
+    echo "$extracted_heredoc" | grep -qF 'test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]' \
         || fail "healthcheck test command missing or incorrect (expected dig-based query/response probe)"
 
     if echo "$extracted_heredoc" | grep -qF 'test: ["CMD", "rec_control", "ping"]'; then

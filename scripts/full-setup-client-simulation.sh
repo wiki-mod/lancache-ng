@@ -14,6 +14,8 @@ if ! script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; then
 fi
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/full-setup-domain-probe.sh
+source "$script_dir/lib/full-setup-domain-probe.sh"
 
 compose_file="${FULL_SETUP_COMPOSE_FILE:-deploy/full-setup/docker-compose.yml}"
 client_tools_image="${FULL_SETUP_CLIENT_TOOLS_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
@@ -41,6 +43,13 @@ fi
 
 [[ -n "$client_domain" ]] \
     || { echo "::error::Could not select a client simulation CDN domain from $domain_file."; exit 1; }
+
+# See scripts/lib/full-setup-domain-probe.sh: a leading-dot cdn-domains.txt
+# entry (e.g. ".steamcontent.com", issue #1140) is a wildcard-only scope, not
+# a literal name dig can query directly. Applied regardless of whether
+# client_domain came from the file or an explicit FULL_SETUP_CLIENT_DOMAIN
+# override, since the same AG-OP-015 scope semantics apply either way.
+client_domain="$(resolve_full_setup_probe_domain "$client_domain")"
 
 if ! dns_container="$(docker compose -f "$compose_file" ps -q dns-standard)"; then
     echo "::error::Failed to query the compose container id for dns-standard." >&2

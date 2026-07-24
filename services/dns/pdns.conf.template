@@ -20,6 +20,18 @@ gsqlite3-database=/var/lib/powerdns/pdns.sqlite3
 dnsupdate=yes
 allow-dnsupdate-from=${DDNS_ALLOW_FROM}
 
+# The LAN/reverse zones created below (pdnsutil create-zone, entrypoint.sh's
+# "Create LAN Zones" step) get no explicit SOA at creation time, so without
+# this, PowerDNS falls back to its own built-in default-soa-content:
+# "a.misconfigured.dns.server.invalid hostmaster.@ ..." -- a real, working
+# SOA (these zones are never delegated/queried externally, so the SOA
+# content is functionally inert), but a genuinely alarming string for an
+# operator to stumble across in a `dig`/debug session. "@" is replaced by
+# PowerDNS with each zone's own name. Matches the RPZ zone's own existing
+# MNAME/RNAME convention (see entrypoint.sh's RPZ_FILE generation:
+# "@ SOA localhost. admin.rpz. ...") instead of inventing a second style.
+default-soa-content=localhost. admin.@ 0 10800 3600 604800 3600
+
 webserver=yes
 webserver-address=0.0.0.0
 webserver-port=8081
