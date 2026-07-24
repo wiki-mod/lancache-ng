@@ -20,43 +20,40 @@
 # ${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}, so a PR resolves against what it
 # will merge into, not its own feature-branch name).
 #
-# STATUS (2026-07-22, issue #1035, short-term "option 2"): `master` used to
-# map to `nightly` (renamed from `edge` by #1056), but nothing has ever
-# actively published a build-tools:nightly image -- `build-tools.yml`'s
-# branch-triggered publish only ever writes `<sanitized-ref>-tc` and (default
-# branch only) `latest`, and `build-push.yml`'s `promote` job only actively
-# maintains `dev`. Every `master`-targeted PR was therefore resolving to a
-# channel tag that could (and did) go silently stale/missing tools between
-# the rare pushes to `master`, failing `select-build-tools-image.sh`'s own
-# smoke test with an opaque "not pullable or did not satisfy smoke checks"
-# error -- exactly the AG-VAL-026 failure class this script's own header
-# comment warns about.
+# STATUS (2026-07-24, issue #1153, follow-through of #1142/#825): `dev` was
+# retired outright by #1142 -- nothing publishes `build-tools:dev` anymore,
+# so the previous "everything resolves to dev" mapping this function used
+# (issue #1035's short-term fix) now fails outright (a hard "denied" pull,
+# since the tag doesn't exist at all, not silently-stale content). #1142's
+# own PR deliberately left this file untouched, since the build-tools
+# *tooling*-image channel is a distinct concept from the runtime
+# `LANCACHE_IMAGE_CHANNEL` product channel it was scoped to -- but the two
+# now need the same underlying branch-to-channel mapping, since `promote`
+# only actively maintains `latest` (from `master`) and `nightly` (from
+# `current_dev`) going forward; nothing feeds `dev` at all anymore.
 #
-# Short-term fix: `master` now resolves to `dev` too, the same
-# actively-maintained channel every other ref already uses below -- this
-# does NOT stand up a new build-tools:nightly publisher (that remains
-# issue #1035's open, deliberately-undecided long-term call, to be folded
-# into the #825/#819 staged dev->nightly->latest channel-promotion design
-# once that exists, matching how the equivalent *product* stack:nightly
-# channel now gets a real scheduled promotion per #1056). This is narrowly
-# a build-tools *tooling*-image channel change; it has no effect on the
-# operator-facing LANCACHE_IMAGE_CHANNEL=nightly product channel, which
-# already has its own working #1056 refresh.
+# Mapping now mirrors #1142's decision exactly: `master` -> `latest` (the
+# stable channel), everything else (current_dev, a feature/claude/* branch
+# forked from it without an open PR yet, etc.) -> `nightly` (the actively-
+# maintained integration channel). This is narrowly a build-tools *tooling*-
+# image channel change; it has no effect on the operator-facing
+# LANCACHE_IMAGE_CHANNEL product channel, which already has its own #1142
+# mapping.
 resolve_build_tools_channel() {
     local channel_ref="$1"
 
     case "$channel_ref" in
         master)
-            printf '%s\n' "dev"
+            printf '%s\n' "latest"
             ;;
         *)
             # Every other ref this script is realistically invoked against --
-            # v0.2.0/current_dev itself, or a feature/claude/* branch forked
-            # from one of those without an open PR yet (e.g. a manual
-            # workflow_dispatch run) -- is integration-branch work, so `dev`
-            # (the channel those pushes actually promote) is the correct
-            # default rather than the stable-only `latest`.
-            printf '%s\n' "dev"
+            # current_dev itself, or a feature/claude/* branch forked from it
+            # without an open PR yet (e.g. a manual workflow_dispatch run) --
+            # is integration-branch work, so `nightly` (the channel those
+            # pushes actually promote per #1142) is the correct default
+            # rather than the stable-only `latest`.
+            printf '%s\n' "nightly"
             ;;
     esac
 }
