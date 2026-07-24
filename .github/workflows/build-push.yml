@@ -7037,6 +7037,25 @@ jobs:
           # and -- like the `-c` form it replaces -- this is set only for
           # this one command's environment, never written to `.git/config`.
           push_url="https://github.com/${REPOSITORY}.git"
+          # actions/checkout (persist-credentials: true, the default used
+          # throughout this workflow) already wrote its own GITHUB_TOKEN
+          # `Authorization` extraheader into this job's local .git/config,
+          # scoped to the bare https://github.com/ host. That entry and the
+          # PROJECT_AUTOMATION_PAT-scoped one set below both match this
+          # push's URL, and git's http backend sends every matching
+          # extraheader as its own `Authorization` header on the same
+          # request -- GitHub's HTTP endpoint rejects a request carrying two
+          # `Authorization` headers with a 400. This is a real, confirmed
+          # regression (every real run 2026-07-19 through 2026-07-24 hit
+          # this exact failure, distinct from the two bugs #1054 already
+          # fixed; see #819's verification comment for the affected run
+          # IDs). Clearing checkout's host-scoped entry immediately before
+          # this push ensures only the PAT-scoped header is sent. Nothing
+          # later in this job needs the original GITHUB_TOKEN git
+          # credential -- the next step authenticates its own registry call
+          # explicitly via secrets.GITHUB_TOKEN, not via this ambient git
+          # config.
+          git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0="http.${push_url}.extraheader" \
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
