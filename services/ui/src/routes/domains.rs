@@ -3,7 +3,7 @@
 //! Admin UI domain routes. Handles CDN domain lists, SSL wildcard scope, and
 //! LAN DNS records while preserving the on-disk domain-file semantics.
 
-use crate::{docker_client, AppState};
+use crate::{AppState, docker_client};
 use axum::extract::{Form, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{Html, Redirect};
@@ -1655,7 +1655,9 @@ mod tests {
             }
 
             let Some((expect, domain)) = line.split_once(' ') else {
-                panic!("malformed shared parity fixture line (expected \"valid|invalid <domain>\"): {line:?}");
+                panic!(
+                    "malformed shared parity fixture line (expected \"valid|invalid <domain>\"): {line:?}"
+                );
             };
             total += 1;
 

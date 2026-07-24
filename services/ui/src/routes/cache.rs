@@ -39,7 +39,7 @@
 //! container recreate the only available mechanism here today, not a
 //! limitation of nginx itself.
 
-use crate::{nginx_client, AppState};
+use crate::{AppState, nginx_client};
 use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};

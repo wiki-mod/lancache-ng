@@ -7,9 +7,9 @@
 //! compose services.
 
 use anyhow::{Context, Result};
+use bollard::Docker;
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{RestartContainerOptionsBuilder, StopContainerOptionsBuilder};
-use bollard::Docker;
 
 pub fn connect_from_env() -> Result<Docker> {
     if let Ok(proxy_url) = std::env::var("DOCKER_PROXY_URL") {
@@ -20,13 +20,12 @@ pub fn connect_from_env() -> Result<Docker> {
         }
     }
 
-    if let Ok(host) = std::env::var("DOCKER_HOST") {
-        if let Some(tcp_url) = host.trim().strip_prefix("tcp://") {
-            if !tcp_url.is_empty() {
-                return Docker::connect_with_http(tcp_url, 120, bollard::API_DEFAULT_VERSION)
-                    .context("Failed to connect to Docker host");
-            }
-        }
+    if let Ok(host) = std::env::var("DOCKER_HOST")
+        && let Some(tcp_url) = host.trim().strip_prefix("tcp://")
+        && !tcp_url.is_empty()
+    {
+        return Docker::connect_with_http(tcp_url, 120, bollard::API_DEFAULT_VERSION)
+            .context("Failed to connect to Docker host");
     }
 
     Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")

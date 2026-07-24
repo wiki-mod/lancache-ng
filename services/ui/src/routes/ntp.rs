@@ -9,7 +9,7 @@
 //! this module only decides WHEN to call it, based on whether this save
 //! actually changed the auto-populate state.
 
-use crate::{docker_client, AppState};
+use crate::{AppState, docker_client};
 use axum::extract::{Form, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;

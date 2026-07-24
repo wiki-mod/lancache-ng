@@ -6,7 +6,7 @@
 //! only for binding a CSRF token to one browser session. See `main.rs`'s
 //! `basic_auth` middleware for how this is wired into the request pipeline.
 
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use rand::random;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -205,12 +205,14 @@ mod tests {
         tampered_cookie.push('x');
         assert!(validate_session_cookie(&tampered_cookie, &secret, now).is_none());
 
-        assert!(validate_session_cookie(
-            &session.cookie_value,
-            &secret,
-            now + Duration::from_secs(301)
-        )
-        .is_none());
+        assert!(
+            validate_session_cookie(
+                &session.cookie_value,
+                &secret,
+                now + Duration::from_secs(301)
+            )
+            .is_none()
+        );
     }
 
     #[test]

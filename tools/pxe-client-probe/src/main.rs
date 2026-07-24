@@ -54,7 +54,7 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use pnet_datalink::Channel::Ethernet;
 use pnet_datalink::NetworkInterface;
 
@@ -155,11 +155,7 @@ fn udp_checksum(src: [u8; 4], dst: [u8; 4], udp_segment: &[u8]) -> u16 {
     let sum = internet_checksum(&buf);
     // A computed UDP checksum of 0x0000 must be transmitted as 0xffff so the
     // receiver does not read it as "checksum disabled" (RFC 768).
-    if sum == 0 {
-        0xffff
-    } else {
-        sum
-    }
+    if sum == 0 { 0xffff } else { sum }
 }
 
 // Builds the full broadcast Ethernet+IPv4+UDP+BOOTP+DHCP DISCOVER frame.
@@ -460,15 +456,15 @@ fn emit_reply_fields(payload: &[u8]) {
         &[][..]
     };
 
-    if let Some(mt) = dhcp_option(options, 53) {
-        if let Some(code) = mt.first() {
-            emit("message_type", &code.to_string());
-        }
+    if let Some(mt) = dhcp_option(options, 53)
+        && let Some(code) = mt.first()
+    {
+        emit("message_type", &code.to_string());
     }
-    if let Some(sid) = dhcp_option(options, 54) {
-        if sid.len() == 4 {
-            emit("server_id", &format_ipv4(sid));
-        }
+    if let Some(sid) = dhcp_option(options, 54)
+        && sid.len() == 4
+    {
+        emit("server_id", &format_ipv4(sid));
     }
     if let Some(dns) = dhcp_option(options, 6) {
         // Option 6 packs one or more 4-byte servers into a single TLV. Emit

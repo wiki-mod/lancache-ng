@@ -115,9 +115,10 @@ mod tests {
         .expect("data endpoint should be allowed");
 
         assert_eq!(url.path(), "/api/v1/data");
-        assert!(url
-            .as_str()
-            .contains("chart+name=system.cpu+%26+memory%3Dused%25"));
+        assert!(
+            url.as_str()
+                .contains("chart+name=system.cpu+%26+memory%3Dused%25")
+        );
         let pairs: HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(
             pairs.get("chart name"),

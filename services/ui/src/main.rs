@@ -28,12 +28,12 @@ mod watchdog_status;
 
 use anyhow::Result;
 use axum::{
-    body::{to_bytes, Body},
+    Router,
+    body::{Body, to_bytes},
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
 use base64::Engine as _;
 use bollard::Docker;
@@ -1330,10 +1330,12 @@ mod tests {
             );
         }
         // A real generated secret (openssl rand -hex 32 shape) must pass.
-        assert!(validate_secondary_registration_token(
-            "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
-        )
-        .is_ok());
+        assert!(
+            validate_secondary_registration_token(
+                "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
+            )
+            .is_ok()
+        );
     }
 
     // Cross-language parity coverage for secret/token placeholder detection
@@ -1512,10 +1514,18 @@ mod tests {
     fn lancache_image_template_functions_render_runtime_config() {
         let _guard = config::env_test_lock().lock().unwrap();
 
-        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
-        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
-        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        }
 
         let cfg = config::Config::from_env().unwrap();
         let mut templates = Tera::default();
@@ -1535,10 +1545,18 @@ mod tests {
             "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [nightly]"
         );
 
-        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
-        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
-        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
-        std::env::remove_var("LANCACHE_IMAGE_TAG");
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_TAG");
+        }
     }
 
     // Regression test for #848: load_templates() parses the *real* on-disk
@@ -1551,14 +1569,24 @@ mod tests {
     fn logs_html_renders_syslog_host_filter_dropdown_with_selection() {
         let _guard = config::env_test_lock().lock().unwrap();
 
-        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
-        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
-        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
-        std::env::set_var(
-            "TEMPLATE_DIR",
-            format!("{}/src/templates", env!("CARGO_MANIFEST_DIR")),
-        );
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        }
+        unsafe {
+            std::env::set_var(
+                "TEMPLATE_DIR",
+                format!("{}/src/templates", env!("CARGO_MANIFEST_DIR")),
+            );
+        }
 
         let cfg = config::Config::from_env().unwrap();
         let templates = load_templates(&cfg);
@@ -1584,11 +1612,21 @@ mod tests {
             "expected the non-selected dns-ssl <option> to be present without `selected`, got:\n{rendered}"
         );
 
-        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
-        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
-        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
-        std::env::remove_var("LANCACHE_IMAGE_TAG");
-        std::env::remove_var("TEMPLATE_DIR");
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_TAG");
+        }
+        unsafe {
+            std::env::remove_var("TEMPLATE_DIR");
+        }
     }
 
     // This crate has two similarly-named CSRF header helpers: main.rs's own

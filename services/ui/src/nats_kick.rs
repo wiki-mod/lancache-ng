@@ -86,7 +86,7 @@
 
 use crate::AppState;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const CONNZ_REQUEST_SUBJECT: &str = "$SYS.REQ.SERVER.PING.CONNZ";

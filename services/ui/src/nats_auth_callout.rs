@@ -123,13 +123,13 @@
 //! per-secondary-identity/revocation property this module delivers.
 
 use crate::AppState;
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
 use argon2::Argon2;
+use argon2::password_hash::{
+    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
+};
 use base64::Engine as _;
 use nkeys::{KeyPair, XKey};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha512_256};
 use std::fs::OpenOptions;
 use std::io::Write;

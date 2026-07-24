@@ -31,16 +31,16 @@
 use crate::{nats_publish, zone_snapshots};
 use async_nats::jetstream;
 use axum::{
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use futures::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -284,7 +284,7 @@ async fn rollback_handler(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("invalid request body: {e}")})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -307,7 +307,7 @@ async fn rollback_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("failed to list known-good snapshots: {e}")})),
             )
-                .into_response()
+                .into_response();
         }
     };
     if !known_ids.iter().any(|id| id == &body.snapshot_id) {
@@ -368,7 +368,7 @@ async fn rollback_handler(
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"error": format!("failed to decode current zone state: {e}")})),
             )
-                .into_response()
+                .into_response();
         }
     };
     let current_rrsets = current_json
@@ -402,7 +402,7 @@ async fn rollback_handler(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("failed to serialize rollback patch: {e}")})),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         let patch_result = state
@@ -590,13 +590,14 @@ async fn rollback_handler(
     // snapshot being rolled back to could already equal the most recently
     // recorded one (e.g. rolling back to undo unrelated DDNS drift that
     // happened to leave the zone matching an already-captured point).
-    if patch_len > 0 && !zone_snapshots::matches_latest_snapshot(&root, &snapshot_data) {
-        if let Err(e) = zone_snapshots::create_snapshot(&root, state.keep_n, &snapshot_data) {
-            zone_snapshots::kgs_log(
-                "FATAL",
-                &format!("failed to record post-rollback known-good snapshot for zone {zone}: {e}"),
-            );
-        }
+    if patch_len > 0
+        && !zone_snapshots::matches_latest_snapshot(&root, &snapshot_data)
+        && let Err(e) = zone_snapshots::create_snapshot(&root, state.keep_n, &snapshot_data)
+    {
+        zone_snapshots::kgs_log(
+            "FATAL",
+            &format!("failed to record post-rollback known-good snapshot for zone {zone}: {e}"),
+        );
     }
 
     (

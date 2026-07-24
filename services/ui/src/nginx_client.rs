@@ -812,7 +812,7 @@ mod tests {
         }
 
         let line_len = make_line(0).len() + 1; // +1 for the trailing '\n'
-                                               // Enough lines to span a few TAIL_CHUNK_SIZE reads with margin.
+        // Enough lines to span a few TAIL_CHUNK_SIZE reads with margin.
         let total_lines = (TAIL_CHUNK_SIZE as usize / line_len) * 3;
         let file_len = (total_lines * line_len) as u64;
         assert!(

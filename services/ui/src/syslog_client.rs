@@ -532,8 +532,8 @@ mod tests {
     }
 
     fn write_gz(dir: &Path, host: &str, name: &str, content: &str) {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         let host_dir = dir.join(host);
         fs::create_dir_all(&host_dir).expect("create host dir");
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -849,9 +849,11 @@ mod tests {
 
         let entries = parse_syslog_tail(root.to_str().unwrap(), Some("hostA"), 10);
         assert_eq!(entries.len(), 3);
-        assert!(entries
-            .iter()
-            .any(|e| e.message == "not a syslog line at all"));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.message == "not a syslog line at all")
+        );
         assert!(entries.iter().any(|e| e.message == "good line"));
         assert!(entries.iter().any(|e| e.message == "another good line"));
 
