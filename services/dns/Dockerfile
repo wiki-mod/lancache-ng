@@ -210,3 +210,5 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 53/udp 53/tcp 8081 8082 8083
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+# scratch AG-CI-012 baseline-trigger check for #1198, will be reverted
