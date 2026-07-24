@@ -1,0 +1,117 @@
+{
+  "_read_me": "This is the durable, checkable validation-state record referenced by docs/release-validation-plan.md's 'Validation State Tracking' section. Read that section before editing this file by hand. Never hand-wave an entry as validated: every non-null commit/date/validator/evidence_ref below must correspond to a real, completed validation run with real evidence (command output, CI run URL, or a PR/issue comment quoting it) -- see the proposed AG-VAL-028 rule in the docs/release-validation-plan.md PR body. This file is intentionally seeded with 'never validated' placeholders; it must not be pre-filled with a fabricated pass.",
+  "schema_version": 1,
+  "last_stack_validation": {
+    "commit": null,
+    "date": null,
+    "validator": null,
+    "scope": "none",
+    "summary": "Not yet validated under this tracking mechanism. Run the Stack half of docs/release-validation-plan.md and record the result here.",
+    "evidence_ref": null
+  },
+  "last_ci_validation": {
+    "commit": null,
+    "date": null,
+    "validator": null,
+    "scope": "none",
+    "summary": "Not yet validated under this tracking mechanism. Run the CI half of docs/release-validation-plan.md and record the result here.",
+    "evidence_ref": null
+  },
+  "subsystem_validation": {
+    "_note": "path_prefixes mirror scripts/classify-image-impact.sh's real touches_prefix() rules (the same classifier build-push.yml's detect-changes job and the promote job's version-bump logic both already consume) so staleness can be computed the same way CI already reasons about relevance, instead of a second, drifting definition. A subsystem entry is stale the moment `git log <its last commit>..HEAD -- <its path_prefixes>` is non-empty, OR whenever AGENTS.md/.github/AGENTS.md changed (see 'full_invalidation_triggers' below), OR whenever the recorded commit itself predates last_stack_validation/last_ci_validation's own commit for that layer.",
+    "dhcp-kea": {
+      "path_prefixes": ["services/dhcp/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "dhcp-dnsmasq": {
+      "path_prefixes": ["services/dhcp-proxy/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "dns-pdns": {
+      "path_prefixes": ["services/dns/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "nats": {
+      "path_prefixes": ["services/ui/src/nats_*.rs", "services/ui/src/nats_config.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
+      "note": "NATS has no dedicated classify-image-impact.sh key -- its functional surface spans the ui, setup_runtime, and deploy classifier keys. Treat a change as NATS-relevant if it touches any prefix above, not only a single classifier boolean.",
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "admin-ui": {
+      "path_prefixes": ["services/ui/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "watchdog": {
+      "path_prefixes": ["services/watchdog/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "proxy-cache": {
+      "path_prefixes": ["services/proxy/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "ntp": {
+      "path_prefixes": ["services/ntp/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "ci-build-tools": {
+      "path_prefixes": ["tools/build-tools/", ".github/workflows/build-tools.yml", ".github/workflows/build-push.yml", ".github/actions/"],
+      "layer": "ci",
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "governance-sbom": {
+      "path_prefixes": ["scripts/generate-vex.sh", "scripts/check-vex-drift.sh", "vex.openvex.json", ".trivyignore.yaml", "AGENTS.md", ".github/AGENTS.md"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    },
+    "setup-runtime": {
+      "path_prefixes": ["setup.sh", "scripts/"],
+      "layer": null,
+      "commit": null,
+      "date": null,
+      "validator": null,
+      "evidence_ref": null
+    }
+  },
+  "full_invalidation_triggers": [
+    "AGENTS.md or .github/AGENTS.md changed since the recorded commit (governance change can redefine what 'correct' means for every subsystem, not just one)",
+    "The diff since the recorded commit could not be reconstructed (force-push discarding the old tip, an unreachable base, or any case classify-image-impact.sh itself would fall back to --all-changed for) -- treat as fully stale rather than guessing",
+    "The recorded commit is not an ancestor of the commit under test (a rebase/history-rewrite happened) -- re-derive the diff from a real merge-base, do not assume the old record still applies"
+  ]
+}
