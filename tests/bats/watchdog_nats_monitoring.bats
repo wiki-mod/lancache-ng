@@ -97,7 +97,11 @@ drive_nats_health_sequence() {
     # shellcheck disable=SC2034 # read by write_status() (sourced from
     # services/watchdog/watchdog.sh) -- cross-file dynamic-scope read.
     export C_DNS_SSL="lancache-dns-ssl"
+    # shellcheck disable=SC2034 # see F_DNS_SSL/H_DNS_SSL comment pattern in
+    # watchdog_idempotence.bats -- read by write_status() via the same
+    # cross-file dynamic scope.
     F_DNS_SSL=0
+    # shellcheck disable=SC2034 # see comment above
     H_DNS_SSL="healthy"
     write_status
     run jq -e '.services["lancache-nats"] == {"status":"green","health":"healthy","failures":0}' "$status_file"
