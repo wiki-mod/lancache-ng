@@ -2,8 +2,9 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for setup.sh DHCP-mode selection and mutual exclusion, plus
-# rendering of the dnsmasq-proxy config template (issue #343). These guard the
-# invariant that Kea mode and dnsmasq-proxy mode can never both be active.
+# rendering of the dnsmasq-proxy and dnsmasq-relay (#844) config templates
+# (issue #343). These guard the invariant that Kea mode and the dnsmasq modes
+# can never both be active (both bind UDP port 67).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -16,14 +17,16 @@ setup() {
 
 # ─── DHCP mode validation ───
 
-# These three values—disabled, kea, and dnsmasq-proxy—are the exact valid
-# values that setup.sh's DHCP_MODE config variable accepts.
-@test "is_valid_dhcp_mode accepts the three supported modes" {
+# These four values—disabled, kea, dnsmasq-proxy, and dnsmasq-relay (#844)—are
+# the exact valid values that setup.sh's DHCP_MODE config variable accepts.
+@test "is_valid_dhcp_mode accepts the four supported modes" {
     run is_valid_dhcp_mode disabled
     [ "$status" -eq 0 ]
     run is_valid_dhcp_mode kea
     [ "$status" -eq 0 ]
     run is_valid_dhcp_mode dnsmasq-proxy
+    [ "$status" -eq 0 ]
+    run is_valid_dhcp_mode dnsmasq-relay
     [ "$status" -eq 0 ]
 }
 
@@ -70,6 +73,14 @@ setup() {
     [ "$output" = "dhcp-proxy" ]
 }
 
+# Issue #844: relay mode shares the dhcp-proxy container/profile with ProxyDHCP
+# mode (DHCP_MODE tells them apart), so it must map to the same profile.
+@test "compose_profiles_for_runtime emits dhcp-proxy for dnsmasq-relay mode" {
+    run compose_profiles_for_runtime "" 0 dnsmasq-relay
+    [ "$status" -eq 0 ]
+    [ "$output" = "dhcp-proxy" ]
+}
+
 @test "compose_profiles_for_runtime emits no DHCP profile when disabled" {
     run compose_profiles_for_runtime "" 0 disabled
     [ "$status" -eq 0 ]
@@ -80,7 +91,7 @@ setup() {
     # Even when both profiles are already present in the existing value (e.g. a
     # hand-edited or migrated .env), selecting one mode must strip the other so
     # Kea and dnsmasq can never both claim UDP port 67.
-    for mode in kea dnsmasq-proxy disabled; do
+    for mode in kea dnsmasq-proxy dnsmasq-relay disabled; do
         run compose_profiles_for_runtime "dhcp-kea,dhcp-proxy" 0 "$mode"
         [ "$status" -eq 0 ]
         # Not both.
@@ -122,5 +133,31 @@ setup() {
 
     # No placeholder may survive rendering; an unexpanded ${VAR} would mean a
     # required value was silently dropped into the running config.
+    [[ "$output" != *'${'* ]]
+}
+
+# ─── dnsmasq-relay template rendering (issue #844) ───
+
+@test "dnsmasq-relay.conf.template renders a real dhcp-relay directive via envsubst" {
+    export DHCP_RELAY_LOCAL_ADDR=192.168.1.2
+    export UPSTREAM_DHCP_IP=10.0.0.1
+
+    run envsubst < "$repo_root/services/dhcp-proxy/dnsmasq-relay.conf.template"
+    [ "$status" -eq 0 ]
+
+    # DNS stays disabled, and the relay forwards local-addr -> upstream. This is
+    # a REAL relay directive, distinct from the ProxyDHCP template's dhcp-range.
+    [[ "$output" == *"port=0"* ]]
+    [[ "$output" == *"dhcp-relay=192.168.1.2,10.0.0.1"* ]]
+
+    # A relay injects nothing of its own: none of the ProxyDHCP directives. Test
+    # the non-comment DIRECTIVE lines only -- the template's header comment
+    # legitimately mentions these directive names while explaining their absence.
+    directives="$(printf '%s\n' "$output" | grep -v '^[[:space:]]*#' || true)"
+    [[ "$directives" != *"dhcp-range="* ]]
+    [[ "$directives" != *"dhcp-option-pxe="* ]]
+    [[ "$directives" != *"pxe-service="* ]]
+
+    # No placeholder may survive rendering.
     [[ "$output" != *'${'* ]]
 }

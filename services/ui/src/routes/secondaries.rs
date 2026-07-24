@@ -488,6 +488,7 @@ pub async fn update_nats_conf(
         &state.config.nats_dns_replica_user,
         &state.config.nats_callout_user,
         &state.nats_issuer_public_key,
+        &state.nats_callout_xkey_public_key,
     );
 
     write_nats_conf_atomically(&state.config.nats_auth_callout_path, &fragment)
@@ -515,6 +516,7 @@ fn render_nats_auth_callout(
     replica_user: &str,
     callout_user: &str,
     issuer_public_key: &str,
+    xkey_public_key: &str,
 ) -> String {
     // This is the fragment `include`d by the nats container's own nats.conf
     // INSIDE its authorization {} block (issue #811). It must therefore be the
@@ -531,6 +533,14 @@ fn render_nats_auth_callout(
 # entrypoint-generated nats.conf.
 auth_callout {{
   issuer: "{issuer_public_key}"
+  # Public half of the responder's own static X25519 encryption keypair
+  # (issue #682). Setting this makes nats-server seal the auth-callout
+  # request to this key and expect the response sealed back to a fresh
+  # per-connection ephemeral key it supplies -- see nats_auth_callout.rs's
+  # xkey module docs for the full request/response mechanism. The matching
+  # private seed is held only by the callout responder task, never written
+  # to this config file.
+  xkey: "{xkey_public_key}"
   # Every static user in nats.conf's `users` list must be listed here, not just
   # the callout responder itself: nats-server only checks a connecting user's
   # password against that static list for names in auth_users. Any username
@@ -664,6 +674,7 @@ mod tests {
                 "lancache-dns-replica",
                 "lancache-nats-callout",
                 "issuer-public-key-abc123",
+                "xkey-public-key-def456",
             )
         };
 
@@ -683,6 +694,7 @@ mod tests {
             "lancache-dns-replica",
             "lancache-nats-callout",
             "issuer-public-key-abc123",
+            "xkey-public-key-def456",
             "auth_callout",
             "auth_users",
         ] {
@@ -729,6 +741,7 @@ mod tests {
             "lancache-dns-replica",
             "lancache-nats-callout",
             "issuer-public-key-abc123",
+            "xkey-public-key-def456",
         );
         write_nats_conf_atomically(path_str, &rendered_first).unwrap();
         let first_write = fs::read_to_string(&path).unwrap();
@@ -743,6 +756,7 @@ mod tests {
             "lancache-dns-replica",
             "lancache-nats-callout",
             "issuer-public-key-abc123",
+            "xkey-public-key-def456",
         );
         write_nats_conf_atomically(path_str, &rendered_second).unwrap();
         let second_write = fs::read_to_string(&path).unwrap();

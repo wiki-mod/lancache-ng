@@ -1,20 +1,25 @@
-# DHCP Modes: Kea vs. dnsmasq-proxy
+# DHCP Modes: Kea vs. dnsmasq-proxy vs. dnsmasq-relay
 
 LanCache NG only helps if clients actually resolve game/CDN hostnames through
 its DNS servers. The most reliable way to hand those DNS servers to every
-client is DHCP. LanCache NG supports three DHCP modes, selected once during
+client is DHCP. LanCache NG supports four DHCP modes, selected once during
 `setup.sh` and stored as `DHCP_MODE` in your `.env`:
 
 | Mode | What it does | DHCP lease owner |
 |---|---|---|
 | `disabled` | LanCache NG does not manage or proxy DHCP. You point clients at its DNS yourself (router DHCP option, static config). | Your existing router/DHCP server |
 | `kea` | LanCache NG runs a full Kea DHCP server and hands out addresses, gateway, and DNS. | LanCache NG (Kea) |
-| `dnsmasq-proxy` | LanCache NG runs dnsmasq in proxy-DHCP mode next to an existing DHCP server. | Your existing router/DHCP server |
+| `dnsmasq-proxy` | LanCache NG runs dnsmasq in proxy-DHCP mode next to an existing DHCP server, injecting PXE/DNS options into the supplemental exchange only. | Your existing router/DHCP server |
+| `dnsmasq-relay` (#844) | LanCache NG runs dnsmasq as a real DHCP relay, forwarding every client's DHCP request to an upstream DHCP server on another network segment and relaying the reply back. | Your upstream DHCP server |
 
-The three modes are mutually exclusive. `setup.sh` writes exactly one runtime
+The four modes are mutually exclusive. `setup.sh` writes exactly one runtime
 Compose profile (`dhcp-kea` **or** `dhcp-proxy`, never both), and the Admin UI
 stops the other DHCP service whenever you switch modes. Kea and dnsmasq both
-bind UDP port 67, so only one can be active at a time.
+bind UDP port 67, so only one can be active at a time. The two dnsmasq modes
+(`dnsmasq-proxy` and `dnsmasq-relay`) share the same `dhcp-proxy` container and
+Compose profile; the container reads `DHCP_MODE` and renders the ProxyDHCP or
+the relay config accordingly, so they too are mutually exclusive (never both on
+one interface).
 
 ## When to use Kea mode
 
@@ -249,6 +254,53 @@ purely because at least one such directive must exist for ProxyDHCP
 replies to happen at all — see `services/dhcp-proxy/entrypoint.sh` for the
 full account.
 
+## When to use dnsmasq-relay mode (issue #844)
+
+Choose `dnsmasq-relay` when your DHCP clients and the real DHCP server that
+should serve them are on **different network segments** (different VLANs/subnets)
+and the clients' broadcast DHCP requests cannot reach that server directly. In
+that situation a DHCP *relay* (RFC 1542) is the standard fix: it listens for
+client broadcasts on the client segment, forwards each request as a unicast to
+the upstream server, and relays the reply back to the client.
+
+This is fundamentally different from `dnsmasq-proxy` mode:
+
+- `dnsmasq-proxy` runs **alongside** an existing DHCP server on the **same**
+  segment and only injects supplemental PXE/DNS options; the existing server
+  still issues every lease and clients see it directly.
+- `dnsmasq-relay` **forwards the whole DHCP exchange** to an upstream server on
+  **another** segment; LanCache NG injects nothing of its own — the upstream
+  server owns the entire lease and every option.
+
+Relay mode does **not** hand LanCache NG's DNS servers to clients (it forwards
+whatever the upstream server sends). If your goal is to point clients at
+LanCache NG's DNS, configure that on the upstream DHCP server, or use `kea`
+mode to own leases here.
+
+### Configuring dnsmasq-relay mode
+
+`setup.sh` prompts for these when you pick `dnsmasq-relay` (both are also
+editable from the Admin UI's DHCP page, which shows a dedicated relay panel):
+
+- **`DHCP_RELAY_LOCAL_ADDR`** (required): this relay's own IPv4 address on the
+  client-facing network. dnsmasq stamps it into each relayed request's `giaddr`
+  field, which the upstream server uses to select the correct address pool for
+  the client's subnet.
+- **`UPSTREAM_DHCP_IP`** (required): the upstream DHCP server every request is
+  forwarded to.
+
+The container renders `dhcp-relay=<DHCP_RELAY_LOCAL_ADDR>,<UPSTREAM_DHCP_IP>`
+(no `dhcp-range`, no option injection). As with every other dnsmasq config in
+this project, `dnsmasq --test` validates the generated config at startup and a
+failed validation rolls back to the last known-good config rather than starting
+broken. Note the known-good-snapshot history is shared between the two dnsmasq
+modes, so a failed relay-config validation may roll back to a stored *ProxyDHCP*
+config — last-known-good beats a broken start either way.
+
+For the upstream server to be reachable, the relay's own routing must let it
+reach `UPSTREAM_DHCP_IP`, and the upstream server must have a route back to the
+client subnet via this relay (standard DHCP-relay deployment requirement).
+
 ## Verifying that clients receive LanCache NG DNS
 
 After enabling a DHCP mode, confirm that clients actually get the LanCache NG
@@ -295,6 +347,7 @@ None run on the host's real network interface by default:
 | **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? And does a granted lease produce a matching PowerDNS **forward (A record)** AND **reverse (PTR record)** DDNS update? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container, a throwaway PowerDNS container, and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
 | **Kea Control Agent mutation round-trip** (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
 | **dnsmasq-proxy PXE simulation** (`scripts/dhcp-proxy-pxe-simulation.sh`) | Does *our own* dnsmasq-proxy ProxyDHCP mode reply to a real, synthetically-crafted PXE-tagged DHCPDISCOVER with the correct external boot server address, architecture-appropriate boot filename, and LanCache NG DNS servers -- for both legacy BIOS and UEFI clients -- while still ignoring an ordinary, non-PXE-tagged DISCOVER? | `dhcp-proxy-pxe-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway dnsmasq-proxy container and a throwaway synthetic-PXE-client container (the Rust `tools/pxe-client-probe` binary, compiled with the build-tools image), both on a dedicated Docker bridge network the script creates and destroys itself. No host interface is ever involved, and the external PXE boot server it asserts against is never a real listening service -- just a configured address, per issue #705's scope of pointing at operator infrastructure this project does not itself run. |
+| **dnsmasq-relay flow simulation** (`scripts/dhcp-relay-flow-simulation.sh`, #844) | Does *our own* dnsmasq-relay mode genuinely forward a real client DHCPDISCOVER across a network-segment boundary to an upstream DHCP server? A client on an isolated client-subnet bridge (with **no** direct path to the upstream) sends a real dhclient DISCOVER; the assertion is that the upstream -- on a separate server-subnet bridge -- receives that relayed request and offers an address from the **client** subnet's pool, which is only possible if the relay stamped the correct `giaddr` (`DHCP_RELAY_LOCAL_ADDR`). | `dhcp-relay-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway relay container (this checkout's `dhcp-proxy` image, `DHCP_MODE=dnsmasq-relay`), a throwaway upstream-dnsmasq container, and a throwaway dhclient container across two dedicated Docker bridge networks it creates and destroys itself. No host interface is involved. The two-segment topology is deliberate: if the client and upstream shared one segment the relay would be bypassed. |
 
 The second, third, and fourth checks exist because the first only tells you
 a DHCP server answered -- it does not prove ours behaves correctly, and it

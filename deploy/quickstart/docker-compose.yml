@@ -1163,6 +1163,7 @@ services:
       - CONTAINER_PROXY=lancache-proxy
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
+      - CONTAINER_NATS=lancache-nats
       - SSL_ENABLED=${SSL_ENABLED:-0}
       # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
       # watchdog does not touch this path at all on installs that never opt
@@ -1399,6 +1400,14 @@ services:
       # results, not fail, so this is required for SYSLOG_ENABLED=true to
       # actually show anything on /logs or the dashboard.
       - logs-syslog-ng:/var/log/lancache-syslog-ng:ro
+      # Issue #870: read-only reader for watchdog's status.json (per-service
+      # health + cache-disk usage color, rendered as the dashboard's
+      # "Service health" card). watchdog is the sole writer of this volume
+      # (see its own service block below); a missing mount here would make
+      # watchdog_status::read_status() see the file as simply absent, not
+      # fail, so this is required for the health card to show real data
+      # instead of its "unavailable" fallback state.
+      - watchdog-status:/var/run/watchdog:ro
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
