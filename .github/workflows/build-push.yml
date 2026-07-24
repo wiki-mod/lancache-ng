@@ -798,7 +798,22 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Real incident (2026-07-24): actionlint's default invocation embeds its
+      # own shellcheck integration, which was found to hang indefinitely (not
+      # merely slow) -- reproduced 3/3 times on a real self-hosted runner.
+      # With no timeout, GitHub's own 360-minute job default was the only
+      # backstop, and this job's own workflow-level concurrency group
+      # (build-push.yml's top-level `{workflow}-{ref}` group, cancel-in-progress
+      # false for pull_request) meant the hang also blocked every subsequent
+      # push to the same PR from ever starting a new Build & Push run at all --
+      # confirmed live: a stuck run sat at this exact step for 5+ hours,
+      # occupying a runner slot and wedging the PR's own concurrency group
+      # the whole time, even though other runners were idle. A real run of
+      # this step normally completes in ~1-2 minutes; 15 minutes is a
+      # generous bound that still turns an unbounded hang into a fast,
+      # automatic failure instead of a silent multi-hour stall.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
