@@ -136,12 +136,6 @@ smoke_test_image() {
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
     expect -v >/dev/null
-
-    # python3-scapy has no standalone binary worth checking via command -v
-    # (see tools/build-tools/Dockerfile'\''s own verification step for the
-    # same caveat) -- verify the importable module scripts/dhcp-proxy-pxe-
-    # simulation.sh actually depends on instead.
-    python3 -c "import scapy.all"
   '
 }
 
