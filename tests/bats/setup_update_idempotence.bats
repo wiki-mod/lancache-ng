@@ -39,16 +39,22 @@ setup() {
 # DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
 # (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
-# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583), AUTO_UPDATE_ENABLED
-# (#819), NTP_ENABLED (#1082, LanCache-NG-NTP), and DHCP_RELAY_LOCAL_ADDR
-# (#844, dnsmasq DHCP-relay mode): migrate_env_for_update() backfills all of
-# these unconditionally when missing, so a fixture predating any of these
-# features would no longer be "fully converged" and would make the no-op
-# test below fail on its first run, not just its second -- confirmed the
-# hard way when #819's own PR broke this exact test on first CI run, again
-# by #1082's NTP feature (issue #1171), and a third time by #844's relay
-# mode, which is exactly the failure mode this comment exists to warn the
-# next feature about.
+# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583),
+# NATS_SYS_USER/NATS_SYS_PASSWORD (#681), AUTO_UPDATE_ENABLED (#819),
+# NTP_ENABLED (#1082, LanCache-NG-NTP), and DHCP_RELAY_LOCAL_ADDR (#844,
+# dnsmasq DHCP-relay mode): migrate_env_for_update() backfills all of these
+# unconditionally when missing, so a fixture predating any of these features
+# would no longer be "fully converged" and would make the no-op test below
+# fail on its first run, not just its second -- confirmed the hard way when
+# #819's own PR broke this exact test on first CI run, again by #1082's NTP
+# feature (issue #1171), and a third time by #844's relay mode, which is
+# exactly the failure mode this comment exists to warn the next feature
+# about. (#1082 itself repeated the exact same mistake, undetected until
+# #681 found this fixture failing on a clean, unmodified current_dev
+# checkout -- i.e. before any #681 change ever touched this file. Fixed
+# here, incidentally, as part of #681 only because that PR was already
+# editing this exact fixture for its own NATS_SYS_* addition; the
+# NTP_ENABLED gap itself is unrelated to #681.)
 #
 # NTP_DATA_DIR is deliberately NOT listed here even though
 # migrate_env_for_update() also sets it: it goes through
@@ -123,6 +129,8 @@ write_converged_env_fixture() {
         'NATS_DNS_REPLICA_PASSWORD=gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg' \
         'NATS_CALLOUT_USER=lancache-nats-callout' \
         'NATS_CALLOUT_PASSWORD=hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh' \
+        'NATS_SYS_USER=lancache-nats-sys' \
+        'NATS_SYS_PASSWORD=iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii' \
         'SECONDARY_REGISTRATION_TOKEN=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
         'COMPOSE_PROFILES=ssl' \
         'UI_AUTH_USER=admin' \
@@ -263,7 +271,7 @@ write_legacy_env_fixture() {
     grep -qx 'PROXY_SECURITY_MODE=lazy' "$env_file"
 
     after_first_run=$(cat "$env_file")
-    secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
+    secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
     # Second run against the now-converged file must not change anything --
     # in particular it must not rotate any of the secrets it just generated.
@@ -271,7 +279,7 @@ write_legacy_env_fixture() {
     [ "$status" -eq 0 ]
 
     after_second_run=$(cat "$env_file")
-    secrets_after_second_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
+    secrets_after_second_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
     [ "$after_first_run" = "$after_second_run" ]
     [ "$secrets_after_first_run" = "$secrets_after_second_run" ]

@@ -205,6 +205,16 @@ pub struct Config {
     // authorization requests for secondaries and needs no other permissions.
     pub nats_callout_user: String,
     pub nats_callout_password: Option<String>,
+    // Issue #681: the sole member of a new NATS `SYS` account (see
+    // services/nats/nats.conf's `accounts {}` block) -- used ONLY by
+    // nats_kick.rs to look up (CONNZ) and force-disconnect
+    // ($SYS.REQ.SERVER.*.KICK) a removed/rotated secondary's live connection.
+    // Every other NATS role in this struct lives in the implicit default
+    // account ($G), which nats-server does not permit to reach the
+    // $SYS.REQ.SERVER.* system-services API at all -- confirmed against a
+    // real nats-server 2.14.3 (see nats_kick.rs's module docs).
+    pub nats_sys_user: String,
+    pub nats_sys_password: Option<String>,
     // Where the auth-callout issuer NKey seed is persisted (generated on
     // first run, mirrors ui_session_secret's file-based persistence). This
     // keypair signs every per-secondary user JWT the callout responder
@@ -390,6 +400,11 @@ impl fmt::Debug for Config {
                     .nats_callout_password
                     .as_ref()
                     .map(|_| "***REDACTED***"),
+            )
+            .field("nats_sys_user", &self.nats_sys_user)
+            .field(
+                "nats_sys_password",
+                &self.nats_sys_password.as_ref().map(|_| "***REDACTED***"),
             )
             .field("nats_issuer_seed_path", &self.nats_issuer_seed_path)
             .field(
@@ -655,6 +670,27 @@ impl Config {
             .unwrap_or_else(|| self.lancache_image_channel.clone())
     }
 
+    // Cache resize (issue #1069 part 3): same "consumed entirely on the
+    // host" model as the release-channel override immediately above --
+    // setup.sh's cmd_converge_reconcile reads this CACHE_MAX_GB override off
+    // the same ui_settings_file and, if it differs from .env's current
+    // value, writes both CACHE_MAX_SIZE (nginx's real max_size) and
+    // CACHE_MAX_GB there, then the pre-existing `docker compose up -d`
+    // convergence step recreates the proxy container so nginx's entrypoint
+    // re-renders its config with the new max_size. This container's own
+    // CACHE_MAX_GB env var (`self.cache_max_gb`) reflects what is actually
+    // running RIGHT NOW; this override reflects a resize the operator has
+    // requested but that has not necessarily reached the running proxy yet
+    // (up to ~5 minutes, the same convergence-tick latency #819 already
+    // accepts) -- routes/dashboard.rs uses the difference between the two to
+    // show a "resize pending" notice rather than silently overwriting the
+    // real, currently-enforced value.
+    pub fn effective_cache_max_gb(&self) -> f64 {
+        read_ui_override(&self.ui_settings_file, "CACHE_MAX_GB")
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(self.cache_max_gb)
+    }
+
     pub fn effective_auto_update_enabled(&self) -> bool {
         read_ui_override(&self.ui_settings_file, "AUTO_UPDATE_ENABLED")
             .map(|value| value.trim() == "1")
@@ -845,6 +881,8 @@ impl Config {
             nats_dns_replica_password: env_opt("NATS_DNS_REPLICA_PASSWORD"),
             nats_callout_user: env_str("NATS_CALLOUT_USER", ""),
             nats_callout_password: env_opt("NATS_CALLOUT_PASSWORD"),
+            nats_sys_user: env_str("NATS_SYS_USER", ""),
+            nats_sys_password: env_opt("NATS_SYS_PASSWORD"),
             nats_issuer_seed_path: env_str(
                 "NATS_ISSUER_SEED_PATH",
                 "/data/lancache-nats-issuer.seed",
@@ -1447,6 +1485,44 @@ mod tests {
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    // effective_cache_max_gb() (issue #1069 part 3) must fall back to the
+    // container's own startup CACHE_MAX_GB when no Admin-UI resize override
+    // has ever been written, and must prefer the override once one exists --
+    // same two-layer precedence as effective_dhcp_mode()/
+    // effective_lancache_image_channel_override() above.
+    #[test]
+    fn effective_cache_max_gb_falls_back_to_raw_env_then_prefers_override() {
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-cache-resize-{}.env",
+            std::process::id()
+        ));
+
+        unsafe {
+            env::set_var("UI_SETTINGS_FILE", &settings_path);
+            env::set_var("CACHE_MAX_GB", "50");
+        }
+        let _ = fs::remove_file(&settings_path);
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.cache_max_gb, 50.0);
+        // No override file yet: effective must equal the raw running value.
+        assert_eq!(cfg.effective_cache_max_gb(), 50.0);
+
+        fs::write(&settings_path, "CACHE_MAX_GB=75\n").unwrap();
+        // The raw value is unchanged (it reflects the process env captured
+        // at startup, not a live re-read) -- only the effective getter must
+        // pick up the pending resize.
+        assert_eq!(cfg.cache_max_gb, 50.0);
+        assert_eq!(cfg.effective_cache_max_gb(), 75.0);
+
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+            env::remove_var("UI_SETTINGS_FILE");
+        }
+        let _ = fs::remove_file(&settings_path);
     }
 
     // Guards the deliberate fail-closed design: when the two legacy

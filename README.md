@@ -786,6 +786,7 @@ NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
 NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
 NATS_CALLOUT_PASSWORD=<generate-a-secret>
+NATS_SYS_PASSWORD=<generate-a-secret>
 ```
 
 `SECONDARY_REGISTRATION_TOKEN` is different from the values above: it is

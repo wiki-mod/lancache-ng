@@ -2786,6 +2786,11 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_CALLOUT_USER "lancache-nats-callout" "$env_file"
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
+    # Issue #681: system-account identity so an already-installed primary
+    # converges to the new active-disconnect capability on its next update,
+    # the same as any other mandatory NATS static role above.
+    set_env_key_if_empty_or_missing NATS_SYS_USER "lancache-nats-sys" "$env_file"
+    ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
     ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
@@ -4218,6 +4223,29 @@ lancache_ui_channel_override_is_valid() {
     esac
 }
 
+# Validates a CACHE_MAX_GB override pulled from the Admin UI's settings
+# volume (services/ui/src/routes/cache.rs's resize_cache, issue #1069 part
+# 3: the Admin UI cache-resize capability). Must be a positive whole number
+# of GiB, same shape setup.sh's own "Cache size in GiB" prompt accepts.
+# Deliberately does NOT re-run a disk-space/safety-buffer check here: the
+# Admin UI already validated the requested size against real free space at
+# its own read-only view of CACHE_DIR (the same proxy-cache volume) before
+# ever writing this override, so re-deriving that check on the host would
+# just duplicate logic that has to be kept in sync in two languages for no
+# real additional safety -- the actual gap this leaves is a real disk-usage
+# change in the window between the Admin UI's validation and this
+# convergence tick picking it up (currently up to ~5 minutes), which is a
+# documented, accepted limitation (see docs/architecture-ng.md's Cache
+# Retention & Cleanup section), not something silently unguarded.
+# The `10#` base prefix mirrors the existing "Cache size in GiB" prompt's own
+# leading-zero handling further down in this script: without it, a
+# settings-file value like "008" would be parsed as octal by `(( ))` and abort
+# on an invalid digit (8/9) rather than being treated as decimal 8.
+lancache_ui_cache_max_gb_override_is_valid() {
+    [[ "$1" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$1 > 0 ))
+}
+
 # Same validation shape as lancache_ui_channel_override_is_valid above, for
 # the DHCP_MODE key persist_ui_settings (routes/dhcp.rs) writes to the same
 # ui-settings volume. Matches exactly the three values
@@ -4274,6 +4302,7 @@ reconcile_auto_update_timer_state() {
 cmd_converge_reconcile() {
     local install_dir="${1:-/opt/lancache-ng}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
+    local ui_cache_max_gb current_cache_max_gb
     local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
 
     install_dir=$(realpath -m "$install_dir")
@@ -4342,6 +4371,46 @@ cmd_converge_reconcile() {
     # the block above just changed it or it was already correct -- covers a
     # direct manual .env edit too, not only the Admin UI path.
     reconcile_auto_update_timer_state "$env_file"
+
+    # Cache resize (issue #1069 part 3): bridges the Admin UI's dashboard
+    # resize control (services/ui/src/routes/cache.rs) onto the host, the
+    # same way the LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED block above
+    # bridges #819's release-channel control. CACHE_MAX_SIZE (nginx's real
+    # `proxy_cache_path ... max_size=`) and CACHE_MAX_GB (the Admin UI's own
+    # display/percentage-bar value) are written together so the two never
+    # drift apart -- see config/{dev,prod}/proxy.env and this env file's own
+    # CACHE_MAX_SIZE/CACHE_MAX_GB pair for why both exist.
+    #
+    # Scope boundary: this writes the quickstart/setup.sh-managed runtime
+    # .env, which deploy/quickstart/docker-compose.yml's proxy service reads
+    # CACHE_MAX_SIZE from directly (`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`).
+    # A manual deploy/prod checkout's proxy service instead reads
+    # config/prod/proxy.env via `env_file:`, a file this convergence tick
+    # never touches -- but this block still writes .env's CACHE_MAX_GB/
+    # CACHE_MAX_SIZE unconditionally (it does not check which compose style
+    # is in use), and deploy/prod's ui service DOES read CACHE_MAX_GB from
+    # .env. That means an Admin UI resize on a deploy/prod install is worse
+    # than an inert no-op: the dashboard's own "pending" banner clears and
+    # its usage bar starts showing the new target size once `docker compose
+    # up -d` recreates the ui container, while the real proxy container
+    # keeps enforcing the untouched old CACHE_MAX_SIZE from
+    # config/prod/proxy.env -- a misleading display of a resize that never
+    # actually reached nginx. deploy/prod is the manual/self-hosted-repo
+    # path, not the setup.sh-managed default this convergence mechanism was
+    # built for; see docs/architecture-ng.md for the same caveat stated
+    # operator-facing. Not fixed here (would mean writing
+    # config/prod/proxy.env from this tick too, a separate, deploy/prod-
+    # specific change out of scope for this PR).
+    ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB")
+    if [[ -n "$ui_cache_max_gb" ]] && lancache_ui_cache_max_gb_override_is_valid "$ui_cache_max_gb"; then
+        ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))
+        current_cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file")
+        if [[ "$ui_cache_max_gb" != "$current_cache_max_gb" ]]; then
+            set_env_key CACHE_MAX_SIZE "${ui_cache_max_gb}g" "$env_file"
+            set_env_key CACHE_MAX_GB "$ui_cache_max_gb" "$env_file"
+            print_ok "Cache size updated from Admin UI: ${current_cache_max_gb:-<unset>} GB -> ${ui_cache_max_gb} GB"
+        fi
+    fi
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
@@ -4447,6 +4516,7 @@ logbundle_secret_env_keys() {
         NATS_DNS_WRITER_PASSWORD \
         NATS_DNS_REPLICA_PASSWORD \
         NATS_CALLOUT_PASSWORD \
+        NATS_SYS_PASSWORD \
         SECONDARY_REGISTRATION_TOKEN \
         UI_AUTH_PASSWORD
 }
@@ -6530,6 +6600,12 @@ NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$e
 NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
 NATS_CALLOUT_USER="${NATS_CALLOUT_USER:-lancache-nats-callout}"
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
+# Issue #681: system-account identity, used only by the Admin UI's kicker
+# connection (nats_kick.rs) to look up and force-disconnect a removed/rotated
+# secondary's live connection.
+NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
+NATS_SYS_USER="${NATS_SYS_USER:-lancache-nats-sys}"
+NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
 UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
@@ -6586,6 +6662,8 @@ validate_env_values_for_initial_write \
     "NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}" \
     "NATS_CALLOUT_USER=${NATS_CALLOUT_USER}" \
     "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
+    "NATS_SYS_USER=${NATS_SYS_USER}" \
+    "NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
     "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
     "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
@@ -6707,6 +6785,11 @@ NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}
 # registered secondaries (generated, do not change)
 NATS_CALLOUT_USER=${NATS_CALLOUT_USER}
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
+# System-account identity (generated, do not change). Used only by the Admin
+# UI's kicker connection (nats_kick.rs) to look up and force-disconnect a
+# removed/rotated secondary's live NATS connection (issue #681).
+NATS_SYS_USER=${NATS_SYS_USER}
+NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 

@@ -306,6 +306,22 @@ services:
           # error).
           include "auth_callout.conf"
         }
+        # Issue #681: a minimal system account, additive alongside the flat
+        # `authorization {}` block above -- mirrors dev/prod/quickstart's
+        # entrypoint (see those files' matching comment for the full
+        # rationale: nats-server only exposes the $$SYS.REQ.SERVER.* system-
+        # services API, used by nats_kick.rs to look up and force-disconnect a
+        # removed/rotated secondary's live connection, to system-account
+        # clients). Fixed literal credentials, same convention as every other
+        # role in this harness above.
+        accounts {
+          SYS: {
+            users: [
+              { user: validation-nats-sys, password: validation-nats-sys-password }
+            ]
+          }
+        }
+        system_account: SYS
         EOF
         cat > /etc/nats/auth_callout.conf <<'EOF'
         auth_callout {
@@ -329,8 +345,15 @@ services:
           # Every static user in nats.conf must be listed here (see
           # nats_auth_callout.rs's module docs for why) -- only real
           # secondaries, registered at runtime and absent from both lists,
-          # go through the callout.
-          auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout"]
+          # go through the callout. Issue #681: this includes validation-nats-sys
+          # (the SYS account's own static user, defined in the accounts{} block
+          # above) even though it lives in a different account than the other
+          # four -- auth_callout interception is server-wide, not scoped to $G
+          # (confirmed the hard way: omitting it here made every system-account
+          # connection attempt fall through to the callout instead of matching
+          # its own static credential, denying nats_kick.rs's own connection
+          # with "authorization violation" before it ever reached CONNZ/KICK).
+          auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout", "validation-nats-sys"]
         }
         EOF
         exec nats-server -c /etc/nats/nats.conf
@@ -413,6 +436,11 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=validation-nats-password
       - NATS_CALLOUT_USER=validation-nats-callout
       - NATS_CALLOUT_PASSWORD=validation-nats-callout-password
+      # Issue #681: lets nats_kick.rs connect as the NATS system account to look
+      # up (CONNZ) and force-disconnect (KICK) a removed/rotated secondary's
+      # live connection. Must match the nats service's prebaked SYS account user.
+      - NATS_SYS_USER=validation-nats-sys
+      - NATS_SYS_PASSWORD=validation-nats-sys-password
       # Fixed literal seed (not the file-based NATS_ISSUER_SEED_PATH default)
       # so its public half can be baked into the nats service's static
       # bootstrap config below ahead of time -- this validation harness has

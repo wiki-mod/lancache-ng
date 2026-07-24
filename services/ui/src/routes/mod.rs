@@ -5,6 +5,7 @@
 //! insertion/verification against the per-session token carried in request
 //! headers by the `basic_auth` middleware.
 
+pub mod cache;
 pub mod dashboard;
 pub mod dhcp;
 pub mod dns_snapshots;

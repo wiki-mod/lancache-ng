@@ -18,6 +18,7 @@ mod docker_client;
 mod kea_snapshots;
 mod nats_auth_callout;
 mod nats_config;
+mod nats_kick;
 mod nginx_client;
 mod reverse_dns;
 mod routes;
@@ -1037,6 +1038,7 @@ async fn main() -> Result<()> {
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
         .route("/setup/update", post(routes::setup::update_stack_settings))
+        .route("/cache/resize", post(routes::cache::resize_cache))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route(
             "/api/watchdog-status",

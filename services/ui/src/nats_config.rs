@@ -155,6 +155,11 @@ pub fn validate_runtime_nats_credentials(config: &Config) -> Result<(), String> 
         &config.nats_callout_user,
         config.nats_callout_password.as_deref(),
     )?;
+    validate_optional_nats_credentials(
+        "NATS system account",
+        &config.nats_sys_user,
+        config.nats_sys_password.as_deref(),
+    )?;
 
     Ok(())
 }
