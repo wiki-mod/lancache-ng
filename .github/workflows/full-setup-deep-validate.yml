@@ -128,34 +128,6 @@ jobs:
           DISPATCH_TAG: ${{ github.event.inputs.image_tag }}
         run: bash scripts/plan-deep-validation.sh
 
-  # Derives a per-run validation subnet keyed on this run's own id/attempt
-  # (#623), so the deep suite never collides with build-push.yml's shallow
-  # validate job even when both run for the same PR at the same time.
-  compute-validation-network:
-    name: derive per-run validation subnet
-    needs: plan
-    if: needs.plan.outputs.should_run == 'true'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    outputs:
-      subnet: ${{ steps.derive.outputs.subnet }}
-      gateway: ${{ steps.derive.outputs.gateway }}
-      proxy_ip: ${{ steps.derive.outputs.proxy_ip }}
-      proxy_ssl_ip: ${{ steps.derive.outputs.proxy_ssl_ip }}
-      dns_standard_ip: ${{ steps.derive.outputs.dns_standard_ip }}
-      dns_ssl_ip: ${{ steps.derive.outputs.dns_ssl_ip }}
-      watchdog_ip: ${{ steps.derive.outputs.watchdog_ip }}
-      netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
-      nats_ip: ${{ steps.derive.outputs.nats_ip }}
-      ui_ip: ${{ steps.derive.outputs.ui_ip }}
-      standard_shim_ip: ${{ steps.derive.outputs.standard_shim_ip }}
-      project_name: ${{ steps.derive.outputs.project_name }}
-      ui_port: ${{ steps.derive.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Derive validation network
-        id: derive
-        uses: ./.github/actions/derive-validation-network
-
   # Cross-workflow wait + fail-closed staging guard. Only meaningful for a
   # same-repo PR (pr_staging_available): waits for build-push to push the
   # PR's touched-service staging tags, fails closed if a touched tag never
@@ -248,698 +220,27 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ensure-pr-staging-images.sh
 
-  # Strict superset of build-push.yml's shallow "validate full-setup image"
-  # job: same compose-config validation, subnet-collision guard, stack
-  # bring-up, health/crash-loop assertions and client simulation -- but on a
-  # PR it pulls the PR's OWN staging tag (resolved by plan) instead of a base
-  # channel.
-  full-setup-validate:
-    name: validate full-setup image
-    needs: [plan, compute-validation-network, ensure-pr-staging-images]
-    # Runs whenever the suite should run AND staging prep did not fail (it is
-    # 'skipped' on dispatch/Dependabot, which is fine). Not gated on the other
-    # sims, so it always contributes its own signal.
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Build full-setup validation image
-        run: |
-          set -euo pipefail
-          docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
-            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
-            --build-arg LANCACHE_IMAGE_TAG="$LANCACHE_IMAGE_TAG" \
-            -t lancache-ng-full-setup:validation \
-            deploy/full-setup
-
-      - name: Validate compose configuration
-        env:
-          LANCACHE_IMAGE_REGISTRY: ghcr.io
-          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -v "$PWD/deploy/full-setup:/validation:ro" \
-            -w /validation \
-            --env LANCACHE_IMAGE_REGISTRY \
-            --env LANCACHE_IMAGE_PREFIX \
-            --env LANCACHE_IMAGE_TAG \
-            docker:latest \
-            docker compose -f docker-compose.yml config >/dev/null
-
-      # The pre-#703 approach here was a single fail-hard "Check for a
-      # validation subnet collision" pre-flight followed by a plain
-      # `docker compose up` -- with no host-local lock and no retry. Two
-      # concurrent runs deriving the same slot (only 252 buckets pre-#832, ~2,000
-      # since), or one
-      # run losing the check-then-create race to another mid-flight, made
-      # this job hard-fail with "Pool overlaps"/"overlaps existing network
-      # state" and forced a manual re-run (real recurrence: run 29287590206).
-      # #703 already fixed exactly this for the manual full-setup-validate.yml
-      # via scripts/lib/reserve-validation-subnet.sh's flock + retry; this
-      # job now adopts the same pattern (issue #820). Unlike the simulation
-      # jobs -- which reserve, run, and release within one script invocation
-      # via scripts/lib/run-in-validation-subnet.sh -- this job holds the
-      # slot lock across SEPARATE steps (up here, then the health-check,
-      # client-simulation, and teardown steps below), so the holder PID is
-      # threaded through $GITHUB_ENV and released in the teardown step.
-      #
-      # A successful `docker compose up` here still only means the containers
-      # were created, not that they are healthy -- the "Wait for the stack to
-      # stabilize" step below is what catches a service that starts and then
-      # immediately crash-loops.
-      - name: Reserve a validation subnet and start the stack (locked, retries on collision)
-        id: reserve-and-start
-        working-directory: deploy/full-setup
-        env:
-          LANCACHE_IMAGE_REGISTRY: ghcr.io
-          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-        run: |
-          set -euo pipefail
-
-          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
-          : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
-
-          if ! command -v flock >/dev/null 2>&1; then
-            echo "::error::flock is required for safe validation-subnet locking."
-            exit 1
-          fi
-
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-
-          # Same host-local lock root the simulation wrapper and the manual
-          # full-setup-validate.yml both use, so every concurrent run on this
-          # host coordinates on one shared per-slot lock namespace.
-          lock_root="/tmp/lancache-validation-locks"
-          max_attempts=10
-
-          # Defense-in-depth ahead of `docker compose up`: a leftover bridge
-          # interface Docker no longer tracks (a killed container's orphan, a
-          # VPN, another NIC) still makes the kernel refuse an overlapping
-          # bridge, so checking the live `ip addr` view lets the retry skip
-          # that slot cleanly. validation_subnet_conflicts (sourced above)
-          # is the single shared definition of this check -- issue #820
-          # consolidated what used to be a copy-pasted python block per
-          # caller (this step, the simulation wrapper, and now the DHCP
-          # scripts) into one place in the lib, so all of them stay in sync.
-
-          docker compose pull --quiet
-
-          reserved_slot=""
-          holder_pid=""
-          next_attempt=1
-
-          while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
-              echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
-              exit 1
-            }
-            attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-            slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
-            candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
-
-            # Export the full VALIDATION_* set for THIS candidate slot before
-            # anything reads it: validation_subnet_conflicts needs the
-            # matching COMPOSE_PROJECT_NAME to recognise our own leftover
-            # networks, and `docker compose up` below needs the whole
-            # address set to place every service inside the reserved subnet.
-            validation_subnet_export_env "$slot"
-
-            # Persist THIS ATTEMPT's identifiers to $GITHUB_ENV right away,
-            # every time through the loop -- not only once after the whole
-            # retry loop succeeds below. Issue #932 (CI run 29569378100, job
-            # 87852874801 -- build-push.yml's equivalent "validate full-setup
-            # image" job, same reserve-and-start shape as this step) confirmed
-            # a real production case where `docker compose up -d` a few lines
-            # down failed for a reason classified as non-retryable (Docker's
-            # own "has active endpoints" race while recreating a leftover
-            # network from a stale prior run that reused this same slot
-            # number -- see validation_network_teardown in
-            # reserve-validation-subnet.sh) and the step exited via `exit 1`
-            # below. The write that used to sit only after this whole loop
-            # never ran on that path, so COMPOSE_PROJECT_NAME was still unset
-            # in $GITHUB_ENV when the "Tear down full-setup validation stack"
-            # step ran (it DOES have `if: always()` and DID run) -- its own
-            # fail-closed `[[ -n "${COMPOSE_PROJECT_NAME:-}" ]]` guard, meant
-            # only for the case where no slot was ever derived at all, saw it
-            # empty and silently skipped `validation_project_networks_teardown`,
-            # leaving that attempt's network behind to poison a later run
-            # that reuses the same slot. $GITHUB_ENV takes the last value
-            # written for a repeated key, so writing here on every attempt
-            # keeps this a no-op correctness fix for the common, successful
-            # case (the final attempt's write is simply the last one and
-            # still lands before the "up" call) while covering every failure
-            # exit out of this step (a non-retryable `docker compose up`
-            # failure, or exhausting every retry) with the last attempted
-            # slot's real project name, subnet, and lock-holder PID instead
-            # of nothing at all.
-            {
-              echo "VALIDATION_LOCK_HOLDER_PID=$candidate_pid"
-              echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
-              echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
-              echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
-              echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
-              echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
-              echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
-              echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
-              echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
-              echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
-              echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
-              echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
-              echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
-              echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
-            } >> "$GITHUB_ENV"
-
-            conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
-            if [[ -n "$conflict" ]]; then
-              echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
-              validation_subnet_release "$candidate_pid"
-              next_attempt=$((attempt + 1))
-              continue
-            fi
-
-            echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
-            if up_output="$(docker compose up -d 2>&1)"; then
-              echo "$up_output"
-              reserved_slot="$slot"
-              holder_pid="$candidate_pid"
-              break
-            fi
-
-            echo "$up_output"
-            validation_subnet_release "$candidate_pid"
-
-            if ! validation_subnet_output_is_collision "$up_output"; then
-              echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
-              exit 1
-            fi
-
-            echo "docker compose up failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
-            next_attempt=$((attempt + 1))
-          done
-
-          if [[ -z "$reserved_slot" ]]; then
-            echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
-            exit 1
-          fi
-
-          echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
-
-      - name: Wait for the stack to stabilize and check container health
-        working-directory: deploy/full-setup
-        run: |
-          set -euo pipefail
-          services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
-          all_services="docker-socket-proxy $services_with_healthcheck"
-
-          deadline=$((SECONDS + 90))
-          while (( SECONDS < deadline )); do
-            all_ready=1
-            for service in $services_with_healthcheck; do
-              cid="$(docker compose ps -q "$service")"
-              status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-              if [[ "$status" != "healthy" ]]; then
-                all_ready=0
-              fi
-            done
-            if [[ "$all_ready" -eq 1 ]]; then
-              break
-            fi
-            sleep 5
-          done
-
-          echo "::group::Final container status"
-          docker compose ps
-          echo "::endgroup::"
-
-          failed=0
-          for service in $all_services; do
-            cid="$(docker compose ps -q "$service")"
-            if [[ -z "$cid" ]]; then
-              echo "::error::$service has no running container"
-              failed=1
-              continue
-            fi
-            restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
-            container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
-            if [[ "$container_status" != "running" ]]; then
-              echo "::error::$service is not running (state: $container_status)"
-              failed=1
-            elif (( restart_count > 1 )); then
-              # > 1, not > 0: one restart during normal startup ordering is
-              # expected and not a crash loop.
-              echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
-              failed=1
-            fi
-            if [[ " $services_with_healthcheck " == *" $service "* ]]; then
-              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-              if [[ "$health" != "healthy" ]]; then
-                echo "::error::$service did not become healthy (status: $health)"
-                failed=1
-              fi
-            fi
-          done
-
-          if [[ "$failed" -eq 1 ]]; then
-            echo "::group::Logs from all services (failure diagnostics)"
-            docker compose logs --no-color
-            echo "::endgroup::"
-            exit 1
-          fi
-          echo "Full-setup stack is stable: all services running and healthy."
-
-      - name: Run client simulation against the full-setup stack
-        env:
-          FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-          bash scripts/full-setup-client-simulation.sh
-
-      - name: Tear down full-setup validation stack
-        if: always()
-        working-directory: deploy/full-setup
-        run: |
-          set -euo pipefail
-          docker compose down --volumes --remove-orphans || true
-
-          # `down` above can lose Docker's own "has active endpoints" race
-          # (a container-removal API call can return before its network
-          # endpoint is actually unwired -- confirmed for real in CI, see
-          # validation_project_networks_teardown's own comment in
-          # reserve-validation-subnet.sh) and silently leave this project's
-          # network(s) non-empty, poisoning them for whichever job/run
-          # reserves this slot next. Wait for and force a real removal
-          # instead of trusting `down`'s own exit code.
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # This step runs unconditionally (`if: always()`), including when
-          # the "Reserve a validation subnet and start the stack" step above
-          # failed before ever setting COMPOSE_PROJECT_NAME -- under
-          # `set -u`, a bare "$COMPOSE_PROJECT_NAME" would abort this whole
-          # step with "unbound variable" in exactly that case (confirmed in
-          # CI). The safe-default form skips teardown when there is nothing
-          # to tear down instead.
-          if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
-            validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
-          fi
-
-          # Release the host-local subnet lock the reserve step acquired, so
-          # the slot frees up for the next run immediately instead of waiting
-          # for this whole job's process tree to exit. Only set if that step
-          # actually reserved a lock before any later failure.
-          if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
-            kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
-          fi
-
-      - name: Clean up image
-        if: always()
-        run: docker rmi lancache-ng-full-setup:validation || true
-
-  ssl-mitm-cache-simulation:
-    # Real DNS/HTTP/HTTPS caching test (deb.debian.org). Chained after the
-    # health-check job to serialize onto the shared runner tier and the
-    # fixed validation IPs; if: always() keeps its signal independent of that
-    # job's own result. LANCACHE_IMAGE_TAG threads the resolved PR staging
-    # tag so it tests the PR's own proxy/dns.
-    name: SSL MITM cache simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, full-setup-validate]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # Per-run compose project name + UI host port keep this sim isolated from
-      # build-push.yml's own shallow validate job when both run for the same
-      # PR (they derive different values from different run ids). The
-      # VALIDATION_SUBNET/*_IP/GATEWAY block below is needed too, not just
-      # the project name: scripts/ssl-mitm-cache-simulation.sh calls `docker
-      # compose up` against deploy/full-setup/docker-compose.yml, whose
-      # network block falls back to the fixed 172.30.99.0/27 subnet
-      # (docker-compose.yml's own ${VALIDATION_SUBNET:-172.30.99.0/27}
-      # default) whenever these are unset -- a different project NAME alone
-      # does not stop two concurrent runs' bridge networks from overlapping
-      # on the same fixed subnet on a shared self-hosted host (Codex review
-      # finding on #764: the isolation claim above was only true for the
-      # full-setup-validate job, which already threaded these through; the
-      # sibling simulation jobs below did not).
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      # This is the only job in this workflow that threads this through: the
-      # standard-passthrough-shim service it names is Compose-profile-gated
-      # (see deploy/full-setup/docker-compose.yml), so only this job's own
-      # `docker compose up ... standard-passthrough-shim` call ever starts
-      # it -- no other job needs a collision-safe value for it (issue #668).
-      VALIDATION_STANDARD_SHIM_IP: ${{ needs.compute-validation-network.outputs.standard_shim_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # BUILD_TOOLS_REQUIRE_PUBLISHED=true: this job's dig/curl client checks
-        # only need tools already in every published build-tools image, so it
-        # should fail loudly rather than silently build a branch-local one.
-        # EXCEPTION: when this PR itself touched tools/build-tools,
-        # ensure-pr-staging-images has already polled for and confirmed
-        # build-tools:$PR_TAG exists (scripts/ensure-pr-staging-images.sh),
-        # so use that PR-scoped image directly instead of build-tools:latest
-        # -- otherwise a same-PR build-tools change that still happens to
-        # pass select-build-tools-image.sh's baseline smoke test would never
-        # actually be exercised by this job (Codex review finding on #764).
-        id: build-tools-image
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run SSL MITM cache simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free /27 subnet within 172.30.0.0/16 (flock +
-          # retry, issue #820) and run the sim inside it, instead of racing the single
-          # job-level VALIDATION_SUBNET against every other concurrent run on
-          # this host. The wrapper exports the whole VALIDATION_* set (incl.
-          # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
-          # standard-passthrough-shim this sim relies on) for the slot it wins.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
-
-  ui-nats-dns-integration-simulation:
-    # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
-    # LANCACHE_IMAGE_TAG here is the direct fix for the inconsistency #715
-    # calls out: the manual full-setup-validate.yml never passed its image_tag
-    # through to this job, so it always tested "nightly" regardless of intent.
-    name: UI/NATS/DNS integration simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, ssl-mitm-cache-simulation]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # See ssl-mitm-cache-simulation's identical block above for why the
-      # full VALIDATION_SUBNET/*_IP/GATEWAY set (not just the project name)
-      # is required for this job's own `docker compose up` call to actually
-      # land on this run's derived, collision-free subnet.
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
-        id: build-tools-image
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run UI/NATS/DNS integration simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it rather than racing the shared job-level subnet.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-nats-dns-integration-simulation.sh
-
-  setup-cli-simulation:
-    # Runs the real setup.sh installer end-to-end (fresh install, update/
-    # migration, rollback, restore). Its unique value is driving setup.sh's own
-    # CLI/migration/rollback logic -- but doing so still brings a real stack up
-    # on real images, so WHICH images matters.
-    #
-    # This used to hardcode the `nightly` channel inside setup-cli-simulation.sh,
-    # on the rationale that the job was "independent of PR image content." That
-    # coupled a per-PR gate to a mutable channel tag refreshed far more slowly
-    # than the gate runs: `nightly` only moves on a push to master, which has sat
-    # frozen for a long time, so every PR revalidated stale, months-old images
-    # (and a v0.2.0 PR tested master's frozen nightly, not v0.2.0's own line at
-    # all). It is the same "blocking check coupled to a slow-moving channel tag"
-    # class of bug as #775 (build-tools :latest) and #777 (promote starvation).
-    #
-    # Fix: install the PR's OWN immutable pr-<N>-sha image set instead (pinned,
-    # threaded via plan's image_tag). That SUPERSEDES the old rationale rather
-    # than contradicting it -- testing setup.sh against this PR's already-built
-    # images + this PR's checked-out compose is strictly more correct than
-    # against a stale channel, at zero extra build cost (the pr-<N>-sha images
-    # already exist for the other sims), and is 1:1 with the PR's diff so no
-    # channel-promotion timing can make it stale. Because it now consumes those
-    # staging images, it is gated on ensure-pr-staging-images (skipped on
-    # dispatch/fork is fine -- see the env block). Testing that the currently-
-    # published channel still installs cleanly is a real but SEPARATE concern
-    # that belongs on a schedule/post-merge, not a per-PR gate; #785 tracks
-    # adding that scheduled channel-install smoke check (it is what re-covers
-    # setup.sh's channel->stack-pointer->sha path, now only exercised here on
-    # dispatch/fork/Dependabot runs rather than on the common same-repo PR).
-    name: setup.sh CLI simulation
-    # ui-nats-dns-integration-simulation is included purely for the shared-
-    # runner collision constraint (same compose project name / fixed
-    # validation ports as the other full-setup-deep-validate jobs), not
-    # because this job consumes its outputs. A former
-    # watchtower-update-simulation job used to sit between it and this job in
-    # that same serialization chain; it was removed with Watchtower itself
-    # (#819), so this job now chains directly off
-    # ui-nats-dns-integration-simulation instead.
-    needs: [plan, ensure-pr-staging-images, ui-nats-dns-integration-simulation]
+  # The nine simulation/validation jobs this suite shares with the manual
+  # full-setup-validate.yml now live in one reusable workflow (issue #1014).
+  # This per-PR gate invokes them with the PR's own resolved staging tag; the
+  # caller keeps its own trigger, plan gating, and ensure-pr-staging-images
+  # ordering. That job's failure/cancel guard therefore lives here on the
+  # `uses:` job rather than on each job inside the reusable workflow.
+  full-setup-sims:
+    name: full-setup simulations
+    needs: [plan, ensure-pr-staging-images]
     if: >-
       always() &&
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: setup-cli-simulation.sh needs
-        # `expect` from build-tools. On a PR that touched tools/build-tools,
-        # prefer the confirmed PR staging tag (ensure-pr-staging-images
-        # already waited for and verified build-tools:$PR_TAG exists) over
-        # select-build-tools-image.sh's own trusted-ref fallback: that
-        # fallback only rebuilds branch-local when the published `latest`
-        # image FAILS its smoke test, so a same-PR build-tools change that
-        # still happens to pass the baseline smoke test would otherwise
-        # silently run against `latest` instead of the PR's own image
-        # (Codex review finding on #764).
-        id: build-tools-image
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
-          else
-            image="$(bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run setup.sh CLI simulation
-        # Mounted at the SAME absolute path inside the container as on the host
-        # so docker compose bind-mount sources (resolved against the HOST
-        # daemon) match; see full-setup-validate.yml's identical step comment.
-        # --network host: also required here for the same reason as that
-        # step -- setup.sh's update-flow health gate curls the stack's own
-        # loopback-published addresses (127.0.0.x), which are per-network-
-        # namespace and otherwise unreachable from this sibling container.
-        #
-        # flock: see full-setup-validate.yml's identical step comment for the
-        # full finding -- this job installs a real quickstart stack with
-        # FIXED container names (lancache-nats, lancache-ui, ...), which are
-        # not project-name-scoped, so two runs of this job landing on the
-        # same physical runner host (this repo's runners are registered
-        # several-per-host, sharing one Docker daemon) collide. The `needs:`
-        # chain onto ui-nats-dns-integration-simulation above only serializes
-        # jobs *within this one workflow run*; it does nothing for two
-        # different PRs' runs overlapping, which is what actually happened.
-        # The lock itself now comes from scripts/lib/quickstart-compose-lock.sh
-        # (issue #838) -- see that file's header for why it must be `source`d
-        # rather than executed, and why its lock path is a single shared
-        # constant rather than a per-caller argument.
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-          # Which images setup.sh installs (see setup-cli-simulation.sh for the
-          # full rationale). Same-repo PR: pin the PR's own immutable
-          # pr-<N>-sha tag (plan.image_tag) so the gate tests THIS PR's code and
-          # can never go stale. Otherwise (dispatch/fork/Dependabot, where
-          # image_tag is already a channel word): install the base-ref channel
-          # -- resolved by plan, never hardcoded nightly -- which also keeps
-          # setup.sh's channel->stack-pointer->sha resolution path covered.
-          SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
-          SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
-        run: |
-          set -euo pipefail
-
-          # shellcheck source=scripts/lib/quickstart-compose-lock.sh
-          source "scripts/lib/quickstart-compose-lock.sh"
-          quickstart_compose_lock_acquire
-
-          docker run --rm \
-            --network host \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD:$PWD" \
-            -w "$PWD" \
-            -e SETUP_SIM_IMAGE_CHANNEL \
-            -e SETUP_SIM_IMAGE_TAG \
-            "$BUILD_TOOLS_IMAGE" \
-            bash scripts/setup-cli-simulation.sh
-
-  dhcp-kea-lease-flow-simulation:
-    # Real DHCP lease flow against a Kea container built from THIS checkout's
-    # services/dhcp source -- so it already tests the PR's own DHCP code
-    # directly and needs no staging tag. This is where dhcp coverage lands in
-    # the automatic gate (it was absent from the shallow check). dhcp-proxy
-    # still has no deep job (tracked in #705) and so is still uncovered here.
-    name: DHCP Kea lease-flow simulation
-    needs: [plan, setup-cli-simulation]
-    if: always() && needs.plan.outputs.should_run == 'true'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: needs isc-dhcp-client from
-        # build-tools. Same PR-staging-tag preference as setup-cli-simulation
-        # above, for the same reason: select-build-tools-image.sh's
-        # trusted-ref fallback only rebuilds branch-local when the published
-        # `latest` FAILS its smoke test, which a same-PR build-tools change
-        # would often still pass (Codex review finding on #764).
-        id: build-tools-image
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
-          else
-            image="$(bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run DHCP Kea lease-flow simulation
-        env:
-          DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          bash scripts/dhcp-kea-lease-flow-simulation.sh
-
-  nats-auth-callout-simulation:
-    # Real per-secondary NATS auth-callout integration test. Pulls the real
-    # dns/ui/nats images (via the script), so it threads the PR staging tag to
-    # test the PR's own secondary credentialing code.
-    name: NATS auth-callout simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, dhcp-kea-lease-flow-simulation]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # See ssl-mitm-cache-simulation's identical block above: this job's own
-      # `docker compose up proxy docker-socket-proxy dns-standard dns-ssl nats
-      # ui` call (in scripts/nats-secondary-auth-callout-simulation.sh) needs
-      # these to land on this run's derived subnet.
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
-        id: build-tools-image
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run NATS auth-callout simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it. This is the exact job whose octet-22 stack died on
-          # "Pool overlaps" in run 29287590206 -- the concrete recurrence this
-          # wrapper eliminates.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/nats-secondary-auth-callout-simulation.sh
+    uses: ./.github/workflows/full-setup-sims.yml
+    with:
+      image_tag: ${{ needs.plan.outputs.image_tag }}
+      should_run: ${{ needs.plan.outputs.should_run }}
+      pr_staging_available: ${{ needs.plan.outputs.pr_staging_available }}
+      build_tools_touched: ${{ needs.plan.outputs.build_tools }}
+    secrets: inherit
 
   dns-zone-rollback-simulation:
     # Real end-to-end test (#628) of the PowerDNS zone/record known-good
@@ -954,33 +255,20 @@ jobs:
     # live PowerDNS/recursor round-trip). Pulls the real dns/ui/nats images,
     # so it threads the PR staging tag to test the PR's own code.
     name: DNS zone/record rollback simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, nats-auth-callout-simulation]
+    needs: [plan, ensure-pr-staging-images, full-setup-sims]
     if: >-
       always() &&
       needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     env:
       LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # See ssl-mitm-cache-simulation's identical block above: this job's own
-      # `docker compose up proxy docker-socket-proxy dns-standard dns-ssl
-      # nats ui` call (in scripts/dns-zone-rollback-simulation.sh) needs
-      # these to land on this run's derived subnet.
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+      # The run-in-validation-subnet.sh wrapper below self-reserves a
+      # collision-free /27 slot and exports the full VALIDATION_* set for it.
+      # Issue #1014: this job no longer threads compute-validation-network's
+      # per-run outputs as job-level env -- that job now lives in the reusable
+      # full-setup-sims.yml, and the wrapper supplies the addresses anyway.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve build-tools image
@@ -1007,140 +295,6 @@ jobs:
           # sim inside it rather than racing the shared job-level subnet.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/dns-zone-rollback-simulation.sh
 
-  ui-reachability-crash-loop-simulation:
-    # Real end-to-end proof for #763: deliberately crash-loops `proxy` (a
-    # real `ui` depends_on entry) and confirms the Admin UI still starts,
-    # becomes healthy, and answers a real HTTP request throughout -- proving
-    # deploy/full-setup/docker-compose.yml's `ui` depends_on list has no
-    # condition: service_healthy gate on it, rather than just reading the
-    # compose file and assuming so. See the script's own header for exactly
-    # what this does and does not prove.
-    name: Admin UI reachability during dependency crash-loop
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, nats-auth-callout-simulation]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # See ssl-mitm-cache-simulation's identical block above: this job's own
-      # `docker compose up ui` call (in
-      # scripts/ui-reachability-crash-loop-simulation.sh) needs these to land
-      # on this run's derived subnet.
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: this job's curl check only needs
-        # tools already in every published build-tools image, matching
-        # ssl-mitm-cache-simulation's own step, but the same-PR
-        # tools/build-tools override below still applies for the same reason
-        # documented there.
-        id: build-tools-image
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run Admin UI reachability during crash-loop simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it, instead of racing the single job-level
-          # VALIDATION_SUBNET against every other concurrent run on this host.
-          # This job used to invoke its script directly, consuming
-          # compute-validation-network's raw output via the job-level env
-          # block above with no reservation in between -- confirmed for real:
-          # this exact job died on "Pool overlaps" for a concurrent run's
-          # _validation network, the same failure class
-          # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
-          # already guard against with this same wrapper.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-reachability-crash-loop-simulation.sh
-
-  setup-reset-kea-config-simulation:
-    # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
-    # reset-to-last-known-good-config kea` must genuinely roll a real,
-    # running Kea server back to an earlier config via its Control Agent API,
-    # not just return success. Builds Kea from THIS checkout's services/dhcp
-    # (like dhcp-kea-lease-flow-simulation above), so it needs no staging tag
-    # for that image; only the published `ui` image is pulled. See
-    # scripts/setup-reset-kea-config-simulation.sh's own header for exactly
-    # what this does and does not prove.
-    name: setup.sh reset-to-last-known-good-config (Kea) simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, ui-reachability-crash-loop-simulation]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
-        # preference, matching every other job in this suite.
-        id: build-tools-image
-        run: |
-          set -euo pipefail
-          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run setup.sh reset-to-last-known-good-config (Kea) simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it. This job used to invoke its script directly,
-          # consuming compute-validation-network's raw output via the
-          # job-level env block above with no reservation in between --
-          # confirmed for real: this exact job died on "Pool overlaps" for a
-          # concurrent run's _validation network, the same failure class
-          # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
-          # already guard against with this same wrapper.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
-
   dhcp-kea-ui-rollback-simulation:
     # Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback
     # route (POST /dhcp/snapshot/rollback, rollback_kea_snapshot in
@@ -1148,36 +302,40 @@ jobs:
     # server back to an earlier known-good config via its Control Agent API,
     # not just return an HTTP redirect. The CLI fallback
     # (setup.sh reset-to-last-known-good-config kea) is separately proven by
-    # setup-reset-kea-config-simulation above; this covers the UI-reachable
-    # path that one does not. Builds Kea from THIS checkout's services/dhcp
-    # (like the sibling sims), so it needs no staging tag for that image; only
-    # the published `ui` image is pulled. See
-    # scripts/dhcp-kea-ui-rollback-simulation.sh's own header for exactly what
-    # this does and does not prove.
+    # setup-reset-kea-config-simulation (now inside full-setup-sims.yml, issue
+    # #1014); this covers the UI-reachable path that one does not. Builds Kea
+    # from THIS checkout's services/dhcp (like the sibling sims), so it needs
+    # no staging tag for that image; only the published `ui` image is pulled.
+    # See scripts/dhcp-kea-ui-rollback-simulation.sh's own header for exactly
+    # what this does and does not prove.
+    #
+    # This job is deep-validate-only (it has no counterpart in the manual
+    # full-setup-validate.yml), so unlike its former sibling
+    # setup-reset-kea-config-simulation it did NOT move into the reusable
+    # full-setup-sims.yml (issue #1014) -- doing so would run it in the
+    # manual-dispatch context where it never existed. Instead it stays a
+    # top-level job here, alongside dns-zone-rollback-simulation and
+    # syslog-forwarding-simulation, needing the whole full-setup-sims caller
+    # job (its former dependency, ui-reachability-crash-loop-simulation, is
+    # now one of the jobs folded inside it and no longer addressable by name
+    # at this level) instead of compute-validation-network's raw per-job
+    # outputs directly.
     name: Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
-    needs: [plan, compute-validation-network, ensure-pr-staging-images, ui-reachability-crash-loop-simulation]
+    needs: [plan, ensure-pr-staging-images, full-setup-sims]
     if: >-
       always() &&
       needs.plan.outputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     env:
       LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+      # The run-in-validation-subnet.sh wrapper below self-reserves a
+      # collision-free slot and exports the full VALIDATION_* set for it.
+      # Issue #1014: this job no longer threads compute-validation-network's
+      # per-run outputs as job-level env -- that job now lives in the reusable
+      # full-setup-sims.yml, and the wrapper supplies the addresses anyway
+      # (same reasoning as dns-zone-rollback-simulation above).
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve build-tools image
@@ -1199,9 +357,9 @@ jobs:
         run: |
           set -euo pipefail
           # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it, exactly like the setup-reset-kea-config-simulation
-          # job above -- both stand up a full validation stack and must not
-          # share a _validation network with a concurrent run.
+          # sim inside it, exactly like the other deep-only sims above -- both
+          # stand up a full validation stack and must not share a _validation
+          # network with a concurrent run.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/dhcp-kea-ui-rollback-simulation.sh
 
   syslog-forwarding-simulation:
@@ -1327,23 +485,16 @@ jobs:
   # docs-only PR, or a sim failed), so branch protection always sees a real
   # conclusion from a job named "deep full-setup validation" -- never a
   # perpetually-pending or "skipped" required check that would wedge a PR.
-  # Passes when every sim that ran succeeded (or was legitimately skipped);
-  # fails if any sim actually failed or the staging prep failed.
+  # Passes when the shared suite and all three deep-only sims succeeded (or
+  # were legitimately skipped); fails if any actually failed or staging prep
+  # failed.
   deep-full-setup-validation:
     name: deep full-setup validation
     needs:
       - plan
-      - compute-validation-network
       - ensure-pr-staging-images
-      - full-setup-validate
-      - ssl-mitm-cache-simulation
-      - ui-nats-dns-integration-simulation
-      - setup-cli-simulation
-      - dhcp-kea-lease-flow-simulation
-      - nats-auth-callout-simulation
+      - full-setup-sims
       - dns-zone-rollback-simulation
-      - ui-reachability-crash-loop-simulation
-      - setup-reset-kea-config-simulation
       - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
     if: always()
@@ -1353,17 +504,15 @@ jobs:
         env:
           SHOULD_RUN: ${{ needs.plan.outputs.should_run }}
           PLAN_RESULT: ${{ needs.plan.result }}
-          COMPUTE_NETWORK_RESULT: ${{ needs['compute-validation-network'].result }}
           ENSURE_RESULT: ${{ needs['ensure-pr-staging-images'].result }}
-          FULL_SETUP_RESULT: ${{ needs['full-setup-validate'].result }}
-          SSL_RESULT: ${{ needs['ssl-mitm-cache-simulation'].result }}
-          UINATS_RESULT: ${{ needs['ui-nats-dns-integration-simulation'].result }}
-          SETUP_RESULT: ${{ needs['setup-cli-simulation'].result }}
-          DHCP_RESULT: ${{ needs['dhcp-kea-lease-flow-simulation'].result }}
-          NATS_RESULT: ${{ needs['nats-auth-callout-simulation'].result }}
+          # One combined result for the nine shared jobs now in the reusable
+          # full-setup-sims.yml (compute-validation-network + full-setup-validate
+          # + the seven simulations). A reusable-workflow caller job reports
+          # 'failure' if ANY job inside it failed, so this single result is a
+          # faithful pass/fail for the whole shared set; GitHub's checks UI still
+          # lists each inner job so a failure is attributable.
+          FULL_SETUP_SIMS_RESULT: ${{ needs['full-setup-sims'].result }}
           DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
-          UI_REACHABILITY_RESULT: ${{ needs['ui-reachability-crash-loop-simulation'].result }}
-          RESET_KEA_CONFIG_RESULT: ${{ needs['setup-reset-kea-config-simulation'].result }}
           UI_KEA_ROLLBACK_RESULT: ${{ needs['dhcp-kea-ui-rollback-simulation'].result }}
           SYSLOG_FORWARDING_RESULT: ${{ needs['syslog-forwarding-simulation'].result }}
         run: |
@@ -1380,26 +529,23 @@ jobs:
           fi
 
           # Hard requirement, deliberately NOT routed through the lenient
-          # check() helper below: compute-validation-network derives the
-          # per-run subnet/IPs every other job in this suite relies on for
-          # collision-free isolation (see its own job comment). If it fails
-          # or is cancelled, downstream jobs are skipped by their own `if:`
-          # guards -- and check() treats 'skipped' as fine, so without this
-          # explicit, unconditional check this required gate could still go
-          # green after silently losing the isolation guarantee it depends
-          # on (Codex review finding on #764). should_run is already 'true'
-          # here (checked above), so compute-validation-network must have
-          # actually run and succeeded, never merely be 'skipped'.
-          if [[ "$COMPUTE_NETWORK_RESULT" != "success" ]]; then
-            echo "::error::Per-run validation network derivation did not succeed (compute-validation-network result: $COMPUTE_NETWORK_RESULT); this suite cannot guarantee collision-free isolation from other concurrent runs. Failing closed."
+          # check() helper below: the shared full-setup-sims suite contains
+          # compute-validation-network (the per-run subnet/IP derivation every
+          # job relies on for collision-free isolation) plus full-setup-validate
+          # and the seven simulations. should_run is already 'true' here, so this
+          # suite must have actually run and succeeded -- never merely be
+          # 'skipped' (which check() treats as fine and would let this required
+          # gate go green after silently losing the isolation guarantee, the
+          # Codex review finding on #764 this preserves).
+          if [[ "$FULL_SETUP_SIMS_RESULT" != "success" ]]; then
+            echo "::error::The shared full-setup simulation suite did not succeed (full-setup-sims result: $FULL_SETUP_SIMS_RESULT); see its individual jobs in the checks UI. Failing closed."
             exit 1
           fi
 
           # A required check must fail only on a genuine problem. 'skipped' is
-          # legitimate (ensure-pr-staging-images skips on dispatch/Dependabot;
-          # a sim can skip if staging prep failed, which is itself reported via
-          # ENSURE_RESULT). 'success' passes. Anything else (failure/cancelled)
-          # fails the gate.
+          # legitimate (ensure-pr-staging-images skips on dispatch/Dependabot; a
+          # deep-only sim can skip if staging prep failed, itself reported via
+          # ENSURE_RESULT). 'success' passes. Anything else fails the gate.
           overall=0
           check() {
             local name="$1" result="$2"
@@ -1410,15 +556,7 @@ jobs:
           }
           echo "Deep validation job results:"
           check "ensure-pr-staging-images" "$ENSURE_RESULT"
-          check "full-setup-validate" "$FULL_SETUP_RESULT"
-          check "ssl-mitm-cache-simulation" "$SSL_RESULT"
-          check "ui-nats-dns-integration-simulation" "$UINATS_RESULT"
-          check "setup-cli-simulation" "$SETUP_RESULT"
-          check "dhcp-kea-lease-flow-simulation" "$DHCP_RESULT"
-          check "nats-auth-callout-simulation" "$NATS_RESULT"
           check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
-          check "ui-reachability-crash-loop-simulation" "$UI_REACHABILITY_RESULT"
-          check "setup-reset-kea-config-simulation" "$RESET_KEA_CONFIG_RESULT"
           check "dhcp-kea-ui-rollback-simulation" "$UI_KEA_ROLLBACK_RESULT"
           check "syslog-forwarding-simulation" "$SYSLOG_FORWARDING_RESULT"
 

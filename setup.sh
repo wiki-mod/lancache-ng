@@ -846,6 +846,57 @@ install_docker() {
     fi
 }
 
+# Shared prerequisite-install flow: curl, Docker engine, a running Docker
+# daemon, and the Docker Compose v2 plugin. Used by the interactive `install`
+# flow below and by the standalone `install-requirements-primary`/
+# `install-requirements-secondary` commands (#1068 item 20) so an operator
+# who only needs the Docker prerequisites -- e.g. a fresh secondary host,
+# where `cmd_secondary` itself only checks for these tools and dies with
+# "docker is not installed" rather than installing them -- can provision
+# exactly that, standalone, without walking through the full interactive
+# installer. Both commands currently call this identical logic: a secondary
+# node needs the same Docker engine + Compose v2 plugin as a primary, nothing
+# less. Kept as two distinct command names anyway (rather than one shared
+# "install-requirements") so the operator-facing entry points stay
+# self-describing and can diverge later without a breaking rename if a
+# primary- or secondary-only requirement is ever added.
+ensure_stack_requirements_installed() {
+    [[ "$(id -u)" = "0" ]] \
+        || die "This command must be run as root (sudo ./setup.sh install-requirements-primary or install-requirements-secondary)."
+
+    if ! command -v curl >/dev/null 2>&1; then
+        install_curl
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        install_docker
+        print_ok "Docker installed"
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        print_warn "Docker daemon not running — starting now..."
+        systemctl enable --now docker \
+            || die "Failed to start Docker daemon."
+    fi
+
+    if ! docker compose version >/dev/null 2>&1; then
+        install_docker_compose
+    fi
+
+    docker compose version >/dev/null 2>&1 \
+        || die "Docker Compose plugin still missing after installing Docker requirements."
+}
+
+cmd_install_requirements_primary() {
+    ensure_stack_requirements_installed
+    print_ok "Primary node requirements installed (curl, Docker, Docker Compose v2). Run ./setup.sh install next."
+}
+
+cmd_install_requirements_secondary() {
+    ensure_stack_requirements_installed
+    print_ok "Secondary node requirements installed (curl, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> next."
+}
+
 # Approximates Docker Compose's own .env value semantics for a value read back
 # out of an existing file: strips a fully single- or double-quoted value's
 # surrounding quotes, and drops an unquoted inline comment (a '#' preceded by
@@ -2858,6 +2909,22 @@ path_is_inside() {
     [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
 }
 
+# Shared "no stack at this path" failure (#1068 item 22), used by every
+# command that operates on an existing install directory defaulting to
+# /opt/lancache-ng (backup, restore, update/auto-update, debug,
+# create-logs-for-issue, reset-to-last-known-good-config, update-ip). A
+# secondary DNS node's stack lives in its own --name-derived directory under
+# wherever cmd_secondary was run (see cmd_secondary's own secondary_dir
+# handling), never /opt/lancache-ng -- so any of these commands, run bare on
+# a fresh secondary host, hits this by default. The previous plain "Run
+# ./setup.sh first." read as if only a primary install were possible, which
+# is actively misleading for that case; point at both real fixes instead of
+# guessing which one applies.
+die_no_stack_found() {
+    local install_dir="$1"
+    die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh (or ./setup.sh install). If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
+}
+
 # Compose helpers are deliberately no-ops when the stack is unavailable so
 # config-only backup/restore can still handle partial or damaged installs.
 compose_stack_available() {
@@ -3095,7 +3162,7 @@ cmd_backup() {
     install_dir=$(realpath -m "$install_dir")
     backup_root=$(realpath -m "$backup_root")
     [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
     local stamp dest archive rel path old_umask stack_stopped=0 stack_was_running=0 backup_paused_convergence=0
@@ -3447,6 +3514,13 @@ Commands:
   install              Run the guided first-time setup. This is also the
                        default when no command is given, so this remains safe
                        for curl | bash installation.
+  install-requirements-primary
+                       Install only the Docker prerequisites (curl, Docker
+                       engine, Docker Compose v2) for a primary node, without
+                       running the rest of the interactive installer.
+  install-requirements-secondary
+                       Install only the Docker prerequisites for a secondary
+                       DNS node, without running ./setup.sh secondary.
   update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
   update-ip [install-dir]
                        Change the configured standard and SSL listener IPs.
@@ -3493,6 +3567,29 @@ default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
 LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
 for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
+EOF
+            ;;
+        install-requirements-primary)
+            cat <<EOF
+Usage: ./setup.sh install-requirements-primary
+
+Installs only the Docker prerequisites (curl, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin) for a primary node, then stops --
+does not run the rest of the interactive installer. Useful for provisioning a
+host's requirements ahead of time, or standalone, separately from the guided
+setup. Must be run as root. Follow with ./setup.sh install.
+EOF
+            ;;
+        install-requirements-secondary)
+            cat <<EOF
+Usage: ./setup.sh install-requirements-secondary
+
+Installs only the Docker prerequisites (curl, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin) for a secondary DNS node, then
+stops. ./setup.sh secondary itself only checks for these tools and fails with
+"docker is not installed" if they are missing -- this command lets an
+operator install exactly what a secondary needs, standalone, before running
+./setup.sh secondary. Must be run as root.
 EOF
             ;;
         update)
@@ -3658,12 +3755,32 @@ dc_update() {
 # from "starting"/"unhealthy" rather than guessing. For a container with no
 # healthcheck at all, the best available signal is that it is actually in the
 # "running" state (weaker, but honestly the most this project can assert for
-# those services today).
+# those services today) -- EXCEPT for a deliberately one-shot utility
+# container (Compose `restart: "no"`, e.g. `dhcp-probe`, the #377 broadcast
+# conflict-discovery probe): that class of service is *expected* to exit on
+# its own once its job is done, so requiring "running" for it can never
+# succeed once it finishes normally. Confirmed as a real, 100%-reproducible
+# bug (issue #1155): every real `setup.sh update` run against deploy/quickstart
+# recreates dhcp-probe as part of "Starting non-UI services", and once it
+# exits 0 (as designed, usually well under a minute), this check kept
+# requiring "running" forever, so wait_for_stack_health always burned its
+# full 180s budget and declared the whole non-UI set unhealthy -- even though
+# every real long-running service (proxy, dns-standard, nats, watchdog,
+# netdata, docker-socket-proxy) was already healthy the entire time. A
+# one-shot container is therefore treated as satisfying this check once it
+# has exited cleanly (exit code 0); a non-zero exit still fails closed, since
+# that is a real probe failure, not a normal one-shot completion.
 service_container_is_healthy() {
     local service="$1"
-    local container_id health status
+    local container_id health status restart_policy exit_code
 
-    container_id=$(dc_update ps -q "$service" 2>/dev/null)
+    # -a/--all: without it, `docker compose ps -q` only lists currently
+    # RUNNING containers, so a one-shot service (dhcp-probe) that already
+    # exited would look up as "no container id at all" and return 1 here
+    # before the one-shot-exit-0 handling below is ever reached -- confirmed
+    # directly while validating the issue #1155 fix (the fix below alone was
+    # not sufficient; this lookup itself was the second half of the bug).
+    container_id=$(dc_update ps -a -q "$service" 2>/dev/null)
     [[ -n "$container_id" ]] || return 1
 
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id" 2>/dev/null)
@@ -3673,7 +3790,16 @@ service_container_is_healthy() {
     fi
 
     status=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null)
-    [[ "$status" = "running" ]]
+    [[ "$status" = "running" ]] && return 0
+
+    restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id" 2>/dev/null)
+    if [[ "$status" = "exited" && "$restart_policy" = "no" ]]; then
+        exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null)
+        [[ "$exit_code" = "0" ]]
+        return $?
+    fi
+
+    return 1
 }
 
 # A missing tool must never look identical to "the thing it would have
@@ -3880,7 +4006,7 @@ apply_stack_update_ordered() {
 perform_stack_update_flow() {
     local install_dir="$1"
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
     # Installed up front, before anything is mutated, so the post-update
     # verify_stack_functional_health gate below actually runs its DNS/HTTP
@@ -3991,7 +4117,7 @@ cmd_auto_update() {
 
     install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     # Re-checked here, not just trusted from whatever gated the systemd timer
@@ -4147,7 +4273,7 @@ cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     cd "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -4419,7 +4545,7 @@ cmd_create_logs_for_issue() {
     install_dir=$(realpath -m "$install_dir")
     dest_root=$(realpath -m "$dest_root")
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     install_missing_tools tar
 
     local env_file cache_env_file state_dir
@@ -4697,7 +4823,7 @@ reset_kea_to_last_known_good_config() {
     local sid config_json
 
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
@@ -4798,7 +4924,7 @@ cmd_update_ip() {
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh update-ip [install-dir])."
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
@@ -5379,6 +5505,18 @@ case "${1:-install}" in
             exit 0
         fi
         ;;
+    install-requirements-primary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install-requirements-primary
+            exit 0
+        fi
+        cmd_install_requirements_primary; exit 0 ;;
+    install-requirements-secondary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install-requirements-secondary
+            exit 0
+        fi
+        cmd_install_requirements_secondary; exit 0 ;;
     update)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help update
@@ -5473,27 +5611,7 @@ print_step "Checking prerequisites"
 
 assert_prebuilt_image_platform_supported
 
-if ! command -v curl >/dev/null 2>&1; then
-    install_curl
-fi
-
-if ! command -v docker >/dev/null 2>&1; then
-    install_docker
-    print_ok "Docker installed"
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    print_warn "Docker daemon not running — starting now..."
-    systemctl enable --now docker \
-        || die "Failed to start Docker daemon."
-fi
-
-if ! docker compose version >/dev/null 2>&1; then
-    install_docker_compose
-fi
-
-docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose plugin still missing after installing Docker requirements."
+ensure_stack_requirements_installed
 
 if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     print_warn "No local repo found — cloning to /opt/lancache-ng..."
@@ -5641,13 +5759,17 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
-    printf "  stable — the channel promoted after the full release validation gate.\n"
-    printf "           Recommended for most installs. This is what './setup.sh update'\n"
-    printf "           tracks by default, and what most operators should stay on.\n"
     printf "  nightly — the most recently built channel from active development.\n"
-    printf "            Refreshes continuously from current_dev, may be less tested\n"
-    printf "            than stable. Opt in only if you specifically want the newest\n"
-    printf "            changes and accept the extra risk.\n\n"
+    printf "            Refreshes continuously from current_dev. Currently the\n"
+    printf "            practical default: this project is pre-1.0 and has not cut\n"
+    printf "            a stable release yet (see below), so this is what most new\n"
+    printf "            installs should pick.\n"
+    printf "  stable — the channel promoted after the full release validation gate,\n"
+    printf "           once a stable release exists. NOT YET AVAILABLE: no stable\n"
+    printf "           release has been cut for this project yet, so choosing it now\n"
+    printf "           will fail during image pull with an explanation of how to\n"
+    printf "           proceed instead. Once a stable release ships, this becomes the\n"
+    printf "           recommended default again.\n\n"
 
     # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
     # resolve_lancache_image_channel already checks first (see its precedence
@@ -5655,17 +5777,27 @@ else
     # "stable" and "latest" resolve to the identical published stack pointer
     # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
     # friendlier, self-explanatory name this prompt writes for new installs.
+    #
+    # Default answer and recommendation deliberately flipped from "stable" to
+    # "nightly" (#1068 field-testing finding): pre-1.0, accepting the prior
+    # default silently walked a new operator straight into a "manifest
+    # unknown" dead end (resolve_lancache_stack_channel_tag's own die()
+    # message already explains this gracefully if reached, so "stable" stays
+    # a valid, non-rejected answer here for the operator who explicitly wants
+    # it or is running this after a real stable release exists -- only the
+    # picker's own default/recommendation changes, not what inputs it
+    # accepts).
     while true; do
-        ask "Release channel [stable/nightly]" "stable"
+        ask "Release channel [nightly/stable]" "nightly"
         case "${REPLY,,}" in
-            stable)
-                LANCACHE_IMAGE_CHANNEL="stable"
-                print_ok "Using the stable channel (recommended)."
-                break
-                ;;
             nightly)
                 LANCACHE_IMAGE_CHANNEL="nightly"
-                print_warn "Using the nightly channel — more recent, less tested than stable."
+                print_ok "Using the nightly channel (recommended pre-1.0)."
+                break
+                ;;
+            stable)
+                LANCACHE_IMAGE_CHANNEL="stable"
+                print_warn "Using the stable channel -- this will fail during image pull unless a stable release already exists."
                 break
                 ;;
             # "edge" was the old name of the nightly channel (renamed in v0.3.0,
