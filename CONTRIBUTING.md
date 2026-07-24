@@ -186,6 +186,113 @@ These are required, not stylistic suggestions — a PR missing them will fail CI
 - **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
 - **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
 
+## Building from source
+
+lancache-ng is a Docker Compose stack of Rust services (Admin UI, DNS
+NATS subscriber) plus nginx, PowerDNS, and Kea, each with its own
+Dockerfile under `services/<name>/`. There is no single top-level build
+command that produces a native binary outside Docker — building "from
+source" means building the container images from this repository's
+source instead of pulling the prebuilt `ghcr.io/wiki-mod/lancache-ng/*`
+images.
+
+### Required tooling
+
+- Docker Engine and Docker Compose v2 (the `docker compose` subcommand,
+  not the standalone `docker-compose` v1 binary).
+- No local Rust toolchain is required to build the images: the Rust
+  service builders (`services/dns/nats-subscriber`, `services/ui`)
+  consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` image
+  (selected via `BUILD_TOOLS_IMAGE`, resolved by
+  `scripts/select-build-tools-image.sh`) inside their own multi-stage
+  Dockerfile, so `cargo`/`rustc` never need to be installed on the host.
+  If you do want a local Rust toolchain for editor tooling (rust-analyzer,
+  etc.), any recent stable toolchain matching the edition declared in
+  each crate's `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
+  container verification" section for why the build-tools container, not
+  your host toolchain, is still the only path CI/PR verification counts.
+- No local Node.js, Python, or Go toolchain is required either — see
+  `AGENTS.md`'s "Project Language" and `AG-KD-003` sections for the
+  narrow, documented exceptions where this project's own CI images build
+  a *different* project's Go-based tool (`actionlint`, Docker CLI,
+  `docker-compose`) from source for a security reason, which is unrelated
+  to building lancache-ng's own services.
+
+### Building the full stack
+
+```bash
+# Development: builds every service image from this checkout's source
+# and starts the stack (CA cert and all runtime certs are auto-generated).
+docker compose -f deploy/dev/docker-compose.yml up --build
+```
+
+`deploy/dev/docker-compose.yml` and each `services/<name>/Dockerfile`
+under it are the actual build definitions; `--build` forces a rebuild
+from source instead of pulling the prebuilt image tags the compose file
+otherwise references.
+
+### Building a single service image
+
+```bash
+# Example: rebuild only the Admin UI image.
+docker build -t lancache-ng-ui:local \
+  --build-arg BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)" \
+  services/ui
+```
+
+Every Rust service builder Dockerfile takes `BUILD_TOOLS_IMAGE` as a
+build arg; omitting it falls back to the Dockerfile's own `ARG
+BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
+default, which is fine for a quick local rebuild but is never what real
+CI passes (see `AGENTS.md`'s **AG-CI-008** for why CI always passes this
+argument explicitly instead of relying on that default).
+
+### Production builds
+
+`deploy/prod/docker-compose.yml` is pull-only by design (see "Setup and
+update safety" below) and does not build images from source. To run a
+locally-built image in a production-shaped deployment, build the image
+as shown above, tag it to match `LANCACHE_IMAGE_REGISTRY`/
+`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env`, and
+push it to a registry the deployment can pull from (or load it directly
+into the target Docker daemon) before running `setup.sh`/`docker compose
+up`.
+
+## Dependency management
+
+This section documents how the project selects, obtains, and tracks its
+dependencies, across every ecosystem this repository uses.
+
+- **Rust crates** (`services/ui`, `services/dns/nats-subscriber`): pinned
+  via each crate's `Cargo.lock`, committed to the repository. New
+  dependencies are added deliberately per change, preferring
+  well-maintained crates already in the Rust ecosystem's common use (see
+  `AGENTS.md`'s **AG-REL-003** for one concrete selection constraint:
+  `reqwest` must use `rustls-tls`, never `openssl-sys`). `cargo-audit`
+  runs in CI (`dns_cargo_audit`/`ui_cargo_audit` jobs) against every
+  PR/push to flag known-vulnerable versions of already-added
+  dependencies.
+- **GitHub Actions** (`.github/workflows/*.yml`): pinned to full commit
+  SHAs with a version comment (never floating tags like `@v4`), per this
+  file's "Quality and release process expectations" section above.
+- **Docker base images**: pinned per `docs/ci-image-pinning-policy.md`,
+  which documents which images are pinned by digest vs. version tag and
+  why, split between runtime base images and build-time builder images.
+- **Automated update tracking**: `.github/dependabot.yml` runs weekly
+  update checks for every ecosystem above (GitHub Actions, Cargo,
+  Docker base images), across both `master` and the active long-lived
+  integration branch, opening a PR per update group rather than
+  silently drifting.
+- **Obtaining dependencies at build time**: Rust dependencies are
+  fetched by Cargo from crates.io during the Docker build stage; no
+  vendored/copied third-party Rust source is committed. The one
+  documented exception is `services/proxy/public_suffix_list.dat` (the
+  vendored Mozilla Public Suffix List) and
+  `services/ui/src/static/chart.umd.min.js` (vendored Chart.js), both of
+  which carry their own upstream headers — see `AGENTS.md`'s
+  **AG-HDR-004** for why these are excluded from the project's own file
+  header requirement.
+
 ## Local checks
 
 ### Using the build-tools container for verification

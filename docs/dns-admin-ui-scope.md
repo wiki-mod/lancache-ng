@@ -11,9 +11,11 @@ in one place — this document is that surface.
 
 This is a **scoping document, not an implementation plan**. Nothing in the
 "planned but unbuilt" sections below is committed to v0.2.0; per issue #645's
-own framing, v0.2.0 is trending toward feature freeze, so most of that list is
-candidate v0.3.0 scope until a maintainer decision says otherwise. Where this
-document says "planned but unbuilt," treat the referenced code (or its
+own framing, v0.2.0 completed its feature freeze and stabilization pass
+(#986, closed) and is now an archived release branch that only takes
+deliberate backports (see docs/release-versioning.md), so most of that list
+is candidate v0.3.0 scope until a maintainer decision says otherwise. Where
+this document says "planned but unbuilt," treat the referenced code (or its
 absence) as intentional, not as something to "clean up."
 
 Related: #415/#616 (known-good config snapshots, implemented), #628 (PowerDNS
