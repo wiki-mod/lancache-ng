@@ -154,6 +154,23 @@ All actionable static analysis warnings are treated as build failures under the 
 **Known exception (tracked in issue #394):**
 GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo check` or `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
 
+#### Testing policy for major changes
+
+A **major change** is any pull request that adds a new feature, changes
+existing runtime/setup/update behavior, or fixes a bug in code that did not
+already have a regression test covering that behavior. A major change must
+add or update an automated test in the relevant test suite (Rust `#[test]`
+functions for `services/ui`/`services/dns/nats-subscriber`, a `.bats` fixture
+under `tests/bats/` for shell/setup logic, or a real end-to-end simulation
+script wired into a CI workflow for full-stack behavior) that exercises the
+new or changed behavior. A pull request that changes behavior with no
+corresponding test change should explain why in the PR body (for example,
+"covered by existing test X" or "no automated coverage is practical for this
+because Y" -- see `docs/threat-model.md`'s own precedent of naming untestable
+gaps explicitly rather than silently shipping without coverage). Purely
+cosmetic changes (docs, comments, formatting) are not major changes and are
+exempt.
+
 Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). Rust security correctness continues to be enforced separately by the `dns_rust_quality`, `ui_rust_quality`, `dns_test`, and `ui_test` jobs, which are independent of CodeQL extraction quality.
 
 - Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
@@ -318,6 +335,31 @@ configured.
 Avoid hiding operational failures. If the UI cannot read logs, talk to Docker,
 reach PowerDNS or update a service, show a clear error instead of pretending
 that the action succeeded.
+
+## Collaborator access and permission escalation
+
+Write access, merge rights, and secret access to this repository are escalated
+resources, not something granted casually. `CODEOWNERS` currently lists a
+single owner (`@djdomi`), reflecting that this project has one maintainer with
+write access today.
+
+Before any additional collaborator is granted an escalated permission --
+repository write/triage/admin access, `CODEOWNERS` inclusion, or access to any
+repository Secret -- the maintainer reviews:
+
+- the contributor's prior contribution history on this repository (issue/PR
+  quality, adherence to this document and `AGENTS.md`);
+- a justifiable lineage of identity where practical (for example, an
+  established GitHub account with a real contribution history elsewhere, or a
+  known affiliation with a trusted organization) rather than granting access
+  to an anonymous or brand-new account;
+- the specific scope actually needed (for example, triage-only access for
+  someone who reviews issues but does not need to merge, rather than defaulting
+  everyone to full write access).
+
+This review happens before the permission is granted, not retroactively. Any
+future automation that grants repository permissions (for example, a bot or
+GitHub App) must go through the same review before being installed.
 
 ## Security-sensitive changes
 

@@ -19,6 +19,28 @@ for the full channel/tagging model); the current stable release line is `v0.x`.
 We aim to provide security updates for the current stable release. Older
 releases are not actively maintained.
 
+### Scope and duration of support (per release)
+
+- **What is supported**: only the most recently published stable `vX.Y.Z`
+  release tag (the one `latest` currently points at) receives bug fixes and
+  security updates. Every `vX.Y.Z` release is a full stack release (see
+  `docs/release-versioning.md`'s "Core Rule") -- support is per stack release,
+  not per individual service image.
+- **What kind of support**: security fixes and correctness bug fixes, applied
+  by publishing a new stable release. There is no separate long-term-support
+  (LTS) branch and no backported point releases for a release once a newer
+  stable release has superseded it.
+- **Duration**: a stable release stops receiving security updates the moment
+  the next stable `vX.Y.Z` release is published -- there is no fixed
+  post-supersession grace window today. Operators should update to the current
+  stable release (or an audited `edge`/release-candidate build) promptly after
+  a new stable release ships, especially when the release notes mention a
+  security fix. This reflects this project's actual current maintenance
+  capacity (a single primary maintainer); it may be revisited if that changes.
+- **Pre-1.0 caveat**: as a pre-1.0 project, breaking changes and security-
+  relevant behavior changes can still land between minor versions; the
+  `CHANGELOG.md` and each release's notes call these out explicitly.
+
 ## Reporting a Vulnerability
 
 1. **Contact**: Send a detailed report to the security contact above, or use GitHub's private advisory feature.
@@ -115,6 +137,101 @@ This section documents intentional security design decisions and known tradeoffs
 - Network isolation: keep the cache host on a trusted, restricted network
 - Monitor proxy logs for upstream certificate validation failures
 - Keep the proxy image updated so CA certificates receive security updates
+
+## Secrets and Credentials Management
+
+This project's own secrets/credentials fall into two distinct groups with
+different handling:
+
+**CI/CD secrets** (used to build, scan, and publish the project itself):
+- Stored exclusively as GitHub Actions Secrets (values) or Variables
+  (non-secret configuration) at the repository level -- never hardcoded in
+  workflow files, Dockerfiles, or source (`AGENTS.md` `AG-SEC-004`/`AG-SEC-005`).
+  Examples: the GHCR publish token, `SCCACHE_REDIS_URL`, `SCCACHE_DIST_AUTH_TOKEN`.
+- Access is scoped per-job via each workflow job's own `permissions:` block
+  (least privilege; see `.github/workflows/*.yml`), not a blanket
+  workflow-wide grant.
+- Rotation of a CI secret is a manual GitHub Settings action by the repository
+  owner; there is no automated rotation schedule today.
+
+**Runtime/deployment secrets** (generated for and used by a running
+lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
+`DDNS_TSIG_KEY`, the four NATS role passwords, `UI_AUTH_PASSWORD`,
+`SECONDARY_REGISTRATION_TOKEN`, and per-secondary NATS credentials):
+- **Storing**: written to the operator's own `.env` file (gitignored) or, for
+  values shared across containers, a shared-secrets Docker volume (see
+  `docs/threat-model.md` T4/T5/T12 for the exact mechanism per secret).
+  `ca.key` lives under `<install>/certs/` and is gitignored (`AGENTS.md`
+  `AG-KD-002`).
+- **Accessing**: each service's entrypoint resolves only the specific
+  secret(s) it needs from `.env`/the shared-secrets volume at startup; no
+  service is handed a shared "all secrets" credential set.
+- **Generating**: a missing or known-placeholder (`CHANGE_ME_*`) value is
+  generated automatically on first start (fail-safe generation, not a
+  fail-closed rejection, for values that are safe to auto-generate); an
+  existing non-placeholder operator-supplied value is always preserved
+  (`AGENTS.md` `AG-OP-006`/`AG-OP-009`). `setup.sh update`/`setup.sh
+  auto-update` never rotates an already-set secret.
+- **Rotating**: the Admin UI exposes explicit rotation for
+  per-secondary NATS credentials (`POST /api/secondary/{name}/rotate-token`);
+  other runtime secrets are rotated by an operator manually setting a new
+  value and running `setup.sh update` (which does not overwrite an existing
+  non-placeholder value, so the operator must intentionally replace it).
+  There is no automatic time-based rotation for any runtime secret today.
+- Sensitive information must never be hardcoded in source or committed to
+  version control (`AGENTS.md` `AG-SEC-003`); GitHub secret scanning and push
+  protection are both enabled on this repository as a backstop.
+
+## Vulnerability Management Policy
+
+This section documents the project's Software Composition Analysis (SCA) and
+Static Application Security Testing (SAST) remediation policy.
+
+### SCA (dependency vulnerability) findings
+
+- **Tooling**: `cargo audit` runs against both first-party Rust crates
+  (`services/ui`, `services/dns/nats-subscriber`) on every pull request and
+  push, using `cargo audit --deny warnings` -- this denies on **any** reported
+  advisory, not only Critical/High severity. Container base images and their
+  OS packages are scanned with Trivy at image-build time.
+- **Threshold**: zero-tolerance by default. Any `cargo audit` finding, or any
+  Trivy-reported vulnerability not already listed in `.trivyignore.yaml`, is
+  treated as a blocking failure. A finding may only be accepted (not fixed) by
+  adding a dated, justified entry to `.trivyignore.yaml` with an explicit
+  `expired_at` date, forcing periodic re-review rather than a silent permanent
+  exception -- there is no equivalent suppression file for `cargo audit`
+  findings today, so a Rust dependency advisory must be fixed (upgrade,
+  patch, or replace the dependency) rather than suppressed.
+- **License findings**: dependency license compliance is not currently
+  automated by a dedicated SCA license-scanning tool (e.g. `cargo-deny`'s
+  license checks). This is a known gap; license review today is manual.
+- **Enforcement**: the `cargo-audit (dns/nats-subscriber)` and
+  `cargo-audit (ui)` jobs feed into the `CI scope policy` job in
+  `.github/workflows/build-push.yml`, which is a **required status check** on
+  `master` (branch protection) -- a failing SCA result blocks both merge and
+  the release/publish pipeline. This applies before every release, not only
+  on ad hoc PRs.
+
+### SAST (static analysis) findings
+
+- **Tooling**: GitHub CodeQL (`.github/workflows/codeql.yml`) analyzes the
+  `actions` (GitHub Actions workflow) and `rust` (both first-party crates)
+  languages on every pull request, push, and a daily schedule, uploading
+  results as GitHub code scanning alerts.
+- **Threshold**: any CodeQL alert on human-authored code (not the documented
+  macro-expansion extraction-warning carve-out in issue #394) at Error or
+  Warning severity must be triaged and either fixed or explicitly dismissed
+  with a documented reason before the affected code ships in a stable
+  release, matching this project's existing warnings-as-errors posture for
+  every other static check (`cargo clippy`, `shellcheck`, `actionlint`; see
+  `CONTRIBUTING.md`'s "Warning-as-errors policy").
+- **Enforcement status**: CodeQL results are visible as GitHub code scanning
+  alerts, but the CodeQL analysis job itself is **not yet** wired as a
+  required status check the way `cargo-audit` is (tracked in issue #1130 --
+  Level 3 follow-up), so a CodeQL finding does not yet automatically block a
+  merge or a release the way an SCA finding does. Until that CI gate lands,
+  enforcement of this threshold relies on manual review of the repository's
+  Security tab before each release.
 
 ## Deployment Scope
 
