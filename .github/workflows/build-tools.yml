@@ -25,7 +25,10 @@ on:
     # product-code change.
     - cron: "23 3 * * 0"
   push:
-    branches: [master, v0.2.0]
+    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # both stay listed so this trigger keeps covering whichever integration
+    # branch is actually receiving pushes (#709).
+    branches: [master, current_dev, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
@@ -73,7 +76,10 @@ on:
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
   pull_request:
-    branches: [master, v0.2.0]
+    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # both stay listed so this trigger keeps covering whichever integration
+    # branch is actually receiving pushes (#709).
+    branches: [master, current_dev, v0.2.0]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"

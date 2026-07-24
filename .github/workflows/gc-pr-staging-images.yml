@@ -30,7 +30,11 @@ name: GC PR Staging Images
 on:
   pull_request:
     types: [closed]
-    branches: [master, "v[0-9]*"]
+    # current_dev is the active development branch today (v0.2.0 is frozen).
+    # Without it, a closed PR against current_dev misses this prompt reap and
+    # falls back to the weekly schedule sweep below as its only cleanup path
+    # (#709).
+    branches: [master, current_dev, "v[0-9]*"]
   schedule:
     # Weekly, offset from build-tools.yml's Sunday 03:23 refresh so the two
     # scheduled jobs don't contend for the same runner at the same minute.
