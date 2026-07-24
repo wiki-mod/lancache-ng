@@ -36,11 +36,14 @@ aio         threads=default;
 directio    4m;
 ```
 
-**Cache configuration (all values as env var + configurable in Admin UI):**
+**Cache configuration (env vars set at `setup.sh` install time; see "Cache
+Retention & Cleanup" below for what the Admin UI does and does not yet expose
+for these — it currently only displays cache usage, it does not let an
+operator edit any of these values after initial setup):**
 
 | Variable | Default | Description |
 |---|---|---|
-| `CACHE_MAX_SIZE` | `50g` | Max cache size — UI checks against available disk space |
+| `CACHE_MAX_SIZE` | `50g` | Max cache size — `setup.sh` validates the requested value against real free disk space at `CACHE_DIR` (issue #1069); no Admin UI resize exists yet |
 | `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
@@ -173,7 +176,9 @@ itself publishes.
 - IP ranges as start–end (no CIDR required)
 - Static assignments: MAC → IP, editable via UI
 - DDNS → PowerDNS: lease = automatically an A record (in the configured DHCP domain) and a PTR record (in the matching private reverse zone) via TSIG-secured nsupdate (RFC 2136). PTR updates were **not** applied in production until issue #768's fix: Kea's D2 daemon used to send every reverse update's on-wire zone as the literal `in-addr.arpa.`, which had no matching PowerDNS zone (only narrower private-range subzones exist), so PowerDNS rejected every PTR update regardless of octet; `reverse-ddns` now lists one entry per real private reverse zone instead. See [docs/dhcp-modes.md](dhcp-modes.md) for the full detail.
+- DDNS enable/disable (issue #1076): whether Kea writes those DNS records is a separate control from whether Kea DHCP is running at all. The `DHCP_DDNS_ENABLED` env var (`config/{dev,prod}/dhcp.env`) sets the first-boot default for Kea's `dhcp-ddns.enable-updates`, and the Admin UI's DHCP page carries an independent "Enable DDNS Updates" toggle that flips `enable-updates` live via the Kea Control API. It defaults **off** for a fresh install (opt-in, matching Kea's own default), while an already-running install keeps whatever value it already has — `migrate_dhcp4_config()` merges the persisted `dhcp-ddns` block over the default, so the toggle's choice (and any existing install's on-state) survives restarts.
 - REST API (Kea Control Agent) for Admin UI
+- **Multi-threading is explicitly disabled** (`"multi-threading": {"enable-multi-threading": false}` in `services/dhcp/kea-dhcp4.conf`, re-asserted on every migration by `services/dhcp/entrypoint.sh`'s `migrate_dhcp4_config`). This is a deliberate override, not an oversight: Kea has shipped multi-threaded packet processing enabled by default since 2.4.0, but that feature targets high-query-rate ISP/carrier deployments processing thousands of leases per second across many CPU cores -- this project's DHCP server serves one LAN/lab-scale subnet, so the added concurrency surface (interacting with the `lease_cmds` hook, the DDNS-forwarding path, and the Admin UI's config-write/rollback machinery, none of which were designed against concurrent packet handlers) buys no real benefit here. No project history (commit messages, linked PRs) documents an incompatibility that was actually hit; this is a preventive simplicity choice, re-stated here so it isn't mistaken for an unexamined default. An operator with a genuinely large multi-subnet deployment can re-enable it (Kea's own default), but should first re-verify it against the hooks/DDNS paths above.
 
 ## Admin UI security headers
 
@@ -293,25 +298,33 @@ Epic / GOG: not supported.
 
 ## Cache Retention & Cleanup
 
-**Three mechanisms combined:**
+**Two mechanisms implemented today:**
 
 | Mechanism | Trigger | Basis |
 |---|---|---|
 | nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
-| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` |
-| Manual purge | Admin UI on-demand | freely selectable |
+| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` (`services/watchdog/watchdog.sh`'s `maybe_purge()`) |
 
-**Manual purging in Admin UI:**
+`setup.sh`'s initial "Cache size in GiB" prompt validates the requested size
+against real free disk space at `CACHE_DIR`, with a safety buffer that scales
+with the requested size (issue #1069). `CACHE_INACTIVE` is likewise a real
+setup-time prompt now, not just a silent default.
+
+**Not yet implemented — planned Admin UI cache-management surface (issue
+#1069), tracked separately from the setup-time work above:** the Admin UI
+dashboard (`services/ui/src/routes/dashboard.rs`) only reads and displays
+cache usage (used GB, max GB, percentage); it has no route or template that
+writes `CACHE_MAX_SIZE`, re-validates disk space at resize time, or triggers
+any purge. None of the following exists in code yet:
 
 | Action | Granularity |
 |---|---|
+| Live resize of `CACHE_MAX_SIZE` (re-checking disk space at resize time, not just at initial setup) | — |
 | Clear entire cache | Everything |
 | Purge by age | Older than X days — preview "~X GB freed" before confirmation |
 | Purge by access | Not accessed for X days |
 | Delete single title | All chunks of a warmed app ID |
 | Pinning | Protect app ID from LRU + automatic purge |
-
-**Size validation:** Admin UI checks available disk space when saving `CACHE_MAX_SIZE`. Warning > 90% of available space, error if exceeded.
 
 ## Monitoring (Admin UI)
 

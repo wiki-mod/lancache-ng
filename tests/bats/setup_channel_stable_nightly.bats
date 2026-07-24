@@ -1,10 +1,11 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Regression tests for the "stable"/"edge" operator-facing channel picker
-# (#819). "stable" is a new accepted LANCACHE_IMAGE_CHANNEL value that must
-# resolve through the exact same published stack:latest pointer image "latest"
-# already uses -- there is no separate stack:stable GHCR tag.
+# Regression tests for the "stable"/"nightly" operator-facing channel picker
+# (#819; the second channel was renamed from "edge" to "nightly" and hard-cut
+# in v0.3.0, #1056). "stable" is a new accepted LANCACHE_IMAGE_CHANNEL value
+# that must resolve through the exact same published stack:latest pointer image
+# "latest" already uses -- there is no separate stack:stable GHCR tag.
 #
 # lancache_stack_pointer_channel_for (the channel-name-to-pointer-tag mapping)
 # is tested directly as a pure function with zero I/O -- no docker/tar
@@ -36,11 +37,31 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-@test "validate_lancache_image_channel still accepts latest, dev, edge, pinned" {
-    for channel in latest dev edge pinned; do
+@test "validate_lancache_image_channel still accepts latest, nightly, pinned" {
+    for channel in latest nightly pinned; do
         run validate_lancache_image_channel "$channel"
         [ "$status" -eq 0 ]
     done
+}
+
+# "edge" was renamed to "nightly" and hard-cut in v0.3.0 (#1056): it must be
+# rejected with a dedicated, actionable error that names "nightly", not
+# silently accepted as an alias and not lumped into the generic error.
+@test "validate_lancache_image_channel rejects the removed edge channel with a nightly hint" {
+    run validate_lancache_image_channel "edge"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nightly"* ]]
+}
+
+# "dev" was RETIRED (not renamed) in v0.3.0 (#825/#1141): archived vY.X.Z
+# release branches no longer publish a live channel, so there is nothing left
+# for "dev" to mean. It must be rejected with a dedicated, actionable error
+# naming both replacement channels, not silently accepted and not lumped into
+# the generic error -- mirroring the edge rejection test above.
+@test "validate_lancache_image_channel rejects the retired dev channel with a nightly hint" {
+    run validate_lancache_image_channel "dev"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nightly"* ]]
 }
 
 @test "validate_lancache_image_channel rejects an unknown channel and names stable in the error" {
@@ -92,14 +113,8 @@ setup() {
     [ "$output" = "latest" ]
 }
 
-@test "lancache_stack_pointer_channel_for passes edge through unchanged" {
-    run lancache_stack_pointer_channel_for "edge"
+@test "lancache_stack_pointer_channel_for passes nightly through unchanged" {
+    run lancache_stack_pointer_channel_for "nightly"
     [ "$status" -eq 0 ]
-    [ "$output" = "edge" ]
-}
-
-@test "lancache_stack_pointer_channel_for passes dev through unchanged" {
-    run lancache_stack_pointer_channel_for "dev"
-    [ "$status" -eq 0 ]
-    [ "$output" = "dev" ]
+    [ "$output" = "nightly" ]
 }

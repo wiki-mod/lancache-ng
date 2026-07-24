@@ -91,6 +91,95 @@ is_absolute_path() {
     [[ -n "${1:-}" && "$1" == /* ]]
 }
 
+# True for an nginx-style time value (e.g. "365d", "1h30m", "600") as accepted
+# by directives like proxy_cache_path's inactive= parameter. nginx's own time
+# grammar is a run of <number><unit> pairs (ms, s, m, h, d, w, M, y); a bare
+# number with no suffix means seconds. This mirrors that grammar closely
+# enough to catch a typo before it reaches envsubst/nginx config generation,
+# without needing nginx itself available at setup time to validate it.
+is_valid_nginx_time_value() {
+    [[ "${1:-}" =~ ^([0-9]+(ms|[smhdwMy])?)+$ ]]
+}
+
+# Walks up from $1 to the nearest existing ancestor directory. Used for disk
+# free-space checks against CACHE_DIR: at the point the cache-size prompt
+# runs, CACHE_DIR itself does not exist yet (it is only created later via
+# `mkdir -p "$CACHE_DIR"`, near the end of the install flow), so `df` would
+# otherwise fail with "No such file or directory" on the path as typed.
+nearest_existing_ancestor_dir() {
+    local path="$1"
+    while [[ ! -d "$path" ]]; do
+        path="$(dirname "$path")"
+    done
+    printf '%s\n' "$path"
+}
+
+# Free space, in whole MiB, on the filesystem that would back directory $1
+# once created (see nearest_existing_ancestor_dir above). Uses `df -Pk`
+# (POSIX output format, 1024-byte blocks) rather than plain `df`, since
+# plain df's column layout wraps onto a second line for long device/mount
+# source strings (e.g. some overlay mounts), which would otherwise shift
+# the field this awk expression reads.
+available_space_mib_at() {
+    local dir avail_kib
+    dir="$(nearest_existing_ancestor_dir "$1")"
+    # `|| true` keeps a failing `df` (permission issue, exotic filesystem)
+    # from tripping `set -e`/`pipefail` before the explicit die() below can
+    # produce a clear message -- the same guard-then-validate pattern used
+    # elsewhere in this script (e.g. detect_secondary_listen_ip's route lookup).
+    avail_kib=$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)
+    [[ "$avail_kib" =~ ^[0-9]+$ ]] \
+        || die "Could not determine free disk space at $dir (df failed or returned unexpected output)."
+    echo $(( avail_kib / 1024 ))
+}
+
+# Maintainer-directed safety buffer (issue #1069): reserve more headroom for a
+# larger requested cache. nginx's cache manager sweeps periodically rather
+# than enforcing max_size instantaneously (manager_sleep/manager_threshold on
+# proxy_cache_path), so actual disk usage can transiently overshoot max_size
+# by roughly one sweep's worth of writes before cleanup catches up -- and a
+# larger declared cache means more concurrent downloads can land in that
+# window before the manager gets to them.
+cache_size_buffer_mib() {
+    local cache_gb="$1"
+    if (( cache_gb > 6 )); then
+        echo 2048
+    elif (( cache_gb > 4 )); then
+        echo 1024
+    else
+        echo 512
+    fi
+}
+
+# True if requesting cache_gb GiB still leaves cache_size_buffer_mib's
+# required buffer free on a filesystem with avail_mib MiB currently free.
+cache_size_fits_available_mib() {
+    local cache_gb="$1" avail_mib="$2" buffer_mib
+    buffer_mib=$(cache_size_buffer_mib "$cache_gb")
+    (( avail_mib - buffer_mib >= cache_gb * 1024 ))
+}
+
+# Largest whole-GiB cache size that currently passes
+# cache_size_fits_available_mib, for the rejection message. Scans downward
+# from the free-space ceiling rather than solving the step-function buffer
+# bands in closed form: the buffer only grows as the requested size grows, so
+# the scan is short (bounded by the disk's own size in GiB) and this stays
+# obviously correct instead of clever. Prints 0 and returns failure if even a
+# 1 GiB cache would not leave a buffer.
+largest_valid_cache_gb() {
+    local avail_mib="$1" candidate
+    candidate=$(( avail_mib / 1024 ))
+    while (( candidate >= 1 )); do
+        if cache_size_fits_available_mib "$candidate" "$avail_mib"; then
+            echo "$candidate"
+            return 0
+        fi
+        candidate=$(( candidate - 1 ))
+    done
+    echo 0
+    return 1
+}
+
 # Proxy-DHCP (dnsmasq) needs a subnet *base* address, not an arbitrary host IP,
 # so it must be a valid IPv4 address ending in ".0".
 is_dnsmasq_subnet_start() {
@@ -1543,6 +1632,35 @@ sync_repo_to_default_branch() {
         || die "Failed to reset $repo_dir to origin/$default_branch."
 }
 
+# Resolves which git ref the standalone bootstrap (the self-clone path used by
+# the documented `curl | bash` one-liner) should check out. An operator-supplied
+# LANCACHE_SETUP_GIT_REF (mirroring the existing LANCACHE_IMAGE_CHANNEL env-var
+# override pattern) takes priority; unset/empty means "keep today's behavior"
+# (resolve and track origin's default branch) so existing installs, docs, and
+# automation are unaffected by this being introduced (#814).
+resolve_setup_bootstrap_ref() {
+    printf '%s\n' "${LANCACHE_SETUP_GIT_REF:-}"
+}
+
+# Hard-resets a repo checkout to a specific, operator-pinned ref (branch, tag,
+# or commit-ish). Fetches the ref explicitly by name rather than relying on a
+# bare `git fetch --prune origin` (which only guarantees branches land under
+# refs/remotes/origin/* -- tag-following is a local clone/config detail this
+# function should not have to assume) so this works uniformly whether "ref" is
+# a branch or a release tag such as v0.2.0. Refuses to run on a dirty tree,
+# matching sync_repo_to_default_branch's safety behavior above.
+sync_repo_to_ref() {
+    local repo_dir="$1" ref="$2"
+
+    git_repo_is_clean "$repo_dir" \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+
+    git -C "$repo_dir" fetch --prune origin "$ref" \
+        || die "Failed to fetch ref '$ref' for $repo_dir. Check that LANCACHE_SETUP_GIT_REF names a real branch, tag, or commit on origin."
+    git -C "$repo_dir" checkout -B "$ref" FETCH_HEAD \
+        || die "Failed to reset $repo_dir to ref '$ref'."
+}
+
 # Resolves the git repo root two levels above a deploy/prod install_dir
 # (deploy/prod -> repo root), used to locate the manual production repo's
 # other runtime inputs (certs/, config/prod/, cdn-domains.txt).
@@ -1886,7 +2004,7 @@ resume_lancache_convergence_after_failed_update() {
 }
 
 # Image selection is part of the release safety contract: mutable channels such
-# as latest/edge/dev must resolve to one immutable stack tag before the compose
+# as latest/nightly must resolve to one immutable stack tag before the compose
 # pull, so one installation cannot accidentally mix image versions.
 validate_lancache_image_tag() {
     local tag="$1"
@@ -1926,14 +2044,42 @@ validate_lancache_image_tag() {
 # so existing installs' .env files and any external tooling/docs that already
 # say LANCACHE_IMAGE_CHANNEL=latest keep working unchanged. The two are
 # resolved identically; see resolve_lancache_stack_channel_tag below.
+#
+# "edge" was the OLD name of the "nightly" channel (renamed in v0.3.0, #1056).
+# It is a HARD CUT, not an alias: an install still carrying
+# LANCACHE_IMAGE_CHANNEL=edge is rejected with a clear, actionable error telling
+# the operator to switch to "nightly", rather than being silently accepted as a
+# synonym. This is an intentional v0.3.0 breaking change.
+#
+# "dev" was RETIRED (not renamed) in v0.3.0 (#825/#1141): it used to publish
+# automatically from whichever vX.Y.Z branch was the active pre-release
+# integration branch of the time. Since current_dev became the permanent
+# active-development branch, that role was never re-pointed to it -- the
+# maintainer's decision (#825, 2026-07-23: "master = stable, current_dev =
+# nightly, vY.X.Z = archived release") formally retired dev instead, because
+# archived vY.X.Z branches are frozen release history now, not an active
+# integration branch, so there is nothing left for a dev channel to mean.
+# This is the same HARD CUT treatment as edge, for the same reason: silently
+# keeping dev valid would mean install/update against an increasingly stale,
+# unmaintained image with no warning. dev was never offered by setup.sh's
+# interactive picker or the Admin UI's channel control (see
+# lancache_ui_channel_override_is_valid), so this only affects operators who
+# set LANCACHE_IMAGE_CHANNEL=dev explicitly via .env/shell env or the
+# secondary-node registration flow.
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
-        stable|latest|dev|edge|pinned)
+        stable|latest|nightly|pinned)
             return 0
             ;;
+        edge)
+            die "LANCACHE_IMAGE_CHANNEL=edge is no longer supported: the 'edge' channel was renamed to 'nightly' in v0.3.0 (#1056). Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly and re-run setup.sh."
+            ;;
+        dev)
+            die "LANCACHE_IMAGE_CHANNEL=dev is no longer supported: the 'dev' channel was retired in v0.3.0 (#825/#1141) -- archived vY.X.Z release branches no longer publish a live channel. Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly (tracks current_dev's ongoing development) or LANCACHE_IMAGE_CHANNEL=stable/latest (tracks the stable release), then re-run setup.sh."
+            ;;
     esac
-    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, dev, edge, or pinned."
+    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, nightly, or pinned."
 }
 
 # Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
@@ -2097,16 +2243,16 @@ resolve_lancache_image_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# Resolves which release channel (latest/dev/edge/pinned) this install should
+# Resolves which release channel (latest/nightly/pinned) this install should
 # track, in this precedence order:
 #   1. An explicit LANCACHE_IMAGE_CHANNEL (shell env, then .env).
 #   2. If no channel was set but LANCACHE_IMAGE_TAG names a moving channel
-#      word (latest/dev/edge), infer that as the channel; if it names an
+#      word (latest/nightly), infer that as the channel; if it names an
 #      immutable tag (sha-*/vX.Y.Z), infer channel=pinned.
 #   3. If still unresolved and this is a git checkout/release archive with a
 #      derivable release tag, infer channel=pinned so that exact release is used.
 #   4. Otherwise default to "latest" — deliberately the stable channel, never
-#      silently "edge" or "master", so a plain install never opts a production
+#      silently "nightly" or "master", so a plain install never opts a production
 #      host into a moving pre-release channel without saying so explicitly.
 # The result is always validated before being returned.
 resolve_lancache_image_channel() {
@@ -2121,7 +2267,7 @@ resolve_lancache_image_channel() {
     fi
 
     case "$tag" in
-        stable|latest|dev|edge)
+        stable|latest|nightly)
             channel="${channel:-$tag}"
             ;;
         sha-*|v[0-9]*)
@@ -2139,7 +2285,7 @@ resolve_lancache_image_channel() {
     fi
 
     # Normal installs default to the stable channel. Untagged development or
-    # pre-stable testing must opt into edge explicitly so production users do
+    # pre-stable testing must opt into nightly explicitly so production users do
     # not drift onto a moving integration channel by accident. "latest", not
     # "stable", stays the hardcoded fallback here so an install with genuinely
     # nothing configured lands on the name that has existed the whole time
@@ -2157,6 +2303,13 @@ resolve_lancache_image_channel() {
 # other channel name passes through unchanged. Kept as its own tiny function
 # (rather than inlined where it's used) specifically so this one mapping can
 # be unit-tested with zero docker/tar involved.
+#
+# Note there is deliberately no "edge -> nightly" mapping here: the old "edge"
+# channel was hard-cut, not aliased, in v0.3.0 (#1056) -- an edge value is
+# rejected by validate_lancache_image_channel long before this function, so it
+# never reaches this pointer resolution. The same is true of the retired
+# "dev" channel (#825/#1141): validate_lancache_image_channel rejects it
+# before this function ever sees it, so there is no "dev" case here either.
 lancache_stack_pointer_channel_for() {
     local channel="$1"
     if [[ "$channel" = "stable" ]]; then
@@ -2166,14 +2319,14 @@ lancache_stack_pointer_channel_for() {
     fi
 }
 
-# Turns a mutable channel name (latest/dev/edge) into one immutable sha-* tag.
+# Turns a mutable channel name (latest/nightly) into one immutable sha-* tag.
 # Channels are published as a tiny "stack:<channel>" pointer image whose only
 # content is a stack.env file naming the current immutable LANCACHE_IMAGE_TAG
 # for that channel; this pulls that pointer image, reads stack.env out of it
 # via `docker cp` + tar (no local container run needed), and validates the
 # extracted tag really is a sha-* value before trusting it. This indirection
-# is what lets `LANCACHE_IMAGE_CHANNEL=edge` resolve to one fixed, reproducible
-# stack version instead of "whatever :edge happens to mean when you docker pull".
+# is what lets `LANCACHE_IMAGE_CHANNEL=nightly` resolve to one fixed, reproducible
+# stack version instead of "whatever :nightly happens to mean when you docker pull".
 # A pull failure on the "latest" channel gets a dedicated explanation (this
 # project is pre-1.0 and has not cut a stable release yet) instead of a raw
 # Docker error.
@@ -2201,13 +2354,13 @@ resolve_lancache_stack_channel_tag() {
 ${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'edge' testing channel daily from master, a formal stable release with a
-published 'latest'/'stable' channel tag has not yet been created.
+to the 'nightly' testing channel continuously from current_dev, a formal stable release
+with a published 'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
-  1. Use the 'edge' testing channel (pre-release, may change frequently):
-     LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install
+  1. Use the 'nightly' testing channel (pre-release, may change frequently):
+     LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install
 
   2. Pin to a specific release version or commit (immutable):
      LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
@@ -2251,14 +2404,14 @@ EOF
 #   4. Otherwise, for a git checkout/release archive, derive the release tag
 #      straight from the tag/VERSION file.
 #   5. Otherwise fall back to resolving the default channel (see
-#      resolve_lancache_image_channel — "latest", never silently "edge").
+#      resolve_lancache_image_channel — "latest", never silently "nightly").
 # Every path validates the final value before returning it.
 resolve_lancache_image_tag() {
     local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel=""
 
     if [[ -n "$tag" ]]; then
         case "$tag" in
-            stable|latest|dev|edge)
+            stable|latest|nightly)
                 resolve_lancache_stack_channel_tag "$env_file" "$tag"
                 return 0
                 ;;
@@ -2276,7 +2429,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$channel" in
-        stable|latest|dev|edge)
+        stable|latest|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$channel"
             return 0
             ;;
@@ -2306,7 +2459,7 @@ resolve_lancache_image_tag() {
     fi
 
     case "$tag" in
-        stable|latest|dev|edge)
+        stable|latest|nightly)
             resolve_lancache_stack_channel_tag "$env_file" "$tag"
             return 0
             ;;
@@ -2346,7 +2499,7 @@ migrate_env_for_update() {
     # channel-tracking install picks up a new image on every update. restore
     # passes 1: restoring an old backup to roll back a bad channel image must
     # keep the archived immutable tag, not silently re-resolve back to
-    # whatever the channel (e.g. edge/latest) currently points to -- which,
+    # whatever the channel (e.g. nightly/latest) currently points to -- which,
     # right after a bad release, is likely still the same bad tag.
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
@@ -2389,7 +2542,7 @@ migrate_env_for_update() {
         && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
         # Restoring a backup to roll back a bad channel-tracked image: keep
         # the archived immutable tag as-is instead of re-resolving it below,
-        # which would silently pull whatever the channel (edge/latest)
+        # which would silently pull whatever the channel (nightly/latest)
         # currently points to -- right after a bad release that is likely
         # still the same bad tag, defeating the whole point of the restore.
         validate_lancache_image_tag "$existing_image_tag"
@@ -3399,6 +3552,13 @@ Usage: ./setup.sh install
 
 Runs the guided LanCache-NG installer. This is the default command when no
 argument is provided, which preserves the existing curl | bash setup flow.
+
+When no local repo is found (the standalone curl | bash path), this command
+self-clones to /opt/lancache-ng from the remote's default branch (master) by
+default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
+LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
+for validating a pre-release branch the same documented one-liner way that
+LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
 EOF
             ;;
         update)
@@ -3564,12 +3724,32 @@ dc_update() {
 # from "starting"/"unhealthy" rather than guessing. For a container with no
 # healthcheck at all, the best available signal is that it is actually in the
 # "running" state (weaker, but honestly the most this project can assert for
-# those services today).
+# those services today) -- EXCEPT for a deliberately one-shot utility
+# container (Compose `restart: "no"`, e.g. `dhcp-probe`, the #377 broadcast
+# conflict-discovery probe): that class of service is *expected* to exit on
+# its own once its job is done, so requiring "running" for it can never
+# succeed once it finishes normally. Confirmed as a real, 100%-reproducible
+# bug (issue #1155): every real `setup.sh update` run against deploy/quickstart
+# recreates dhcp-probe as part of "Starting non-UI services", and once it
+# exits 0 (as designed, usually well under a minute), this check kept
+# requiring "running" forever, so wait_for_stack_health always burned its
+# full 180s budget and declared the whole non-UI set unhealthy -- even though
+# every real long-running service (proxy, dns-standard, nats, watchdog,
+# netdata, docker-socket-proxy) was already healthy the entire time. A
+# one-shot container is therefore treated as satisfying this check once it
+# has exited cleanly (exit code 0); a non-zero exit still fails closed, since
+# that is a real probe failure, not a normal one-shot completion.
 service_container_is_healthy() {
     local service="$1"
-    local container_id health status
+    local container_id health status restart_policy exit_code
 
-    container_id=$(dc_update ps -q "$service" 2>/dev/null)
+    # -a/--all: without it, `docker compose ps -q` only lists currently
+    # RUNNING containers, so a one-shot service (dhcp-probe) that already
+    # exited would look up as "no container id at all" and return 1 here
+    # before the one-shot-exit-0 handling below is ever reached -- confirmed
+    # directly while validating the issue #1155 fix (the fix below alone was
+    # not sufficient; this lookup itself was the second half of the bug).
+    container_id=$(dc_update ps -a -q "$service" 2>/dev/null)
     [[ -n "$container_id" ]] || return 1
 
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id" 2>/dev/null)
@@ -3579,7 +3759,16 @@ service_container_is_healthy() {
     fi
 
     status=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null)
-    [[ "$status" = "running" ]]
+    [[ "$status" = "running" ]] && return 0
+
+    restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id" 2>/dev/null)
+    if [[ "$status" = "exited" && "$restart_policy" = "no" ]]; then
+        exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null)
+        [[ "$exit_code" = "0" ]]
+        return $?
+    fi
+
+    return 1
 }
 
 # A missing tool must never look identical to "the thing it would have
@@ -3638,7 +3827,12 @@ verify_stack_functional_health() {
     # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
     # container answers a real query at all (AGENTS.md requires a real
     # query/response probe here, not ping/ss), not that every domain resolves.
-    test_fqdn="steamcontent.com"
+    # Must be a bare-apex cdn-domains.txt entry, not a wildcard-only one
+    # (leading-dot, e.g. ".steamcontent.com" since #1073): RPZ wildcard-only
+    # entries never match the bare apex itself, so probing steamcontent.com
+    # directly always came back empty after #1073 and permanently failed this
+    # gate even on a perfectly healthy stack (issue #1149).
+    test_fqdn="content1.steampowered.com"
     if [[ -n "$ip_standard" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
         resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>/dev/null)
@@ -3943,14 +4137,21 @@ cmd_auto_update() {
 # AUTO_UPDATE_ENABLED, validated independently of the wider
 # validate_lancache_image_channel (which `die`s on an unrecognized value --
 # unsuitable here, since an unexpected value from the UI must be a silent
-# no-op tick, not an aborted systemd service run). Only "stable"/"edge" are
-# accepted, matching exactly what routes/setup.rs's is_valid_ui_channel
-# offers the operator; this intentionally does not widen to "dev"/"pinned"
-# even once another codepath's validator learns those, since this control was
-# never meant to set them.
+# no-op tick, not an aborted systemd service run). Only "stable"/"nightly" are
+# accepted, matching exactly what routes/setup.rs's is_valid_ui_channel now
+# offers the operator; this intentionally does not widen to "pinned" even
+# once another codepath's validator learns it, since this control was never
+# meant to set it. "edge" (the old name of "nightly", renamed in v0.3.0
+# #1056) and "dev" (retired, not renamed, in v0.3.0 #825/#1141) are both
+# deliberately NOT accepted -- consistent with the hard cut elsewhere, and
+# neither was ever offered by the Admin UI to begin with. A settings volume
+# still holding "edge" from a pre-rename Admin UI is treated as an
+# unrecognized value and no-op'd here (this must not `die` -- see above --
+# because it runs inside the auto-update service tick); the operator re-picks a
+# valid channel in the current UI.
 lancache_ui_channel_override_is_valid() {
     case "$1" in
-        stable|edge) return 0 ;;
+        stable|nightly) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -5008,7 +5209,11 @@ EOF
     # (visible to anything reading `ps`/`/proc/<pid>/cmdline` on this host),
     # the same exposure class already fixed for kea_ctrl_post's Basic-Auth
     # credential (#955/#956).
-    if ! http_status=$(printf '{"token":"%s","name":"%s"}' "$token" "$name" \
+    # #1084: also report this secondary's chosen DNS bind IP so the primary can
+    # store it and later run an active health probe against it. Harmless if the
+    # primary is older and ignores the field; the primary validates it as a
+    # private IPv4 before storing, so a blank/odd value is simply dropped.
+    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token" "$name" "$listen_ip" \
         | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d @- \
@@ -5112,7 +5317,7 @@ EOF
     if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
         lancache_image_channel="$response_image_channel"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|dev|edge)$ ]]; then
+    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|nightly)$ ]]; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -5125,7 +5330,7 @@ EOF
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
         LANCACHE_IMAGE_TAG=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file")
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|dev|edge)$ ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "${LANCACHE_IMAGE_TAG:-}" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|nightly)$ ]]; then
         LANCACHE_IMAGE_TAG="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -5216,7 +5421,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -5390,9 +5595,18 @@ if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
     if ! command -v git >/dev/null 2>&1; then
         install_git
     fi
+    setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
     if [[ -d "/opt/lancache-ng/.git" ]]; then
-        print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
-        sync_repo_to_default_branch /opt/lancache-ng
+        if [[ -n "$setup_bootstrap_ref" ]]; then
+            print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
+            sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
+        else
+            print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+            sync_repo_to_default_branch /opt/lancache-ng
+        fi
+    elif [[ -n "$setup_bootstrap_ref" ]]; then
+        git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+            || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
     else
         git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
             || die "Clone failed."
@@ -5486,11 +5700,36 @@ while true; do
     print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache)."
 done
 
+# Checked against the nearest existing ancestor of CACHE_DIR (see
+# nearest_existing_ancestor_dir) since CACHE_DIR itself is only created later
+# via `mkdir -p`. Computed once, before the loop: the operator's answer to
+# this prompt cannot change which filesystem CACHE_DIR lives on.
+cache_dir_avail_mib=$(available_space_mib_at "$CACHE_DIR")
+
 while true; do
     ask "Cache size in GiB" "50"
     cache_gb="$REPLY"
-    [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
-    print_error "Please enter a positive integer (e.g. 50)."
+    if ! is_positive_integer "$cache_gb"; then
+        print_error "Please enter a positive integer (e.g. 50)."
+        continue
+    fi
+    # Canonicalize away any leading zero (e.g. "008") before this value is
+    # used in bash arithmetic below: without the 10# base prefix, an
+    # unnormalized leading-zero string is parsed as octal by `((...))`, and
+    # digits 8/9 in that string would abort the script with a bash
+    # arithmetic error rather than a clean validation message.
+    cache_gb=$(( 10#$cache_gb ))
+    cache_size_fits_available_mib "$cache_gb" "$cache_dir_avail_mib" && break
+    # Issue #1069: reject a cache size that would not leave a safety buffer on
+    # the real disk backing CACHE_DIR, instead of silently writing a
+    # CACHE_MAX_SIZE the disk cannot possibly satisfy. Buffer scales with the
+    # requested size -- see cache_size_buffer_mib.
+    largest_valid_gb=$(largest_valid_cache_gb "$cache_dir_avail_mib" || true)
+    if (( largest_valid_gb >= 1 )); then
+        print_error "$cache_gb GiB would not leave a safety buffer at $CACHE_DIR (only $(( cache_dir_avail_mib / 1024 )) GiB free there). The largest value that currently passes is ${largest_valid_gb} GiB."
+    else
+        print_error "Not enough free space at $CACHE_DIR for any cache size with a safety buffer (only $(( cache_dir_avail_mib / 1024 )) GiB free there). Free up disk space or choose a different cache directory."
+    fi
 done
 
 while true; do
@@ -5500,18 +5739,25 @@ while true; do
     print_error "Please enter a positive integer (e.g. 512)."
 done
 
+while true; do
+    ask "Cache entry max age (inactive; e.g. 365d, 30d, 12h)" "365d"
+    cache_inactive="$REPLY"
+    is_valid_nginx_time_value "$cache_inactive" && break
+    print_error "Please enter an nginx-style time value (e.g. 365d, 30d, 12h)."
+done
+
 # ── 5. Release channel ────────────────────────────────────────────────────────
 print_step "Release channel"
 
 # Unlike the other prompts in this flow (INSTALL_DIR, detected_ip, ...), an
 # already-set LANCACHE_IMAGE_CHANNEL is NOT just a default to confirm -- it is
 # respected outright and the prompt is skipped entirely. Two real callers rely
-# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=edge ./setup.sh install`
+# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install`
 # non-interactive invocation (see resolve_lancache_stack_channel_tag's own
 # die() message), and (2) scripts/setup-cli-simulation.sh, which exports
 # LANCACHE_IMAGE_CHANNEL=pinned (plus an explicit LANCACHE_IMAGE_TAG) so CI
 # installs THIS commit's own just-built images rather than any published
-# channel. "pinned" is not a stable/edge choice at all -- it is a request for
+# channel. "pinned" is not a stable/nightly choice at all -- it is a request for
 # one specific immutable tag -- so re-prompting and overwriting it with
 # whatever the operator/simulation answers here would silently discard that
 # request (a real regression caught in CI, not a hypothetical). Respecting any
@@ -5525,10 +5771,10 @@ else
     printf "  stable — the channel promoted after the full release validation gate.\n"
     printf "           Recommended for most installs. This is what './setup.sh update'\n"
     printf "           tracks by default, and what most operators should stay on.\n"
-    printf "  edge   — the most recently built channel from active development.\n"
-    printf "           Refreshes more often, may be less tested than stable. Opt in\n"
-    printf "           only if you specifically want the newest changes and accept\n"
-    printf "           the extra risk.\n\n"
+    printf "  nightly — the most recently built channel from active development.\n"
+    printf "            Refreshes continuously from current_dev, may be less tested\n"
+    printf "            than stable. Opt in only if you specifically want the newest\n"
+    printf "            changes and accept the extra risk.\n\n"
 
     # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
     # resolve_lancache_image_channel already checks first (see its precedence
@@ -5537,20 +5783,26 @@ else
     # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
     # friendlier, self-explanatory name this prompt writes for new installs.
     while true; do
-        ask "Release channel [stable/edge]" "stable"
+        ask "Release channel [stable/nightly]" "stable"
         case "${REPLY,,}" in
             stable)
                 LANCACHE_IMAGE_CHANNEL="stable"
                 print_ok "Using the stable channel (recommended)."
                 break
                 ;;
-            edge)
-                LANCACHE_IMAGE_CHANNEL="edge"
-                print_warn "Using the edge channel — more recent, less tested than stable."
+            nightly)
+                LANCACHE_IMAGE_CHANNEL="nightly"
+                print_warn "Using the nightly channel — more recent, less tested than stable."
                 break
                 ;;
+            # "edge" was the old name of the nightly channel (renamed in v0.3.0,
+            # #1056) and is intentionally NOT accepted as a synonym here -- point
+            # the operator at the new name rather than silently substituting it.
+            edge)
+                print_error "The 'edge' channel was renamed to 'nightly' in v0.3.0. Please answer 'nightly'."
+                ;;
             *)
-                print_error "Please answer 'stable' or 'edge'."
+                print_error "Please answer 'stable' or 'nightly'."
                 ;;
         esac
     done
@@ -5883,7 +6135,7 @@ validate_env_values_for_initial_write \
     "CACHE_SLICE_SIZE=8m" \
     "CACHE_VALID_HIT=365d" \
     "CACHE_VALID_ANY=1m" \
-    "CACHE_INACTIVE=365d" \
+    "CACHE_INACTIVE=${cache_inactive}" \
     "NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" \
     "PROXY_SECURITY_MODE=lazy" \
     "PROXY_ALLOWED_CLIENT_CIDRS=" \
@@ -5949,7 +6201,7 @@ CACHE_MEM_MB=${CACHE_MEM_MB}
 CACHE_SLICE_SIZE=8m
 CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
-CACHE_INACTIVE=365d
+CACHE_INACTIVE=${cache_inactive}
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
 # Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
@@ -5971,7 +6223,8 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 CACHE_MAX_GB=${cache_gb}
 
 # First-party service image selector. "latest" is the stable default.
-# Use "edge" only when you explicitly want the tested pre-stable channel.
+# Use "nightly" only when you explicitly want the tested pre-stable channel,
+# built continuously from master (this was formerly called "edge").
 # setup.sh resolves mutable channels to an immutable sha-* service tag before
 # pulling images so one install cannot consume a mixed stack during promotion.
 # Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.
@@ -6197,6 +6450,7 @@ printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
 printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
+printf "  %-26s %s\n"    "Cache entry max age:"     "$cache_inactive"
 printf "  %-26s %s\n"    "DHCP mode:"               "$DHCP_MODE"
 if [[ "$DHCP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "DHCP server:"             "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"

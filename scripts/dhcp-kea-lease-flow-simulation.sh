@@ -479,6 +479,12 @@ echo "== Starting a real Kea container on the isolated network =="
 # start to restrict the Control Agent API to Docker-internal networks (see
 # that file's own comment). Without NET_ADMIN those iptables calls fail and
 # the entrypoint would not behave the same way it does in a real deployment.
+#
+# DHCP_DDNS_ENABLED=true: DDNS is opt-in and defaults to OFF for a fresh Kea
+# render (issue #1076). This simulation's entire purpose is to prove the
+# forward-A + reverse-PTR DDNS follow-through, so it must explicitly turn DDNS
+# on; without this the first-boot render would set dhcp-ddns.enable-updates to
+# false and the DDNS verification below would fail by design.
 docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
@@ -494,6 +500,7 @@ docker run -d --name "$kea_container" \
     -e KEA_CTRL_TOKEN="$kea_ctrl_token" \
     -e DDNS_TSIG_KEY="$ddns_tsig_key" \
     -e DHCP_DNS_SERVER_IP="$pdns_ip" \
+    -e DHCP_DDNS_ENABLED=true \
     "$image_tag" >/dev/null
 
 echo "== Waiting for the Kea Control Agent API to answer =="

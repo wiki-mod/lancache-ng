@@ -101,7 +101,7 @@ Unlike `update`, this convergence pass keeps an already-valid
 `LANCACHE_IMAGE_TAG` (an immutable `sha-*` or `vX.Y.Z` value) exactly as
 restored instead of re-resolving it against the current
 `LANCACHE_IMAGE_CHANNEL` pointer. Restoring a backup is commonly a rollback
-after a bad channel-tracked (`edge`/`latest`) image; re-resolving the channel
+after a bad channel-tracked (`nightly`/`latest`) image; re-resolving the channel
 during that restore would silently pull whatever the channel currently
 points to, which right after a bad release is often still the same bad tag.
 `update` does not have this exception because re-resolving the channel on

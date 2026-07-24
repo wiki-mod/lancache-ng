@@ -22,11 +22,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
     gettext-base \
     locales \
+    nano \
+    lsof \
+    ripgrep \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+# nano/lsof/ripgrep: in-container troubleshooting tools -- these images
+# otherwise ship no editor, no way to see which process holds an open
+# file/socket, and no fast recursive search, all real gaps when debugging a
+# live container via `docker exec`. EDITOR/VISUAL default to nano now that
+# it's actually present, matching common shell/tool expectations (git,
+# crontab -e, etc.) that read one of these instead of falling back to vi.
+ENV EDITOR=nano
+ENV VISUAL=$EDITOR
 
 RUN mkdir -p \
     /etc/nginx/ssl/ca \

@@ -16,6 +16,16 @@
     </p>
   </div>
 
+  {# domain_error_message (only ever one of the fixed, safe strings from
+     domains_page_error_message -- never raw query-parameter text) surfaces
+     a rejected CDN-domain add (e.g. a bare TLD) as an in-app banner instead
+     of the raw browser-level HTTP 400 page a plain form POST used to show. #}
+  {% if domain_error_message %}
+  <div class="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-300">
+    {{ domain_error_message }}
+  </div>
+  {% endif %}
+
   <div class="flex items-center gap-2 border-b border-slate-700">
     <a href="/domains"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "domains" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
@@ -36,6 +46,10 @@
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
       LAN
     </button>
+    <button type="button" data-dns-tab="ptr"
+            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      PTR (Reverse)
+    </button>
     <button type="button" data-dns-tab="settings"
             class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
       Settings
@@ -51,6 +65,10 @@
       <div>
         <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
         <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. SSL-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
+        <p class="text-xs text-slate-500 mt-0.5">
+          Vorkonfigurierte Standard-Domains lassen sich über den Schalter aktivieren/deaktivieren, ohne aus der Liste zu verschwinden.
+          Selbst hinzugefügte Domains werden weiterhin über "Entfernen" verwaltet.
+        </p>
       </div>
 
       <form action="/domains/dns/add" method="post" class="flex gap-2">
@@ -69,19 +87,51 @@
       <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if dns_domains %}
         {% for domain in dns_domains %}
-        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
-          <span class="font-mono text-sm text-slate-300">{{ domain }}</span>
-          <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity">
+        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group {% if not domain.enabled %}opacity-50{% endif %}">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="font-mono text-sm text-slate-300 truncate">{{ domain.display }}</span>
+            {% if domain.is_default %}
+            <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-600 text-slate-300 flex-shrink-0">Standard</span>
+            {% else %}
+            <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-900 text-blue-300 flex-shrink-0">Eigene</span>
+            {% endif %}
+            {% if not domain.enabled %}
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 flex-shrink-0">Deaktiviert</span>
+            {% endif %}
+          </div>
+
+          {% if domain.is_default and domain.is_valid %}
+          {# Toggle control for pre-shipped defaults (#1073): distinct from
+             the Add/Remove flow below, this never deletes the line, it only
+             flips the leading "!" disabled marker cdn-domains.txt stores it
+             with. Auto-submits on change, matching a real on/off switch
+             instead of needing a separate save click per row. #}
+          <form action="/domains/dns/toggle" method="post" class="flex items-center gap-2 flex-shrink-0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="domain" value="{{ domain.display }}">
+            <label class="flex items-center gap-1.5 cursor-pointer select-none">
+              <input type="checkbox" name="enabled" value="1"
+                     {% if domain.enabled %}checked{% endif %}
+                     onchange="this.form.requestSubmit()"
+                     class="w-4 h-4 rounded border-slate-600 bg-slate-700 text-green-600 focus:ring-2 focus:ring-green-500 cursor-pointer">
+              <span class="text-xs {% if domain.enabled %}text-green-400{% else %}text-slate-500{% endif %}">
+                {% if domain.enabled %}Aktiv{% else %}Deaktiviert{% endif %}
+              </span>
+            </label>
+          </form>
+          {% else %}
+          <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {# The hidden value must be the exact file entry so removal is
                deterministic even when display sorting/filtering changes later. #}
-            <input type="hidden" name="domain" value="{{ domain }}">
+            <input type="hidden" name="domain" value="{{ domain.raw }}">
             <button type="submit"
-                    onclick="return confirm('{{ domain }} aus der Domain-Liste entfernen?\nDer SSL-Proxy wird ggf. neu gestartet, falls SSL-Modus aktiv ist.')"
+                    onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer SSL-Proxy wird ggf. neu gestartet, falls SSL-Modus aktiv ist.')"
                     class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
               Entfernen
             </button>
           </form>
+          {% endif %}
         </div>
         {% endfor %}
         {% else %}
@@ -165,6 +215,80 @@
       </div>
 
       <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+    </section>
+
+    <section data-dns-panel="ptr" class="card flex flex-col gap-4 hidden">
+      <div>
+        <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          PowerDNS Authoritative Server · Reverse-Lookups (IP&nbsp;→&nbsp;Hostname) für die privaten Reverse-Zonen
+          (<span class="font-mono">10.in-addr.arpa</span>, <span class="font-mono">168.192.in-addr.arpa</span>,
+          <span class="font-mono">16–31.172.in-addr.arpa</span>).
+        </p>
+        <p class="text-xs text-amber-300/90 mt-1 leading-relaxed">
+          Hinweis: Automatisch von Kea (DHCP-DDNS) angelegte PTR-Einträge sind technisch nicht von manuell
+          angelegten unterscheidbar und werden hier gemeinsam angezeigt. Wird ein von DHCP verwalteter Eintrag
+          entfernt, kann Kea ihn beim nächsten Lease-Ereignis erneut anlegen.
+        </p>
+      </div>
+
+      <form action="/domains/ptr/add" method="post" class="flex flex-col gap-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# PTR records live in the reverse zones, not lan.; the operator enters a
+           plain IP + target hostname and the backend derives the in-addr.arpa
+           record name (see reverse_dns.rs). #}
+        <div class="flex gap-2">
+          <input type="text" name="ip" placeholder="IP, z.B. 192.168.1.50"
+                 required
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+          <input type="text" name="hostname" placeholder="Hostname, z.B. printer.lan."
+                 required
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+        </div>
+        <div class="flex gap-2">
+          <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
+                 required min="1"
+                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+          <button type="submit"
+                  class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+            Hinzufügen
+          </button>
+        </div>
+      </form>
+
+      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
+        {% if ptr_records %}
+        {% for ptr in ptr_records %}
+        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+          <div class="flex-1 min-w-0">
+            <div class="flex gap-2 items-center">
+              <span class="font-mono text-sm text-slate-300">{{ ptr.ip }}</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">PTR</span>
+              <span class="text-xs text-slate-500">TTL: {{ ptr.ttl }}</span>
+            </div>
+            <div class="text-xs text-slate-400 mt-0.5 font-mono">→ {{ ptr.hostname }}</div>
+          </div>
+          <form action="/domains/ptr/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {# A PTR is keyed by its IP; the backend deletes the whole PTR rrset
+               for this address. #}
+            <input type="hidden" name="ip" value="{{ ptr.ip }}">
+            <button type="submit"
+                    data-ptr-ip="{{ ptr.ip }}"
+                    data-ptr-host="{{ ptr.hostname }}"
+                    onclick="return confirmRemovePtr(this)"
+                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+              Entfernen
+            </button>
+          </form>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-slate-500 text-sm px-3 py-2">Keine PTR-Einträge vorhanden.</p>
+        {% endif %}
+      </div>
+
+      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
     </section>
 
     <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
@@ -310,6 +434,10 @@
 
   function confirmRemoveRecord(btn) {
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
+  }
+
+  function confirmRemovePtr(btn) {
+    return confirm('PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost + ' entfernen?');
   }
 
   // Zone-snapshot timestamps (#628): same Intl.DateTimeFormat-based helper

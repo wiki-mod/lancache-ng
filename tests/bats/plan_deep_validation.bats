@@ -22,10 +22,10 @@ val() {
 
 @test "workflow_dispatch: honours the input tag and always runs" {
     EVENT_NAME=workflow_dispatch REPOSITORY=wiki-mod/lancache-ng \
-        DISPATCH_TAG=edge GITHUB_OUTPUT="$out" \
+        DISPATCH_TAG=nightly GITHUB_OUTPUT="$out" \
         run bash "$script"
     [ "$status" -eq 0 ]
-    [ "$(val image_tag)" = "edge" ]
+    [ "$(val image_tag)" = "nightly" ]
     [ "$(val should_run)" = "true" ]
     [ "$(val pr_staging_available)" = "false" ]
 }
@@ -39,7 +39,8 @@ val() {
     [ "$status" -eq 0 ]
     [ "$(val pr_staging_available)" = "true" ]
     [ "$(val image_tag)" = "pr-715-sha-abcdef0" ]
-    [ "$(val base_channel_tag)" = "edge" ]
+    # #825/#1141: master publishes latest, not nightly (current_dev does).
+    [ "$(val base_channel_tag)" = "latest" ]
     [ "$(val proxy)" = "true" ]
     [ "$(val should_run)" = "true" ]
 }

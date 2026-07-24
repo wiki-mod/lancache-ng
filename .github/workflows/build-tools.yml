@@ -50,6 +50,8 @@ on:
       - "scripts/check-executable-bits.sh"
       - "scripts/check-workflow-service-lists.sh"
       - "scripts/check-orphaned-branches.sh"
+      - "scripts/check-changelog-direct-edit.sh"
+      - "scripts/check-pr-title-convention.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
@@ -95,6 +97,8 @@ on:
       - "scripts/check-executable-bits.sh"
       - "scripts/check-workflow-service-lists.sh"
       - "scripts/check-orphaned-branches.sh"
+      - "scripts/check-changelog-direct-edit.sh"
+      - "scripts/check-pr-title-convention.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
@@ -375,6 +379,24 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: this job's local Buildx cache (see "Prepare local Buildx
+      # cache" above) has no wall-clock expiry, only cache-key expiry -- once
+      # tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN
+      # step has been built once, every later run with identical Dockerfile
+      # text reuses that same cached layer forever, so a Debian security fix
+      # published after the layer was first cached (confirmed for real:
+      # bind9-libs/bind9-dnsutils/bind9-host stayed on the vulnerable
+      # 1:9.20.23-1~deb13u1 for weeks after 1:9.20.26-1~deb13u1 shipped to
+      # trixie-security) never gets picked up. A value that changes once per
+      # ISO week, passed as the Dockerfile's APT_CACHE_BUST build-arg, forces
+      # that one layer to actually re-run against the current Debian archive
+      # on a weekly cadence without busting it on every single run.
+      - name: Compute apt cache-bust value
+        id: apt-cache-bust
+        run: |
+          set -euo pipefail
+          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       # Pull requests cannot push to GHCR, so they build a local scan image
       # and run the smoke/Trivy checks before the workflow can pass.
       - name: Build local amd64 scan image
@@ -389,6 +411,8 @@ jobs:
           tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           platforms: linux/amd64
           provenance: false
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
@@ -450,7 +474,7 @@ jobs:
       # This build-tools workflow is the only place bats/shellspec ever run
       # against the LOCALLY built candidate image before it's published --
       # build-push.yml's own dns_test/ui_test/etc. jobs pull the already-
-      # published build-tools:edge, so they'd never catch a fixture
+      # published build-tools:nightly, so they'd never catch a fixture
       # regression introduced by a change to this Dockerfile itself. Running
       # the project's real test suites here doubles as this job's own proof
       # that the image it just built can actually execute them, not just
@@ -621,6 +645,13 @@ jobs:
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Same APT_CACHE_BUST value as "Build local amd64 scan image"
+          # above, computed once by "Compute apt cache-bust value" earlier in
+          # this job -- passing a different value here would miss the cache
+          # entry that step's build just wrote, forcing a redundant rebuild
+          # of the busted layer instead of reusing it.
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           # No index-level annotation set here on purpose (issue #620): a
           # genuinely single-platform push with provenance disabled has no
           # index to attach one to. Forcing OCI mediatypes is still required
@@ -809,6 +840,20 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: same reasoning as build-tools's own identically-named
+      # step -- this job's `type=gha` cache (see the arm64 leg's own scope
+      # comment further down) also has no wall-clock expiry, so this arm64
+      # leg needs the same periodic bust as the amd64 leg above, computed
+      # independently here since the two jobs run on separate runners with
+      # no shared state. Both derive the same ISO-week string from wall-clock
+      # time alone, so amd64 and arm64 bust in lockstep without needing to
+      # pass a value between jobs.
+      - name: Compute apt cache-bust value
+        id: apt-cache-bust
+        run: |
+          set -euo pipefail
+          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Build local arm64 scan image
         id: local-build-arm64
         timeout-minutes: 60
@@ -820,6 +865,8 @@ jobs:
           pull: true
           tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           platforms: linux/arm64
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
@@ -906,6 +953,12 @@ jobs:
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Same APT_CACHE_BUST value as "Build local arm64 scan image"
+          # above, computed once by "Compute apt cache-bust value" earlier in
+          # this job -- see build-tools's equivalent push step for why this
+          # must match the local build's value rather than being recomputed.
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           # See build-tools's equivalent step for why there is no index-level
           # annotation here and why outputs: oci-mediatypes=true is still
           # required groundwork for issue #620.
@@ -1121,7 +1174,7 @@ jobs:
           # (release/stack-images.yml declares that tag `mutable: false`),
           # silently overwriting it on the next
           # tools/build-tools/**-touching commit. None of this project's
-          # real release-channel tags for build-tools (`edge`, `dev`,
+          # real release-channel tags for build-tools (`nightly`, `dev`,
           # `latest`, `vX.Y.Z`, `vX.Y.Z-rc.N` -- see build-push.yml's
           # promote job) end with "-tc", so suffixing every branch-triggered
           # tag this way is collision-proof by construction against the

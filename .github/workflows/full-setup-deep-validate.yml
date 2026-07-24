@@ -67,12 +67,12 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        # Same rationale as full-setup-validate.yml: edge (not latest) is the
+        # Same rationale as full-setup-validate.yml: nightly (not latest) is the
         # channel actually promoted from master; latest is a stale pre-release
         # leftover. Operators can point an ad-hoc run at any published tag.
         description: Stack image tag to validate against (manual runs only).
         required: false
-        default: edge
+        default: nightly
 
 # Cancel superseded runs for the same PR/ref: a new push makes an in-flight
 # deep run obsolete, and these are expensive serial suites on a shared runner
@@ -670,7 +670,7 @@ jobs:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
     # LANCACHE_IMAGE_TAG here is the direct fix for the inconsistency #715
     # calls out: the manual full-setup-validate.yml never passed its image_tag
-    # through to this job, so it always tested "edge" regardless of intent.
+    # through to this job, so it always tested "nightly" regardless of intent.
     name: UI/NATS/DNS integration simulation
     needs: [plan, compute-validation-network, ensure-pr-staging-images, ssl-mitm-cache-simulation]
     if: >-
@@ -729,12 +729,12 @@ jobs:
     # CLI/migration/rollback logic -- but doing so still brings a real stack up
     # on real images, so WHICH images matters.
     #
-    # This used to hardcode the `edge` channel inside setup-cli-simulation.sh,
+    # This used to hardcode the `nightly` channel inside setup-cli-simulation.sh,
     # on the rationale that the job was "independent of PR image content." That
     # coupled a per-PR gate to a mutable channel tag refreshed far more slowly
-    # than the gate runs: `edge` only moves on a push to master, which has sat
+    # than the gate runs: `nightly` only moves on a push to master, which has sat
     # frozen for a long time, so every PR revalidated stale, months-old images
-    # (and a v0.2.0 PR tested master's frozen edge, not v0.2.0's own line at
+    # (and a v0.2.0 PR tested master's frozen nightly, not v0.2.0's own line at
     # all). It is the same "blocking check coupled to a slow-moving channel tag"
     # class of bug as #775 (build-tools :latest) and #777 (promote starvation).
     #
@@ -823,7 +823,7 @@ jobs:
           # pr-<N>-sha tag (plan.image_tag) so the gate tests THIS PR's code and
           # can never go stale. Otherwise (dispatch/fork/Dependabot, where
           # image_tag is already a channel word): install the base-ref channel
-          # -- resolved by plan, never hardcoded edge -- which also keeps
+          # -- resolved by plan, never hardcoded nightly -- which also keeps
           # setup.sh's channel->stack-pointer->sha resolution path covered.
           SETUP_SIM_IMAGE_CHANNEL: ${{ needs.plan.outputs.pr_staging_available == 'true' && 'pinned' || needs.plan.outputs.image_tag }}
           SETUP_SIM_IMAGE_TAG: ${{ needs.plan.outputs.pr_staging_available == 'true' && needs.plan.outputs.image_tag || '' }}
@@ -1141,6 +1141,69 @@ jobs:
           # already guard against with this same wrapper.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
 
+  dhcp-kea-ui-rollback-simulation:
+    # Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback
+    # route (POST /dhcp/snapshot/rollback, rollback_kea_snapshot in
+    # services/ui/src/routes/dhcp.rs) must genuinely roll a real, running Kea
+    # server back to an earlier known-good config via its Control Agent API,
+    # not just return an HTTP redirect. The CLI fallback
+    # (setup.sh reset-to-last-known-good-config kea) is separately proven by
+    # setup-reset-kea-config-simulation above; this covers the UI-reachable
+    # path that one does not. Builds Kea from THIS checkout's services/dhcp
+    # (like the sibling sims), so it needs no staging tag for that image; only
+    # the published `ui` image is pulled. See
+    # scripts/dhcp-kea-ui-rollback-simulation.sh's own header for exactly what
+    # this does and does not prove.
+    name: Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
+    needs: [plan, compute-validation-network, ensure-pr-staging-images, ui-reachability-crash-loop-simulation]
+    if: >-
+      always() &&
+      needs.plan.outputs.should_run == 'true' &&
+      needs['compute-validation-network'].result != 'failure' &&
+      needs['compute-validation-network'].result != 'cancelled' &&
+      needs['ensure-pr-staging-images'].result != 'failure' &&
+      needs['ensure-pr-staging-images'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
+      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
+      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
+      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
+      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
+      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
+      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
+      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
+      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Resolve build-tools image
+        # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
+        # preference, matching every other job in this suite.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.plan.outputs.pr_staging_available }}" == "true" && "${{ needs.plan.outputs.build_tools }}" == "true" ]]; then
+            image="ghcr.io/${{ github.repository }}/build-tools:${{ needs.plan.outputs.image_tag }}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
+          else
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it, exactly like the setup-reset-kea-config-simulation
+          # job above -- both stand up a full validation stack and must not
+          # share a _validation network with a concurrent run.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/dhcp-kea-ui-rollback-simulation.sh
+
   syslog-forwarding-simulation:
     # Real end-to-end proof for #453's last two comments: not just "a log
     # line reached syslog-ng on disk" (which #756/#757/#758 already covered
@@ -1281,6 +1344,7 @@ jobs:
       - dns-zone-rollback-simulation
       - ui-reachability-crash-loop-simulation
       - setup-reset-kea-config-simulation
+      - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -1300,6 +1364,7 @@ jobs:
           DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
           UI_REACHABILITY_RESULT: ${{ needs['ui-reachability-crash-loop-simulation'].result }}
           RESET_KEA_CONFIG_RESULT: ${{ needs['setup-reset-kea-config-simulation'].result }}
+          UI_KEA_ROLLBACK_RESULT: ${{ needs['dhcp-kea-ui-rollback-simulation'].result }}
           SYSLOG_FORWARDING_RESULT: ${{ needs['syslog-forwarding-simulation'].result }}
         run: |
           set -euo pipefail
@@ -1354,6 +1419,7 @@ jobs:
           check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
           check "ui-reachability-crash-loop-simulation" "$UI_REACHABILITY_RESULT"
           check "setup-reset-kea-config-simulation" "$RESET_KEA_CONFIG_RESULT"
+          check "dhcp-kea-ui-rollback-simulation" "$UI_KEA_ROLLBACK_RESULT"
           check "syslog-forwarding-simulation" "$SYSLOG_FORWARDING_RESULT"
 
           if [[ "$overall" -ne 0 ]]; then

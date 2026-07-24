@@ -178,11 +178,38 @@ require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ui build-tools\)' \
 forbidden_latest_default_branch='type=raw,value=latest,enable={{is_default'
 forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
 if grep -Fq "$forbidden_latest_default_branch" "$repo_root/.github/workflows/build-push.yml"; then
-  fail 'default branch must not publish latest; latest is stable-release only'
+  fail 'default branch must not publish latest via an unaudited build-time tag; latest may only move through the gated promote job'
 fi
-require_grep 'channel_tags\+=\(edge\)' \
-  .github/workflows/build-push.yml \
-  'default branch promotion must publish the tested edge channel'
+# #825/#1141 branch-model decision: master -> latest, current_dev -> nightly,
+# archived vY.X.Z branches -> no live channel. Scoped to each branch's own
+# if/elif arm (not a flat grep for the channel_tags line alone) so a
+# regression that keeps both literal strings in the file but ties them to
+# the wrong branch would still be caught -- mirrors the equivalent guard in
+# build-push.yml's own governance-guards job.
+if ! awk '
+  /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
+  in_branch && /^ *elif/ { in_branch=0 }
+  in_branch && /channel_tags\+=\(latest\)/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$repo_root/.github/workflows/build-push.yml"; then
+  fail 'master branch promotion must publish the latest channel'
+fi
+if ! awk '
+  /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
+  in_branch && /^ *elif/ { in_branch=0 }
+  in_branch && /channel_tags\+=\(nightly\)/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$repo_root/.github/workflows/build-push.yml"; then
+  fail 'current_dev branch promotion must publish the nightly channel'
+fi
+if ! awk '
+  /^ *channel_tags=\(\)$/ { in_scope=1; next }
+  in_scope && /if \(\( \$\{#channel_tags\[@\]\} == 0 \)\)/ { in_scope=0 }
+  in_scope && /elif \[\[ "\$GITHUB_REF" = refs\/heads\/v\[0-9\]\* \]\]; then/ { found=1 }
+  END { exit found ? 1 : 0 }
+' "$repo_root/.github/workflows/build-push.yml"; then
+  fail "archived vY.X.Z release branches must not publish a live channel tag; the old 'dev' channel mapping was retired (#825/#1141)"
+fi
 require_grep 'channel_tags\+=\(latest\)' \
   .github/workflows/build-push.yml \
   'stable release promotion must publish latest'

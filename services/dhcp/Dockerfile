@@ -20,7 +20,15 @@ RUN apt-get update && apt-get install -y \
     curl \
     jq \
     iptables \
+    nano \
+    lsof \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
+
+# nano/lsof/ripgrep: in-container troubleshooting tools -- see
+# services/proxy/Dockerfile's identical comment for the full rationale.
+ENV EDITOR=nano
+ENV VISUAL=$EDITOR
 
 # Config templates — expanded once into /var/lib/kea/ on first boot
 COPY kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.template

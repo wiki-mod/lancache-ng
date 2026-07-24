@@ -20,29 +20,51 @@ change-title-escapes: '\<*_&' # escape markdown special characters in PR titles
 # label set only (verified via `gh api repos/wiki-mod/lancache-ng/labels`) --
 # no "fix"/"feature"/"major"/"minor"/"patch" labels exist here, so a config
 # referencing them would just silently never match.
+#
+# Schema migrated to release-drafter's unified category model (#1131,
+# https://github.com/release-drafter/release-drafter/pull/1558) to clear 8
+# deprecation warnings the old top-level `categories[*].labels`,
+# `exclude-labels`, and `version-resolver.{minor,patch}.labels` fields
+# produced in real CI runs. No behavior change: each changelog category
+# below still matches the same label(s) it did before (now via `when`
+# instead of its own `label`/`labels` field) and carries the same
+# `semver-increment` the old `version-resolver` block gave that label,
+# since every version-resolver label already mapped 1:1 onto one of these
+# categories. The trailing `type: "version-resolver"` category with no
+# `when` reproduces the old `version-resolver.default: patch` fallback for
+# PRs that don't match any category above -- per release-drafter's docs,
+# such a category acts purely as that fallback, and "the highest matching
+# increment wins across both category types", so it never overrides a
+# category above that already resolved to `minor`.
 categories:
   - title: '🐛 Fixed'
-    labels: ['bug']
+    semver-increment: 'patch'
+    when:
+      label: 'bug'
   - title: '🚀 Added'
-    labels: ['enhancement']
+    semver-increment: 'minor'
+    when:
+      label: 'enhancement'
   - title: '📚 Documentation'
-    labels: ['documentation']
+    semver-increment: 'patch'
+    when:
+      label: 'documentation'
   - title: '🔧 Dependencies'
-    labels: ['dependencies']
+    semver-increment: 'patch'
+    when:
+      label: 'dependencies'
   - title: '🧰 Chore / CI'
-    labels: ['chore', 'ci']
-
-exclude-labels:
-  - 'skip-changelog' # new label, added alongside this config; opt out a PR from release notes by applying it
-
-version-resolver:
-  # No "major" label exists yet either -- add one and a labels: entry here
-  # when this project actually needs to signal a breaking-change release.
-  minor:
-    labels: ['enhancement']
-  patch:
-    labels: ['bug', 'chore', 'ci', 'documentation', 'dependencies']
-  default: patch
+    semver-increment: 'patch'
+    when:
+      labels: ['chore', 'ci']
+  - type: 'pre-exclude' # opt out a PR from release notes by applying this label
+    when:
+      label: 'skip-changelog' # new label, added alongside this config
+  - type: 'version-resolver' # fallback for PRs matching none of the categories above
+    semver-increment: 'patch'
+    # No "major" label/category exists yet either -- add one (a category with
+    # `semver-increment: 'major'`) when this project actually needs to signal
+    # a breaking-change release.
 
 sort-by: merged_at
 sort-direction: descending

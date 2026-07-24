@@ -6,8 +6,12 @@ FROM mirror.gcr.io/library/debian:13-slim@sha256:020c0d20b9880058cbe785a9db10715
 LABEL org.opencontainers.image.description="lancache-ng watchdog helper for runtime health checks and recovery hooks."
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl jq ca-certificates \
+    curl jq ca-certificates nano lsof ripgrep \
     && rm -rf /var/lib/apt/lists/*
+# nano/lsof/ripgrep: in-container troubleshooting tools -- see
+# services/proxy/Dockerfile's identical comment for the full rationale.
+ENV EDITOR=nano
+ENV VISUAL=$EDITOR
 COPY watchdog.sh /watchdog.sh
 COPY healthcheck.sh /healthcheck.sh
 RUN chmod +x /watchdog.sh /healthcheck.sh

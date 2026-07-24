@@ -92,6 +92,21 @@ which `print_error`s and fails the gate closed rather than falling through to
 gate so `dig` is present on the host in the normal path. The silent-pass
 degradation this finding described no longer exists.
 
+> **Regression found 2026-07-23 (issue #1149), fixed alongside this doc's
+> update:** the fail-closed fix above did not change which hostname the probe
+> queries — `test_fqdn` was still the bare apex `steamcontent.com`
+> (`setup.sh:3712`). Issue #1073 (merged 2026-07-22) migrated
+> `steamcontent.com` to a wildcard-only RPZ entry (`.steamcontent.com`), and
+> RPZ wildcard-only entries never match the bare apex itself. From that point
+> on, `dig ... A steamcontent.com` against a perfectly healthy DNS container
+> always returned empty, so `verify_stack_functional_health` failed closed on
+> *every* `update`/`auto-update` run — a false-negative version of the same
+> silent-pass bug this finding originally described, except now the gate
+> reports every stack unhealthy and can trigger `rollback_stack_update`
+> regardless of actual DNS health. Fixed by switching `test_fqdn` to
+> `content1.steampowered.com` (a bare-apex `cdn-domains.txt` entry, confirmed
+> not migrated to wildcard-only).
+
 ---
 
 ## 2. Backup-root is not scoped per install_dir — cross-install rollback collision risk
@@ -434,7 +449,7 @@ together.
 
 ## 10. Stale doc-comment references a deleted script as existing test coverage
 
-**File/line**: `tests/bats/setup_channel_stable_edge.bats:18-21` (header comment).
+**File/line**: `tests/bats/setup_channel_stable_nightly.bats:18-21` (header comment).
 
 ```
 Testing the pure mapping function directly is both simpler and strictly

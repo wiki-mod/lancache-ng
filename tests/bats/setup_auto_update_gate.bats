@@ -21,14 +21,14 @@ setup() {
 }
 
 @test "skips when AUTO_UPDATE_ENABLED is not 1" {
-    run lancache_auto_update_should_proceed "0" "edge" "sha-new" "sha-old"
+    run lancache_auto_update_should_proceed "0" "nightly" "sha-new" "sha-old"
     [ "$status" -eq 1 ]
     [[ "$output" == skip:* ]]
     [[ "$output" == *"AUTO_UPDATE_ENABLED"* ]]
 }
 
 @test "skips when AUTO_UPDATE_ENABLED is empty" {
-    run lancache_auto_update_should_proceed "" "edge" "sha-new" "sha-old"
+    run lancache_auto_update_should_proceed "" "nightly" "sha-new" "sha-old"
     [ "$status" -eq 1 ]
 }
 
@@ -41,13 +41,13 @@ setup() {
 }
 
 @test "skips when the channel has not moved" {
-    run lancache_auto_update_should_proceed "1" "edge" "sha-abc" "sha-abc"
+    run lancache_auto_update_should_proceed "1" "nightly" "sha-abc" "sha-abc"
     [ "$status" -eq 1 ]
     [[ "$output" == *"already at sha-abc"* ]]
 }
 
 @test "proceeds when enabled, not pinned, and the channel moved" {
-    run lancache_auto_update_should_proceed "1" "edge" "sha-new" "sha-old"
+    run lancache_auto_update_should_proceed "1" "nightly" "sha-new" "sha-old"
     [ "$status" -eq 0 ]
     [[ "$output" == proceed:* ]]
     [[ "$output" == *"sha-old -> sha-new"* ]]
