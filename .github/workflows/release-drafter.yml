@@ -1,15 +1,22 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# Drafts/updates a GitHub Release incrementally on every push to master/v0.2.0,
-# using .github/release-drafter.yml's config (#899, decided on #894). Replaces
-# the manual "collect merged PRs by hand at release time" step -- see
-# CONTRIBUTING.md's "Releasing Changes to CHANGELOG.md" section, which now
-# treats scripts/collect-changelog-entries.sh as a fallback, not the primary
-# path.
+# Drafts/updates a GitHub Release incrementally on every push to
+# master/current_dev/v0.2.0, using .github/release-drafter.yml's config
+# (#899, decided on #894). Replaces the manual "collect merged PRs by hand
+# at release time" step -- see CONTRIBUTING.md's "Releasing Changes to
+# CHANGELOG.md" section, which now treats
+# scripts/collect-changelog-entries.sh as a fallback, not the primary path.
 name: Release Drafter
 
 on:
   push:
-    branches: [master, v0.2.0]
+    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # both stay listed so this trigger keeps covering whichever integration
+    # branch is actually receiving pushes (#709). Missed by #1110's original
+    # sweep; the config's own `filter-by-commitish` stays unset (false), so
+    # this only ever refreshes the single shared draft release sooner, from
+    # whichever branch merges land on -- it never publishes on its own (see
+    # the job's `publish:` condition below).
+    branches: [master, current_dev, v0.2.0]
   workflow_dispatch:
 
 permissions:
