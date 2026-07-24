@@ -8,7 +8,7 @@
 //! stanza) at process startup only -- see `nats_auth_callout.rs` for why
 //! register/rotate/remove no longer need to rewrite that file or restart NATS.
 
-use crate::{docker_client, nats_auth_callout, nats_config, AppState};
+use crate::{AppState, docker_client, nats_auth_callout, nats_config};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Json};

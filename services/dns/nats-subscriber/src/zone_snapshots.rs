@@ -477,10 +477,10 @@ pub fn changed_names(patch: &Value) -> Vec<String> {
     let mut names = Vec::new();
     if let Some(rrsets) = patch.get("rrsets").and_then(Value::as_array) {
         for rrset in rrsets {
-            if let Some(name) = rrset.get("name").and_then(Value::as_str) {
-                if seen.insert(name.to_string()) {
-                    names.push(name.to_string());
-                }
+            if let Some(name) = rrset.get("name").and_then(Value::as_str)
+                && seen.insert(name.to_string())
+            {
+                names.push(name.to_string());
             }
         }
     }

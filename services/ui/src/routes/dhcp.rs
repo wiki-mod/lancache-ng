@@ -8,13 +8,13 @@
 //! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
 //! one-shot helper container that can only be started, waited on, and logged.
 
-use crate::{docker_client, kea_snapshots, AppState};
+use crate::{AppState, docker_client, kea_snapshots};
 use anyhow::Context as AnyhowContext;
+use axum::Json;
 use axum::extract::{Form, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Json;
 use bollard::container::LogOutput;
 // The DHCP probe path deliberately uses only start/stop/wait/logs operations
 // because Docker exec and generic container creation are banned from the UI's
@@ -25,7 +25,7 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
@@ -627,13 +627,12 @@ async fn reconcile_dhcp_mode(
     if mode.is_kea()
         && state.config.effective_ntp_enabled()
         && state.config.effective_ntp_auto_dhcp()
+        && let Err(err) = apply_ntp_lan_ip_to_all_subnets(state).await
     {
-        if let Err(err) = apply_ntp_lan_ip_to_all_subnets(state).await {
-            tracing::warn!(
-                error = %err,
-                "failed to push LanCache-NG-NTP's LAN address into Kea subnets after switching to Kea mode; it will be retried on the next NTP/DHCP settings save"
-            );
-        }
+        tracing::warn!(
+            error = %err,
+            "failed to push LanCache-NG-NTP's LAN address into Kea subnets after switching to Kea mode; it will be retried on the next NTP/DHCP settings save"
+        );
     }
 
     Ok(())
@@ -1175,19 +1174,19 @@ pub async fn update_dhcp_mode(
         // they're already on; reconcile_dhcp_mode is then a no-op repeat of
         // the current state, so there is nothing to roll back to and doing
         // so would just repeat the exact same persist failure.
-        if mode != previous_mode {
-            if let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await {
-                return Err(DhcpError::config_error(format!(
-                    "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
-                     back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
-                     are now running in '{}' mode but the UI may still report '{}' until this is \
-                     resolved manually.",
-                    mode.as_str(),
-                    previous_mode.as_str(),
-                    mode.as_str(),
-                    previous_mode.as_str()
-                )));
-            }
+        if mode != previous_mode
+            && let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await
+        {
+            return Err(DhcpError::config_error(format!(
+                "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
+                 back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
+                 are now running in '{}' mode but the UI may still report '{}' until this is \
+                 resolved manually.",
+                mode.as_str(),
+                previous_mode.as_str(),
+                mode.as_str(),
+                previous_mode.as_str()
+            )));
         }
         return Err(persist_err);
     }
@@ -1986,10 +1985,10 @@ async fn fetch_lease_hostname(state: &AppState, ip: &str) -> Option<String> {
 async fn cleanup_lease_ddns_records(state: &AppState, ip: &str, hostname: Option<&str>) {
     // Forward A record: keyed by Kea's own FQDN for the lease. Skipped when the
     // lease had no hostname (nothing was ever registered forward).
-    if let Some(hostname) = hostname {
-        if let Some((zone, name)) = forward_record_zone_and_name(hostname) {
-            publish_dns_record_delete(state, &zone, &name, "A").await;
-        }
+    if let Some(hostname) = hostname
+        && let Some((zone, name)) = forward_record_zone_and_name(hostname)
+    {
+        publish_dns_record_delete(state, &zone, &name, "A").await;
     }
     // Reverse PTR record: name + zone derive purely from the IPv4, so this runs
     // even when the lease carried no hostname.
@@ -2980,14 +2979,14 @@ fn extract_dhcp_offer_details(output: &str) -> Vec<DhcpProbeDetail> {
     for line in output.lines() {
         let line = normalize_nmap_line(line);
 
-        if let Some(rest) = line.strip_prefix("Response ") {
-            if rest.contains(" of ") {
-                response_blocks_seen += 1;
-                if response_blocks_seen > 1 {
-                    break;
-                }
-                continue;
+        if let Some(rest) = line.strip_prefix("Response ")
+            && rest.contains(" of ")
+        {
+            response_blocks_seen += 1;
+            if response_blocks_seen > 1 {
+                break;
             }
+            continue;
         }
 
         // `.iter().copied()` (not a bare `for label in DHCP_OFFER_DETAIL_LABELS`)
@@ -6283,34 +6282,50 @@ mod tests {
         // a code with "routers", and (3) fresh UI-managed entries reflect
         // this save's new form values.
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 3 && is_dhcp4_option_space(option)));
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 15 && is_dhcp4_option_space(option)));
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 119 && is_dhcp4_option_space(option)));
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 3 && is_dhcp4_option_space(option))
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 15 && is_dhcp4_option_space(option))
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 119 && is_dhcp4_option_space(option))
+        );
         assert!(options.iter().any(|option| option["space"] == "vendor-foo"
             && option["code"] == 3
             && option["data"] == "keep-vendor-route"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.1.2, 10.0.1.3"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name-servers"
+                    && option["data"] == "10.0.1.2, 10.0.1.3")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan")
+        );
     }
 
     // Kea's own config-get response identifies well-known options by numeric
@@ -6393,13 +6408,17 @@ mod tests {
 
         let options = subnet["option-data"].as_array().expect("option-data array");
         assert_eq!(options.len(), 4);
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.2.2, 10.0.2.3"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name-servers"
+                    && option["data"] == "10.0.2.2, 10.0.2.3")
+        );
         assert!(!options.iter().any(|option| option["name"] == "ntp-servers"));
     }
 
@@ -6429,15 +6448,21 @@ mod tests {
         .expect("subnet value");
 
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4")
+        );
     }
 
     // The custom-option form (add_subnet_option) must refuse the 5 codes
@@ -6890,15 +6915,19 @@ mod tests {
 
         let options = custom_subnet_options(&subnet);
         assert_eq!(options.len(), 2);
-        assert!(options
-            .iter()
-            .any(|option| option.code == 66 && option.data == "10.0.0.20"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option.code == 66 && option.data == "10.0.0.20")
+        );
 
         remove_custom_subnet_option(&mut subnet, 67, "bootx64.efi").expect("remove option");
         let raw_options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(raw_options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1"));
+        assert!(
+            raw_options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1")
+        );
         assert!(!raw_options.iter().any(|option| option["code"] == 67));
     }
 
@@ -6941,15 +6970,21 @@ mod tests {
             compatible_reservations_for_subnet(&subnet, "10.0.2.0/24").expect("reservations");
 
         assert_eq!(reservations.len(), 2);
-        assert!(reservations
-            .iter()
-            .any(|reservation| reservation["ip-address"] == "10.0.2.50"));
-        assert!(!reservations
-            .iter()
-            .any(|reservation| reservation["ip-address"] == "10.0.3.50"));
-        assert!(reservations
-            .iter()
-            .any(|reservation| reservation["client-id"] == "01:02:03"));
+        assert!(
+            reservations
+                .iter()
+                .any(|reservation| reservation["ip-address"] == "10.0.2.50")
+        );
+        assert!(
+            !reservations
+                .iter()
+                .any(|reservation| reservation["ip-address"] == "10.0.3.50")
+        );
+        assert!(
+            reservations
+                .iter()
+                .any(|reservation| reservation["client-id"] == "01:02:03")
+        );
     }
 
     // Regression coverage for a real bug found by driving real Kea 2.6.3
@@ -7037,8 +7072,8 @@ mod tests {
     // kea_config_modify_strips_hash_from_config_get_before_reuse already
     // uses for the `hash`-field regression, applied to this bug instead.
     #[tokio::test]
-    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope(
-    ) {
+    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope()
+     {
         let config_get_response = kea_config_get_response(json!({
             "Dhcp4": {
                 "subnet4": [{"id": 1, "reservations": []}]
@@ -7339,13 +7374,17 @@ mod tests {
 
         let options = subnet["option-data"].as_array().expect("array");
         assert_eq!(options.len(), 3, "routers/custom entries must be preserved");
-        assert!(options
-            .iter()
-            .any(|o| o["name"] == "routers" && o["data"] == "10.0.0.1"));
+        assert!(
+            options
+                .iter()
+                .any(|o| o["name"] == "routers" && o["data"] == "10.0.0.1")
+        );
         assert!(options.iter().any(|o| o["code"] == 99));
-        assert!(options
-            .iter()
-            .any(|o| o["name"] == "ntp-servers" && o["data"] == "192.0.2.50"));
+        assert!(
+            options
+                .iter()
+                .any(|o| o["name"] == "ntp-servers" && o["data"] == "192.0.2.50")
+        );
     }
 
     // An empty target value (the resolved project-wide default when nothing
