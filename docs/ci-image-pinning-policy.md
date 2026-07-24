@@ -102,8 +102,10 @@ All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 
 
 The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
 as the pull source for their runtime bases (Debian for most services;
-`services/dhcp-proxy/Dockerfile` moved to an Alpine base as of issue #815's
-staged Alpine migration), including `services/ui/Dockerfile`. This is a
+`services/dhcp-proxy/Dockerfile` and `services/dhcp/Dockerfile` moved to an
+Alpine base as the first two stages of issue #815's staged Alpine migration
+-- `services/dns/Dockerfile` remains on Debian, that stage still open),
+including `services/ui/Dockerfile`. This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
 the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
 configured pull source for these public Docker Hub bases, whichever
@@ -118,7 +120,7 @@ undocumented per-Dockerfile fallback logic.
 
 - `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
+- `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
 - `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
 - `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
