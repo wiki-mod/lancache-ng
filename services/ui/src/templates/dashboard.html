@@ -49,6 +49,36 @@
       </div>
       <p class="text-xs text-slate-500 mt-1">{{ cache_pct }}% used</p>
     </div>
+
+    <!-- Resize control (issue #1069 part 3). Re-validates the request
+         against real free disk space at cache_dir (routes/cache.rs's
+         resize_cache), the same buffer-scaled safety check setup.sh's
+         initial "Cache size in GiB" prompt already enforces at install
+         time. This never takes effect synchronously: the request is
+         persisted for setup.sh's host-side lancache-converge.service (every
+         ~5 minutes) to fold into the real .env and let the existing
+         `docker compose up -d` convergence step recreate the proxy
+         container -- see routes/cache.rs's module doc comment for the full
+         mechanism and why a live nginx reload isn't wired up yet. -->
+    {% if cache_resize_pending %}
+    <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
+      Resize to {{ effective_cache_max_gb }} GB requested. This takes effect within the next
+      few minutes (the host convergence timer runs every 5 minutes) and briefly restarts the
+      proxy container.
+    </div>
+    {% endif %}
+    <form method="post" action="/cache/resize" class="flex flex-wrap items-end gap-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">New cache size (GB)</label>
+        <input type="number" name="cache_gb" min="1" step="1" placeholder="{{ cache_max_gb }}"
+               class="w-32 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+      </div>
+      <button type="submit"
+              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        Resize cache
+      </button>
+    </form>
   </div>
   <!-- Per-mode connection metrics: standard mode (services/proxy-standard,
        HTTP caching + HTTPS SNI passthrough, no CA cert needed) and SSL mode

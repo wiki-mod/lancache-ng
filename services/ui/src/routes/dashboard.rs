@@ -3,12 +3,13 @@
 
 use crate::{config::DhcpMode, nginx_client, syslog_client, AppState};
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{Html, Json};
 use serde_json::json;
 use std::sync::Arc;
 use tera::Context;
 
-pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
+pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let cfg = &state.config;
 
     // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and
@@ -112,7 +113,20 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let syslog_size_gb = syslog_size_result.unwrap_or(0.0);
     let syslog_stats = syslog_stats_result.unwrap_or_default();
 
+    // The percentage bar stays tied to cfg.cache_max_gb (the container's own
+    // raw startup value, i.e. what nginx is ACTUALLY enforcing right now),
+    // never the pending override -- see effective_cache_max_gb's own doc
+    // comment. A separate "resize pending" notice (cache_resize_pending/
+    // effective_cache_max_gb below) is the only place the requested-but-not-
+    // yet-applied value shows up, so an operator can't mistake a submitted
+    // request for one that has already taken effect.
     let cache_pct = cache_usage_pct(cache_used_gb, cfg.cache_max_gb);
+    let effective_cache_max_gb = cfg.effective_cache_max_gb();
+    // Whole-GB comparison: both sides originate as whole-GiB integers (the
+    // resize form only ever accepts a whole number, see routes/cache.rs), so
+    // a >= 1.0 difference reliably means "a real pending resize", not float
+    // noise from the two being computed slightly differently.
+    let cache_resize_pending = (effective_cache_max_gb - cfg.cache_max_gb).abs() >= 1.0;
 
     let mut ctx = Context::new();
     ctx.insert("ssl_enabled", &cfg.ssl_enabled);
@@ -126,6 +140,11 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("cache_used_gb", &format!("{:.1}", cache_used_gb));
     ctx.insert("cache_max_gb", &cfg.cache_max_gb);
     ctx.insert("cache_pct", &cache_pct);
+    ctx.insert("cache_resize_pending", &cache_resize_pending);
+    ctx.insert(
+        "effective_cache_max_gb",
+        &format!("{:.0}", effective_cache_max_gb),
+    );
     ctx.insert("log_stats", &log_stats);
     ctx.insert("recent_logs", &recent_logs);
     ctx.insert("syslog_enabled", &cfg.syslog_enabled);
@@ -133,6 +152,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
     ctx.insert("syslog_stats", &syslog_stats);
     ctx.insert("active_page", "dashboard");
+    crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     crate::routes::render(
         &state.templates,

@@ -851,6 +851,14 @@ pub(crate) fn persist_stack_settings(
                 }
                 .to_string(),
             ),
+            // Issue #1069 part 3: this route never edits a pending cache
+            // resize, but write_ui_settings_file overwrites the whole file
+            // each call -- carried through unchanged so a release-channel
+            // save never silently reverts an operator's requested resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
         ],
     )
 }
@@ -940,6 +948,115 @@ pub(crate) fn persist_ntp_settings(
                 "NTP_AUTO_DHCP",
                 if ntp_auto_dhcp { "1" } else { "0" }.to_string(),
             ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // persist_stack_settings's own CACHE_MAX_GB line -- this route
+            // never edits a pending cache resize either.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )
+}
+
+// Cache resize (issue #1069 part 3): counterpart to persist_stack_settings/
+// persist_ntp_settings for routes/cache.rs's own settings save
+// (resize_cache). Writes the requested CACHE_MAX_GB plus every current
+// DHCP/release-channel/NTP value unchanged, for the same whole-file-
+// overwrite reason documented on write_ui_settings_file. `pub(crate)` so
+// routes/cache.rs can call it without duplicating this file's ownership of
+// the settings file's write contract. Callers are expected to have already
+// validated `cache_gb` (a positive whole number of GiB that leaves the
+// required safety buffer on the real cache disk) before calling this --
+// this function only persists, it does not re-validate.
+pub(crate) fn persist_cache_settings(state: &AppState, cache_gb: u64) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            ("CACHE_MAX_GB", cache_gb.to_string()),
         ],
     )
 }
@@ -996,6 +1113,13 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         "NTP_ENABLED",
         "NTP_UPSTREAM_SERVERS",
         "NTP_AUTO_DHCP",
+        // Cache resize (issue #1069 part 3), written by routes/cache.rs's
+        // resize_cache (via persist_cache_settings below). Same
+        // whole-file-overwrite contract: every other save site in this file
+        // must keep carrying this key through unchanged, or an unrelated
+        // DHCP/release-channel/NTP save would silently drop a pending
+        // resize back to the container's raw startup CACHE_MAX_GB.
+        "CACHE_MAX_GB",
     ] {
         if let Some(value) = map.get(key) {
             content.push_str(key);
@@ -1166,6 +1290,13 @@ pub async fn update_dhcp_mode(
                     "0"
                 }
                 .to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/NTP_* above -- this route never edits a
+            // pending cache resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
             ),
         ],
     );
@@ -1372,6 +1503,13 @@ pub async fn update_dhcp_proxy(
                     "0"
                 }
                 .to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/NTP_* above -- this route never edits a
+            // pending cache resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
             ),
         ],
     )?;
@@ -7311,6 +7449,66 @@ mod tests {
         assert_eq!(
             content,
             "NTP_ENABLED=1\nNTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org time.cloudflare.com\nNTP_AUTO_DHCP=0\n"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Issue #1069 part 3: same bug class as write_ui_settings_file_persists_
+    // release_channel_and_auto_update_keys/write_ui_settings_file_persists_
+    // ntp_keys above -- CACHE_MAX_GB must be on write_ui_settings_file's
+    // fixed whitelist, or routes/cache.rs's persist_cache_settings would
+    // silently drop every resize request it tries to save.
+    #[test]
+    fn write_ui_settings_file_persists_cache_max_gb_key() {
+        let dir = temp_snapshot_root("cache-resize-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(&target, &[("CACHE_MAX_GB", "75".to_string())]);
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(content, "CACHE_MAX_GB=75\n");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Every existing whole-file save site (update_dhcp_mode, update_dhcp_proxy,
+    // persist_stack_settings, persist_ntp_settings) must carry a pending
+    // CACHE_MAX_GB resize through unchanged, per the same "every other save
+    // site must re-include every key" contract documented on
+    // write_ui_settings_file's fixed key list. This directly exercises
+    // persist_ntp_settings (the one call site that does NOT take an AppState,
+    // making it callable here without a live Docker/NATS connection) writing
+    // a values slice that omits CACHE_MAX_GB, mirroring the shape a caller
+    // that forgot the carry-through line would produce, and asserts the
+    // result is what the *whitelist* alone determines -- i.e. that this
+    // failure class is caught by inspecting the actual call sites in this
+    // file (see the CACHE_MAX_GB carry-through lines added to all four save
+    // sites), not by this generic function silently reintroducing a dropped
+    // key on its own.
+    #[test]
+    fn write_ui_settings_file_omitted_cache_max_gb_is_dropped_not_silently_kept() {
+        let dir = temp_snapshot_root("cache-resize-omission-guard");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        // First write establishes a pending resize override.
+        write_ui_settings_file(&target, &[("CACHE_MAX_GB", "75".to_string())])
+            .expect("expected a clean first write");
+
+        // A whole-file save that forgets to carry CACHE_MAX_GB through (the
+        // exact bug this test guards every real call site against) silently
+        // wipes the pending resize -- proving why every persist_* function
+        // above must always include it.
+        write_ui_settings_file(&target, &[("NTP_ENABLED", "1".to_string())])
+            .expect("expected a clean second write");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content, "NTP_ENABLED=1\n",
+            "CACHE_MAX_GB must be re-included by every caller or it is lost, exactly as asserted here"
         );
 
         fs::remove_dir_all(&dir).ok();
