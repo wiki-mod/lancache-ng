@@ -13,10 +13,17 @@
 #     with zero impact on a different, still-registered secondary.
 #   - Rotating a secondary's credential (POST .../rotate-token) invalidates
 #     the old credential immediately while issuing a new one that works.
+#   - (Issue #682) The auth-callout request/response between nats-server and
+#     the Admin UI's responder is xkey-encrypted, not cleartext -- proven by
+#     packet-capturing the real nats<->ui leg and asserting the presented
+#     password does not appear in it while the nkeys sealed-box "xkv1"
+#     marker does.
 #
 # Reuses the same published-image/health-wait/ephemeral-client pattern
 # already proven in ssl-mitm-cache-simulation.sh and
-# ui-nats-dns-integration-simulation.sh.
+# ui-nats-dns-integration-simulation.sh. The #682 packet-capture phase pulls
+# a third-party debug image (nicolaka/netshoot) for tcpdump only -- not a
+# project dependency, not added to any product image.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -348,4 +355,83 @@ assert_rejected "b-old-cred-after-rotate" "$b_url" "$b_user" "$b_pass" "$b_consu
 echo "== Verifying authcallout-b's NEW (post-rotation) credential works =="
 assert_connects "b-new-cred-after-rotate" "$b_url" "$b_user" "$b_new_pass" "$b_consumer"
 
-echo "nats-secondary-auth-callout-simulation passed: per-secondary NATS identity, immediate revocation on removal, isolation between secondaries, and credential rotation all verified end-to-end against a real nats-server and the real nats-subscriber client."
+# Issue #682: proves the auth-callout xkey encryption is not just configured
+# but actually protecting the payload on the wire. Captures specifically on
+# the `ui` container's own network namespace, not the `nats` container's --
+# both the callout responder's connection AND every secondary's own CONNECT
+# share the same port 4222, but only the `ui` container's own traffic is
+# involved in the callout request/response this feature encrypts. A
+# secondary's own CONNECT (where connect_opts.pass genuinely originates) goes
+# straight secondary-container -> nats-container and never touches `ui` at
+# all, so capturing on `ui`'s namespace cannot see it -- this is deliberate,
+# not a gap in the capture: xkey does not claim to protect that leg (see
+# nats_auth_callout.rs's module docs), so this proof must not conflate the
+# two by capturing broadly on the nats container instead.
+echo "== xkey encryption proof: packet-capturing the nats<->ui auth-callout leg =="
+if ! ui_cid="$("${compose[@]}" ps -q ui)"; then
+    echo "::error::Could not query the compose container id for service 'ui'." >&2
+    exit 1
+fi
+# nicolaka/netshoot: a well-known, widely used third-party network
+# troubleshooting image (tcpdump/tshark/iproute2 etc.), pulled here only for
+# this one-off manual/CI packet capture step -- not a project dependency, not
+# added to any Dockerfile or compose service, and nothing about it is
+# committed into this project's own images.
+capture_cid="$(docker run -d --rm --network "container:$ui_cid" --cap-add NET_RAW --cap-add NET_ADMIN \
+    -v "$work_dir/shared:/shared" nicolaka/netshoot \
+    tcpdump -i any -w /shared/xkey-capture.pcap 'tcp port 4222')"
+sleep 2 # let tcpdump attach before the traffic we care about happens
+register_secondary "authcallout-xkey-proof"
+proof_file="$work_dir/shared/register-authcallout-xkey-proof.json"
+if ! proof_pass="$(json_field "$proof_file" nats_password)"; then
+    echo "::error::Failed to read field 'nats_password' from $proof_file." >&2
+    exit 1
+fi
+if ! proof_url="$(json_field "$proof_file" nats_url)"; then
+    echo "::error::Failed to read field 'nats_url' from $proof_file." >&2
+    exit 1
+fi
+if ! proof_user="$(json_field "$proof_file" nats_user)"; then
+    echo "::error::Failed to read field 'nats_user' from $proof_file." >&2
+    exit 1
+fi
+if ! proof_consumer="$(json_field "$proof_file" consumer_name)"; then
+    echo "::error::Failed to read field 'consumer_name' from $proof_file." >&2
+    exit 1
+fi
+# The connection attempt itself is what makes nats-server issue the
+# auth-callout request/response this capture needs to see -- the capture
+# would otherwise just show an idle socket.
+assert_connects "xkey-proof" "$proof_url" "$proof_user" "$proof_pass" "$proof_consumer"
+sleep 2
+docker stop "$capture_cid" >/dev/null 2>&1 || true
+sleep 1
+
+capture_bytes="$(docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c 'wc -c < /shared/xkey-capture.pcap' 2>/dev/null || echo 0)"
+# A too-small/empty capture is a broken test, not a pass -- must fail loudly
+# rather than let an absent password "prove" encryption when the real cause
+# is that no traffic was captured at all.
+if [[ "$capture_bytes" -lt 200 ]]; then
+    echo "::error::xkey capture pcap is empty or too small ($capture_bytes bytes) -- the capture did not actually run, this proves nothing." >&2
+    exit 1
+fi
+
+if docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "tcpdump -r /shared/xkey-capture.pcap -A 2>/dev/null | grep -F -- '$proof_pass'" >/dev/null; then
+    echo "::error::The secondary's plaintext NATS password was found in the captured nats<->ui auth-callout traffic -- xkey encryption is NOT actually protecting the payload." >&2
+    exit 1
+fi
+echo "Confirmed: the plaintext password does NOT appear anywhere in the captured nats<->ui auth-callout traffic."
+
+# "xkv1" is nkeys' own literal sealed-box version prefix (see
+# nats_auth_callout.rs's module docs) -- its presence is what distinguishes
+# "genuinely encrypted" from "the password just happens not to appear in
+# this particular capture for an unrelated reason" (e.g. a missed capture
+# window). Confirms the payload isn't merely absent the password by
+# coincidence, but is actually using the sealed-box wire format.
+if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "tcpdump -r /shared/xkey-capture.pcap -A 2>/dev/null | grep -F 'xkv1'" >/dev/null; then
+    echo "::error::The nkeys sealed-box version marker 'xkv1' was not found in the captured traffic -- cannot confirm the auth-callout payload is actually xkey-encrypted." >&2
+    exit 1
+fi
+echo "Confirmed: captured traffic contains the nkeys sealed-box 'xkv1' marker -- the auth-callout request/response is genuinely xkey-encrypted."
+
+echo "nats-secondary-auth-callout-simulation passed: per-secondary NATS identity, immediate revocation on removal, isolation between secondaries, credential rotation, and xkey encryption of the auth-callout payload (issue #682) all verified end-to-end against a real nats-server and the real nats-subscriber client."
