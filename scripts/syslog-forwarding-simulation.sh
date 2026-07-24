@@ -192,12 +192,32 @@ dhcp_proxy_subnet_start="172.29.${octet}.140"
 cleanup() {
     local status=$?
     if [[ -f "$install_dir/docker-compose.yml" ]]; then
+        # --profile flags on `down` (issue #864): confirmed empirically that
+        # a bare `down -v --remove-orphans` with no `--profile` flags leaves
+        # `dhcp`/`dhcp-proxy` specifically still running (their fixed
+        # container names, `lancache-dhcp`/`lancache-dhcp-proxy`, and their
+        # own dedicated dhcp-test-net/dhcp-proxy-test-net networks all
+        # survived a bare `down` in a real, reproduced test run), even though
+        # every other profile-gated service in the same stack (ssl/logging)
+        # was torn down correctly by the same bare `down` call. The exact
+        # internal reason wasn't fully isolated (possibly related to
+        # dhcp/dhcp-proxy being the only services on custom, non-`default`
+        # networks rather than purely a profile-visibility issue), but the
+        # fix is directly confirmed: repeating `down` with the SAME
+        # `--profile` flags used for `up` reliably removes both containers
+        # and both networks, with no leak, across repeated real test runs.
         docker compose --project-directory "$install_dir" \
             -f "$install_dir/docker-compose.yml" \
             -f "$work_dir/logging-test-override.yml" \
             -f "$work_dir/dhcp-test-override.yml" \
             --env-file "$install_dir/.env" \
+            --profile ssl --profile logging --profile dhcp-kea --profile dhcp-proxy \
             down -v --remove-orphans >/dev/null 2>&1 || true
+        # Defense in depth: force-remove the two fixed container names
+        # directly if the profile-aware `down` above somehow still left
+        # either running, so a partial/unexpected compose failure can never
+        # leak a real container onto a shared self-hosted runner host.
+        docker rm -f lancache-dhcp lancache-dhcp-proxy >/dev/null 2>&1 || true
     fi
     rm -rf "$work_dir"
     exit "$status"
