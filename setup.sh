@@ -4183,6 +4183,29 @@ lancache_ui_channel_override_is_valid() {
     esac
 }
 
+# Validates a CACHE_MAX_GB override pulled from the Admin UI's settings
+# volume (services/ui/src/routes/cache.rs's resize_cache, issue #1069 part
+# 3: the Admin UI cache-resize capability). Must be a positive whole number
+# of GiB, same shape setup.sh's own "Cache size in GiB" prompt accepts.
+# Deliberately does NOT re-run a disk-space/safety-buffer check here: the
+# Admin UI already validated the requested size against real free space at
+# its own read-only view of CACHE_DIR (the same proxy-cache volume) before
+# ever writing this override, so re-deriving that check on the host would
+# just duplicate logic that has to be kept in sync in two languages for no
+# real additional safety -- the actual gap this leaves is a real disk-usage
+# change in the window between the Admin UI's validation and this
+# convergence tick picking it up (currently up to ~5 minutes), which is a
+# documented, accepted limitation (see docs/architecture-ng.md's Cache
+# Retention & Cleanup section), not something silently unguarded.
+# The `10#` base prefix mirrors the existing "Cache size in GiB" prompt's own
+# leading-zero handling further down in this script: without it, a
+# settings-file value like "008" would be parsed as octal by `(( ))` and abort
+# on an invalid digit (8/9) rather than being treated as decimal 8.
+lancache_ui_cache_max_gb_override_is_valid() {
+    [[ "$1" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$1 > 0 ))
+}
+
 # Reads a single KEY=value line out of the ui-data volume's
 # lancache-ui-settings.env, or prints nothing if the volume doesn't exist yet
 # (a fresh install before the UI container has ever started), Docker itself
@@ -4225,6 +4248,7 @@ reconcile_auto_update_timer_state() {
 cmd_converge_reconcile() {
     local install_dir="${1:-/opt/lancache-ng}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
+    local ui_cache_max_gb current_cache_max_gb
 
     install_dir=$(realpath -m "$install_dir")
     # A converge tick can fire before the very first install completes (the
@@ -4260,6 +4284,36 @@ cmd_converge_reconcile() {
     # the block above just changed it or it was already correct -- covers a
     # direct manual .env edit too, not only the Admin UI path.
     reconcile_auto_update_timer_state "$env_file"
+
+    # Cache resize (issue #1069 part 3): bridges the Admin UI's dashboard
+    # resize control (services/ui/src/routes/cache.rs) onto the host, the
+    # same way the LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED block above
+    # bridges #819's release-channel control. CACHE_MAX_SIZE (nginx's real
+    # `proxy_cache_path ... max_size=`) and CACHE_MAX_GB (the Admin UI's own
+    # display/percentage-bar value) are written together so the two never
+    # drift apart -- see config/{dev,prod}/proxy.env and this env file's own
+    # CACHE_MAX_SIZE/CACHE_MAX_GB pair for why both exist.
+    #
+    # Scope boundary: this writes the quickstart/setup.sh-managed runtime
+    # .env, which deploy/quickstart/docker-compose.yml's proxy service reads
+    # CACHE_MAX_SIZE from directly (`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`).
+    # A manual deploy/prod checkout's proxy service instead reads
+    # config/prod/proxy.env via `env_file:`, a file this convergence tick
+    # never touches -- an Admin UI resize on that deployment style is
+    # therefore a no-op today. deploy/prod is the manual/self-hosted-repo
+    # path, not the setup.sh-managed default this convergence mechanism was
+    # built for; see docs/architecture-ng.md for the same caveat stated
+    # operator-facing.
+    ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB")
+    if [[ -n "$ui_cache_max_gb" ]] && lancache_ui_cache_max_gb_override_is_valid "$ui_cache_max_gb"; then
+        ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))
+        current_cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file")
+        if [[ "$ui_cache_max_gb" != "$current_cache_max_gb" ]]; then
+            set_env_key CACHE_MAX_SIZE "${ui_cache_max_gb}g" "$env_file"
+            set_env_key CACHE_MAX_GB "$ui_cache_max_gb" "$env_file"
+            print_ok "Cache size updated from Admin UI: ${current_cache_max_gb:-<unset>} GB -> ${ui_cache_max_gb} GB"
+        fi
+    fi
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
