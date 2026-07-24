@@ -11,26 +11,38 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: Also promote this channel from the dispatched ref, in addition to the automatic branch/tag rule below (e.g. spot-check a feature branch as "dev" without merging it first).
+        description: Also promote this channel from the dispatched ref, in addition to the automatic branch/tag rule below (e.g. spot-check a feature branch as "nightly" without merging it first).
         type: choice
-        options: [none, dev, nightly]
+        options: [none, nightly]
         default: none
   schedule:
-    # Daily nightly-channel refresh (issues #1035, #1056). The `promote` job
-    # only moves the `nightly` stack channel on a push to master, so between
-    # master pushes the channel's images can silently go stale (exactly #1035's
-    # failure mode for the old `edge` name). A `schedule` event runs from the
-    # default branch (master), and because `detect-changes` only gates
+    # Daily stable-channel refresh (issues #1035, #1056; re-scoped for the
+    # #825/#1141 branch-model decision: master = `latest`, current_dev =
+    # `nightly`, archived vY.X.Z branches publish no live channel). The
+    # `promote` job only moves the `latest` stack channel on a push to
+    # master, so between master pushes the channel's images can silently go
+    # stale (exactly #1035's failure mode for the old `edge` name, back when
+    # this same schedule kept the then-master-fed `nightly` channel fresh
+    # instead). A `schedule` event always runs from the repository's default
+    # branch (currently master), and because `detect-changes` only gates
     # pull_request events -- every non-PR event builds all services
     # unconditionally -- this rebuilds the full stack and re-runs `promote`,
-    # whose `refs/heads/master -> nightly` case then re-points the channel. So
-    # `nightly` can never drift more than ~24h behind master even with no push.
+    # whose `refs/heads/master -> latest` case then re-points the channel. So
+    # `latest` can never drift more than ~24h behind master even with no push.
+    #
+    # KNOWN GAP: this schedule cannot give `nightly` (current_dev's channel)
+    # the same guarantee. GitHub Actions `schedule:` triggers only ever run
+    # from the repository's default branch, never from current_dev, so there
+    # is no equivalent daily safety net if current_dev goes a while without a
+    # push. #825 explicitly left the GitHub default-branch question open, so
+    # this is not solved here; revisit if nightly staleness between pushes
+    # becomes a real operational problem.
     #
     # 01:00 UTC == 02:00 CET (the intended local refresh time). GitHub Actions
     # cron has no timezone concept and always fires in UTC, so during CEST
     # (European summer DST, UTC+2) this lands at 03:00 local instead. That
     # one-hour seasonal drift is deliberately accepted rather than worked around
-    # -- there is no DST-aware cron here to match, and an off-by-one-hour nightly
+    # -- there is no DST-aware cron here to match, and an off-by-one-hour
     # rebuild has no correctness impact.
     - cron: "0 1 * * *"
   push:
@@ -608,8 +620,8 @@ jobs:
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs['line-endings'].result == 'success'`
     # unconditionally (on every event), so on push this is a hard gate on the
-    # dev-channel publish path: a cancelled line-endings run makes build skip
-    # and publishes no dev image, starving the channel in a merge cascade. It
+    # channel publish path: a cancelled line-endings run makes build skip
+    # and publishes no channel image, starving the channel in a merge cascade. It
     # must survive to completion on push. On a PR that same cancelled result
     # cleanly skips build/build-arm64 via their `if:` gates, so cancelling a
     # superseded run there just reclaims a lancache-light slot.
@@ -678,8 +690,8 @@ jobs:
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs.shellcheck.result == 'success'`
     # unconditionally (on every event), so on push this is a hard gate on the
-    # dev-channel publish path: a cancelled shellcheck makes build skip and
-    # publishes no dev image, starving the channel in a merge cascade. It must
+    # channel publish path: a cancelled shellcheck makes build skip and
+    # publishes no channel image, starving the channel in a merge cascade. It must
     # survive to completion on push. On a PR that same cancelled result cleanly
     # skips build/build-arm64 via their `if:` gates, so cancelling a superseded
     # run there just reclaims a lancache-light slot.
@@ -1010,7 +1022,7 @@ jobs:
     # smoke-tested build-tools image for the whole workflow, and it is an
     # unconditional `needs:`-success gate for build/build-arm64 (their `if:`
     # requires `needs['validate-compose'].result == 'success'` on every
-    # event). So on push it is the sharpest gate on the dev-channel publish
+    # event). So on push it is the sharpest gate on the channel publish
     # path: cancelling it in a merge cascade makes the entire build path skip
     # and starves the channel. It must therefore survive to completion on
     # push. On a PR every consumer cleanly skips a cancelled result (the soft
@@ -1695,11 +1707,9 @@ jobs:
           forbidden_latest_default_branch='type=raw,value=latest,enable={{is_default'
           forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
           if grep -Fq "$forbidden_latest_default_branch" .github/workflows/build-push.yml; then
-            echo "::error::Default branch builds must not publish latest; latest is stable-release only."
+            echo "::error::Default branch builds must not publish latest via an unaudited build-time tag (docker/metadata-action's is_default_branch auto-tag); latest may only move through the gated promote job."
             exit 1
           fi
-          grep -F 'channel_tags+=(nightly)' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Master promotion must publish the nightly channel."; exit 1; }
           grep -F 'channel_tags+=(latest)' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Stable release promotion must publish the latest channel."; exit 1; }
           grep -F 'elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
@@ -2258,6 +2268,61 @@ jobs:
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
+
+      # Deliberately its OWN step, not appended to "Validate compose files"
+      # above: that step's embedded script is already large enough that
+      # actionlint's shellcheck integration deadlocks on it (a real,
+      # reproduced hang -- confirmed empirically while adding these checks:
+      # the exact same awk guards pass instantly in a small isolated script,
+      # but reliably hang actionlint once embedded in the oversized
+      # "Validate compose files" script, and the *unmodified* pre-existing
+      # script does not hang, so this is a genuine size/threshold interaction
+      # in actionlint's own shellcheck subprocess handling, not a defect in
+      # this shell code itself). Keeping this content in its own step is the
+      # minimal, safe fix -- do not merge this back into "Validate compose
+      # files" without re-confirming actionlint still completes.
+      - name: Validate channel/branch-model mapping (#825/#1141)
+        run: |
+          set -euo pipefail
+
+          # #825/#1141 branch-model decision: master -> latest, current_dev
+          # -> nightly, archived vY.X.Z branches -> no live channel. These
+          # awk guards are scoped to each branch's own if/elif arm (not a
+          # flat grep -F for the channel_tags line alone) so a regression
+          # that keeps both literal strings in the file but ties them to the
+          # wrong branch would still be caught.
+          if ! awk '
+            /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
+            in_branch && /^ *elif/ { in_branch=0 }
+            in_branch && /channel_tags\+=\(latest\)/ { found=1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::Master promotion must publish the latest channel."
+            exit 1
+          fi
+          if ! awk '
+            /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
+            in_branch && /^ *elif/ { in_branch=0 }
+            in_branch && /channel_tags\+=\(nightly\)/ { found=1 }
+            END { exit found ? 0 : 1 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::current_dev promotion must publish the nightly channel."
+            exit 1
+          fi
+          # Scoped to the promote job's own channel_tags=() ... 0-tags-check
+          # block (not a flat file-wide grep -F): a flat search for this
+          # exact literal would also match this very guard's own source line
+          # a few lines above, making the check tautologically fail on every
+          # run regardless of the real promote logic.
+          if ! awk '
+            /^ *channel_tags=\(\)$/ { in_scope=1; next }
+            in_scope && /if \(\( \$\{#channel_tags\[@\]\} == 0 \)\)/ { in_scope=0 }
+            in_scope && /elif \[\[ "\$GITHUB_REF" = refs\/heads\/v\[0-9\]\* \]\]; then/ { found=1 }
+            END { exit found ? 1 : 0 }
+          ' .github/workflows/build-push.yml; then
+            echo "::error::Archived vY.X.Z release branches must not publish a live channel tag; the old 'dev' channel mapping was retired (#825/#1141)."
+            exit 1
+          fi
 
       - name: Check naming consistency (docs/naming-conventions.md)
         run: |
@@ -3708,7 +3773,7 @@ jobs:
     # throttle at all. THAT is where a job-level cancel-in-progress group on
     # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit lets a newer push cancel
     # an older, still in-progress push's copy of that job mid-flight. Those
-    # four jobs are deliberately NOT on the dev-channel publish path (nothing
+    # four jobs are deliberately NOT on the channel publish path (nothing
     # in `build`'s `if:` needs them), so #979 left their cancel-on-push groups
     # in place: reclaiming a superseded push's copy saves scarce runners at no
     # freshness cost, and this job just has to tolerate the resulting
@@ -3767,7 +3832,7 @@ jobs:
     # cancel-in-progress is pull_request-only -- see `build`'s group comment
     # for the full #979 rationale. build/build-arm64 require
     # `needs.ci_scope_policy.result == 'success'` unconditionally, so on push
-    # this is a hard gate on the dev-channel publish path: cancelling it in a
+    # this is a hard gate on the channel publish path: cancelling it in a
     # merge cascade makes the build path skip and starves the channel. The
     # push-branch tolerance logic below already lets THIS job reach `success`
     # despite its upstream test jobs being superseded, so it stays a reliable
@@ -4002,8 +4067,8 @@ jobs:
     # and per ref. cancel-in-progress is pull_request-only -- see `build`'s
     # group comment for the full #979 rationale. On push, `build`'s `if:`
     # requires `needs['container-scan'].result == 'success'` (the non-PR
-    # branch), so this scan is a hard gate on the dev-channel publish path:
-    # cancelling it in a merge cascade makes `build` skip and publishes no dev
+    # branch), so this scan is a hard gate on the channel publish path:
+    # cancelling it in a merge cascade makes `build` skip and publishes no channel
     # image for that commit, starving the channel. On a PR it is safe to
     # cancel a superseded scan -- it only reads/builds a local image to scan
     # (never pushes to GHCR, worst case a wasted Trivy run) and `build` cleanly
@@ -4395,6 +4460,18 @@ jobs:
             allow_args+=(--allow network.host)
           fi
 
+          # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/
+          # apt-get-upgrade RUN step is fed from this build's own layer
+          # cache with no wall-clock expiry, so a stale cached layer can
+          # keep this scan (the gate that is supposed to catch exactly this
+          # class of bug) from ever seeing a Debian security fix that
+          # shipped after the layer was first cached. Passed unconditionally
+          # for every matrix.service like BUILD_TOOLS_IMAGE/CARGO_BUILD_JOBS
+          # above -- harmless for services whose Dockerfile does not declare
+          # this ARG, and only actually changes the resolved command text
+          # (hence the cache key) for build-tools's own Dockerfile.
+          apt_cache_bust="$(date -u +%G-W%V)"
+
           docker buildx build \
             --load \
             --pull \
@@ -4403,6 +4480,7 @@ jobs:
             "${allow_args[@]}" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
+            --build-arg "APT_CACHE_BUST=$apt_cache_bust" \
             "${secret_args[@]}" \
             "${build_context_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
@@ -4643,7 +4721,7 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 150
     # Job-level concurrency (#888, keyed per matrix service and per ref).
-    # CANONICAL RATIONALE for this whole workflow's dev-channel publish path
+    # CANONICAL RATIONALE for this whole workflow's channel publish path
     # -- container-scan/build-arm64 and the shellcheck/validate-compose/
     # line-endings/ci_scope_policy gates all point here for the full story.
     #
@@ -4658,20 +4736,21 @@ jobs:
     # cancelled build cleanly stops the pipeline via that gate.
     #
     # On push/tag it must NOT cancel. This branch build is what publishes the
-    # commit's sha-* images that promote turns into the dev/nightly channel. The
+    # commit's sha-* images that promote turns into the latest/nightly channel
+    # (#825/#1141: master -> latest, current_dev -> nightly). The
     # top-level group uses a run_id-scoped key for push (never collides -- see
-    # top of file), so a rapid v0.2.0/master merge cascade runs every push's
+    # top of file), so a rapid current_dev/master merge cascade runs every push's
     # build fully in parallel with no throttle. With cancel-in-progress:true
     # each new push tore down the previous push's in-progress build before it
     # finished; in a fast enough cascade NO build completed for 90+ minutes,
-    # starving the dev channel and failing #808's freshness gate on unrelated
-    # PRs that backfill an untouched service from `dev` (issue #979 -- a
+    # starving the channel and failing #808's freshness gate on unrelated
+    # PRs that backfill an untouched service from the base channel (issue #979 -- a
     # recurrence of #777's starvation one layer below the promote job). With
     # cancel false on push the in-progress build always survives to
     # completion; the channel still advances toward HEAD because GitHub keeps
     # only the newest *pending* run per group and drops older pending ones
     # regardless of this flag (see promote's #897 comment), and #808 needs
-    # `dev` built at-or-after a PR's base commit, not exactly at it. Release
+    # the base channel built at-or-after a PR's base commit, not exactly at it. Release
     # (tag) builds are unaffected: a tag ref never collides, so there was
     # never a cancellation to suppress there.
     #
@@ -4968,6 +5047,23 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/
+      # apt-get-upgrade RUN step is fed from this job's persistent local
+      # Buildx cache (see "Prepare local Buildx cache" above) with no
+      # wall-clock expiry, so a Debian security fix published after that
+      # layer was first cached (confirmed for real: bind9-libs/
+      # bind9-dnsutils/bind9-host stayed vulnerable for weeks after the fix
+      # shipped to trixie-security) never gets picked up. A value that
+      # changes once per ISO week, passed as build-tools's APT_CACHE_BUST
+      # build-arg below, forces that one layer to re-run on a weekly cadence
+      # without busting it on every push.
+      - name: Compute apt cache-bust value
+        if: steps.should-build.outputs.should-build == 'true'
+        id: apt-cache-bust
+        run: |
+          set -euo pipefail
+          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Prepare Rust acceleration secret files
         if: >-
           ${{
@@ -5131,6 +5227,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -5370,8 +5467,8 @@ jobs:
     # for the same reasons -- see `build`'s group comment for the full #979
     # rationale. cancel-in-progress is pull_request-only: merge-manifests
     # needs this native arm64 leg's success, so on push it is on the
-    # dev-channel publish path and must survive to completion (cancelling it
-    # in a merge cascade starves `dev` exactly like cancelling `build`). On a
+    # channel publish path and must survive to completion (cancelling it
+    # in a merge cascade starves the channel exactly like cancelling `build`). On a
     # PR, a superseded commit's arm64 leg is wasted work merge-manifests can
     # never use, so cancelling it there reclaims arm64 runner capacity. Same
     # `workflow_dispatch`/rerun run_id isolation as `build`'s group.
@@ -5604,6 +5701,21 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: same reasoning as build's own identically-named step --
+      # this job's `type=gha` cache (see the "Build and push" step's own
+      # `cache-from`/`cache-to` below) also has no wall-clock expiry, so this
+      # arm64 leg needs the same periodic bust as the amd64 leg. Computed
+      # independently here since the two jobs run on separate runners with no
+      # shared state; both derive the same ISO-week string from wall-clock
+      # time alone, so amd64 and arm64 bust in lockstep without passing a
+      # value between jobs.
+      - name: Compute apt cache-bust value
+        if: steps.should-build.outputs.should-build == 'true'
+        id: apt-cache-bust
+        run: |
+          set -euo pipefail
+          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         # No secret-files/network/allow here: this runner cannot reach the
         # LAN-only Redis/sccache-dist/distcc acceleration infrastructure, so
@@ -5627,6 +5739,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
@@ -6281,7 +6394,7 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          # Debounce/coalesce (#777): mutable channel tags (dev/nightly) are
+          # Debounce/coalesce (#777): mutable channel tags (latest/nightly) are
           # branch-driven, and giving promote its own concurrency group above
           # only stops it competing for the SAME slot as the rest of this
           # workflow -- it does not stop several of these runs from queuing
@@ -6308,12 +6421,22 @@ jobs:
             fi
           fi
 
+          # Branch-to-channel mapping (#825/#1141, decided 2026-07-23:
+          # "master = stable, current_dev = nightly, vY.X.Z = archived
+          # release, ganz simpel"). master publishes the stable `latest`
+          # channel; current_dev (the permanent active-development branch)
+          # publishes `nightly` continuously from its own tip -- taking over
+          # the role master used to have here before this decision. A
+          # version-numbered integration branch (v0.2.0, v0.3.0, ...) is an
+          # archived release freeze: it still takes deliberate backports, but
+          # deliberately gets NO channel_tags entry at all -- there is no
+          # live channel fed from it anymore (see setup.sh's matching hard
+          # cut of LANCACHE_IMAGE_CHANNEL=dev for the operator-facing side of
+          # this same retirement).
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
+            channel_tags+=(latest)
+          elif [[ "$GITHUB_REF" = "refs/heads/current_dev" ]]; then
             channel_tags+=(nightly)
-          elif [[ "$GITHUB_REF" = refs/heads/v[0-9]* ]]; then
-            # Any version-numbered integration branch (v0.2.0, v0.3.0, v0.2.x,
-            # ...), not just whichever one happens to be active right now.
-            channel_tags+=(dev)
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
