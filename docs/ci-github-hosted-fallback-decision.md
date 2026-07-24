@@ -77,9 +77,11 @@ self-hosted job at all (see their own comments in the workflow file).
 
 These are not part of the "cheap lint" class #509 scoped in. They all
 require either the shared `build-tools` Docker image, a full Docker Compose
-stack, or (for `detect-changes`) a `fetch-depth: 0` checkout plus PR base/head
-context used purely for path-scoping other jobs -- not itself expensive, but
-not a lint check either, and not requested by #509's acceptance criteria.
+stack, or (for `detect-changes`) a `fetch-depth: 0` checkout plus the diff
+context it path-scopes from -- PR base/head on a pull request, or
+`github.event.before`..`github.sha` on a push (#1095) -- used purely for
+path-scoping other jobs, not itself expensive, but not a lint check either,
+and not requested by #509's acceptance criteria.
 They are left for a future increment if the project decides path-scoping and
 compose validation are worth a hosted fallback; no decision is made here
 either way.
