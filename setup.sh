@@ -4248,14 +4248,14 @@ lancache_ui_cache_max_gb_override_is_valid() {
 
 # Same validation shape as lancache_ui_channel_override_is_valid above, for
 # the DHCP_MODE key persist_ui_settings (routes/dhcp.rs) writes to the same
-# ui-settings volume. Matches exactly the three values
+# ui-settings volume. Matches exactly the four values
 # parse_dhcp_mode_input in routes/dhcp.rs accepts -- anything else (empty,
 # a future value this script doesn't know yet) is left as a silent no-op
 # tick rather than folded in, for the same "must never die() inside a
 # systemd service tick" reason documented above.
 lancache_ui_dhcp_mode_override_is_valid() {
     case "$1" in
-        disabled|kea|dnsmasq-proxy) return 0 ;;
+        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
         *) return 1 ;;
     esac
 }
