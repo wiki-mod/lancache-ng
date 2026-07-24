@@ -582,6 +582,33 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
     }
 }
 
+// Turns a start_service failure into a DhcpError, adding actionable
+// create-the-container guidance when the underlying cause is a 404 (see
+// docker_client::is_container_not_created's own comment for why that
+// specific status code means "never created", not "crashed"). Without this,
+// an operator switching to a DHCP mode that was never active before saw only
+// "Failed to start 'dhcp-proxy'" with no indication of what to actually do
+// (issue #1068 item 6) -- the docker-socket-proxy allowlist this module
+// talks through has no create capability, so the Admin UI itself cannot
+// bring the missing container up; the operator (or the host's
+// lancache-converge.timer, once installed) has to run `docker compose up`
+// with the matching profile at least once.
+fn start_service_error(err: anyhow::Error, service_name: &str, profile: &str) -> DhcpError {
+    if docker_client::is_container_not_created(&err) {
+        DhcpError::config_error(format!(
+            "The '{service_name}' container has not been created yet: this Compose stack was \
+             never started with the '{profile}' profile active, so Docker has no container for \
+             the Admin UI to start (it is only allowed to start/stop existing containers, never \
+             create new ones). Fix: in the lancache-ng install directory, run \
+             `docker compose --profile {profile} up -d {service_name}` once to create it, then \
+             switch DHCP mode again here. If a `lancache-converge.timer` is installed, it will \
+             also pick this up automatically within a few minutes after that."
+        ))
+    } else {
+        DhcpError::config_error(format!("{err:#}"))
+    }
+}
+
 async fn reconcile_dhcp_mode(
     state: &AppState,
     mode: crate::config::DhcpMode,
@@ -593,26 +620,26 @@ async fn reconcile_dhcp_mode(
         crate::config::DhcpMode::Disabled => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
         crate::config::DhcpMode::Kea => {
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
         crate::config::DhcpMode::DnsmasqProxy => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
         }
     }
 
@@ -4421,6 +4448,56 @@ mod tests {
     use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::Arc;
+
+    // Issue #1068 item 6: switching to a DHCP mode whose container was never
+    // created (the docker-socket-proxy allowlist has no create capability --
+    // see docker_client's own module comment) used to surface as a bare
+    // "Failed to start 'dhcp-proxy'" with no indication of what to do about
+    // it. Confirms the 404 case is rewritten into the actionable
+    // create-it-yourself guidance instead of the raw Docker error text.
+    #[test]
+    fn start_service_error_gives_actionable_guidance_for_a_missing_container() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container: lancache-dhcp-proxy".to_string(),
+        };
+        let err: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp-proxy'");
+        let dhcp_err = start_service_error(err, "dhcp-proxy", "dhcp-proxy");
+        assert_eq!(dhcp_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            dhcp_err.message.contains("has not been created yet"),
+            "expected actionable guidance, got: {}",
+            dhcp_err.message
+        );
+        assert!(
+            dhcp_err
+                .message
+                .contains("docker compose --profile dhcp-proxy up -d dhcp-proxy"),
+            "expected the exact fix command, got: {}",
+            dhcp_err.message
+        );
+    }
+
+    // A real operational failure (not a missing container) must still
+    // surface as an honest error -- this must not be misclassified as the
+    // "run this command" bootstrap case, which would send an operator
+    // chasing a fix that cannot possibly help.
+    #[test]
+    fn start_service_error_passes_through_other_failures_unchanged() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "container crashed on start".to_string(),
+        };
+        let err: anyhow::Error = anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
+        let dhcp_err = start_service_error(err, "dhcp", "dhcp-kea");
+        assert!(
+            !dhcp_err.message.contains("has not been created yet"),
+            "a real failure must not get the missing-container message: {}",
+            dhcp_err.message
+        );
+        assert!(dhcp_err.message.contains("container crashed on start"));
+    }
 
     // Wraps validate_dhcp_form's 9-field DhcpFormValidation struct literal
     // so individual tests below can call it with plain positional

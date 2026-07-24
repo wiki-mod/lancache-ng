@@ -8,6 +8,7 @@
 name = "pxe-client-probe"
 version = "0.3.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
 
 [[bin]]
 name = "pxe-client-probe"
