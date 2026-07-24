@@ -159,15 +159,29 @@ as proof of it:**
   (incl. the VEX-drift guard), `pr-tracking-metadata-check`, and `container-scan` live.
 - `full-setup-validate.yml` (11 jobs incl. `full-setup-sims` composing the reusable
   `full-setup-sims.yml`) is **`workflow_dispatch`-only** — it does not run
-  automatically on any PR. `full-setup-deep-validate.yml`'s `pull_request` trigger is
-  scoped to `branches: [master, "v[0-9]*"]` only — **it does not run automatically on
-  `current_dev` PRs either.** For subsystems whose real E2E proof lives in one of
+  automatically on any PR; confirmed directly (2026-07-24): its `on:` block has no
+  `pull_request` trigger at all.
+- `full-setup-deep-validate.yml`'s `pull_request` trigger **does** include
+  `current_dev` — `branches: [master, current_dev, "v[0-9]*"]`, confirmed directly
+  (2026-07-24) against the workflow file itself (a prior version of this document
+  claimed `current_dev` was excluded; it is not — see #709's audit, which restored
+  `current_dev` here specifically to match `build-push.yml`'s own `pull_request`
+  trigger). It does, however, carry a docs-only `paths-ignore` (`**/*.md`,
+  `docs/**`, added by #1203), so a PR that touches only docs does not trigger it —
+  do not treat a green `current_dev` PR as proof this workflow ran unless the diff
+  also touched a non-docs path. For subsystems whose real E2E proof lives in one of
   these two workflows (DHCP relay, NATS active-disconnect/xkey, DNS reset-to-last-
-  known-good, syslog forwarding, etc.), "repeatable CI validation" means actually
-  invoking it — `gh workflow run full-setup-validate.yml --repo wiki-mod/lancache-ng
-  --ref <branch>` — or running the underlying `scripts/*-simulation.sh` script
-  directly against a real stack over SSH on a Linux host, not assuming a green
-  `current_dev` PR check already covered it.
+  known-good, syslog forwarding, etc.), "repeatable CI validation" for
+  `full-setup-validate.yml` specifically means actually invoking it —
+  `gh workflow run full-setup-validate.yml --repo wiki-mod/lancache-ng --ref
+  <branch>` — or running the underlying `scripts/*-simulation.sh` script directly
+  against a real stack over SSH on a Linux host, not assuming a green `current_dev`
+  PR check already covered it. Note also: `gh workflow run`'s own `image_tag` input
+  defaults to `nightly` — before trusting that dispatch as evidence for a specific
+  commit, confirm the `nightly` channel tag has actually been rebuilt from that
+  commit (`build-push.yml`'s run for that exact SHA on `current_dev` must have
+  completed and published), not just that the dispatch itself succeeded; a stale
+  `nightly` silently validates the wrong content.
 
 ### Standing checks per subsystem
 
