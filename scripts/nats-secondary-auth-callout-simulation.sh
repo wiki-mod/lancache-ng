@@ -384,7 +384,7 @@ fi
 # added to any Dockerfile or compose service, and nothing about it is
 # committed into this project's own images.
 capture_cid="$(docker run -d --rm --network "container:$ui_cid" --cap-add NET_RAW --cap-add NET_ADMIN \
-    -v "$work_dir/shared:/shared" nicolaka/netshoot \
+    -v "$work_dir/shared:/shared" "$netshoot_image" \
     tcpdump -i any -w /shared/xkey-capture.pcap 'tcp port 4222')"
 sleep 2 # let tcpdump attach before the traffic we care about happens
 register_secondary "authcallout-xkey-proof"
@@ -413,7 +413,7 @@ sleep 2
 docker stop "$capture_cid" >/dev/null 2>&1 || true
 sleep 1
 
-capture_bytes="$(docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c 'wc -c < /shared/xkey-capture.pcap' 2>/dev/null || echo 0)"
+capture_bytes="$(docker run --rm -v "$work_dir/shared:/shared" "$netshoot_image" sh -c 'wc -c < /shared/xkey-capture.pcap' 2>/dev/null || echo 0)"
 # A too-small/empty capture is a broken test, not a pass -- must fail loudly
 # rather than let an absent password "prove" encryption when the real cause
 # is that no traffic was captured at all.
@@ -432,7 +432,7 @@ fi
 # report as absent even though it is genuinely present in the traffic --
 # indistinguishable from an actual encryption result without this step. Empty
 # `tcp.payload` fields (bare ACKs) print as blank and contribute nothing.
-if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c \
+if ! docker run --rm -v "$work_dir/shared:/shared" "$netshoot_image" sh -c \
     "tshark -r /shared/xkey-capture.pcap -T fields -e tcp.payload 2>/dev/null | tr -d '\n:' | xxd -r -p > /shared/xkey-stream.bin"; then
     echo "::error::Failed to reassemble the captured TCP payload stream with tshark." >&2
     exit 1
@@ -454,7 +454,7 @@ fi
 # contain it, since the whole JWT string is encrypted as one opaque blob
 # before it ever reaches the wire.
 jwt_header_marker="eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ"
-if docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F -- '$jwt_header_marker' /shared/xkey-stream.bin" >/dev/null; then
+if docker run --rm -v "$work_dir/shared:/shared" "$netshoot_image" sh -c "grep -a -F -- '$jwt_header_marker' /shared/xkey-stream.bin" >/dev/null; then
     echo "::error::A plaintext JWT header marker was found in the captured nats<->ui auth-callout traffic -- the request/response is NOT actually xkey-encrypted (anyone who captured this could base64-decode it and recover connect_opts.pass in full)." >&2
     exit 1
 fi
@@ -466,7 +466,7 @@ echo "Confirmed: no plaintext JWT structure appears anywhere in the captured nat
 # missed capture window, or a capture on the wrong leg/interface). Confirms
 # the traffic isn't merely absent a JWT structure by coincidence, but is
 # actually using the sealed-box wire format.
-if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F 'xkv1' /shared/xkey-stream.bin" >/dev/null; then
+if ! docker run --rm -v "$work_dir/shared:/shared" "$netshoot_image" sh -c "grep -a -F 'xkv1' /shared/xkey-stream.bin" >/dev/null; then
     echo "::error::The nkeys sealed-box version marker 'xkv1' was not found in the captured traffic -- cannot confirm the auth-callout payload is actually xkey-encrypted." >&2
     exit 1
 fi
