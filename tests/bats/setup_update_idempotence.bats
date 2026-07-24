@@ -40,13 +40,15 @@ setup() {
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
 # (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
 # NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583), AUTO_UPDATE_ENABLED
-# (#819), and NTP_ENABLED (#1082, LanCache-NG-NTP): migrate_env_for_update()
-# backfills all of these unconditionally when missing, so a fixture predating
-# any of these features would no longer be "fully converged" and would make
-# the no-op test below fail on its first run, not just its second --
-# confirmed the hard way when #819's own PR broke this exact test on first CI
-# run, and again by #1082's NTP feature (issue #1171), which is exactly the
-# failure mode this comment exists to warn the next feature about.
+# (#819), NTP_ENABLED (#1082, LanCache-NG-NTP), and DHCP_RELAY_LOCAL_ADDR
+# (#844, dnsmasq DHCP-relay mode): migrate_env_for_update() backfills all of
+# these unconditionally when missing, so a fixture predating any of these
+# features would no longer be "fully converged" and would make the no-op
+# test below fail on its first run, not just its second -- confirmed the
+# hard way when #819's own PR broke this exact test on first CI run, again
+# by #1082's NTP feature (issue #1171), and a third time by #844's relay
+# mode, which is exactly the failure mode this comment exists to warn the
+# next feature about.
 #
 # NTP_DATA_DIR is deliberately NOT listed here even though
 # migrate_env_for_update() also sets it: it goes through
@@ -90,6 +92,7 @@ write_converged_env_fixture() {
         'DHCP_DNS_PRIMARY=192.0.2.10' \
         'DHCP_DNS_SECONDARY=192.0.2.11' \
         'UPSTREAM_DHCP_IP=' \
+        'DHCP_RELAY_LOCAL_ADDR=' \
         'DHCP_PROXY_INTERFACE=' \
         'DHCP_PROXY_ROUTER=' \
         'DHCP_NTP_SERVERS=' \
