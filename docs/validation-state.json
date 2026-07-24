@@ -2,12 +2,12 @@
   "_read_me": "This is the durable, checkable validation-state record referenced by docs/release-validation-plan.md's 'Validation State Tracking' section. Read that section before editing this file by hand. Never hand-wave an entry as validated: every non-null commit/date/validator/evidence_ref below must correspond to a real, completed validation run with real evidence (command output, CI run URL, or a PR/issue comment quoting it) -- see the proposed AG-VAL-028 rule in the docs/release-validation-plan.md PR body. This file is intentionally seeded with 'never validated' placeholders; it must not be pre-filled with a fabricated pass.",
   "schema_version": 1,
   "last_stack_validation": {
-    "commit": null,
-    "date": null,
-    "validator": null,
-    "scope": "none",
-    "summary": "Not yet validated under this tracking mechanism. Run the Stack half of docs/release-validation-plan.md and record the result here.",
-    "evidence_ref": null
+    "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+    "date": "2026-07-24",
+    "validator": "djdomi-claude (agent-run Stack-validation pass, docs/release-validation-plan.md Part B, against the v0.3.0 release-candidate branch on that commit)",
+    "scope": "Part B scenarios named in the assigned task: bring-up, DNS resolution both modes, DHCP all three modes, cache HIT/MISS (HTTP + SSL/MITM HTTPS), NATS full secondary lifecycle incl. active-disconnect/xkey, Admin UI reachability + watchdog dashboard card, watchdog auto-restart coverage, central logging/syslog forwarding, resource-leak/cleanup pass. Ran against a real deploy/dev stack built from this exact commit's source on a self-hosted Linux runner (lancache-241), plus two delegated sub-agent runs (lancache-243 for the three DHCP simulation scripts, lancache-229 for the NATS simulation script, images built from this same source commit).",
+    "summary": "PASS with real evidence: bring-up (after working around issue #1215, a deploy/dev-only IP-allocation race -- confirmed 3x reproducible, scoped to deploy/dev only, not quickstart/prod/full-setup); DNS resolution both modes (dig + openssl s_client showed real passthrough CDN cert in standard mode, real LanCache-NG CA cert in SSL/MITM mode); cache HIT/MISS for HTTP (both modes share one cache, query-string-invariant key confirmed) and SSL/MITM HTTPS (clean MISS-then-HIT, byte-identical); DHCP Kea/dnsmasq-proxy/dnsmasq-relay all confirmed via their dedicated simulation scripts plus (for relay) a real Admin-UI-driven end-to-end proof with correct rendered dnsmasq config; NATS full lifecycle (registration/isolation/rotation/removal, active-disconnect via connz polling, xkey encryption with positive assertion in this run reusing the prior negative-control proof per the plan's own reuse guidance) via the delegated nats-secondary-auth-callout-simulation.sh run; Admin UI reachability + auth enforcement; watchdog dashboard card live green-to-red-to-green transition via a real container stop; watchdog auto-restart via a real external SIGSTOP on nats, including a live reproduction of the known #1166 cosmetic restart-warning bug (StartedAt confirmed genuinely new despite the spurious WARNING); central logging/syslog forwarding (real nginx access-log lines, matching earlier cache-test requests, confirmed arriving at the syslog-ng target via fluent-bit); resource-leak/cleanup pass (docker ps -a / docker volume ls both empty for all lancache-prefixed items after `down -v`, no stale connections observed). PARTIAL, correctly left unmarked in subsystem_validation below rather than blanket-passed: Admin UI cache-resize (PR #1174) -- confirmed the UI submission persists correctly and confirmed `lancache-converge.service` is actually two separate ExecStart steps (`setup.sh converge-reconcile` merges the override into .env; a separate, distinct step actually runs `docker compose up -d`), but did not run the second step, so nginx's rendered `max_size` was never confirmed to change -- the check's own headline pass/fail criterion remains unproven this pass. New findings filed as issues, not fixed in this pass (out of scope): #1215 (deploy/dev IP-race, reproduced 3x) and #1216 (setup.sh's converge-reconcile DHCP-mode accept-list wasn't updated for dnsmasq-relay -- a real, narrow gap confirmed by reading the code; its downstream impact on profile self-heal is analytically derived, not reproduced against a live systemd timer). Also fixed two real inaccuracies in docs/release-validation-plan.md itself found while dogfooding it (standard-mode HTTPS does not cache at all -- corrected from a wrong prior claim; and an image-tag-staleness trap -- ghcr.io `nightly` was confirmed 29 commits behind this exact commit, missing every 2026-07-24 feature). IMPORTANT CAVEAT: the v0.3.0 branch received one additional commit after this pass began (an AGENTS.md governance addition, PR #1211) -- per this file's own full_invalidation_triggers, an AGENTS.md change is a full-invalidation trigger; this record's commit field intentionally names the exact commit actually tested (88ddbf6a), which is confirmed still an ancestor of v0.3.0's current tip, but a fresh (at minimum incremental) validation pass should be run against v0.3.0's current tip before treating this record as covering it for a release decision.",
+    "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217 (this record's own introducing PR -- see its description for the full per-scenario evidence log); see also issues #1215 and #1216 for the two new findings"
   },
   "last_ci_validation": {
     "commit": null,
@@ -21,36 +21,36 @@
     "_note": "path_prefixes mirror scripts/classify-image-impact.sh's real touches_prefix() rules (the same classifier build-push.yml's detect-changes job and the promote job's version-bump logic both already consume) so staleness can be computed the same way CI already reasons about relevance, instead of a second, drifting definition. A subsystem entry is stale the moment `git log <its last commit>..HEAD -- <its path_prefixes>` is non-empty, OR whenever AGENTS.md/.github/AGENTS.md changed (see 'full_invalidation_triggers' below), OR whenever the recorded commit itself predates last_stack_validation/last_ci_validation's own commit for that layer.",
     "dhcp-kea": {
       "path_prefixes": ["services/dhcp/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "stack",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "djdomi-claude (delegated sub-agent run on lancache-243, dhcp-kea-lease-flow-simulation.sh, built from this commit's source)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
     },
     "dhcp-dnsmasq": {
       "path_prefixes": ["services/dhcp-proxy/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "stack",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "djdomi-claude (dhcp-proxy-pxe-simulation.sh + dhcp-relay-flow-simulation.sh via delegated sub-agent on lancache-243, both built from this commit's source; dnsmasq-relay additionally confirmed first-hand via a real Admin-UI-driven end-to-end run on lancache-241)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
     },
     "dns-pdns": {
       "path_prefixes": ["services/dns/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "stack",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "djdomi-claude (first-hand: dig + openssl s_client against a real deploy/dev stack on lancache-241, both DNS instances and both TLS-handling modes)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
     },
     "nats": {
       "path_prefixes": ["services/ui/src/nats_*.rs", "services/ui/src/nats_config.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
       "note": "NATS has no dedicated classify-image-impact.sh key -- its functional surface spans the ui, setup_runtime, and deploy classifier keys. Treat a change as NATS-relevant if it touches any prefix above, not only a single classifier boolean.",
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "stack",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "djdomi-claude (delegated sub-agent run on lancache-229, nats-secondary-auth-callout-simulation.sh, images built from this commit's source and locally retagged -- not a first-hand run, taken on the sub-agent's reported command output)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
     },
     "admin-ui": {
       "path_prefixes": ["services/ui/"],
@@ -62,19 +62,19 @@
     },
     "watchdog": {
       "path_prefixes": ["services/watchdog/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "stack",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "djdomi-claude (first-hand on lancache-241: real container stop for the dashboard-card transition, real external `docker kill --signal=STOP` for auto-restart, including a live reproduction of the known #1166 cosmetic-warning gap)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
     },
     "proxy-cache": {
       "path_prefixes": ["services/proxy/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "stack",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "djdomi-claude (first-hand on lancache-241: real HTTP MISS/HIT + query-string-invariance, real SSL/MITM HTTPS MISS/HIT, confirmed standard-mode HTTPS is genuinely uncached blind passthrough)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
     },
     "ntp": {
       "path_prefixes": ["services/ntp/"],
