@@ -4,6 +4,7 @@
 
 # lancache-ng
 
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/13763/baseline)](https://www.bestpractices.dev/projects/13763)
 [![Rust coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwiki-mod%2Flancache-ng%2Fbadges%2Fcoverage%2Frust-master.json)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml?query=branch%3Amaster)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
