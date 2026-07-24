@@ -334,8 +334,15 @@ services:
           # Every static user in nats.conf must be listed here (see
           # nats_auth_callout.rs's module docs for why) -- only real
           # secondaries, registered at runtime and absent from both lists,
-          # go through the callout.
-          auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout"]
+          # go through the callout. Issue #681: this includes validation-nats-sys
+          # (the SYS account's own static user, defined in the accounts{} block
+          # above) even though it lives in a different account than the other
+          # four -- auth_callout interception is server-wide, not scoped to $G
+          # (confirmed the hard way: omitting it here made every system-account
+          # connection attempt fall through to the callout instead of matching
+          # its own static credential, denying nats_kick.rs's own connection
+          # with "authorization violation" before it ever reached CONNZ/KICK).
+          auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout", "validation-nats-sys"]
         }
         EOF
         exec nats-server -c /etc/nats/nats.conf
