@@ -18,30 +18,64 @@
 # `/logs` route (the exact HTTP surface an operator uses) until that marker
 # appears in the rendered response.
 #
-# SCOPE (increment 1 of 2, tracked on #453): the 7 services below. `dhcp`
-# and `dhcp-proxy` are deliberately NOT covered here -- both run with
-# `network_mode: host` in deploy/quickstart/docker-compose.yml (confirmed by
-# reading the compose file), so bringing both up simultaneously in a shared
-# CI runner risks a real DHCP/host-network port conflict, and running even
-# one of them this way is untested territory for this project's CI (the
-# existing scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/dhcp-proxy-pxe-simulation.sh deliberately avoid quickstart's
-# host-network services entirely, using their own isolated bridge-network
-# containers instead). Covering dhcp/dhcp-proxy here needs its own careful,
-# sequential (never simultaneous) design and live CI confirmation of the
-# exact log-visibility mechanism -- tracked as explicit follow-up work on
-# #453, not silently dropped from the "all 9 services" requirement.
+# SCOPE (increment 2 of 2, issue #864 -- increment 1 above covered the 7
+# services below; #453 is closed, #864 tracks this remainder): `dhcp` (Kea)
+# and `dhcp-proxy` (dnsmasq) are now also covered, as Triggers 7/8 further
+# down. Both run `network_mode: host` in deploy/quickstart/docker-compose.yml
+# in production (needed for real broadcast DHCP on the operator's actual
+# LAN) -- exercising that unmodified on a shared CI runner would leak real
+# DHCPDISCOVER broadcast traffic onto the runner host's own LAN interface,
+# the same risk scripts/dhcp-kea-lease-flow-simulation.sh and
+# scripts/dhcp-proxy-pxe-simulation.sh already avoid by using their own
+# isolated bridge-network containers instead of quickstart's host-network
+# services. This script does the same for its two DHCP triggers: a
+# per-run compose override (`$work_dir/dhcp-test-override.yml`, built below)
+# uses Compose's `!reset` merge tag (supported by this project's runners,
+# Compose v5.3.0+) to null out `dhcp`/`dhcp-proxy`'s `network_mode: host` and
+# instead attach each to its own dedicated, per-run bridge network
+# (`dhcp-test-net` / `dhcp-proxy-test-net`, kept separate from each other and
+# from the stack's own `default` network so neither DHCP server's broadcast
+# traffic can reach the other or any unrelated stack container). This was
+# confirmed live before writing this script: both `dhcp` and `dhcp-proxy`
+# start and log normally under this override, and a real dhclient exchange
+# against `dhcp` completes a full Discover/Offer/Request/Ack over the
+# isolated bridge with no host-network involvement at all -- the logging
+# path this script proves (service -> log file -> fluent-bit tail ->
+# syslog-ng -> Admin UI `/logs`) is identical regardless of network mode,
+# so this loses no coverage of what #864 actually asks for (central-logging
+# E2E visibility), while dhcp-kea-lease-flow-simulation.sh/
+# dhcp-proxy-pxe-simulation.sh remain the authority on real host-network/PXE
+# protocol behavior. Because neither DHCP server ever binds a host-level
+# port under this override (each gets its own bridge-network namespace),
+# the "sequential, never-simultaneous bring-up" constraint #864 originally
+# raised for host-network port contention does not apply here -- both run
+# concurrently, each on its own isolated network.
+#
+# CORRECTION to #864's own framing (surfaced per AG-DOC-008/009): the issue
+# body names deploy/full-setup/docker-compose.yml's missing dhcp/dhcp-proxy
+# + `logging` profile as "the gap", describing full-setup as "the CI-only
+# validation harness every E2E simulation script builds on". That does not
+# hold for this script, which has used deploy/quickstart/docker-compose.yml
+# as its base since increment 1 (see the COMPOSE BASE paragraph below,
+# unchanged from before) -- and full-setup's own dummy images (per
+# docs/naming-conventions.md) could not emit real Kea/dnsmasq log content
+# even if the profile existed there. Per AG-DOC-002 (current code/CI
+# behavior over issue prose), this increment extends quickstart, matching
+# this script's own established base, not full-setup. Whether full-setup
+# should separately gain dhcp/dhcp-proxy for AG-VAL-027 health-gate coverage
+# is a distinct question this script does not resolve.
 #
 # COMPOSE BASE: deploy/quickstart/docker-compose.yml, not deploy/full-setup
 # (which every earlier `scripts/*-simulation.sh` uses). full-setup has
 # neither the `logging` profile (syslog-ng/fluent-bit) nor dhcp/dhcp-proxy
 # defined at all -- extending it would mean testing an unguarded copy of the
 # logging wiring instead of the real thing scripts/check-logging-matrix.sh
-# actually guards (dev/prod/quickstart). quickstart already has every
-# service and the full logging profile, and is the same compose file
-# scripts/setup-cli-simulation.sh already drives concurrently in CI via a
-# unique COMPOSE_PROJECT_NAME + loopback IP + retry-on-collision -- reused
-# here directly rather than inventing a second isolation mechanism.
+# actually guards (prod/quickstart -- deploy/dev was retired in v0.3.0,
+# #766). quickstart already has every service and the full logging profile,
+# and is the same compose file scripts/setup-cli-simulation.sh already
+# drives concurrently in CI via a unique COMPOSE_PROJECT_NAME + loopback IP
+# + retry-on-collision -- reused here directly rather than inventing a
+# second isolation mechanism.
 #
 # Getting a correct, fully-populated .env (~50 required values: NATS
 # credentials, PDNS_API_KEY, DDNS_TSIG_KEY, etc.) is done by driving the
@@ -131,12 +165,37 @@ if ! marker_watchdog="$(date +%s%N | tail -c 9)"; then
     exit 1
 fi
 
+# dhcp/dhcp-proxy test subnets (issue #864, Triggers 7/8): reuses the same
+# per-run $octet already derived above for ip_standard/ip_ssl instead of a
+# second collision-avoidance scheme -- both DHCP test networks are dedicated,
+# per-run-named bridge networks (via COMPOSE_PROJECT_NAME), so the only real
+# collision risk is two concurrent runs deriving the same $octet, exactly
+# the same risk already accepted for ip_standard/ip_ssl above. Split as two
+# /25s of one /24 (172.29.<octet>.0/25 and .128/25) rather than two
+# independently-chosen /24s: one octet lookup covers both networks with no
+# possibility of the two ranges overlapping each other, and 172.29.0.0/16 is
+# not used by any other script in this repo (deploy/dev's now-retired
+# 172.28.0.0/16, full-setup-validate's 172.30.0.0/16, and
+# dhcp-kea-lease-flow-simulation.sh's 172.31.0.0/16 are all distinct ranges).
+dhcp_gateway="172.29.${octet}.1"
+dhcp_range_start="172.29.${octet}.10"
+dhcp_range_end="172.29.${octet}.100"
+dhcp_proxy_gateway="172.29.${octet}.129"
+# dhcp-proxy's own dhcp-range=...,proxy directive (dnsmasq.conf.template)
+# takes a single representative IP inside the subnet it proxies for, not a
+# CIDR or range -- confirmed by reading that template. Used directly as this
+# trigger's per-run marker (see Trigger 8 below): a real, operator-configured
+# value that only differs from run to run, the same marker technique already
+# established for the watchdog trigger's CHECK_INTERVAL above.
+dhcp_proxy_subnet_start="172.29.${octet}.140"
+
 cleanup() {
     local status=$?
     if [[ -f "$install_dir/docker-compose.yml" ]]; then
         docker compose --project-directory "$install_dir" \
             -f "$install_dir/docker-compose.yml" \
             -f "$work_dir/logging-test-override.yml" \
+            -f "$work_dir/dhcp-test-override.yml" \
             --env-file "$install_dir/.env" \
             down -v --remove-orphans >/dev/null 2>&1 || true
     fi
@@ -147,11 +206,17 @@ trap cleanup EXIT
 
 echo "== Phase 1: fresh install via the real setup.sh CLI (expect-driven, mirrors setup-cli-simulation.sh) =="
 
-# SSL mode enabled (need dns-ssl for its own marker below), DHCP disabled
-# (out of scope this increment, see header comment), Admin-UI auth disabled
-# (ALLOW_INSECURE_UI=true) so every curl call below needs no login flow --
-# the same simplification the other full-setup simulation scripts get for
-# free from their own validation-only compose file's insecure defaults.
+# SSL mode enabled (need dns-ssl for its own marker below). DHCP mode is left
+# "disabled" in the main .env deliberately: dhcp/dhcp-proxy (Triggers 7/8
+# below) are started via their own explicit `--profile dhcp-kea --profile
+# dhcp-proxy` plus a dedicated override (dhcp-test-override.yml, built below)
+# that fully replaces their environment -- the same "wizard has no prompt
+# for this, set it directly" approach the `logging` profile below already
+# uses, so the main .env's DHCP_MODE is never consulted for these two
+# containers. Admin-UI auth disabled (ALLOW_INSECURE_UI=true) so every curl
+# call below needs no login flow -- the same simplification the other
+# full-setup simulation scripts get for free from their own validation-only
+# compose file's insecure defaults.
 # "Add now? (ip addr add ...)" is always answered "" (default N): this
 # script must never mutate the runner host's real network configuration,
 # only ever bind to already-existing loopback addresses.
@@ -267,11 +332,77 @@ services:
       - SYSLOG_RETENTION_DAYS=\${SYSLOG_RETENTION_DAYS:-30}
 EOF
 
-compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" -f "$work_dir/logging-test-override.yml" --env-file "$install_dir/.env")
+# dhcp/dhcp-proxy (issue #864, Triggers 7/8): moves both off
+# `network_mode: host` onto their own dedicated, per-run bridge networks
+# (see this script's header comment for why) via Compose's `!reset` merge
+# tag, which nulls out the base file's `network_mode: host` so `networks:`
+# below can take effect instead -- confirmed live against this project's
+# runners (Compose v5.3.0) before writing this override. `dhcp`'s
+# environment is fully replaced (matching docker-compose.yml's own
+# `dhcp:` block, DHCP_MODE=kea and the test subnet/pool computed above);
+# `dhcp-proxy`'s environment sets only the variables entrypoint.sh actually
+# requires for dnsmasq-proxy mode (DHCP_MODE, DHCP_SUBNET_START,
+# DHCP_DNS_PRIMARY/SECONDARY, UPSTREAM_DHCP_IP) -- confirmed live that the
+# remaining optional PXE-related variables the real service block also sets
+# are safe to leave unset here (entrypoint.sh's own warnings for each are
+# non-fatal, and this narrow logging-path proof does not exercise PXE
+# options at all). cap_add is re-declared explicitly in both blocks rather
+# than relying on the base file's list surviving the override merge, to
+# avoid depending on Compose's per-field list-merge behavior being "additive
+# by default" without directly confirming it here.
+cat > "$work_dir/dhcp-test-override.yml" <<EOF
+services:
+  dhcp:
+    network_mode: !reset null
+    networks:
+      dhcp-test-net: {}
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+    environment:
+      - DHCP_DNS_PRIMARY=${dhcp_gateway}
+      - DHCP_DNS_SECONDARY=${dhcp_gateway}
+      - DHCP_DNS_SERVER_IP=${ip_standard}
+      - DHCP_DNS_SERVER_IP_SSL=${ip_ssl}
+      - DDNS_TSIG_KEY=
+      - KEA_CTRL_TOKEN=
+      - DHCP_MODE=kea
+      - DHCP_SUBNET=172.29.${octet}.0/25
+      - DHCP_GATEWAY=${dhcp_gateway}
+      - DHCP_RANGE_START=${dhcp_range_start}
+      - DHCP_RANGE_END=${dhcp_range_end}
+  dhcp-proxy:
+    network_mode: !reset null
+    networks:
+      dhcp-proxy-test-net: {}
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+    environment:
+      - DHCP_MODE=dnsmasq-proxy
+      - DHCP_SUBNET_START=${dhcp_proxy_subnet_start}
+      - DHCP_DNS_PRIMARY=${dhcp_proxy_gateway}
+      - DHCP_DNS_SECONDARY=${dhcp_proxy_gateway}
+      - UPSTREAM_DHCP_IP=${dhcp_proxy_gateway}
+      - KEEP_KNOWN_GOOD_CONFIGS=3
+networks:
+  dhcp-test-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.${octet}.0/25
+  dhcp-proxy-test-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.${octet}.128/25
+EOF
 
-echo "== Phase 3: bringing the stack up (ssl + logging profiles; dhcp disabled this increment) =="
-"${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng
-"${compose[@]}" --profile ssl --profile logging up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng
+compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" -f "$work_dir/logging-test-override.yml" -f "$work_dir/dhcp-test-override.yml" --env-file "$install_dir/.env")
+
+echo "== Phase 3: bringing the stack up (ssl + logging + dhcp-kea + dhcp-proxy profiles) =="
+"${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng dhcp dhcp-proxy
+"${compose[@]}" --profile ssl --profile logging --profile dhcp-kea --profile dhcp-proxy up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng dhcp dhcp-proxy
 
 # nats and ui are back in this list: deploy/quickstart/docker-compose.yml now
 # defines a real Docker HEALTHCHECK for both (nats: http_port 8222 + a wget
@@ -297,8 +428,16 @@ echo "== Phase 3: bringing the stack up (ssl + logging profiles; dhcp disabled t
 # that never reaches "healthy" (e.g. main loop stalled, status.json stale)
 # would never fail this job. Matches build-push.yml/full-setup-validate.yml/
 # full-setup-deep-validate.yml's canonical list, which already included it.
-services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
-all_services="docker-socket-proxy syslog syslog-ng $services_with_healthcheck"
+# dhcp joins this list too (issue #864): deploy/quickstart/docker-compose.yml's
+# dhcp (Kea) service has a real Docker HEALTHCHECK (Control Agent config-get
+# probe, self-healing against the shared-secret KEA_CTRL_TOKEN per #858 --
+# see docs/architecture-ng.md's logging matrix / that healthcheck block's own
+# comment). dhcp-proxy (dnsmasq) has no Docker healthcheck at all (matches
+# docs/architecture-ng.md: "dhcp-proxy (dnsmasq) and netdata: neither has a
+# Docker healthcheck"), so it stays in all_services only, getting the weaker
+# running+restart-count check like docker-socket-proxy/syslog/syslog-ng.
+services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp"
+all_services="docker-socket-proxy syslog syslog-ng dhcp-proxy $services_with_healthcheck"
 
 deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do
@@ -477,11 +616,11 @@ assert_marker_reaches_ui() {
     return 1
 }
 
-echo "== Trigger 1/6: proxy -- real HTTP GET with a unique request path =="
+echo "== Trigger 1/8: proxy -- real HTTP GET with a unique request path =="
 run_client "curl -sS -o /dev/null 'http://$ip_standard/e2e-marker-$marker_proxy'" || true
 assert_marker_reaches_ui "$marker_proxy" "proxy (nginx access log)"
 
-echo "== Trigger 2/6: ui -- real POST /domains/dns/add with an intentionally-invalid, marker-bearing domain =="
+echo "== Trigger 2/8: ui -- real POST /domains/dns/add with an intentionally-invalid, marker-bearing domain =="
 # parse_domain_entry (services/ui/src/routes/domains.rs) rejects any value
 # with fewer than 2 dot-separated labels, logging the RAW submitted value
 # via tracing::warn!(domain = %form.domain, "Rejected invalid dns domain")
@@ -494,7 +633,7 @@ run_client "curl -sS -o /dev/null -b /shared/cookiejar \
     'http://$ip_standard:8080/domains/dns/add'" || true
 assert_marker_reaches_ui "$marker_ui" "ui (Rejected invalid dns domain warning)"
 
-echo "== Trigger 3/6: nats -- a real authentication failure carrying a unique username =="
+echo "== Trigger 3/8: nats -- a real authentication failure carrying a unique username =="
 # An earlier version of this trigger created a durable JetStream consumer
 # named after the marker (via the real nats-subscriber binary) and expected
 # nats-server's own log to mention that name -- confirmed directly (live,
@@ -531,7 +670,7 @@ docker run --rm --network "$network_name" \
     ' >/dev/null 2>&1 || true
 assert_marker_reaches_ui "$marker_nats" "nats (authentication-error log line carrying the attempted username)"
 
-echo "== Trigger 4/6 and 5/6: dns-standard + dns-ssl -- one real DNS record add via the Admin UI =="
+echo "== Trigger 4/8 and 5/8: dns-standard + dns-ssl -- one real DNS record add via the Admin UI =="
 # Both dns-standard's and dns-ssl's own nats-subscriber processes durably
 # consume the same "lancache.dns.record" NATS subject (confirmed by reading
 # services/dns/nats-subscriber/src/main.rs), so this single real write
@@ -547,12 +686,96 @@ run_client "curl -sS -o /dev/null -b /shared/cookiejar \
     'http://$ip_standard:8080/domains/lan/add'" || true
 assert_marker_reaches_ui "$marker_dns" "dns-standard AND dns-ssl (nats-subscriber's own record-applied log line)"
 
-echo "== Trigger 6/6: watchdog -- real startup banner carrying this run's overridden CHECK_INTERVAL =="
+echo "== Trigger 6/8: watchdog -- real startup banner carrying this run's overridden CHECK_INTERVAL =="
 # No separate action needed: watchdog.sh unconditionally logs
 # "Interval: ${CHECK_INTERVAL}s | ..." once, immediately at container start
 # (watchdog.sh, just before its `while true` loop) -- already triggered by
 # Phase 3 bringing the container up with the override file's marker value.
 assert_marker_reaches_ui "$marker_watchdog" "watchdog (startup banner's CHECK_INTERVAL value)"
+
+echo "== Trigger 7/8: dhcp (Kea) -- a real DHCPDISCOVER/OFFER/REQUEST/ACK lease over the isolated dhcp-test-net =="
+# A real dhclient, on the dedicated dhcp-test-net bridge network (see the
+# override built in Phase 2/3 above), negotiates a genuine lease against
+# this run's own Kea container -- the identical Discover/Offer/Request/Ack
+# exchange dhcp-kea-lease-flow-simulation.sh already proves in depth, driven
+# here only far enough to produce a real, per-run-unique log line (the
+# offered address, drawn from this run's own $dhcp_range_start-
+# $dhcp_range_end pool) in kea-dhcp4.log -- confirmed live before writing
+# this trigger that Kea's own DHCP4_LEASE_ALLOC log line names the leased
+# address verbatim. `-sf /bin/true` (a no-op lease-apply script) means the
+# lease is negotiated over the wire but never actually applied to this
+# throwaway client container's own interface, the same safety technique
+# dhcp-kea-lease-flow-simulation.sh and services/ui/dhcp-probe.sh both use.
+dhcp_client_container="lancachee2e-dhcp-client-$$"
+docker run -d --name "$dhcp_client_container" \
+    --network "${compose_project}_dhcp-test-net" \
+    --cap-add NET_ADMIN --cap-add NET_RAW \
+    -v "$work_dir/shared:/shared" \
+    "$BUILD_TOOLS_IMAGE" \
+    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /shared/dhcp-client.pid -lf /shared/dhcp-client.leases eth0 >/shared/dhcp-client.out 2>&1; echo DONE >> /shared/dhcp-client.out' \
+    >/dev/null
+
+dhcp_lease_deadline=$((SECONDS + 30))
+dhcp_lease_obtained=0
+while (( SECONDS < dhcp_lease_deadline )); do
+    # Same "wait for the closing brace, not just file existence" reasoning
+    # as dhcp-kea-lease-flow-simulation.sh's own identical wait loop: the
+    # lease file appears the moment dhclient starts writing it, well before
+    # the record is complete.
+    if [[ -s "$work_dir/shared/dhcp-client.leases" ]] && grep -q '^}' "$work_dir/shared/dhcp-client.leases" 2>/dev/null; then
+        dhcp_lease_obtained=1
+        break
+    fi
+    sleep 1
+done
+docker rm -f "$dhcp_client_container" >/dev/null 2>&1 || true
+
+echo "::group::Trigger 7/8: raw dhclient output"
+cat "$work_dir/shared/dhcp-client.out" 2>/dev/null || echo "(no client output captured)"
+echo "::endgroup::"
+
+if [[ "$dhcp_lease_obtained" -ne 1 ]]; then
+    echo "::error::dhclient never obtained a real lease from this run's dhcp (Kea) container within 30s over dhcp-test-net." >&2
+    "${compose[@]}" logs --no-color dhcp || true
+    exit 1
+fi
+
+if ! dhcp_offered_address="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases" | head -1 | cut -d' ' -f2)"; then
+    echo "::error::Could not parse the offered address out of the real dhclient lease file." >&2
+    exit 1
+fi
+[[ -n "$dhcp_offered_address" ]] || { echo "::error::dhclient's lease file had no fixed-address field." >&2; exit 1; }
+echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC log line names this address verbatim)."
+assert_marker_reaches_ui "$dhcp_offered_address" "dhcp/Kea (DHCP4_LEASE_ALLOC log line naming the real leased address)"
+
+echo "== Trigger 8/8: dhcp-proxy (dnsmasq) -- real DHCPDISCOVER over the isolated dhcp-proxy-test-net; per-run-unique proxy-subnet startup marker =="
+# dnsmasq-proxy mode (RFC 4388 ProxyDHCP) only ever supplements PXE options
+# alongside an existing, separate primary DHCP server -- it never completes
+# a lease on its own, so there is no offered-address marker to parse the way
+# Trigger 7 above has. Confirmed live before writing this trigger: without a
+# paired primary DHCP server (out of scope to stand up here -- a separate,
+# heavier scenario dhcp-proxy-pxe-simulation.sh is better positioned to
+# cover if ever needed), a real DHCPDISCOVER received here only produces
+# dnsmasq's own "no address range available for DHCP request via eth0" line,
+# which carries no per-run marker. Instead, this trigger's marker is the
+# real, operator-configured DHCP_SUBNET_START value this run's override set
+# ($dhcp_proxy_subnet_start, see Phase 2/3 above) -- dnsmasq logs it
+# verbatim in its own startup banner ("DHCP, proxy on subnet <value>",
+# confirmed live), the same technique already established for the watchdog
+# trigger's CHECK_INTERVAL above. The real DHCPDISCOVER below additionally
+# proves the isolated network path itself is live end-to-end (a genuine
+# client packet actually reaches dnsmasq), even though its own reply carries
+# no marker.
+dhcp_proxy_client_container="lancachee2e-dhcp-proxy-client-$$"
+docker run -d --name "$dhcp_proxy_client_container" \
+    --network "${compose_project}_dhcp-proxy-test-net" \
+    --cap-add NET_ADMIN --cap-add NET_RAW \
+    "$BUILD_TOOLS_IMAGE" \
+    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /tmp/dhcp-proxy-client.pid -lf /tmp/dhcp-proxy-client.leases eth0 >/tmp/dhcp-proxy-client.out 2>&1 || true; sleep 3' \
+    >/dev/null
+sleep 5
+docker rm -f "$dhcp_proxy_client_container" >/dev/null 2>&1 || true
+assert_marker_reaches_ui "$dhcp_proxy_subnet_start" "dhcp-proxy/dnsmasq (startup banner's DHCP_SUBNET_START value)"
 
 echo "== netdata: documented weaker check (no operator-triggerable marker mechanism found) =="
 # netdata is a third-party image (docs/architecture-ng.md's logging matrix);
@@ -588,4 +811,34 @@ if [[ "$netdata_seen" -ne 1 ]]; then
 fi
 echo "OK: netdata's forwarded logging path is visible via the real Admin UI /logs route (no per-event marker; see comment above for why)."
 
-echo "syslog-forwarding-simulation passed: proxy, ui, nats, dns-standard, dns-ssl, and watchdog were each proven end-to-end with a unique marker (real trigger -> syslog-ng file -> real Admin UI /logs response); netdata was proven present via a documented weaker check. dhcp and dhcp-proxy remain tracked follow-up work on #453 (see this script's header comment)."
+echo "== fluent-bit self-log (issue #864): documented weaker check, same class as netdata above =="
+# fluent-bit's own internal log has no operator-triggerable marker mechanism
+# either -- there is no route or config surface that lets this script inject
+# a distinguishing string into fluent-bit's own startup/error output, the
+# same structural gap netdata's check above documents. What IS verified: the
+# self-log tail input (tag=fluent-bit.selflog, see deploy/quickstart/
+# docker-compose.yml's `-l /data/fluent-bit.log` flag) reliably produces at
+# least fluent-bit's own real startup banner line within the wait below,
+# proving the self-log path is wired end-to-end -- confirmed live before
+# writing this check that a real run produces this line within seconds of
+# container start, well inside this timeout.
+selflog_deadline=$((SECONDS + 60))
+selflog_seen=0
+while (( SECONDS < selflog_deadline )); do
+    if ! body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"; then
+        echo "::error::Failed to fetch the Admin UI /logs route from $ip_standard while polling for fluent-bit's own forwarded self-log line (run_client/docker invocation failed)." >&2
+        exit 1
+    fi
+    if grep -qP '<td[^>]*>\s*fluent-bit\s*</td>' <<<"$body"; then
+        selflog_seen=1
+        break
+    fi
+    sleep 3
+done
+if [[ "$selflog_seen" -ne 1 ]]; then
+    echo "::error::No line attributed to ident 'fluent-bit' ever appeared via the Admin UI /logs route within 60s." >&2
+    exit 1
+fi
+echo "OK: fluent-bit's own self-log is visible via the real Admin UI /logs route (no per-event marker; see comment above for why)."
+
+echo "syslog-forwarding-simulation passed: proxy, ui, nats, dns-standard, dns-ssl, watchdog, dhcp (Kea), and dhcp-proxy (dnsmasq) were each proven end-to-end with a unique or real-event marker (real trigger -> syslog-ng file -> real Admin UI /logs response); netdata and fluent-bit's own self-log were proven present via documented weaker checks."

@@ -411,6 +411,24 @@ services:
       - "5"
       - -b
       - /data/flb-storage
+      # Self-log (issue #864): fluent-bit's own operational log (startup,
+      # tail-input errors, forwarding failures) was previously visible only
+      # via `docker logs` on this container -- nothing surfaced a fluent-bit
+      # crash-loop or misconfiguration once the `logging` profile started
+      # silently swallowing it into this stack. `-l`/`--log_file` (confirmed
+      # against the pinned image via `docker run ... fluent-bit --help`,
+      # per AG-VAL-023 -- not assumed) redirects ALL of fluent-bit's own
+      # stdout logging into this file instead of `docker logs`; the tail
+      # input near the end of this command (tag=fluent-bit.selflog)
+      # re-ingests exactly that file and forwards it to syslog-ng, the same
+      # single-destination trade-off already documented for dnsmasq/
+      # nats-server in the logging matrix (`docker logs` goes quiet). No
+      # feedback loop: fluent-bit's default Log_Level (info) does not log
+      # per-line tail-read activity, only startup/error/state-change
+      # events -- confirmed empirically, a live run produced a fixed ~16
+      # startup lines with no unbounded growth.
+      - -l
+      - /data/fluent-bit.log
       - -i
       - tail
       - -p
@@ -899,6 +917,48 @@ services:
       - syslog
       - -m
       - netdata.syslog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
+      # fluent-bit's own self-log (issue #864, see the -l flag's comment
+      # above): syslog-only, same "remaining logging-matrix services"
+      # pattern as dhcp/dhcp-proxy/ui/watchdog/nats/netdata above (no local
+      # plain-text copy).
+      - -i
+      - tail
+      - -p
+      - read_from_head=on
+      - -p
+      - path=/data/fluent-bit.log
+      - -p
+      - tag=fluent-bit.selflog
+      - -p
+      - db=/data/flb-selflog-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -F
+      - record_modifier
+      - -m
+      - fluent-bit.selflog
+      - -p
+      - record=host lancache-syslog
+      - -p
+      - record=ident fluent-bit
+      - -o
+      - syslog
+      - -m
+      - fluent-bit.selflog
       - -p
       - host=syslog-ng
       - -p
