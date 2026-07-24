@@ -195,6 +195,9 @@ services:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
       - proxy-cache:/var/cache/lancache
+      # Issue #870: shared with `ui` below (read-only) so this validation
+      # stack exercises the same status.json hand-off dev/prod/quickstart use.
+      - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
     networks:
@@ -350,6 +353,11 @@ services:
       # here (inert: this validation stack hardcodes a consistent PDNS_API_KEY).
       - shared-secrets:/var/lib/lancache-secrets
       - nats-conf:/etc/nats
+      # Issue #870: read-only reader for watchdog's status.json (per-service
+      # health + cache-disk usage color, rendered as the dashboard's
+      # "Service health" card) -- see the `watchdog` service above and
+      # dev/prod/quickstart's identical mount.
+      - watchdog-status:/var/run/watchdog:ro
     ports:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
     environment:
@@ -487,3 +495,9 @@ volumes:
   netdataconfig:
   netdatalib:
   netdatacache:
+  # Issue #870: shared between `watchdog` (sole writer of status.json) and
+  # `ui` (read-only reader, see the "Service health" dashboard card) so this
+  # validation stack actually exercises the same mount dev/prod/quickstart
+  # rely on (AG-VAL-027) -- previously this stack's watchdog wrote
+  # status.json to its own container-local, unshared filesystem.
+  watchdog-status:

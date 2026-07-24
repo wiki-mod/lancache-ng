@@ -253,6 +253,14 @@ pub struct Config {
     pub ntp_enabled: bool,
     pub ntp_upstream_servers: String,
     pub ntp_auto_dhcp: bool,
+    // Issue #870: path to watchdog.sh's STATUS_FILE, shared read-only via the
+    // `watchdog-status` named volume (see deploy/*/docker-compose.yml's `ui:`
+    // service). Defaults to the same path watchdog.sh itself defaults
+    // STATUS_FILE to, so a dev/prod/quickstart install that never overrides
+    // either variable still lines up without extra configuration. Read-only
+    // by design: the Admin UI is never a writer of this file, only watchdog
+    // is (see watchdog_status.rs's module doc comment).
+    pub watchdog_status_file: String,
 }
 
 // Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
@@ -367,6 +375,7 @@ impl fmt::Debug for Config {
             .field("ntp_enabled", &self.ntp_enabled)
             .field("ntp_upstream_servers", &self.ntp_upstream_servers)
             .field("ntp_auto_dhcp", &self.ntp_auto_dhcp)
+            .field("watchdog_status_file", &self.watchdog_status_file)
             .finish()
     }
 }
@@ -826,6 +835,9 @@ impl Config {
                 "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com",
             ),
             ntp_auto_dhcp: env_bool("NTP_AUTO_DHCP", false),
+            // Matches services/watchdog/watchdog.sh's own STATUS_FILE default
+            // exactly (see its `STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"`).
+            watchdog_status_file: env_str("WATCHDOG_STATUS_FILE", "/var/run/watchdog/status.json"),
         })
     }
 }
