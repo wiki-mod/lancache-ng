@@ -85,11 +85,11 @@ Track related work explicitly in the PR body:
 - If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
 - When a PR is merged, completion claims must be checked against the merged code on the active development branch (`current_dev` as of #825, not a hardcoded `master`/`v0.2.0` assumption), not just the PR head or narrative.
 - If no issue exists, that's expected and fine per the "Before you start" guidance above for single, well-scoped work implemented immediately — no need to explain why in that case. If work that genuinely should have had an issue (multi-topic, backlog, needs-discussion) shipped without one, explain why in the PR body instead of leaving the relationship unclear.
-- **`Closes #123` does not auto-close the issue when merging to `current_dev`** — GitHub's built-in closing-keyword behavior only fires on merges to the repository's default branch (`master`). Until this is automated (tracked in #1137), whoever merges a current_dev PR with a closing keyword must manually close the referenced issue(s) and post a real closing report (not just a bare link) — see the next section.
+- **`Closes #123` is now automated on `current_dev` merges too** (`.github/workflows/current-dev-auto-close.yml`, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own workflow now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
 
-### Closing an issue manually (current_dev merges)
+### Closing an issue manually (fallback, current_dev merges)
 
-Because of the `current_dev` auto-close gap above, closing an issue by hand still needs to leave a real record, not just a status change:
+If the automation above did not fire for some reason, closing an issue by hand still needs to leave a real record, not just a status change:
 
 - Post a comment on the issue with an actual closing report before/when closing it: what was resolved, a link to the PR, and the concrete evidence (the PR's own Summary/Changelog content is usually sufficient to paste in directly — it's already required to exist by the PR template).
 - The same applies to any merge-readiness assessment (CI status, mergeability, caveats) — record it as a PR/issue comment, not only as a chat message to whoever asked. GitHub is this project's record of truth, not a chat transcript.
