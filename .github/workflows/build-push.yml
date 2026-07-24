@@ -221,6 +221,13 @@ jobs:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real recent runs (30+ samples across pull_request/push events, 2026-07):
+    # this job's own git-diff/classify-image-impact.sh work completes in
+    # 6-17s. 15 minutes is a generous, round floor (not derived by scaling
+    # that tiny number -- see the shared job-timeout rollout PR for why every
+    # cheap self-hosted script job in this file uses the same 15-minute
+    # floor) that still turns any future hang into a fast, bounded failure.
+    timeout-minutes: 15
     outputs:
       dns_rust: ${{ steps.filter.outputs.dns_rust }}
       dns_image: ${{ steps.filter.outputs.dns_image }}
@@ -289,6 +296,9 @@ jobs:
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its
+    # comment) -- generous relative to real observed duration, not tight.
+    timeout-minutes: 15
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): a superseded commit's file-headers run gets
     # reclaimed instead of running to completion. Safe to cancel mid-flight:
@@ -315,6 +325,9 @@ jobs:
     name: PR template validation
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-12s (one live `gh pr view` call + a bash script). Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -361,6 +374,9 @@ jobs:
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: 5-7s on ubuntu-latest. Same 15-minute floor as
+    # detect-changes' self-hosted equivalent above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -405,6 +421,9 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-12s (gh pr view calls + one docker run of the build-tools
+    # image). Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -477,6 +496,11 @@ jobs:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: up to ~1 min (build-tools image resolution + gh pr view
+    # calls on ubuntu-latest, slower than the self-hosted twin since it
+    # cannot reuse validate-compose's already-selected image). Same
+    # 15-minute floor as detect-changes above -- still ~15x the observed max.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -568,6 +592,8 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-10s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -623,6 +649,9 @@ jobs:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: up to ~50s (build-tools image resolution on ubuntu-latest +
+    # gh pr view). Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -677,6 +706,8 @@ jobs:
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: GitHub-hosted fallback notice
@@ -697,6 +728,8 @@ jobs:
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-11s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs['line-endings'].result == 'success'`
@@ -731,6 +764,8 @@ jobs:
   line-endings-hosted:
     name: line endings (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: GitHub-hosted fallback notice
@@ -767,6 +802,13 @@ jobs:
     # to be installed on the runner host.
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real full-job runs: 30-85s. Must exceed the "Run ShellCheck and
+    # ActionLint" step's own 15-minute timeout below (a job-level bound
+    # tighter than a step it contains would fail the job before that step's
+    # own deliberate 15-minute allowance ever gets to run out) -- 25 minutes
+    # covers that step's 15-minute budget plus this job's other steps
+    # (governance guardrails, changelog-edit guard) with real headroom.
+    timeout-minutes: 25
     # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs.shellcheck.result == 'success'`
@@ -798,7 +840,22 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Real incident (2026-07-24): actionlint's default invocation embeds its
+      # own shellcheck integration, which was found to hang indefinitely (not
+      # merely slow) -- reproduced 3/3 times on a real self-hosted runner.
+      # With no timeout, GitHub's own 360-minute job default was the only
+      # backstop, and this job's own workflow-level concurrency group
+      # (build-push.yml's top-level `{workflow}-{ref}` group, cancel-in-progress
+      # false for pull_request) meant the hang also blocked every subsequent
+      # push to the same PR from ever starting a new Build & Push run at all --
+      # confirmed live: a stuck run sat at this exact step for 5+ hours,
+      # occupying a runner slot and wedging the PR's own concurrency group
+      # the whole time, even though other runners were idle. A real run of
+      # this step normally completes in ~1-2 minutes; 15 minutes is a
+      # generous bound that still turns an unbounded hang into a fast,
+      # automatic failure instead of a silent multi-hour stall.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
@@ -1008,6 +1065,10 @@ jobs:
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real full-job runs: 58-84s. 25 minutes, same as the self-hosted
+    # shellcheck job above, for the same reason: must exceed this job's own
+    # "Run ShellCheck and ActionLint" step timeout added below.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Select build-tools image
@@ -1027,7 +1088,16 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      # Parity fix: this step runs the exact same actionlint invocation as
+      # the self-hosted shellcheck job's own "Run ShellCheck and ActionLint"
+      # step (see that job's comment for the real 2026-07-24 incident -- a
+      # 5+ hour indefinite hang, reproduced 3/3 times, from actionlint's
+      # embedded shellcheck integration). That fix only covered the
+      # self-hosted job; this hosted fallback carried the identical
+      # unbounded-hang risk and had no timeout at all until now. Same
+      # 15-minute bound, for the same reason.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
@@ -1097,6 +1167,14 @@ jobs:
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 20-72s (the docker-run/grep checks in this job are cheap).
+    # 30 minutes rather than the 15-minute floor used by the other light
+    # script jobs in this file: select-build-tools-image.sh's resolution
+    # step can fall back to a local Docker build of the (large) build-tools
+    # image if the published one is unavailable or fails its smoke test --
+    # real work this job's own comment below explicitly calls out -- and
+    # that fallback build is not represented in the fast-path samples above.
+    timeout-minutes: 30
     # Job-level concurrency (#891 follow-up): cancel-in-progress is
     # pull_request-only -- see `build`'s group comment for the full #979
     # rationale. validate-compose is the shared `needs:` root that exports the
@@ -2615,6 +2693,8 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-9s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     outputs:
       subnet: ${{ steps.derive.outputs.subnet }}
       gateway: ${{ steps.derive.outputs.gateway }}
@@ -2669,6 +2749,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 30-71s (pulls the just-published multi-platform image set,
+    # brings the full stack up via docker compose, smoke-tests it, tears it
+    # down). 30 minutes, not the 15-minute lint-job floor, because this job
+    # depends on a real docker-compose stack startup (image pulls, container
+    # health checks) whose cold-cache worst case is not represented by these
+    # warm-cache samples.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -3089,6 +3176,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 31s-3.3min. But this job's own "cargo clippy"
+    # step already carries a 35-minute timeout (a deliberately generous
+    # bound for sccache/sccache-dist fallback to a full local compile) -- a
+    # job-level timeout must exceed every step timeout it contains, or the
+    # job would fail before that step's own allowance runs out. 45 minutes
+    # covers the clippy step's 35-minute budget plus this job's other steps.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -3147,6 +3241,10 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning as dns_rust_quality above: this job's own "cargo
+    # clippy" step below already carries a 35-minute timeout, so the
+    # job-level bound must exceed it. Real warm-cache runs: 50s-3.3min.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Isolate Rust toolchain paths
@@ -3218,6 +3316,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 26-56s. Same class of risk as dns_rust_quality's
+    # clippy step above (this job's own "test" step compiles the crate via
+    # the same cargo-with-sccache-fallback path, so an sccache/sccache-dist
+    # miss forces the same full local recompile) -- 45 minutes matches
+    # dns_rust_quality/ui_rust_quality's bound for that reason, not derived
+    # from the fast warm-cache samples alone.
+    timeout-minutes: 45
     # Job-level concurrency (#891 follow-up, extending #888/#892/#915's
     # proven pattern): dns_test is on the scarce self-hosted lancache-heavy
     # pool, so reclaiming a superseded commit's run matters for real
@@ -3292,6 +3397,10 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_test above (compiles via the same
+    # cargo-with-sccache-fallback path, so shares its cold-compile risk).
+    # Real warm-cache runs: 40-51s.
+    timeout-minutes: 45
     # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
     # above for the same reason): scarce lancache-heavy capacity, safe to
     # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
@@ -3356,6 +3465,14 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 1.3-6.6min. 60 minutes rather than a tighter
+    # multiple of that: cargo-tarpaulin instruments and recompiles both
+    # crates for coverage (its own build path, separate from the
+    # sccache-fallback compiles elsewhere in this file), and this job can
+    # also fall back to a branch-local build-tools image rebuild (see the
+    # step comment below) when a PR's own Dockerfile change hasn't been
+    # published yet -- neither cold path is represented by the samples above.
+    timeout-minutes: 60
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): rust_coverage is on the scarce self-hosted
     # lancache-heavy pool, same as build/container-scan, so reclaiming a
@@ -3570,6 +3687,8 @@ jobs:
     needs: rust_coverage
     if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 10-12s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # Job-level concurrency, keyed per source ref: the top-level group (see
     # top of file) is run_id-suffixed for push events and therefore never
     # collides, so it no longer serializes same-branch badge publishes the
@@ -3724,6 +3843,9 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 6-13s (bash -n + a file-permission check, no compilation).
+    # Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: test (watchdog)
@@ -3743,6 +3865,8 @@ jobs:
     # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: GitHub-hosted fallback notice
@@ -3771,6 +3895,11 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 10-14s. cargo-audit checks Cargo.lock against the advisory
+    # database using a prebuilt binary (AG-KD-003) -- it does not compile
+    # the crate, so it does not share dns_test's cold-compile risk. 20
+    # minutes covers a slow advisory-database fetch with real headroom.
+    timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_test above): scarce lancache-heavy capacity, no other consumer
     # besides ci_scope_policy, whose push-branch check on this job's result
@@ -3829,6 +3958,9 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
+    # binary, no crate compilation). Real runs: 10-18s.
+    timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_cargo_audit above): scarce lancache-heavy capacity, no other
     # consumer besides ci_scope_policy, whose push-branch check on this
@@ -3980,6 +4112,10 @@ jobs:
       - ui_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-14s (this job only reads its upstream needs' results and
+    # runs a policy script; no compilation or Docker work of its own). Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # cancel-in-progress is pull_request-only -- see `build`'s group comment
     # for the full #979 rationale. build/build-arm64 require
     # `needs.ci_scope_policy.result == 'success'` unconditionally, so on push
@@ -4243,6 +4379,14 @@ jobs:
     # self-hosted pool would reintroduce the emulated-Rust-compile risk this
     # scan is meant to catch before build/build-arm64 push anything real.
     runs-on: ${{ fromJSON(matrix.runner) }}
+    # Real per-service runs: 24s-7min (this job's own comment above notes it
+    # "routinely dominates PR runtime" -- it builds a full service image,
+    # amd64 on self-hosted or native arm64 on a hosted runner, then Trivy
+    # scans it). 60 minutes gives real headroom for a cold Docker layer
+    # cache or a Trivy vulnerability-database refresh, neither of which
+    # shows up in the warm-cache samples above; still far under build's own
+    # 150-minute bound for the same class of work at full multi-arch scale.
+    timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     strategy:
@@ -5994,6 +6138,11 @@ jobs:
     needs: [build, build-arm64]
     if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
+    # manifest list from two already-pushed digests -- no image rebuild).
+    # 30 minutes covers the ghcr_retry backoff windows on its GHCR calls
+    # (max ~2 minutes total) plus real headroom for registry slowness.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -6393,6 +6542,15 @@ jobs:
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 17s-3.6min for this job's own promotion work, but
+    # scripts/lib/promote-lock.sh's promote_lock_acquire_with_retry is
+    # called with (max_attempts=40, backoff_seconds=15), a legitimate
+    # non-hang wait of up to ~10 minutes for the shared cross-run lock under
+    # real contention (concurrent promotions from a merge cascade), before
+    # this job's own work even starts. 45 minutes covers that real lock-wait
+    # ceiling plus this job's own work with headroom, so normal lock
+    # contention can never be mistaken for a hang.
+    timeout-minutes: 45
     # Promote only repoints already-built, already-pushed sha-* images at
     # mutable channel tags -- it is idempotent and fast, unlike the rest of
     # this workflow (build/test/scan/build-images), which is slow and where
@@ -6943,6 +7101,17 @@ jobs:
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # NO REAL RUN DATA: this job only runs on an actual `refs/tags/v*` push,
+    # and no such run of this workflow has completed in the recorded history
+    # checked for this rollout (2026-07, ~3800 total workflow runs) -- tags
+    # v0.1.0/v0.2.0/v0.3.0/v0.3.1 exist as GitHub releases, but none was
+    # created by a tag push that triggered this exact job. This value is
+    # therefore an estimate, not a measurement: 30 minutes, anchored to
+    # promote's/merge-manifests' class of work (source archive creation +
+    # GitHub Releases API calls, no compilation), not scaled from any
+    # observed duration. Flagged explicitly rather than guessed silently --
+    # revisit once a real tag-push run of this job exists to measure.
+    timeout-minutes: 30
     # Job-level concurrency, keyed per tag ref: this job's GET-then-create-or-
     # PATCH logic against the GitHub Releases API is only safe if at most one
     # instance runs per tag at a time (two concurrent instances for the same
@@ -7263,6 +7432,15 @@ jobs:
     # Container image scanning is memory-heavy, so it takes the heavy tier the
     # same way container-scan does (AG-CI-002).
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # NO REAL RUN DATA: same gap as `release` above -- this job only runs on
+    # a tag push, and none has completed in recorded history. Anchored
+    # instead to container-scan's per-service class of real data (24s-7min
+    # per service for a full image build + Trivy scan; this job only pulls
+    # an already-built digest and re-runs Trivy for the CycloneDX SBOM
+    # output, so it is never slower than that per-service work). 45 minutes
+    # gives real headroom over container-scan's own per-service worst case.
+    # Flagged explicitly as an estimate, not a measurement.
+    timeout-minutes: 45
     permissions:
       contents: write
       packages: read
