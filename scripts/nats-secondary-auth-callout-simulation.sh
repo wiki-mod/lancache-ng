@@ -416,7 +416,23 @@ if [[ "$capture_bytes" -lt 200 ]]; then
     exit 1
 fi
 
-if docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "tcpdump -r /shared/xkey-capture.pcap -A 2>/dev/null | grep -F -- '$proof_pass'" >/dev/null; then
+# Reassemble the raw TCP payload bytes (in capture order) into one contiguous
+# blob before searching, rather than grepping tcpdump -A's per-packet ASCII
+# dump line by line. This matters because tcpdump -A wraps/breaks its ASCII
+# rendering at packet boundaries: a payload of a few hundred bytes (this
+# auth-callout envelope, once permissions/claims are embedded, comfortably
+# exceeds a single TCP segment) can legitimately have the password or the
+# "xkv1" marker split across two packets, which a plain per-packet grep would
+# report as absent even though it is genuinely present in the traffic --
+# indistinguishable from an actual encryption result without this step. Empty
+# `tcp.payload` fields (bare ACKs) print as blank and contribute nothing.
+if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c \
+    "tshark -r /shared/xkey-capture.pcap -T fields -e tcp.payload 2>/dev/null | tr -d '\n:' | xxd -r -p > /shared/xkey-stream.bin"; then
+    echo "::error::Failed to reassemble the captured TCP payload stream with tshark." >&2
+    exit 1
+fi
+
+if docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F -- '$proof_pass' /shared/xkey-stream.bin" >/dev/null; then
     echo "::error::The secondary's plaintext NATS password was found in the captured nats<->ui auth-callout traffic -- xkey encryption is NOT actually protecting the payload." >&2
     exit 1
 fi
@@ -428,7 +444,7 @@ echo "Confirmed: the plaintext password does NOT appear anywhere in the captured
 # this particular capture for an unrelated reason" (e.g. a missed capture
 # window). Confirms the payload isn't merely absent the password by
 # coincidence, but is actually using the sealed-box wire format.
-if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "tcpdump -r /shared/xkey-capture.pcap -A 2>/dev/null | grep -F 'xkv1'" >/dev/null; then
+if ! docker run --rm -v "$work_dir/shared:/shared" nicolaka/netshoot sh -c "grep -a -F 'xkv1' /shared/xkey-stream.bin" >/dev/null; then
     echo "::error::The nkeys sealed-box version marker 'xkv1' was not found in the captured traffic -- cannot confirm the auth-callout payload is actually xkey-encrypted." >&2
     exit 1
 fi
