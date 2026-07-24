@@ -234,6 +234,23 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 : "${DHCP_DDNS_PORT:=5300}"
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
+# DDNS master switch (issue #1076). DHCP_DDNS_ENABLED gates Kea's
+# dhcp-ddns.enable-updates -- the documented connectivity switch that must be
+# true for the DHCPv4 server to send any DDNS NameChangeRequest to D2 (Kea's
+# own default for it is false). This is deliberately independent of DHCP_MODE:
+# an operator can run Kea DHCP without also having it write DNS records on
+# every lease. Normalize any truthy/falsy spelling to a bare JSON boolean
+# literal, because envsubst splices this value UNQUOTED into kea-dhcp4.conf's
+# "enable-updates" field, where anything other than true/false is invalid JSON.
+# Default off for a fresh install (conservative/opt-in, matching Kea's own
+# default); an existing install keeps whatever its persisted kea-dhcp4.conf
+# already has via migrate_dhcp4_config's existing-wins merge below, so this
+# never silently disables DDNS for anyone already relying on it.
+case "$(printf '%s' "${DHCP_DDNS_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) DHCP_DDNS_ENABLED="true" ;;
+    *) DHCP_DDNS_ENABLED="false" ;;
+esac
+
 # Verify KEA_CTRL_TOKEN is set to a non-default secret. secret_is_placeholder's
 # universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
 # uses YOUR_*_HERE elsewhere, e.g. SECONDARY_REGISTRATION_TOKEN) plus this
@@ -359,10 +376,10 @@ if [ -z "$KEA_LEASE_CMDS_HOOK_PATH" ]; then
 fi
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH DHCP_DDNS_ENABLED
 
 # shellcheck disable=SC2016
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}'
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
 
 render_kea_config() {
     local template=$1 target=$2
@@ -446,6 +463,16 @@ migrate_dhcp4_config() {
     # itself (or the runtime JSON this migration writes) because both must
     # stay parseable by `jq` -- see migrate_dhcp4_config's own callers and
     # tests/bats/*kea* for the parseability contract this relies on.
+    #
+    # ddns_enabled (issue #1076): the dhcp-ddns block is merged as
+    # `{defaults incl. enable-updates: $ddns_enabled} + (existing // {})`, so
+    # the RHS (an install's persisted dhcp-ddns, including any value the Admin
+    # UI's DDNS toggle wrote) always WINS over this default. The $ddns_enabled
+    # default therefore only decides the value for a config that has no
+    # dhcp-ddns.enable-updates at all (effectively a fresh render); it never
+    # overrides an existing install's persisted choice. This is what keeps the
+    # UI toggle durable across restarts and keeps DHCP_DDNS_ENABLED a
+    # first-boot/default-only control.
     if ! jq \
         --arg domain "$DHCP_DOMAIN" \
         --argjson lease_time "$DHCP_LEASE_TIME" \
@@ -453,6 +480,7 @@ migrate_dhcp4_config() {
         --argjson ntp_migration_map "$ntp_migration_map" \
         --arg lease_cmds_hook_path "$KEA_LEASE_CMDS_HOOK_PATH" \
         --arg kea_log_file "/var/log/kea/kea-dhcp4.log" \
+        --argjson ddns_enabled "$DHCP_DDNS_ENABLED" \
         '
         def is_ipv4:
           type == "string"
@@ -505,7 +533,7 @@ migrate_dhcp4_config() {
         # this default.
         .Dhcp4["multi-threading"] = ({"enable-multi-threading": false} + (.Dhcp4["multi-threading"] // {}))
         | .Dhcp4["dhcp-ddns"] = ({
-            "enable-updates": true,
+            "enable-updates": $ddns_enabled,
             "server-ip": "127.0.0.1",
             "server-port": 53001,
             "sender-ip": "127.0.0.1",

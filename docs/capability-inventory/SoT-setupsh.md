@@ -571,9 +571,15 @@ service, PowerDNS-based, with the #615 known-good-snapshot volume and a real
 healthcheck) and `.env`, then `docker compose up -d`. (Corrected 2026-07-18:
 this generated healthcheck was `rec_control ping` when this file was written;
 issue #946 / PRs #976/#916 replaced it with a real dig-based query/response
-probe — `dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q .`
-— explicitly per AG-VAL-018, since `rec_control ping` only proves the process
-is up, not that it actually resolves.)
+probe — at the time, `dig @127.0.0.1 steamcontent.com A +short +time=2
++tries=1 | grep -q .` — explicitly per AG-VAL-018, since `rec_control ping`
+only proves the process is up, not that it actually resolves. Corrected again
+2026-07-23: issue #1149 found that `steamcontent.com` itself had migrated to
+a wildcard-only RPZ entry (`.steamcontent.com`, added by #1073) and no longer
+returns an answer for the bare apex the probe queries, so the healthcheck now
+probes `content1.steampowered.com` instead — a bare-apex `cdn-domains.txt`
+entry that is not expected to need wildcard-only coverage, since it is not
+itself a CDN wildcard host the way `steamcontent.com` is.)
 
 **Idempotence**: `--rotate` explicitly preserves anything not being rotated
 (`KEEP_KNOWN_GOOD_CONFIGS` from existing `.env` if not overridden); a
