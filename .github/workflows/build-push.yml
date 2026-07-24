@@ -240,7 +240,7 @@ jobs:
       release_contract: ${{ steps.filter.outputs.release_contract }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -307,7 +307,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
@@ -319,7 +319,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate PR template completeness
         env:
           # Fetched live via `gh pr view` instead of trusting
@@ -365,7 +365,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -411,7 +411,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fetch current labels/milestone live
         # Same class of bug found and fixed in pr-template-check (2026-07-16):
         # github.event.pull_request.labels/.milestone is a snapshot taken when
@@ -481,7 +481,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
         # This fallback job must resolve its own image rather than depending
         # on validate-compose's output (like the self-hosted job above does)
@@ -574,7 +574,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fetch current PR title live
         # Same class of bug found and fixed in pr-template-check and
         # pr-tracking-metadata-check (2026-07-16): github.event.pull_request
@@ -627,7 +627,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
         # This fallback job must resolve its own image rather than depending
         # on validate-compose's output (like the self-hosted job above does)
@@ -678,7 +678,7 @@ jobs:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -717,7 +717,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check tracked files use Unix (LF) line endings
         run: |
           set -euo pipefail
@@ -732,7 +732,7 @@ jobs:
     name: line endings (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -796,7 +796,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run ShellCheck and ActionLint
         run: |
@@ -1009,7 +1009,7 @@ jobs:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
         # Always resolve through the digest-pinned, smoke-tested selector --
         # never fall back to a bare :latest tag here. This job exists so
@@ -1131,7 +1131,7 @@ jobs:
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx for manifest inspection
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -2629,7 +2629,7 @@ jobs:
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
@@ -2704,7 +2704,7 @@ jobs:
       # PR's base.sha and a base-channel image's build-commit label. Same
       # requirement, and same fix, as the `detect-changes` job's own
       # fetch-depth: 0 checkout (needed for its own merge-base-based diff).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -2813,7 +2813,7 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -3090,7 +3090,7 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3098,7 +3098,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3148,7 +3148,7 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3156,7 +3156,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3239,7 +3239,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3247,7 +3247,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3307,7 +3307,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3315,7 +3315,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3377,7 +3377,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # This job resolves its own build-tools image rather than reusing
       # validate-compose's exported build_tools_image output. That output is
       # deliberately locked to the published, digest-qualified image (never a
@@ -3601,7 +3601,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download coverage badge data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
         with:
@@ -3725,7 +3725,7 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: test (watchdog)
         run: |
           bash -n services/watchdog/watchdog.sh
@@ -3744,7 +3744,7 @@ jobs:
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -3786,7 +3786,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (dns/nats-subscriber)
         run: |
           set -euo pipefail
@@ -3844,7 +3844,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (ui)
         run: |
           set -euo pipefail
@@ -4008,7 +4008,7 @@ jobs:
       # found" failure and, worse, a silent false pass/fail against the wrong
       # commit's content. Every other job in this workflow already checks out
       # its own commit; this is the one job that didn't.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -4369,7 +4369,7 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Enable build-tools publish scan
         id: build-tools-scan-changes
@@ -4982,7 +4982,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine whether this service needs building
         id: should-build
@@ -5065,7 +5065,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -5699,7 +5699,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine whether this service needs building
         id: should-build
@@ -5780,7 +5780,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6009,13 +6009,13 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6468,7 +6468,7 @@ jobs:
       # need full tag/commit history, which a default shallow checkout does
       # not have.
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -6509,7 +6509,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6809,7 +6809,13 @@ jobs:
             echo "::notice::No vX.Y.Z release tag exists yet on this history; skipping automated patch tagging until the first release tag is bootstrapped (see #819 Point 4)."
             exit 0
           fi
-          base_commit="$(git rev-list -n1 "$base_tag")"
+          # Qualified as refs/tags/ explicitly (#1054): this repo has both a
+          # branch and a tag named identically for a version like v0.2.0 (the
+          # long-lived integration branch vs. the release cut from it), so a
+          # bare ref lookup here is genuinely ambiguous, not just
+          # theoretically so -- confirmed live via a "refname ... is
+          # ambiguous" warning on this exact line.
+          base_commit="$(git rev-list -n1 "refs/tags/$base_tag")"
 
           # Reuse the SAME classifier detect-changes and the earlier channel
           # promotion above both rely on (#819 Point 1: do not invent a
@@ -6853,6 +6859,13 @@ jobs:
             exit 0
           fi
 
+          # An annotated tag (-a) requires a committer identity, which this
+          # self-hosted runner has no default for (#1054: confirmed live,
+          # "Committer identity unknown" / "empty ident name"). Same bot
+          # identity this file already uses for its other automated commit
+          # (the publish_coverage_badge job).
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$next_tag" "$COMMIT_SHA" -m "Automated patch release ${next_tag}"
           # PROJECT_AUTOMATION_PAT (not secrets.GITHUB_TOKEN) authors this
           # push so the tag push actually re-triggers build-push.yml on
@@ -6965,13 +6978,13 @@ jobs:
       packages: read
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

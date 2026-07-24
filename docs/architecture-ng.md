@@ -370,12 +370,13 @@ Epic / GOG: not supported.
 size against real free disk space at `CACHE_DIR`, with a safety buffer that
 scales with the requested size (issue #1069); `CACHE_INACTIVE` is likewise a
 real setup-time prompt, not just a silent default. (This setup-time
-validation shipped on `master`/v0.2.0 via issue #1069's PR #1070; as of this
-writing it has not yet been synced into `current_dev`'s `setup.sh` — a
-branch-hygiene gap, not a design decision. The Admin UI resize control
-described below is independent of that gap: it runs its own real
-disk-space check inside the Admin UI container regardless of whether
-`setup.sh`'s own prompt-time check has landed on this branch.)
+validation shipped on `master`/v0.2.0 via issue #1069's PR #1070; it had not
+yet been synced into `current_dev`'s `setup.sh` before this branch merged
+`master` back in — a branch-hygiene gap, not a design decision, now closed by
+that merge. The Admin UI resize control described below is independent of
+that history either way: it runs its own real disk-space check inside the
+Admin UI container regardless of whether `setup.sh`'s own prompt-time check
+has landed.)
 
 **Admin UI cache resize (`services/ui/src/routes/cache.rs`, issue #1069 part
 3):** the dashboard shows current usage, current `CACHE_MAX_SIZE`, and lets an

@@ -255,8 +255,13 @@ expect_prompt {Server IP \(Standard mode\)} "127.0.0.2"
 expect_prompt {Enable SSL mode\? \[y/N\]} ""
 expect_prompt {Directory[^\n]*\[} $install_dir
 expect_prompt {Cache directory \(absolute path\)} ""
-expect_prompt {Cache size in GiB} ""
+# Explicit small answer (not "" for the 50 GiB default): issue #1069 added a
+# real free-disk-space check against this runner's filesystem, and this
+# phase must not depend on however much space happens to be free on whichever
+# self-hosted runner picks up the job.
+expect_prompt {Cache size in GiB} "5"
 expect_prompt {Cache RAM buffer in MB} ""
+expect_prompt {Cache entry max age} ""
 expect_prompt {Enable scheduled automatic updates\?} ""
 expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy, dnsmasq-relay\)} ""
 expect_prompt {Enable LanCache-NG-NTP\? \[y/N\]} ""

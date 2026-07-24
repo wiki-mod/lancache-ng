@@ -1038,4 +1038,4 @@ Use SSL mode when:
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE). Chosen specifically because this project is a network server: the AGPL closes the "SaaS loophole" plain GPL leaves open, so anyone running a modified version of lancache-ng as a network service (not just distributing binaries) must also make that modified source available to the service's users.
+AGPL-3.0 -- see [LICENSE](LICENSE). Chosen specifically because this project is a network server: the AGPL closes the "SaaS loophole" plain GPL leaves open, so anyone running a modified version of lancache-ng as a network service (not just distributing binaries) must also make that modified source available to the service's users.
