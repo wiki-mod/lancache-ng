@@ -52,7 +52,8 @@ setup() {
     export NATS_UI_USER=lancache-ui NATS_UI_PASSWORD=ui-secret \
         NATS_DNS_WRITER_USER=lancache-dns-writer NATS_DNS_WRITER_PASSWORD=writer-secret \
         NATS_DNS_REPLICA_USER=lancache-dns-replica NATS_DNS_REPLICA_PASSWORD=replica-secret \
-        NATS_CALLOUT_USER=lancache-nats-callout NATS_CALLOUT_PASSWORD=callout-secret
+        NATS_CALLOUT_USER=lancache-nats-callout NATS_CALLOUT_PASSWORD=callout-secret \
+        NATS_SYS_USER=lancache-nats-sys NATS_SYS_PASSWORD=sys-secret
 }
 
 # make_sandbox <label>
@@ -157,6 +158,12 @@ nats_conf_content() {
     grep -q 'user: "lancache-ui"' "$root_a/etc/nats/nats.conf"
     grep -q 'user: "lancache-nats-callout"' "$root_a/etc/nats/nats.conf"
     grep -q 'include "auth_callout.conf"' "$root_a/etc/nats/nats.conf"
+
+    # Issue #681: the system account (used only by nats_kick.rs's CONNZ/KICK
+    # calls) must also be wired -- both the SYS account's own user and the
+    # top-level system_account pointer selecting it.
+    grep -q 'user: "lancache-nats-sys"' "$root_a/etc/nats/nats.conf"
+    grep -q 'system_account: SYS' "$root_a/etc/nats/nats.conf"
 }
 
 # ── the three generating compose files must not drift apart ───────────────────

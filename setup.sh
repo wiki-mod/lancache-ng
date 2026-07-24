@@ -2786,6 +2786,11 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_CALLOUT_USER "lancache-nats-callout" "$env_file"
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
+    # Issue #681: system-account identity so an already-installed primary
+    # converges to the new active-disconnect capability on its next update,
+    # the same as any other mandatory NATS static role above.
+    set_env_key_if_empty_or_missing NATS_SYS_USER "lancache-nats-sys" "$env_file"
+    ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
     ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
@@ -4447,6 +4452,7 @@ logbundle_secret_env_keys() {
         NATS_DNS_WRITER_PASSWORD \
         NATS_DNS_REPLICA_PASSWORD \
         NATS_CALLOUT_PASSWORD \
+        NATS_SYS_PASSWORD \
         SECONDARY_REGISTRATION_TOKEN \
         UI_AUTH_PASSWORD
 }
@@ -6530,6 +6536,12 @@ NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$e
 NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
 NATS_CALLOUT_USER="${NATS_CALLOUT_USER:-lancache-nats-callout}"
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
+# Issue #681: system-account identity, used only by the Admin UI's kicker
+# connection (nats_kick.rs) to look up and force-disconnect a removed/rotated
+# secondary's live connection.
+NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
+NATS_SYS_USER="${NATS_SYS_USER:-lancache-nats-sys}"
+NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
 UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
@@ -6586,6 +6598,8 @@ validate_env_values_for_initial_write \
     "NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}" \
     "NATS_CALLOUT_USER=${NATS_CALLOUT_USER}" \
     "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
+    "NATS_SYS_USER=${NATS_SYS_USER}" \
+    "NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
     "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
     "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
@@ -6707,6 +6721,11 @@ NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}
 # registered secondaries (generated, do not change)
 NATS_CALLOUT_USER=${NATS_CALLOUT_USER}
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
+# System-account identity (generated, do not change). Used only by the Admin
+# UI's kicker connection (nats_kick.rs) to look up and force-disconnect a
+# removed/rotated secondary's live NATS connection (issue #681).
+NATS_SYS_USER=${NATS_SYS_USER}
+NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 

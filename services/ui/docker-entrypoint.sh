@@ -215,6 +215,15 @@ if [ "$(id -u)" = "0" ]; then
     if secret_is_placeholder "$_ui_nats_callout_cfg"; then _ui_nats_callout_cfg=""; fi
     _ui_resolve_or_die NATS_CALLOUT_PASSWORD nats-callout-password "$_ui_nats_callout_cfg" lancache_gen_hex32
 
+    # Issue #681: NATS_SYS_PASSWORD is the third credential the UI actually
+    # connects to NATS with (nats_kick.rs, alongside NATS_UI_PASSWORD and
+    # NATS_CALLOUT_PASSWORD above) -- the system-account identity used only to
+    # look up (CONNZ) and force-disconnect (KICK) a removed/rotated secondary's
+    # live connection. Same lockstep-with-the-nats-service rationale as above.
+    _ui_nats_sys_cfg="${NATS_SYS_PASSWORD:-}"
+    if secret_is_placeholder "$_ui_nats_sys_cfg"; then _ui_nats_sys_cfg=""; fi
+    _ui_resolve_or_die NATS_SYS_PASSWORD nats-sys-password "$_ui_nats_sys_cfg" lancache_gen_hex32
+
     # The UI never connects to NATS as the dns-writer/dns-replica roles (only
     # dns-standard/dns-ssl do), but config.rs holds both passwords anyway and
     # main.rs's preflight_startup_config() -> validate_runtime_nats_credentials()
