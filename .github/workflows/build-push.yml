@@ -4668,6 +4668,18 @@ jobs:
             allow_args+=(--allow network.host)
           fi
 
+          # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/
+          # apt-get-upgrade RUN step is fed from this build's own layer
+          # cache with no wall-clock expiry, so a stale cached layer can
+          # keep this scan (the gate that is supposed to catch exactly this
+          # class of bug) from ever seeing a Debian security fix that
+          # shipped after the layer was first cached. Passed unconditionally
+          # for every matrix.service like BUILD_TOOLS_IMAGE/CARGO_BUILD_JOBS
+          # above -- harmless for services whose Dockerfile does not declare
+          # this ARG, and only actually changes the resolved command text
+          # (hence the cache key) for build-tools's own Dockerfile.
+          apt_cache_bust="$(date -u +%G-W%V)"
+
           docker buildx build \
             --load \
             --pull \
@@ -4676,6 +4688,7 @@ jobs:
             "${allow_args[@]}" \
             --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
             --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
+            --build-arg "APT_CACHE_BUST=$apt_cache_bust" \
             "${secret_args[@]}" \
             "${build_context_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
@@ -5242,6 +5255,23 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/
+      # apt-get-upgrade RUN step is fed from this job's persistent local
+      # Buildx cache (see "Prepare local Buildx cache" above) with no
+      # wall-clock expiry, so a Debian security fix published after that
+      # layer was first cached (confirmed for real: bind9-libs/
+      # bind9-dnsutils/bind9-host stayed vulnerable for weeks after the fix
+      # shipped to trixie-security) never gets picked up. A value that
+      # changes once per ISO week, passed as build-tools's APT_CACHE_BUST
+      # build-arg below, forces that one layer to re-run on a weekly cadence
+      # without busting it on every push.
+      - name: Compute apt cache-bust value
+        if: steps.should-build.outputs.should-build == 'true'
+        id: apt-cache-bust
+        run: |
+          set -euo pipefail
+          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Prepare Rust acceleration secret files
         if: >-
           ${{
@@ -5405,6 +5435,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -5878,6 +5909,21 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: same reasoning as build's own identically-named step --
+      # this job's `type=gha` cache (see the "Build and push" step's own
+      # `cache-from`/`cache-to` below) also has no wall-clock expiry, so this
+      # arm64 leg needs the same periodic bust as the amd64 leg. Computed
+      # independently here since the two jobs run on separate runners with no
+      # shared state; both derive the same ISO-week string from wall-clock
+      # time alone, so amd64 and arm64 bust in lockstep without passing a
+      # value between jobs.
+      - name: Compute apt cache-bust value
+        if: steps.should-build.outputs.should-build == 'true'
+        id: apt-cache-bust
+        run: |
+          set -euo pipefail
+          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         # No secret-files/network/allow here: this runner cannot reach the
         # LAN-only Redis/sccache-dist/distcc acceleration infrastructure, so
@@ -5901,6 +5947,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
