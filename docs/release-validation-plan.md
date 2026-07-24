@@ -216,39 +216,34 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
 
 ### 1. Bring-up
 
-- **Profile choice**: `deploy/dev/docker-compose.yml` for a fast day-to-day check
-  (10 GB cache, dev DNS ports 5300/5353); `deploy/quickstart/docker-compose.yml` for
+- **Profile choice**: `deploy/quickstart/docker-compose.yml` for
   the profile that most closely matches what `setup.sh install` actually produces for
   an operator (this is also the only profile the Admin UI's cache-resize convergence
   loop, PR #1174, actually reaches — see Part A); `deploy/prod/docker-compose.yml`
   when specifically validating prod-only divergences (e.g. the cache-resize
   misleading-display gap). `deploy/full-setup/docker-compose.yml` is CI's own
   self-contained validation harness, useful for reproducing exactly what
-  `full-setup-validate.yml`/`full-setup-deep-validate.yml` do locally.
-- Bring up: `docker compose -f deploy/<profile>/docker-compose.yml up -d --build`.
+  `full-setup-validate.yml`/`full-setup-deep-validate.yml` do locally. (There used to
+  be a `deploy/dev/docker-compose.yml` fourth option here; it was retired in v0.3.0,
+  #766 — every remaining profile above references images by `image:`, not `build:`,
+  so there is no compose-level `--build` shortcut; see `CONTRIBUTING.md`'s "Building
+  the full stack" for exercising local source changes against these profiles.)
+- Bring up: `docker compose -f deploy/<profile>/docker-compose.yml up -d`.
   Confirm every service reaches `healthy` (`docker compose ps`) within a reasonable
   window — `docker inspect --format='{{.State.Health.Status}}' <container>` for any
   service whose Compose `ps` summary looks ambiguous.
-- **Known `deploy/dev`-only bring-up flake (issue #1215, confirmed live/reproduced 3/3,
-  2026-07-24):** `deploy/dev/docker-compose.yml`'s `lancache` bridge network gives some
-  services a static `ipv4_address` (`dns-standard`, `dns-ssl`, `dhcp`, `nats`, `syslog`,
-  `syslog-ng`, `proxy`) but leaves others (`ui`, `watchdog`, `netdata`,
-  `docker-socket-proxy`, `dhcp-probe`, `dhcp-proxy`, `ntp`) to Docker's dynamic IPAM pool
-  in the same subnet, with no `ip_range` carve-out. Whenever a dynamic-IP service starts
-  before a not-yet-running static-IP service claims its own address, `docker compose up`
-  fails with `Error response from daemon: failed to set up container networking: Address
-  already in use` for the static-IP service. This is most likely to bite when bringing a
-  profile-gated service (`dhcp`, `syslog`, `syslog-ng`) up for the first time, or on the
-  very first `--build` bring-up (a dynamic service can grab a base service's reserved
-  address before that service starts). Not a sign of a broken build: `docker stop` the
-  dynamic-IP service that won the race, bring up the static-IP one, then restart the
-  dynamic one. Confirmed NOT present on `deploy/quickstart`/`deploy/prod` (no custom
-  static-IP bridge there) or `deploy/full-setup` (every service has an explicit static IP).
-- **Image-freshness trap (confirmed live, 2026-07-24):** `deploy/dev`'s `--build` flag
-  builds every first-party image from the checked-out source, so it always tests the
-  exact commit under test — use it whenever validating a specific pending branch/commit
-  like a frozen release candidate. `deploy/quickstart`/`deploy/prod`/`deploy/full-setup`
-  instead **pull** published `${LANCACHE_IMAGE_REGISTRY}/.../<service>:${LANCACHE_IMAGE_TAG}`
+- **Formerly known `deploy/dev`-only bring-up flake (issue #1215, confirmed live/reproduced
+  3/3, 2026-07-24) — moot as of v0.3.0's dev-folder retirement (#766).** `deploy/dev`'s
+  custom `lancache` bridge network gave some services a static `ipv4_address` but left
+  others to Docker's dynamic IPAM pool in the same subnet with no `ip_range` carve-out,
+  causing an intermittent `Address already in use` failure. This paragraph is kept only as
+  a historical pointer for anyone who finds #1215 referenced elsewhere — the file this bug
+  lived in (`deploy/dev/docker-compose.yml`) no longer exists, so the bug cannot recur.
+  `deploy/quickstart`/`deploy/prod`/`deploy/full-setup` never had this custom bridge
+  (confirmed at the time #1215 was filed) and remain unaffected.
+- **Image-freshness trap (confirmed live, 2026-07-24; local-build guidance updated for
+  v0.3.0's dev-folder retirement, #766):** `deploy/quickstart`/`deploy/prod`/`deploy/full-setup`
+  all **pull** published `${LANCACHE_IMAGE_REGISTRY}/.../<service>:${LANCACHE_IMAGE_TAG}`
   images (default tag `latest`, or `nightly` if you set it) — these channel tags can lag
   the commit under test by a large number of commits (confirmed live: `nightly` was 29
   commits behind this same v0.3.0 commit, missing every feature merged that day) because
@@ -256,14 +251,17 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   evidence for a specific commit, check the image's own revision label —
   `docker inspect <image> --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
   — and confirm it descends from the commit under test; if it doesn't (or the tag doesn't
-  exist yet for that commit), either build locally instead (`docker compose build
-  <service>` against `deploy/dev`, then `docker tag` the result to the registry-style name
-  the target compose file/script expects, e.g. `ghcr.io/wiki-mod/lancache-ng/dns:<local-tag>`,
-  and point `LANCACHE_IMAGE_TAG` at `<local-tag>`) or wait for a fresh `build-push.yml` run
-  against that exact commit. This applies to `scripts/*-simulation.sh` invocations too —
-  `nats-secondary-auth-callout-simulation.sh` and `syslog-forwarding-simulation.sh` both
-  default `LANCACHE_IMAGE_TAG` to a mutable channel and need the same treatment; the DHCP
-  simulation scripts (`dhcp-kea-lease-flow-simulation.sh`, `dhcp-proxy-pxe-simulation.sh`,
+  exist yet for that commit), either build locally instead (build the specific service
+  directly, matching how CI itself builds first-party images and how `CONTRIBUTING.md`'s
+  "Building the full stack" documents exercising local source changes, e.g.
+  `docker build -t ghcr.io/wiki-mod/lancache-ng/dns:<local-tag> services/dns` with the
+  matching `BUILD_TOOLS_IMAGE`/`additional_contexts` build args that service's Dockerfile
+  needs, then point `LANCACHE_IMAGE_TAG` at `<local-tag>`) or wait for a fresh
+  `build-push.yml` run against that exact commit. This applies to `scripts/*-simulation.sh`
+  invocations too — `nats-secondary-auth-callout-simulation.sh` and
+  `syslog-forwarding-simulation.sh` both default `LANCACHE_IMAGE_TAG` to a mutable channel
+  and need the same treatment; the DHCP simulation scripts
+  (`dhcp-kea-lease-flow-simulation.sh`, `dhcp-proxy-pxe-simulation.sh`,
   `dhcp-relay-flow-simulation.sh`) are unaffected — they always `docker build` their own
   images directly from the checked-out source, never from a registry tag.
 - Tear down after the full pass: `docker compose -f deploy/<profile>/docker-compose.yml
@@ -282,7 +280,7 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   different entry from the same file (`download.epicgames.com` and `deb.debian.org` were
   confirmed reachable and were used for this pass's evidence) before concluding anything is
   broken.
-- **Standard mode**: `dig @<IP_STANDARD or dev DNS port> steamcontent.com` (or any
+- **Standard mode**: `dig @<IP_STANDARD> steamcontent.com` (or any
   configured CDN domain) resolves to the proxy's IP. Confirm the TLS handshake for
   that domain is **passthrough** (no interception) — `openssl s_client -connect
   <proxy>:8443 -servername steamcontent.com` and confirm the presented certificate is
