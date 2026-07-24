@@ -1,7 +1,7 @@
 # lancache-ng Threat Model
 
-> **Last reviewed against release: `v0.2.0`**
-> **Last review date: 2026-07-09**
+> **Last reviewed against release: `v0.3.0`**
+> **Last review date: 2026-07-24**
 >
 > This document must be re-audited for every release. It describes the security
 > posture of a *specific* architecture, and that architecture changes between
@@ -43,6 +43,7 @@ the top is a signal that its threats need re-checking.
 | NATS event bus + role-scoped credentials | `deploy/quickstart/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
 | Secondary-node registration / remote NATS | `deploy/prod/docker-compose.nats-secondary.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
+| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/rollback_listener.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
 
 ---
 
@@ -245,6 +246,19 @@ appliance spoofs.
   validated before being written into the RPZ zone. DNS record changes flow only
   over the authenticated NATS event bus and the PowerDNS API (see T5), not from
   arbitrary clients.
+- **Zone/record rollback listener (issue #628, added since v0.2.0)**:
+  `services/dns/nats-subscriber/src/rollback_listener.rs` exposes a local HTTP
+  API (`DNS_ROLLBACK_LISTEN_ADDR`, default `0.0.0.0:8083`) the Admin UI calls to
+  list known-good zone/record snapshots and trigger an operator-selected
+  rollback — another path, besides NATS and the PowerDNS API, that can mutate
+  live DNS record data. It is not published to the host/LAN (`deploy/*/
+  docker-compose.yml` uses `expose:`, not `ports:`, for this port — reachable
+  only from other containers on the same Compose network, same treatment as
+  PowerDNS's own 8081/8082 APIs), and every request still requires
+  `X-API-Key: <PDNS_API_KEY>` regardless of network placement, matching the
+  same handshake-secret convention as the PowerDNS API itself (see above) —
+  network placement is defense-in-depth here, not the trust boundary. Rollback
+  is always operator-selected, never automatic on startup.
 - The PowerDNS API key is a shared handshake secret bootstrapped safely (issue
   #858): `services/dns/entrypoint.sh` resolves `PDNS_API_KEY` through the
   shared-secrets volume so PowerDNS and the Admin UI's PowerDNS REST client
