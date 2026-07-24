@@ -3709,7 +3709,12 @@ verify_stack_functional_health() {
     # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
     # container answers a real query at all (AGENTS.md requires a real
     # query/response probe here, not ping/ss), not that every domain resolves.
-    test_fqdn="steamcontent.com"
+    # Must be a bare-apex cdn-domains.txt entry, not a wildcard-only one
+    # (leading-dot, e.g. ".steamcontent.com" since #1073): RPZ wildcard-only
+    # entries never match the bare apex itself, so probing steamcontent.com
+    # directly always came back empty after #1073 and permanently failed this
+    # gate even on a perfectly healthy stack (issue #1149).
+    test_fqdn="content1.steampowered.com"
     if [[ -n "$ip_standard" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
         resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>/dev/null)
@@ -5298,7 +5303,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 steamcontent.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
