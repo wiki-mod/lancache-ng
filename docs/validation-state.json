@@ -10,12 +10,12 @@
     "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217 (this record's own introducing PR -- see its description for the full per-scenario evidence log); see also issues #1215 and #1216 for the two new findings"
   },
   "last_ci_validation": {
-    "commit": null,
-    "date": null,
-    "validator": null,
-    "scope": "none",
-    "summary": "Not yet validated under this tracking mechanism. Run the CI half of docs/release-validation-plan.md and record the result here.",
-    "evidence_ref": null
+    "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+    "date": "2026-07-24",
+    "validator": "claude-agent (Part A CI validation pass, real Linux self-hosted runner host)",
+    "scope": "incremental:edition-2024-crates,dhcp-dnsmasq(relay+bats),dhcp-kea(bats-only),dns-pdns(bats-only),nats,governance-sbom(vex+key-drift),ci-build-tools(bats/shellspec/shellcheck/actionlint/path-filter-coverage)",
+    "summary": "Real Part A (CI) pass against the frozen v0.3.0 branch tip (identical content to current_dev at this commit): cargo fmt/check(-D warnings)/clippy(-D warnings)/test PASS for all three crates (ui 353 tests, dns/nats-subscriber 49 tests, pxe-client-probe 4 tests) on real Linux via the same rustup-stable toolchain CI itself installs. dhcp-relay-flow-simulation.sh PASS (real two-segment DORA relay proof). nats-secondary-auth-callout-simulation.sh run twice against locally-built images pinned to this exact commit (ghcr.io nightly was stale/behind at run time): positive control PASS (connz-polled active-disconnect #681, xkv1 encryption marker #682 with no plaintext JWT marker), negative control (xkey removed) correctly FAILED with the expected plaintext-marker error. check-vex-drift.sh PASS + negative control (mutated .trivyignore.yaml) correctly failed with a real diff. setup_update_idempotence.bats guard PASS + negative control (NTP_ENABLED removed) correctly failed naming that key. shellcheck: 0 findings. bats tests/bats: 714/715 pass -- the 1 real failure (check-bats-path-filter-coverage.sh's own self-test) was root-caused to a genuine gap (dnsmasq-relay.conf.template missing from build-tools.yml's path filters) and fixed in PR #1209, re-verified there (0 gaps after fix). shellspec: 3/3 pass. actionlint (default invocation, matching CI's own exact 'Run ShellCheck and ActionLint' step): FAILED to complete -- hung indefinitely, reproduced 3/3 times at this commit; corroborated by a real, independently-stuck CI job (shellcheck job on PR feat/681-nats-active-disconnect, in_progress 5+ hours using the actual published ghcr.io build-tools image, not a local-build artifact). Disabling the embedded shellcheck integration (-shellcheck=) completes in 0.017s with 0 findings, so the workflow YAML content itself is clean; the check as CI currently invokes it is not reliably completing. Not exercised in this pass (explicitly deferred, not silently assumed passing): DHCP-Kea and dnsmasq-ProxyDHCP live E2E simulations (dhcp-kea-lease-flow-simulation, dhcp-proxy-pxe-simulation), DNS live dig-based resolution and setup-reset-dns-config-simulation.sh, check-workflow-service-lists.sh, Admin UI/watchdog live Part B stack checks (out of Part A CI scope by design), governance-doc manual review beyond the plan-doc fix itself.",
+    "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 (full command transcript in the PR description and first comment); https://github.com/wiki-mod/lancache-ng/pull/1209 (ci-build-tools path-filter-coverage gap: before/after command output)"
   },
   "subsystem_validation": {
     "_note": "path_prefixes mirror scripts/classify-image-impact.sh's real touches_prefix() rules (the same classifier build-push.yml's detect-changes job and the promote job's version-bump logic both already consume) so staleness can be computed the same way CI already reasons about relevance, instead of a second, drifting definition. A subsystem entry is stale the moment `git log <its last commit>..HEAD -- <its path_prefixes>` is non-empty, OR whenever AGENTS.md/.github/AGENTS.md changed (see 'full_invalidation_triggers' below), OR whenever the recorded commit itself predates last_stack_validation/last_ci_validation's own commit for that layer.",
@@ -25,7 +25,7 @@
       "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
       "date": "2026-07-24",
       "validator": "djdomi-claude (delegated sub-agent run on lancache-243, dhcp-kea-lease-flow-simulation.sh, built from this commit's source)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217; superseded, chronologically later than an earlier CI-layer (Part A) pass of the same subsystem recorded in full under last_ci_validation.summary above and https://github.com/wiki-mod/lancache-ng/pull/1213 (dhcp_kea_config_generation.bats, dhcp_lease_flow_parsing.bats -- both PASS, part of the 714/715 bats run)"
     },
     "dhcp-dnsmasq": {
       "path_prefixes": ["services/dhcp-proxy/"],
@@ -33,7 +33,7 @@
       "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
       "date": "2026-07-24",
       "validator": "djdomi-claude (dhcp-proxy-pxe-simulation.sh + dhcp-relay-flow-simulation.sh via delegated sub-agent on lancache-243, both built from this commit's source; dnsmasq-relay additionally confirmed first-hand via a real Admin-UI-driven end-to-end run on lancache-241)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217; superseded, chronologically later than an earlier CI-layer (Part A) pass of the same subsystem recorded in full under last_ci_validation.summary above and https://github.com/wiki-mod/lancache-ng/pull/1213 (scripts/dhcp-relay-flow-simulation.sh PASS; dhcp_proxy_known_good_snapshot.bats/dhcp_proxy_optional_directives.bats/setup_dhcp_mode.bats all PASS)"
     },
     "dns-pdns": {
       "path_prefixes": ["services/dns/"],
@@ -41,7 +41,7 @@
       "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
       "date": "2026-07-24",
       "validator": "djdomi-claude (first-hand: dig + openssl s_client against a real deploy/dev stack on lancache-241, both DNS instances and both TLS-handling modes)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217; superseded, chronologically later than an earlier CI-layer (Part A) pass of the same subsystem recorded in full under last_ci_validation.summary above and https://github.com/wiki-mod/lancache-ng/pull/1213 (dns_zone_generation.bats/dns_known_good_snapshot.bats/dns_config_snapshot_idempotence.bats all PASS; services/dns/nats-subscriber crate's own fmt/check/clippy/test all PASS, 49 tests)"
     },
     "nats": {
       "path_prefixes": ["services/ui/src/nats_*.rs", "services/ui/src/nats_config.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
@@ -50,15 +50,15 @@
       "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
       "date": "2026-07-24",
       "validator": "djdomi-claude (delegated sub-agent run on lancache-229, nats-secondary-auth-callout-simulation.sh, images built from this commit's source and locally retagged -- not a first-hand run, taken on the sub-agent's reported command output)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217; superseded, chronologically later than an earlier CI-layer (Part A) pass of the same subsystem recorded in full under last_ci_validation.summary above and https://github.com/wiki-mod/lancache-ng/pull/1213 (same script run twice against locally-built images: positive control PASS -- credential isolation, rotation invalidation, real connz-polled active disconnect #681, xkv1 marker with no plaintext JWT #682; negative control with xkey removed correctly FAILED with the expected plaintext-marker error)"
     },
     "admin-ui": {
       "path_prefixes": ["services/ui/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "ci",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "claude-agent",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 -- PARTIAL: services/ui crate's own fmt/check(-D warnings)/clippy(-D warnings)/test all pass (353 tests, incl. nats_auth_callout, watchdog_status, dhcp routes, secondary-registration modules), and the NATS simulation above drives real Admin UI HTTP routes (session/CSRF, secondary registration/rotation/removal). Live dashboard/cache-resize Part B checks (nginx -T rendered-config proof, watchdog dashboard green/red transitions) were NOT run -- out of this Part A CI pass's scope by design, not assumed passing."
     },
     "watchdog": {
       "path_prefixes": ["services/watchdog/"],
@@ -66,7 +66,7 @@
       "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
       "date": "2026-07-24",
       "validator": "djdomi-claude (first-hand on lancache-241: real container stop for the dashboard-card transition, real external `docker kill --signal=STOP` for auto-restart, including a live reproduction of the known #1166 cosmetic-warning gap)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217"
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1217; superseded, chronologically later than an earlier CI-layer (Part A) pass of the same subsystem recorded in full under last_ci_validation.summary above and https://github.com/wiki-mod/lancache-ng/pull/1213 (watchdog_test CI job's own checks reproduced directly, PASS; extensive watchdog.sh bats coverage -- maybe_purge, maybe_prune_syslog, check_and_maybe_restart nats, write_status convergence -- all PASS as part of the 714/715 bats run)"
     },
     "proxy-cache": {
       "path_prefixes": ["services/proxy/"],
@@ -87,26 +87,26 @@
     "ci-build-tools": {
       "path_prefixes": ["tools/build-tools/", ".github/workflows/build-tools.yml", ".github/workflows/build-push.yml", ".github/actions/"],
       "layer": "ci",
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "claude-agent",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 (full transcript) and https://github.com/wiki-mod/lancache-ng/pull/1209 (the fix + before/after check-bats-path-filter-coverage.sh output) -- MIXED result, recorded honestly rather than rounded to a single pass/fail: check-bats-path-filter-coverage.sh FAILED against the unmodified v0.3.0/current_dev tree (2 real gaps, services/dhcp-proxy/dnsmasq-relay.conf.template missing from both path-filter lists) -- fixed in PR #1209, re-verified there (0 gaps after). shellcheck PASSED (0 findings, repo-wide). actionlint FAILED to complete as CI actually invokes it (default embedded-shellcheck invocation hangs indefinitely, reproduced 3/3 times; corroborated by an independently-stuck real CI job using the published ghcr.io image, not a local-build artifact); with the embedded shellcheck integration disabled (-shellcheck=, a deviation from CI's real invocation) it completes in 0.017s with 0 findings, so the workflow YAML content itself is not known to be wrong, but the check as CI runs it is not reliably completing right now. check-workflow-service-lists.sh was NOT run in this pass. bats/shellspec smoke-tests of the build-tools image itself: 714/715 and 3/3 respectively (see nats/dhcp-dnsmasq entries for the one real bats failure, which is this same path-filter gap)."
     },
     "governance-sbom": {
       "path_prefixes": ["scripts/generate-vex.sh", "scripts/check-vex-drift.sh", "vex.openvex.json", ".trivyignore.yaml", "AGENTS.md", ".github/AGENTS.md"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "ci",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "claude-agent",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 -- check-vex-drift.sh reports vex.openvex.json in sync with .trivyignore.yaml (PASS); generate-vex.sh | jq empty produces valid JSON; negative control (a scratch copy of .trivyignore.yaml with an injected fake CVE entry) correctly made the drift guard FAIL with a real, readable diff, proving the guard still discriminates a genuine mismatch. AGENTS.md/.github/AGENTS.md unchanged since #1205, so no governance full-invalidation trigger fired in this pass."
     },
     "setup-runtime": {
       "path_prefixes": ["setup.sh", "scripts/"],
-      "layer": null,
-      "commit": null,
-      "date": null,
-      "validator": null,
-      "evidence_ref": null
+      "layer": "ci",
+      "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
+      "date": "2026-07-24",
+      "validator": "claude-agent",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 -- tests/bats/setup_update_idempotence.bats's migrate_env_for_update() key-drift guard (first @test) PASSES on a clean checkout; negative control (NTP_ENABLED removed from write_converged_env_fixture() in a scratch copy of the test file) correctly FAILS, naming exactly 'NTP_ENABLED' as the missing key. scripts/dhcp-relay-flow-simulation.sh (also under scripts/) covered under dhcp-dnsmasq above. Other scripts/ entries (check-workflow-service-lists.sh, check-idempotence-test-coverage.sh, etc.) NOT individually re-run in this pass."
     }
   },
   "full_invalidation_triggers": [
