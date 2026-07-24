@@ -455,7 +455,7 @@ For SSL mode, only point clients to the SSL IP after the CA certificate was inst
 
 LanCache NG only caches traffic for clients that resolve CDN hostnames through
 its DNS servers. DHCP is the most reliable way to hand those DNS servers to
-clients. `setup.sh` lets you pick one of three DHCP modes (stored as
+clients. `setup.sh` lets you pick one of four DHCP modes (stored as
 `DHCP_MODE` in `.env`):
 
 - `disabled` — LanCache NG does not manage or proxy DHCP. You point clients at
@@ -473,10 +473,17 @@ clients. `setup.sh` lets you pick one of three DHCP modes (stored as
   enabled and cannot be disabled. It does not own leases and is limited to
   proxy/PXE clients; it does not reliably replace the DNS option handed out by
   a normal router DHCP server.
+- `dnsmasq-relay` — LanCache NG runs dnsmasq as a real DHCP relay, forwarding
+  each client's DHCP request to an upstream DHCP server on **another network
+  segment** and relaying the reply back. Use this when clients and their DHCP
+  server are on different subnets/VLANs and the client broadcasts can't reach
+  the server directly. It injects nothing of its own — the upstream server owns
+  the whole lease.
 
-The three modes are mutually exclusive — Kea and dnsmasq both bind DHCP port
+The four modes are mutually exclusive — Kea and dnsmasq both bind DHCP port
 `67/udp`, so setup activates exactly one, and switching modes in the Admin UI
-stops the other service.
+stops the other service. The two dnsmasq modes (`dnsmasq-proxy` and
+`dnsmasq-relay`) share one container and are also mutually exclusive.
 
 Important: do not run two normal DHCP servers in the same network unless you
 planned it carefully. If your router already provides DHCP, either keep using

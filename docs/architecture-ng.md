@@ -17,7 +17,7 @@ document.
 |---|---|---|---|
 | nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
-| Kea DHCP / DHCP modes | off | — | Configurable tri-state: `disabled` / `kea` / `dnsmasq-proxy`; requires PowerDNS (DDNS via nsupdate). See [docs/dhcp-modes.md](dhcp-modes.md). |
+| Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog-ng | off (`--profile logging`) | — | Central log receiver; fluent-bit forwards logs from every wired service to it (#453) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
@@ -221,17 +221,58 @@ entry here is watched and restarted by the watchdog daemon.
 
 **Auto-restart:** X failed checks → `docker restart <container>`. Scope,
 verified against `services/watchdog/watchdog.sh`: the daemon's own
-`check_and_maybe_restart` loop only polls and auto-restarts `proxy`,
-`dns-standard`, and (when `SSL_ENABLED=1`) `dns-ssl` -- the three container
-names it takes via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
+`check_and_maybe_restart` loop polls and auto-restarts `proxy`,
+`dns-standard`, `nats` (always monitored, not flag-gated), and (when
+`SSL_ENABLED=1`) `dns-ssl` -- the container names it takes via
+`CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_NATS`/
 `CONTAINER_DNS_SSL`. `watchdog.sh` writes this state to a `status.json` file
 every 30 seconds, but as of this writing the Admin UI has no route or
 template that reads that file -- there is no per-service dashboard status
 indicator today (UI delivery debt; see "Status" below).
-Kea, syslog-ng, fluent-bit, `nats`, and `ui` all have a real Docker
-healthcheck too (so `docker inspect`/`docker compose ps` and CI's own
-wait-for-healthy scripts can see it), but the watchdog daemon does not poll
-or restart any of those five itself.
+
+Kea, syslog-ng, fluent-bit, and `ui` all have a real Docker healthcheck too
+(so `docker inspect`/`docker compose ps` and CI's own wait-for-healthy
+scripts can see it), but the watchdog daemon does not poll or restart any of
+those four itself (issue #842's per-service decision, not an oversight):
+
+- **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
+  adding either to watchdog's blind restart-on-unhealthy loop would need the
+  Docker socket proxy's allowlist (`scripts/docker-socket-proxy.sh`) widened
+  first -- `ui` has no allowlist entry at all today (a deliberate boundary
+  documented in `docs/naming-conventions.md`'s "Operator-visible
+  consistency" section: nothing currently calls the Docker API to manage it
+  by name), and `dhcp` is only allowlisted for `start`/`stop`
+  (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
+  Widening that allowlist is a security-relevant architectural change in its
+  own right, not a side effect of extending a monitored-container list, so
+  #842 left both out of scope for a follow-up PR to decide deliberately
+  rather than as a byproduct of this change.
+- **`dhcp-proxy` (dnsmasq) and `netdata`**: neither has a Docker `healthcheck:`
+  block at all in any Compose file, so `get_health()` would always read
+  `.State.Health.Status` as absent ("none") for either -- adding either to
+  the monitored list today would be a silent no-op, not real coverage.
+  Defining a meaningful health probe for dnsmasq (no HTTP/control-socket API
+  the way Kea's Control Agent has) or for netdata is its own separate
+  scoping question, deferred rather than bolted on here.
+- **`syslog` (fluent-bit) and `syslog-ng`**: `syslog` has no `container_name:`
+  set in any Compose file at all (Compose auto-generates one), so it cannot
+  be addressed by a fixed name the way every other allowlisted/monitored
+  container is; its own healthcheck (`fluent-bit -V`) only proves the binary
+  is intact, not that the tailing pipeline actually works (see the compose
+  comment next to that healthcheck). Both are also gated behind the
+  optional `logging` profile, off by default.
+- **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
+  API. If it is down or hung, watchdog cannot reach any container through
+  it -- including this one -- so "restart docker-socket-proxy via
+  docker-socket-proxy" cannot work by construction. It also has no Docker
+  healthcheck defined. Docker's own `restart: always` already covers a hard
+  process crash, which is the only failure mode watchdog could conceivably
+  help with here anyway.
+
+All of the above still get Docker's own `restart: always`/`restart: "no"`
+policy (`deploy/*/docker-compose.yml`), which restarts a container that
+*exits*; watchdog's gap is specifically for a container that is still
+running but reports unhealthy (hung, wedged) without ever exiting.
 
 **Scheduled purge (cron, daily):**
 - Remove cache entries older than `CACHE_VALID_DAYS` (`config/{dev,prod}/watchdog.env`, `find -mtime`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `config/{dev,prod}/proxy.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
@@ -241,20 +282,25 @@ or restart any of those five itself.
 **Disk monitoring:**
 - `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
   color and writes it into `status.json` every 30 seconds, monitoring actual
-  disk usage, not just nginx `max_size` -- but, same gap as "Status" above,
-  nothing in the Admin UI reads or renders that file, so this warning/alarm
-  is not currently operator-visible in the UI (see #849 observability
-  finding #3). The dashboard's own cache-usage bar (`cache_pct` in
-  `services/ui/src/routes/dashboard.rs`) is a separate, independently
-  computed value (used cache bytes vs. `CACHE_MAX_GB`), not this disk-usage
-  color.
+  disk usage, not just nginx `max_size`. Since issue #870, the Admin UI's
+  dashboard reads this file (`services/ui/src/watchdog_status.rs`) and
+  renders the color in the "Service health" card's "Cache disk" indicator,
+  polling `GET /api/watchdog-status` every 10 seconds to stay live -- this
+  closes #849 observability finding #3. The dashboard's own cache-usage bar
+  (`cache_pct` in `services/ui/src/routes/dashboard.rs`) remains a separate,
+  independently computed value (used cache bytes vs. `CACHE_MAX_GB`), not
+  this disk-usage color.
 
 **Status:** `watchdog.sh` computes per-service health and disk-usage color
-(green/yellow/red) into `status.json` every 30 seconds, but nothing in the
-Admin UI (`services/ui/src/routes/dashboard.rs`, `templates/dashboard.html`)
-reads or renders that file as of this writing -- there is no per-service
-"traffic light" indicator in the UI today. Treat this as unfinished Admin UI
-delivery, not a shipped feature (see "Feature Completeness" in `AGENTS.md`).
+(green/yellow/red) into `status.json` every 30 seconds. Since issue #870,
+the Admin UI (`services/ui/src/routes/dashboard.rs`,
+`services/ui/src/watchdog_status.rs`, `templates/dashboard.html`) reads and
+renders that file as a per-service "traffic light" indicator in the
+dashboard's "Service health" card, sharing `status.json` via the
+`watchdog-status` named volume (mounted read-only into the `ui` container --
+see `deploy/*/docker-compose.yml`'s `ui:` service). A missing or stale
+`status.json` (watchdog not running, or crashed) renders as an explicit
+"unavailable"/"stale" state rather than a silently frozen last-known color.
 
 ## syslog-ng
 
@@ -392,9 +438,10 @@ one) rather than being a given.
 - Netdata integrated (proxy via `/api/netdata`)
 - Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
 - Dashboard: cache fill level, hit/miss rate, active connections
-- Watchdog per-service traffic light bar: **not yet implemented** -- `watchdog.sh`
-  computes the underlying `status.json` state, but the Admin UI does not read
-  or render it (see the "Status" note under Watchdog above)
+- Watchdog per-service traffic light bar: one indicator per service
+  (green/yellow/red) plus a cache-disk usage indicator, persistently visible
+  in the dashboard's "Service health" card, live-polled every 10 seconds
+  (issue #870; see the "Status" note under Watchdog above)
 
 ## Admin UI
 

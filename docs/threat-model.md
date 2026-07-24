@@ -469,10 +469,19 @@ or saturating the proxy.
   over HTTP/HTTPS — it is not enforced for the standard-mode `stream{}`
   SNI-passthrough listener (`:8443`), so a flood over that listener is not
   mitigated by this control (see T2).
-- Disk-usage warnings/alarms via the watchdog and Netdata.
+- Disk-usage warnings/alarms via the watchdog: since issue #870, the
+  watchdog-computed cache-disk yellow/red color is rendered live on the
+  Admin UI dashboard's "Service health" card (`services/ui/src/
+  watchdog_status.rs`), closing the visibility gap #849 observability
+  finding #3 identified. Netdata's own stock alarm templates still have no
+  notification integration or Admin UI surface of their own (its native
+  dashboard, port 19999, is never published to the host) -- that half of
+  this mitigation remains not operator-visible without direct `docker
+  exec`/Netdata-API access.
 
 **Residual risk**: Medium — there is no per-client request rate limiting by
-default; the operator must configure limits and monitor disk.
+default; the operator must configure limits, and must still reach Netdata
+directly for its half of disk/resource monitoring.
 
 ---
 

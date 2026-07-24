@@ -261,11 +261,14 @@ is_valid_cidr() {
     return 0
 }
 
-# Enumerates the only three DHCP_MODE values setup.sh understands: DHCP off,
-# our own Kea server, or dnsmasq acting as a proxy-DHCP helper for PXE.
+# Enumerates the only DHCP_MODE values setup.sh understands: DHCP off, our own
+# Kea server, dnsmasq acting as a proxy-DHCP helper for PXE, or dnsmasq acting
+# as a real DHCP relay to an upstream server (issue #844). Both dnsmasq modes
+# run in the same `dhcp-proxy` container/profile; DHCP_MODE is what tells them
+# apart.
 is_valid_dhcp_mode() {
     case "$1" in
-        disabled|kea|dnsmasq-proxy) return 0 ;;
+        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -325,7 +328,12 @@ compose_profiles_for_runtime() {
             [[ -n "$result" ]] && result+=","
             result+="dhcp-kea"
             ;;
-        dnsmasq-proxy)
+        dnsmasq-proxy|dnsmasq-relay)
+            # Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in
+            # the same `dhcp-proxy` compose service, so they map to the same
+            # profile; the container reads DHCP_MODE to render the matching
+            # config. The strip loop above already removes `dhcp-proxy` from
+            # `existing`, so mutual exclusion with dhcp-kea still holds.
             [[ -n "$result" ]] && result+=","
             result+="dhcp-proxy"
             ;;
@@ -2679,6 +2687,10 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
+    # forwarded as giaddr). Required in dnsmasq-relay mode, ignored otherwise.
+    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "" "$env_file"
+    dhcp_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$env_file")
     # Issue #450: additional optional dnsmasq relay/proxy fields. Unlike the
     # four values above, none of these are required in dnsmasq-proxy mode --
     # an empty value just means entrypoint.sh renders no directive for it.
@@ -2731,6 +2743,16 @@ migrate_env_for_update() {
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             ;;
+        dnsmasq-relay)
+            # Issue #844: relay mode forwards to an upstream server and injects
+            # nothing of its own, so the only two required values are this
+            # relay's client-facing address (giaddr source) and the upstream
+            # server -- NOT the ProxyDHCP subnet/DNS fields.
+            is_valid_ipv4 "$dhcp_relay_local_addr" \
+                || die "DHCP_MODE=dnsmasq-relay requires DHCP_RELAY_LOCAL_ADDR (this relay's own IPv4 on the client network) in $env_file. Set it, then rerun setup.sh update."
+            is_valid_ipv4 "$upstream_dhcp_ip" \
+                || die "DHCP_MODE=dnsmasq-relay requires the upstream DHCP server IPv4 in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
+            ;;
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
             is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
@@ -2743,6 +2765,7 @@ migrate_env_for_update() {
     set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
     set_env_key DHCP_DNS_SECONDARY "$dhcp_dns_secondary" "$env_file"
     set_env_key UPSTREAM_DHCP_IP "$upstream_dhcp_ip" "$env_file"
+    set_env_key DHCP_RELAY_LOCAL_ADDR "$dhcp_relay_local_addr" "$env_file"
     set_env_key DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" "$env_file"
     set_env_key DHCP_PROXY_ROUTER "$dhcp_proxy_router" "$env_file"
     set_env_key DHCP_NTP_SERVERS "$dhcp_ntp_servers" "$env_file"
@@ -3531,6 +3554,8 @@ Commands:
   reset-to-last-known-good-config <service> [install-dir] [snapshot-id]
                        CLI fallback for rolling a service back to a known-good
                        config when the Admin UI itself is unreachable.
+                       Supported: kea, dns/pdns (dns/pdns also takes a <zone>
+                       argument -- run with --help for the full shape).
   help, --help         Show this compact command list.
 
 Compatibility aliases:
@@ -3694,6 +3719,7 @@ EOF
         reset-to-last-known-good-config)
             cat <<EOF
 Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id] [--yes]
+       ./setup.sh reset-to-last-known-good-config dns|pdns [install-dir] <zone> [snapshot-id] [--yes]
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
 control surface still is (issue #763). Automates the exact by-hand recovery
@@ -3705,12 +3731,21 @@ API, the same sequence the Admin UI's own per-service rollback pages already
 run when they ARE reachable.
 
 Supported services:
-  kea, dhcp   Rolls back Kea's DHCP config via its Control Agent API
-              (config-test -> config-set -> config-write), reading snapshots
-              from the shared kea-data volume.
-
-Not yet supported: dns/pdns zone-record rollback (depends on issue #628's
-PowerDNS rollback listener).
+  kea, dhcp          Rolls back Kea's DHCP config via its Control Agent API
+                     (config-test -> config-set -> config-write), reading
+                     snapshots from the shared kea-data volume.
+  dns, pdns          Rolls back a PowerDNS zone's record data via
+                     nats-subscriber's rollback listener (list snapshots ->
+                     diff -> PATCH -> check-zone -> flush -> re-publish),
+                     reached by execing curl inside the target container
+                     (its port is Compose-internal only, never published to
+                     the host). Defaults to the dns-standard container,
+                     matching the Admin UI's own current single-primary
+                     scope; dns-standard/dns-ssl select one explicitly.
+                     Unlike Kea, PowerDNS tracks snapshots per zone (lan.,
+                     local.lan., and the private reverse zones), so a <zone>
+                     argument is required -- omit it to list which zones
+                     currently have snapshots instead of guessing one.
 
 --yes, -y     Skip the interactive confirmation prompt (e.g. for scripted use).
               Applying a snapshot always takes effect immediately either way.
@@ -4811,7 +4846,7 @@ EOF
 # automates exactly that sequence into one invocation, rather than inventing a
 # new mechanism.
 cmd_reset_to_last_known_good_config() {
-    local service="" install_dir="/opt/lancache-ng" snapshot_id="" assume_yes=0
+    local service="" install_dir="/opt/lancache-ng" snapshot_id="" zone="" assume_yes=0
     local -a positional=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -4821,26 +4856,57 @@ cmd_reset_to_last_known_good_config() {
     done
     service="${positional[0]:-}"
     [[ -n "${positional[1]:-}" ]] && install_dir="${positional[1]}"
-    snapshot_id="${positional[2]:-}"
+    # Normalizes a relative [install-dir] to absolute, matching cmd_update_ip's
+    # identical `realpath -m` call: reset_dns_to_last_known_good_config's
+    # dns_rollback_exec runs `cd "$install_dir" && docker compose --env-file
+    # "$env_file" ...` (needed so `docker compose exec` resolves the right
+    # project/container -- see that function's own doc comment), and
+    # env_file is itself computed as "$install_dir/.env" -- if install_dir
+    # were left relative, that cd would re-resolve env_file a second time
+    # relative to the NEW cwd, silently doubling the path (e.g.
+    # "a/b/a/b/.env"). Confirmed empirically while validating this command
+    # against a real stack with a relative install-dir argument.
+    install_dir=$(realpath -m "$install_dir")
+
+    # PowerDNS's zone/record snapshots are inherently per-zone (lan.,
+    # local.lan., and 20 private reverse zones -- see zone_snapshots.rs's
+    # ROLLBACK_ZONES), unlike Kea's single dhcp4.json: positional[2] means
+    # "zone" for dns/pdns targets and "snapshot-id" for kea, and dns/pdns
+    # additionally consumes positional[3] as its own snapshot-id.
+    case "$service" in
+        dns|pdns|dns-standard|dns-ssl)
+            zone="${positional[2]:-}"
+            snapshot_id="${positional[3]:-}"
+            ;;
+        *)
+            snapshot_id="${positional[2]:-}"
+            ;;
+    esac
 
     case "$service" in
         kea|dhcp)
             reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
             ;;
-        dns|pdns|dns-standard|dns-ssl)
-            # #628/PR #788 (PowerDNS zone/record snapshot + rollback listener)
-            # was still in review, not yet merged, when this command was
-            # added -- automating its manual-recovery sequence here would mean
-            # guessing at an API surface still subject to change. Fails
-            # closed with a clear pointer instead of silently no-op-ing or
-            # shipping against a moving target.
-            die "reset-to-last-known-good-config for '$service' is not implemented yet: it depends on the PowerDNS zone/record rollback listener tracked in issue #628. Once that lands, this command will call it the same way the 'kea' target already calls Kea's Control Agent API. Until then, see docs/known-good-config-snapshots.md's \"Manual recovery\" section."
+        dns|pdns)
+            # Scoped to dns-standard by default, matching services/ui/src/
+            # routes/dns_snapshots.rs's own current single-primary scope
+            # decision (see that file's module doc comment) -- not a new
+            # scope choice invented here.
+            reset_dns_to_last_known_good_config "dns-standard" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
+            ;;
+        dns-standard|dns-ssl)
+            # The rollback listener (services/dns/nats-subscriber/src/
+            # rollback_listener.rs) runs identically in both containers with
+            # independent snapshot histories (separate pdns-config-snapshots-
+            # {standard,ssl} volumes) -- accepting an explicit target here is
+            # a direct use of that existing mechanism, not new scope.
+            reset_dns_to_last_known_good_config "$service" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         "")
-            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
         *)
-            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
     esac
 }
@@ -5009,6 +5075,252 @@ reset_kea_to_last_known_good_config() {
 
     print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
     print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/routes/dhcp.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
+}
+
+# Normalizes a zone name to the canonical, dot-terminated form the rollback
+# listener's ROLLBACK_ZONES/snapshot directories use (mirrors
+# services/dns/nats-subscriber/src/zone_snapshots.rs's canonical_zone exactly)
+# so an operator can type "lan" instead of "lan." without the listener
+# rejecting it as an unmanaged zone.
+canonical_dns_zone() {
+    local zone="$1"
+    if [[ "$zone" == *. ]]; then
+        printf '%s\n' "$zone"
+    else
+        printf '%s.\n' "$zone"
+    fi
+}
+
+# Extracts every zone key from a GET /snapshots response body that currently
+# holds at least one snapshot (a non-empty array) -- used when no zone was
+# given, so the operator can see which zones actually have something to roll
+# back to before picking one. The response lists every zone in
+# zone_snapshots::ROLLBACK_ZONES unconditionally (even ones with zero
+# snapshots, as an empty array: `[]`), so this filters for `[{` (an array
+# whose first element is an object) rather than listing every key -- printing
+# all ~22 zones every time would bury the ones that actually matter.
+list_dns_zones_with_snapshots() {
+    local body="$1"
+    # `|| true`: an empty result (every zone's array is empty) is a valid,
+    # expected outcome here, not a failure -- grep's own "no match" exit
+    # status (1) would otherwise become this function's exit status too,
+    # since it is the last command in the pipeline, wrongly signaling
+    # failure to a caller that only checked $? rather than the actual
+    # (empty but valid) output.
+    printf '%s' "$body" | grep -oP '"[a-zA-Z0-9.-]+"\s*:\s*\[\{' | grep -oP '^"\K[^"]+' || true
+}
+
+# Extracts "<id> <created_unix>" lines for one zone from a GET /snapshots
+# response body, newest first (matching list_snapshots_handler's own
+# ordering) -- one line per snapshot, so callers can mapfile straight into an
+# array without a JSON library. No jq dependency (see kea_ctrl_post's
+# identical reasoning): the response is never pretty-printed and neither an
+# id nor a created_unix value can ever contain a literal ']', so capturing
+# non-greedily up to the first ']' is a safe boundary for this specific,
+# known-flat shape -- not a general JSON parser.
+dns_zone_snapshot_entries() {
+    local body="$1" zone="$2" zone_escaped zone_array
+    zone_escaped="${zone//./\\.}"
+    zone_array=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]" | head -1)
+    [[ -n "$zone_array" ]] || return 0
+    paste -d' ' \
+        <(printf '%s' "$zone_array" | grep -oP '"id"\s*:\s*"\K[0-9]+') \
+        <(printf '%s' "$zone_array" | grep -oP '"created_unix"\s*:\s*\K[0-9]+')
+}
+
+# Issues one PowerDNS zone-rollback-listener request (GET /snapshots or
+# POST /rollback) by execing curl INSIDE the target dns-standard/dns-ssl
+# container, rather than calling it directly from this host: unlike Kea's
+# Control Agent (reachable from the host via network_mode: host, see
+# reset_kea_to_last_known_good_config above), nats-subscriber's rollback
+# listener (port 8083, services/dns/nats-subscriber/src/rollback_listener.rs)
+# is deliberately only `expose`d to the Compose network, never published to
+# the host -- so there is no host-reachable address for this command to call
+# directly. `docker compose exec` runs the curl call from inside the exact
+# same container the listener binds 127.0.0.1:8083 in, sidestepping the need
+# to discover the Compose network name or publish a new host port.
+#
+# The X-API-Key value is resolved INSIDE the exec'd shell, not read from this
+# host's .env and passed in as an argument: the #858 shared-secrets
+# first-writer-wins bootstrap (services/dns/entrypoint.sh) means a fresh
+# install's .env-configured PDNS_API_KEY can legitimately be blank/placeholder,
+# with the real effective key only ever resolved into the running
+# entrypoint.sh process's own environment -- which a brand-new `docker exec`
+# process does NOT inherit (it only sees the container's create-time
+# Config.Env, i.e. whatever .env held when `docker compose up` last ran) --
+# or written out to the shared-secrets volume this same container already
+# mounts at /var/lib/lancache-secrets. Reproducing entrypoint.sh's own
+# placeholder-then-shared-file resolution order here (mirroring
+# scripts/lib/shared-secret-bootstrap.sh's resolve_shared_secret contract) is
+# what keeps this working in that case instead of silently sending an
+# empty/stale key and misreporting a real 401 as "wrong install".
+dns_rollback_exec() {
+    local install_dir="$1" env_file="$2" container="$3" method="$4" path="$5" body="${6:-}"
+    local project stdout_val err_file rc exec_err http_status response_body
+
+    project=$(compose_project_name "$install_dir" "$env_file")
+    err_file=$(mktemp)
+
+    stdout_val=$(cd "$install_dir" && docker compose --env-file "$env_file" -p "$project" \
+        -f "$install_dir/docker-compose.yml" exec -T "$container" sh -c '
+            key="$PDNS_API_KEY"
+            case "$key" in
+                ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
+            esac
+            if [ -z "$key" ] && [ -s /var/lib/lancache-secrets/pdns-api-key ]; then
+                key=$(tr -d "\n" < /var/lib/lancache-secrets/pdns-api-key)
+            fi
+            if [ -z "$key" ]; then
+                echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
+                exit 9
+            fi
+            m="$1"; p="$2"; b="$3"
+            if [ "$m" = "POST" ]; then
+                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" -X POST \
+                    -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
+                    "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+            else
+                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" \
+                    -H "X-API-Key: $key" "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+            fi
+            printf "%s\n" "$status"
+            cat /tmp/.dns-rollback-resp
+            rm -f /tmp/.dns-rollback-resp
+        ' sh "$method" "$path" "$body" 2>"$err_file")
+    rc=$?
+    exec_err=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+
+    if [[ $rc -ne 0 ]]; then
+        case "$stdout_val" in
+            *DNS_ROLLBACK_EXEC_NO_API_KEY*)
+                die "PDNS_API_KEY could not be resolved inside the $container container (no usable value in its environment and nothing on the shared-secrets volume yet). Is the stack fully started?"
+                ;;
+            *DNS_ROLLBACK_EXEC_CURL_FAILED*)
+                die "Failed to reach the rollback listener inside $container (curl could not connect to 127.0.0.1:8083). Is nats-subscriber running there?"
+                ;;
+            *)
+                die "docker compose exec into $container failed (exit $rc): ${exec_err:-$stdout_val}"
+                ;;
+        esac
+    fi
+
+    http_status="${stdout_val%%$'\n'*}"
+    response_body="${stdout_val#*$'\n'}"
+    [[ "$http_status" =~ ^[0-9]{3}$ ]] \
+        || die "Unexpected response from $container's rollback listener: $stdout_val"
+    if [[ ! "$http_status" =~ ^2 ]]; then
+        die "$container's rollback listener rejected the request with HTTP ${http_status}. Response: ${response_body}"
+    fi
+    printf '%s\n' "$response_body"
+}
+
+# Automates docs/known-good-config-snapshots.md's PowerDNS zone/record
+# manual-recovery sequence (that doc's "Manual recovery" section: "The
+# PowerDNS zone/record adapter... has no equivalent manual-CLI fallback
+# documented here yet" -- this is that fallback): list this install's
+# known-good zone snapshots for the requested zone from nats-subscriber's
+# rollback listener, apply the requested one -- or, if none was given, the
+# newest after an explicit confirmation -- via that listener's real
+# diff/PATCH/check-zone/flush/republish chain
+# (services/dns/nats-subscriber/src/rollback_listener.rs), the exact same
+# listener services/ui/src/routes/dns_snapshots.rs already forwards to when
+# the Admin UI IS reachable.
+#
+# Unlike Kea (one dhcp4.json, one snapshot history), PowerDNS tracks
+# snapshots per zone (zone_snapshots::ROLLBACK_ZONES: lan., local.lan., and
+# 20 private reverse zones) -- so a zone must be selected before a snapshot
+# id means anything. A missing zone lists which zones currently have
+# snapshots and stops there rather than guessing one (unlike the
+# snapshot-id-defaults-to-newest behavior below, which is safe precisely
+# because it stays within one already-explicit zone).
+reset_dns_to_last_known_good_config() {
+    local container="$1" install_dir="$2" zone="$3" snapshot_id="$4" assume_yes="${5:-0}"
+    local env_file snapshots_body zone_canon rollback_body resp
+    local -a zone_names=()
+    local -a entries=()
+    local idx n entry eid ecreated found zn
+    local applied zone_check_passed flush_ok republished changed_names flush_failed
+
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
+
+    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" "$container" GET /snapshots)
+
+    if [[ -z "$zone" ]]; then
+        mapfile -t zone_names < <(list_dns_zones_with_snapshots "$snapshots_body")
+        print_step "Zones with known-good snapshots on $container"
+        if [[ ${#zone_names[@]} -eq 0 ]]; then
+            print_warn "No zone currently has any known-good snapshot on $container."
+        else
+            for zn in "${zone_names[@]}"; do
+                printf '  %s\n' "$zn"
+            done
+        fi
+        die "A zone is required for the dns/pdns target (PowerDNS tracks snapshots per zone, unlike Kea's single config file). Usage: ./setup.sh reset-to-last-known-good-config dns [install-dir] <zone> [snapshot-id] [--yes]"
+    fi
+
+    zone_canon=$(canonical_dns_zone "$zone")
+
+    mapfile -t entries < <(dns_zone_snapshot_entries "$snapshots_body" "$zone_canon")
+    [[ ${#entries[@]} -gt 0 ]] \
+        || die "No known-good snapshots found for zone $zone_canon on $container."
+
+    print_step "Known-good $zone_canon zone snapshots on $container (oldest first)"
+    n=${#entries[@]}
+    for (( idx = n - 1; idx >= 0; idx-- )); do
+        eid="${entries[$idx]%% *}"
+        ecreated="${entries[$idx]#* }"
+        printf '  %s  (%s UTC)\n' "$eid" "$(date -u -d "@${ecreated}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    done
+
+    if [[ -z "$snapshot_id" ]]; then
+        snapshot_id="${entries[0]%% *}"
+        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+    fi
+
+    found=0
+    for entry in "${entries[@]}"; do
+        eid="${entry%% *}"
+        [[ "$eid" = "$snapshot_id" ]] && { found=1; break; }
+    done
+    [[ "$found" -eq 1 ]] \
+        || die "Snapshot '$snapshot_id' not found for zone $zone_canon on $container."
+
+    if [[ "$assume_yes" != "1" ]]; then
+        confirm "Roll $container's zone $zone_canon back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
+            || die "Cancelled."
+    fi
+
+    rollback_body="{\"zone\":\"${zone_canon}\",\"snapshot_id\":\"${snapshot_id}\"}"
+    print_step "Applying snapshot $snapshot_id for zone $zone_canon (rollback listener PATCH)"
+    resp=$(dns_rollback_exec "$install_dir" "$env_file" "$container" POST /rollback "$rollback_body")
+
+    applied=$(printf '%s' "$resp" | grep -oP '"applied"\s*:\s*\K(true|false)' || true)
+    zone_check_passed=$(printf '%s' "$resp" | grep -oP '"zone_check_passed"\s*:\s*\K(true|false)' || true)
+    flush_ok=$(printf '%s' "$resp" | grep -oP '"flush_ok"\s*:\s*\K(true|false)' || true)
+    republished=$(printf '%s' "$resp" | grep -oP '"republished_to_nats"\s*:\s*\K(true|false)' || true)
+    changed_names=$(printf '%s' "$resp" | grep -oP '"changed_names"\s*:\s*\[[^]]*\]' || true)
+    flush_failed=$(printf '%s' "$resp" | grep -oP '"flush_failed_names"\s*:\s*\[[^]]*\]' || true)
+
+    [[ "$applied" = "true" ]] \
+        || die "Rollback listener did not report applied=true: $resp"
+
+    print_ok "Zone $zone_canon on $container rolled back to known-good snapshot $snapshot_id."
+    [[ -n "$changed_names" ]] && print_ok "Changed rrsets: ${changed_names}"
+    if [[ "$zone_check_passed" != "true" ]]; then
+        print_warn "Post-rollback pdnsutil check-zone reported a problem for $zone_canon -- the rollback was already applied and is NOT automatically reverted. Inspect the zone manually."
+    fi
+    if [[ "$flush_ok" != "true" ]]; then
+        print_warn "One or more recursor cache-flush publishes failed after rollback (${flush_failed:-see response}) -- affected clients may see stale answers until TTL expiry."
+    fi
+    if [[ "$zone_canon" = "lan." && "$republished" = "true" ]]; then
+        print_ok "Restored lan. records were re-published to NATS so secondary DNS nodes converge."
+    fi
+    print_ok "A fresh known-good snapshot of the restored state was recorded automatically (same as an Admin-UI-driven rollback)."
 }
 
 # ── update-ip subcommand ───────────────────────────────────────────────────────
@@ -5959,10 +6271,11 @@ print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
 printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
+printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (relay only; injects nothing of its own)\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
-    ask "DHCP mode (disabled, kea, dnsmasq-proxy)" "disabled"
+    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "disabled"
     DHCP_MODE="${REPLY,,}"
     if is_valid_dhcp_mode "$DHCP_MODE"; then
         break
@@ -5980,6 +6293,8 @@ DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_STANDARD"
 DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
+# Issue #844: relay-mode local address, empty unless dnsmasq-relay is chosen.
+DHCP_RELAY_LOCAL_ADDR=""
 # Issue #450: additional optional dnsmasq relay/proxy fields, all left empty
 # unless the operator opts in below.
 DHCP_PROXY_INTERFACE=""
@@ -6149,6 +6464,28 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     fi
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
+elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
+    # Issue #844: real DHCP relay. Only two values matter -- this relay's own
+    # client-facing address (forwarded as giaddr) and the upstream server it
+    # relays to. No subnet/DNS/PXE prompts: a relay injects nothing of its own.
+    print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
+    print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
+
+    while true; do
+        ask "This relay's own IP on the client-facing network (giaddr)" ""
+        DHCP_RELAY_LOCAL_ADDR="$REPLY"
+        is_valid_ipv4 "$DHCP_RELAY_LOCAL_ADDR" && break
+        print_error "Invalid IPv4 address: $DHCP_RELAY_LOCAL_ADDR"
+    done
+
+    while true; do
+        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
+        UPSTREAM_DHCP_IP="$REPLY"
+        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
+        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
+    done
+
+    print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP}"
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
@@ -6292,6 +6629,7 @@ validate_env_values_for_initial_write \
     "DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}" \
     "DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}" \
     "UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}" \
+    "DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}" \
     "DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}" \
     "DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER}" \
     "DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS}" \
@@ -6384,6 +6722,9 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
+# Issue #844: DHCP-relay-mode local address (giaddr source). Empty unless
+# DHCP_MODE=dnsmasq-relay; see docs/dhcp-modes.md.
+DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}
 
 # Issue #450: additional optional dnsmasq relay/proxy options, all empty by
 # default. Delivered only via the supplemental ProxyDHCP/PXE exchange to

@@ -1,5 +1,5 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# Reusable workflow: the nine shared full-setup validation/simulation jobs that
+# Reusable workflow: the ten shared full-setup validation/simulation jobs that
 # used to be maintained as two independently-drifting copies in
 # full-setup-validate.yml (manual) and full-setup-deep-validate.yml (per-PR).
 # This is now their single source (issue #1014); each caller keeps its own
@@ -737,3 +737,66 @@ jobs:
           # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
           # already guard against with this same wrapper.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
+
+  setup-reset-dns-config-simulation:
+    # Real end-to-end proof for issue #836's CLI-fallback item: `setup.sh
+    # reset-to-last-known-good-config dns` must genuinely roll a real,
+    # running PowerDNS zone's live record data back to an earlier known-good
+    # snapshot via nats-subscriber's rollback listener, not just return
+    # success. See scripts/setup-reset-dns-config-simulation.sh's own header
+    # for exactly what this does and does not prove -- including the
+    # deliberate wrong-PDNS_API_KEY regression guard for the
+    # host-.env-vs-in-container key resolution this command depends on.
+    # Chained after setup-reset-kea-config-simulation (its sibling CLI
+    # rollback sim, same one-job-at-a-time reason every job in this suite
+    # chains onto the previous one). The deep-validate caller's own
+    # DNS-stack-heavy dns-zone-rollback-simulation job (outside this reusable
+    # workflow) already `needs:` this whole full-setup-sims caller job, so it
+    # cannot run concurrently with this one either -- no separate
+    # cross-workflow needs edge is possible or required here.
+    name: setup.sh reset-to-last-known-good-config (DNS) simulation
+    needs: [compute-validation-network, setup-reset-kea-config-simulation]
+    if: >-
+      always() &&
+      inputs.should_run == 'true' &&
+      needs['compute-validation-network'].result != 'failure' &&
+      needs['compute-validation-network'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    env:
+      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
+      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
+      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
+      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
+      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
+      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
+      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
+      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
+      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
+      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
+      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Resolve build-tools image
+        # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
+        # preference, matching every other job in this suite.
+        id: build-tools-image
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
+            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
+          else
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run setup.sh reset-to-last-known-good-config (DNS) simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it -- same reasoning as setup-reset-kea-config-
+          # simulation above.
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-dns-config-simulation.sh

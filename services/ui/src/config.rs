@@ -33,19 +33,26 @@ pub enum HstsMode {
     Never,
 }
 
-// Which DHCP service, if any, this deployment runs -- mutually exclusive
-// with each other since both `Kea` and `DnsmasqProxy` bind DHCP port 67/udp.
-// `Disabled`: no DHCP here, the existing LAN router/DHCP server is
-// untouched. `Kea`: full DHCP server (isc-kea), this deployment owns
-// leases/reservations for the LAN. `DnsmasqProxy`: a proxy-DHCP relay that
-// runs *alongside* an existing DHCP server and only answers PXE/network-boot
-// clients -- it does not lease addresses or reliably replace DNS options for
-// ordinary clients (see docs/dhcp-modes.md).
+// Which DHCP service, if any, this deployment runs -- all mutually exclusive
+// since Kea, DnsmasqProxy, and DnsmasqRelay each bind DHCP port 67/udp (a
+// relay listens on 67 to receive client broadcasts). `Disabled`: no DHCP
+// here, the existing LAN router/DHCP server is untouched. `Kea`: full DHCP
+// server (isc-kea), this deployment owns leases/reservations for the LAN.
+// `DnsmasqProxy`: a proxy-DHCP helper that runs *alongside* an existing DHCP
+// server and only answers PXE/network-boot clients -- it does not lease
+// addresses or reliably replace DNS options for ordinary clients.
+// `DnsmasqRelay` (issue #844): a real DHCP relay that forwards every client's
+// DHCP request to an upstream DHCP server (which owns the whole lease) --
+// distinct from DnsmasqProxy and never combined with it. Both dnsmasq modes
+// run in the same `dhcp-proxy` container, which renders one config or the
+// other from DHCP_MODE (see services/dhcp-proxy/entrypoint.sh and
+// docs/dhcp-modes.md).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DhcpMode {
     Disabled,
     Kea,
     DnsmasqProxy,
+    DnsmasqRelay,
 }
 
 impl DhcpMode {
@@ -54,11 +61,26 @@ impl DhcpMode {
             Self::Disabled => "disabled",
             Self::Kea => "kea",
             Self::DnsmasqProxy => "dnsmasq-proxy",
+            Self::DnsmasqRelay => "dnsmasq-relay",
         }
     }
 
     pub fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
+    }
+
+    // True for either dnsmasq-backed mode (proxy or relay). Both run in the
+    // same `dhcp-proxy` container and share its config/UI surface, so callers
+    // that gate "is the dnsmasq DHCP container this deployment's DHCP" use
+    // this rather than testing the two variants separately.
+    pub fn is_dnsmasq(self) -> bool {
+        matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
+    }
+
+    // True only for the relay sub-mode (issue #844) -- used to render the
+    // relay-specific Admin UI panel and settings.
+    pub fn is_dnsmasq_relay(self) -> bool {
+        matches!(self, Self::DnsmasqRelay)
     }
 }
 
@@ -95,6 +117,7 @@ pub struct Config {
     pub dhcp_ntp_servers: String,
     pub dhcp_proxy_subnet_start: String,
     pub dhcp_upstream_dhcp_ip: String,
+    pub dhcp_relay_local_addr: String,
     pub dhcp_proxy_interface: String,
     pub dhcp_proxy_router: String,
     pub dhcp_proxy_domain: String,
@@ -195,6 +218,21 @@ pub struct Config {
     // have no persistent /data volume to read a generated one back from --
     // not intended for dev/prod, which use the file-based path instead.
     pub nats_issuer_seed: Option<String>,
+    // Where the auth-callout responder's static X25519 (curve) NKey seed is
+    // persisted (issue #682). Distinct keypair from nats_issuer_seed_path's
+    // Ed25519 signing identity: this one is used to decrypt (xkey "open") the
+    // nats-server-sealed `AuthorizationRequest` payload and re-encrypt (xkey
+    // "seal") the response, per the NATS auth-callout xkey spec -- see
+    // nats_auth_callout.rs's module docs for the full mechanism. Mirrors
+    // nats_issuer_seed_path's generate-on-first-run + 0600 persistence
+    // exactly. Ignored if nats_xkey_seed is set.
+    pub nats_xkey_seed_path: String,
+    // Optional literal seed value, taking precedence over nats_xkey_seed_path
+    // when set -- same rationale as nats_issuer_seed: deterministic
+    // deployments (e.g. deploy/full-setup's validation harness) with no
+    // persistent /data volume need a fixed, pre-known xkey baked into the
+    // auth_callout fragment ahead of time.
+    pub nats_xkey_seed: Option<String>,
     pub secondary_registration_token: String,
     pub lancache_image_registry: String,
     pub lancache_image_prefix: String,
@@ -253,6 +291,14 @@ pub struct Config {
     pub ntp_enabled: bool,
     pub ntp_upstream_servers: String,
     pub ntp_auto_dhcp: bool,
+    // Issue #870: path to watchdog.sh's STATUS_FILE, shared read-only via the
+    // `watchdog-status` named volume (see deploy/*/docker-compose.yml's `ui:`
+    // service). Defaults to the same path watchdog.sh itself defaults
+    // STATUS_FILE to, so a dev/prod/quickstart install that never overrides
+    // either variable still lines up without extra configuration. Read-only
+    // by design: the Admin UI is never a writer of this file, only watchdog
+    // is (see watchdog_status.rs's module doc comment).
+    pub watchdog_status_file: String,
 }
 
 // Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
@@ -282,6 +328,7 @@ impl fmt::Debug for Config {
             .field("dhcp_ntp_servers", &self.dhcp_ntp_servers)
             .field("dhcp_proxy_subnet_start", &self.dhcp_proxy_subnet_start)
             .field("dhcp_upstream_dhcp_ip", &self.dhcp_upstream_dhcp_ip)
+            .field("dhcp_relay_local_addr", &self.dhcp_relay_local_addr)
             .field("dhcp_proxy_interface", &self.dhcp_proxy_interface)
             .field("dhcp_proxy_router", &self.dhcp_proxy_router)
             .field("dhcp_proxy_domain", &self.dhcp_proxy_domain)
@@ -349,6 +396,11 @@ impl fmt::Debug for Config {
                 "nats_issuer_seed",
                 &self.nats_issuer_seed.as_ref().map(|_| "***REDACTED***"),
             )
+            .field("nats_xkey_seed_path", &self.nats_xkey_seed_path)
+            .field(
+                "nats_xkey_seed",
+                &self.nats_xkey_seed.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("secondary_registration_token", &"***REDACTED***")
             .field("lancache_image_registry", &self.lancache_image_registry)
             .field("lancache_image_prefix", &self.lancache_image_prefix)
@@ -367,6 +419,7 @@ impl fmt::Debug for Config {
             .field("ntp_enabled", &self.ntp_enabled)
             .field("ntp_upstream_servers", &self.ntp_upstream_servers)
             .field("ntp_auto_dhcp", &self.ntp_auto_dhcp)
+            .field("watchdog_status_file", &self.watchdog_status_file)
             .finish()
     }
 }
@@ -521,6 +574,14 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
     }
 
+    // The DHCP-relay-mode local address (issue #844): this relay's own IP on
+    // the client-facing network, forwarded as giaddr to UPSTREAM_DHCP_IP. Same
+    // env-default-then-UI-override resolution as every other dhcp-proxy field.
+    pub fn effective_dhcp_relay_local_addr(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_RELAY_LOCAL_ADDR")
+            .unwrap_or_else(|| self.dhcp_relay_local_addr.clone())
+    }
+
     // Issue #450: additional optional dnsmasq relay/proxy fields. All of
     // these ride the supplemental ProxyDHCP/PXE exchange, same as
     // DHCP_DNS_PRIMARY/SECONDARY above -- see docs/dhcp-modes.md and
@@ -645,6 +706,13 @@ impl Config {
         if !upstream_dhcp_ip.trim().is_empty() {
             lines.push(format!("UPSTREAM_DHCP_IP={}", upstream_dhcp_ip.trim()));
         }
+        let dhcp_relay_local_addr = self.effective_dhcp_relay_local_addr();
+        if !dhcp_relay_local_addr.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_RELAY_LOCAL_ADDR={}",
+                dhcp_relay_local_addr.trim()
+            ));
+        }
         let dhcp_ntp_servers = self.effective_dhcp_ntp_servers();
         if !dhcp_ntp_servers.trim().is_empty() {
             lines.push(format!("DHCP_NTP_SERVERS={}", dhcp_ntp_servers.trim()));
@@ -707,6 +775,7 @@ impl Config {
         let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "");
         let dhcp_proxy_subnet_start = env_str("DHCP_SUBNET_START", "");
         let dhcp_upstream_dhcp_ip = env_str("UPSTREAM_DHCP_IP", "");
+        let dhcp_relay_local_addr = env_str("DHCP_RELAY_LOCAL_ADDR", "");
         let dhcp_proxy_interface = env_str("DHCP_PROXY_INTERFACE", "");
         let dhcp_proxy_router = env_str("DHCP_PROXY_ROUTER", "");
         let dhcp_proxy_domain = env_str("DHCP_PROXY_DOMAIN", "");
@@ -744,6 +813,7 @@ impl Config {
             dhcp_ntp_servers,
             dhcp_proxy_subnet_start,
             dhcp_upstream_dhcp_ip,
+            dhcp_relay_local_addr,
             dhcp_proxy_interface,
             dhcp_proxy_router,
             dhcp_proxy_domain,
@@ -801,6 +871,11 @@ impl Config {
                 "/data/lancache-nats-issuer.seed",
             ),
             nats_issuer_seed: env_opt("NATS_ISSUER_SEED"),
+            nats_xkey_seed_path: env_str(
+                "NATS_XKEY_SEED_PATH",
+                "/data/lancache-nats-xkey.seed",
+            ),
+            nats_xkey_seed: env_opt("NATS_XKEY_SEED"),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             // Kept as separate fields so the UI can display the running
             // release/channel without reconstructing image references from
@@ -847,6 +922,9 @@ impl Config {
                 "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com",
             ),
             ntp_auto_dhcp: env_bool("NTP_AUTO_DHCP", false),
+            // Matches services/watchdog/watchdog.sh's own STATUS_FILE default
+            // exactly (see its `STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"`).
+            watchdog_status_file: env_str("WATCHDOG_STATUS_FILE", "/var/run/watchdog/status.json"),
         })
     }
 }
@@ -1041,6 +1119,7 @@ fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
         "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
+        "dnsmasq-relay" => DhcpMode::DnsmasqRelay,
         "disabled" => DhcpMode::Disabled,
         "" if legacy_enabled => DhcpMode::Kea,
         _ => DhcpMode::Disabled,
@@ -1465,6 +1544,14 @@ mod tests {
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::DnsmasqProxy
+        ));
+
+        // Issue #844: the relay mode is a distinct DHCP_MODE value, parsed as
+        // its own variant (not coerced to proxy or disabled).
+        env::set_var("DHCP_MODE", "dnsmasq-relay");
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::DnsmasqRelay
         ));
 
         env::set_var("DHCP_MODE", "kea");

@@ -1,13 +1,43 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! Main dashboard route displaying cache statistics and connection metrics.
 
-use crate::{config::DhcpMode, nginx_client, syslog_client, AppState};
+use crate::{config::DhcpMode, nginx_client, syslog_client, watchdog_status, AppState};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{Html, Json};
 use serde_json::json;
 use std::sync::Arc;
 use tera::Context;
+
+// Renders a watchdog_status::read_status() result into the plain JSON shape
+// both the initial dashboard() render and the polling watchdog_status_api()
+// endpoint share, so the two can never drift into different field names or
+// state-classification logic (Fresh/Stale/Unavailable) the way standard_status/
+// ssl_status briefly could have before being unified through one helper.
+// `state`/`age_seconds`/`stale_after_seconds` let dashboard.html render three
+// distinct visual states (see that template's own comment) instead of
+// collapsing "never wired up" and "was working, now stopped" into one
+// generic "unknown."
+fn watchdog_status_json(result: watchdog_status::WatchdogStatusReadResult) -> serde_json::Value {
+    match result {
+        watchdog_status::WatchdogStatusReadResult::Fresh(status) => json!({
+            "state": "fresh",
+            "updated": status.updated,
+            "services": watchdog_status::sorted_service_views(&status),
+            "disk": status.disk,
+        }),
+        watchdog_status::WatchdogStatusReadResult::Stale(status, age) => json!({
+            "state": "stale",
+            "updated": status.updated,
+            "age_seconds": age.as_secs(),
+            "services": watchdog_status::sorted_service_views(&status),
+            "disk": status.disk,
+        }),
+        watchdog_status::WatchdogStatusReadResult::Unavailable => json!({
+            "state": "unavailable",
+        }),
+    }
+}
 
 pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     let cfg = &state.config;
@@ -83,6 +113,19 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         }
     });
 
+    // Issue #870: per-service health/disk-usage "traffic light" data,
+    // read from watchdog.sh's status.json. Same spawn_blocking shape as the
+    // collectors above -- fs::metadata/fs::read_to_string are blocking calls.
+    // Unconditional (no syslog_enabled-style gate): unlike the syslog store,
+    // the watchdog-status volume mount is always present in
+    // deploy/*/docker-compose.yml, and a missing/stale file is itself a
+    // meaningful, always-worth-showing state (see watchdog_status.rs), not
+    // an opt-in feature with its own disabled-by-default toggle.
+    let watchdog_status_task = tokio::task::spawn_blocking({
+        let path = cfg.watchdog_status_file.clone();
+        move || watchdog_status::read_status(&path)
+    });
+
     let (
         standard_status,
         distinct_ssl_status,
@@ -91,6 +134,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         recent_logs_result,
         syslog_size_result,
         syslog_stats_result,
+        watchdog_status_result,
     ) = tokio::join!(
         standard_status_future,
         ssl_status_future,
@@ -99,6 +143,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         recent_logs_task,
         syslog_size_task,
         syslog_stats_task,
+        watchdog_status_task,
     );
     let ssl_status = if !cfg.ssl_enabled {
         None
@@ -112,6 +157,11 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let recent_logs = recent_logs_result.unwrap_or_default();
     let syslog_size_gb = syslog_size_result.unwrap_or(0.0);
     let syslog_stats = syslog_stats_result.unwrap_or_default();
+    // A JoinError here (the blocking task panicked) is treated the same as a
+    // missing/unreadable status.json -- Unavailable -- rather than failing
+    // the whole dashboard render over one optional health widget.
+    let watchdog_status =
+        watchdog_status_result.unwrap_or(watchdog_status::WatchdogStatusReadResult::Unavailable);
 
     // The percentage bar stays tied to cfg.cache_max_gb (the container's own
     // raw startup value, i.e. what nginx is ACTUALLY enforcing right now),
@@ -151,6 +201,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert("syslog_size_gb", &format!("{:.1}", syslog_size_gb));
     ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
     ctx.insert("syslog_stats", &syslog_stats);
+    ctx.insert("watchdog_status", &watchdog_status_json(watchdog_status));
     ctx.insert("active_page", "dashboard");
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
@@ -192,4 +243,83 @@ pub async fn metrics_api(State(state): State<Arc<AppState>>) -> Json<serde_json:
         "ssl_enabled": cfg.ssl_enabled,
         "ssl": ssl_status,
     }))
+}
+
+// Issue #870: cheap polling counterpart to the watchdog_status section of
+// dashboard()'s initial render, registered at GET /api/watchdog-status.
+// dashboard.html's own script polls this every 10s to keep the per-service
+// health indicators and disk-usage color live without a full page reload --
+// same pattern as metrics_api above, and reads the same small JSON file
+// rather than re-running dashboard()'s much heavier cache-size/log-parsing
+// collectors.
+pub async fn watchdog_status_api(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let path = state.config.watchdog_status_file.clone();
+    let result = tokio::task::spawn_blocking(move || watchdog_status::read_status(&path))
+        .await
+        .unwrap_or(watchdog_status::WatchdogStatusReadResult::Unavailable);
+    Json(watchdog_status_json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    fn sample_status() -> watchdog_status::WatchdogStatus {
+        let mut services = HashMap::new();
+        services.insert(
+            "lancache-proxy".to_string(),
+            watchdog_status::ServiceHealth {
+                status: "green".to_string(),
+                health: "healthy".to_string(),
+                failures: 0,
+            },
+        );
+        watchdog_status::WatchdogStatus {
+            updated: "2026-07-22T00:00:00Z".to_string(),
+            services,
+            disk: watchdog_status::DiskInfo {
+                cache: watchdog_status::DiskHealth {
+                    pct: 10,
+                    status: "green".to_string(),
+                },
+            },
+        }
+    }
+
+    // The dashboard template and the polling JS (dashboard.html) both branch
+    // on the literal "state" string -- if this ever silently changed (e.g. a
+    // typo introduced in a refactor), both would fall through to their
+    // default/unknown rendering without any test failing to explain why.
+    #[test]
+    fn watchdog_status_json_marks_fresh_state_and_includes_services() {
+        let value = watchdog_status_json(watchdog_status::WatchdogStatusReadResult::Fresh(
+            sample_status(),
+        ));
+        assert_eq!(value["state"], "fresh");
+        assert_eq!(value["services"][0]["name"], "lancache-proxy");
+        assert_eq!(value["disk"]["cache"]["pct"], 10);
+    }
+
+    #[test]
+    fn watchdog_status_json_marks_stale_state_and_includes_age() {
+        let value = watchdog_status_json(watchdog_status::WatchdogStatusReadResult::Stale(
+            sample_status(),
+            Duration::from_secs(120),
+        ));
+        assert_eq!(value["state"], "stale");
+        assert_eq!(value["age_seconds"], 120);
+    }
+
+    // Unavailable must carry no stale/misleading services/disk data at all --
+    // a caller checking only `state` (as dashboard.html's JS does) must never
+    // find leftover fields it could accidentally render.
+    #[test]
+    fn watchdog_status_json_unavailable_carries_no_service_data() {
+        let value = watchdog_status_json(watchdog_status::WatchdogStatusReadResult::Unavailable);
+        assert_eq!(value["state"], "unavailable");
+        assert!(value.get("services").is_none());
+        assert!(value.get("disk").is_none());
+    }
 }
