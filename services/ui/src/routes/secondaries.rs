@@ -25,11 +25,26 @@ use tera::Context;
 pub struct RegisterForm {
     pub token: String,
     pub name: String,
+    // #1084: the secondary self-reports its own DNS bind IP (setup.sh's
+    // detected `listen_ip`) so the primary can later health-probe it. Optional
+    // for backward compatibility with an older setup.sh that does not send it;
+    // validated as a private IPv4 before storage.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct RotateForm {
     pub token: String,
+}
+
+// #1084: manual address override, the fallback for when auto-detection can't
+// determine a usable probe target (NAT, non-standard network paths). Sent as a
+// JSON body by the Admin UI's fetch call; CSRF is enforced via the X-CSRF-Token
+// header (verify_csrf_header), matching rotate_token / remove_secondary.
+#[derive(Deserialize)]
+pub struct SetAddressForm {
+    pub address: String,
 }
 
 #[derive(Serialize)]
@@ -61,6 +76,10 @@ pub struct Secondary {
     pub consumer_name: String,
     pub registered_at: i64,
     pub last_seen: Option<i64>,
+    // #1084: the secondary's reachable DNS address (NULL until a registration
+    // reports one, or an operator sets it manually). The health-check UI shows
+    // it and probes it.
+    pub address: Option<String>,
 }
 
 // ─── Handlers ───
@@ -75,7 +94,7 @@ pub async fn secondaries_page(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let secondaries = db
-        .prepare("SELECT name, consumer_name, registered_at, last_seen FROM secondaries ORDER BY registered_at DESC")
+        .prepare("SELECT name, consumer_name, registered_at, last_seen, address FROM secondaries ORDER BY registered_at DESC")
         .and_then(|mut stmt| {
             stmt.query_map([], |row| {
                 Ok(Secondary {
@@ -83,6 +102,7 @@ pub async fn secondaries_page(
                     consumer_name: row.get(1)?,
                     registered_at: row.get(2)?,
                     last_seen: row.get(3)?,
+                    address: row.get(4)?,
                 })
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -180,12 +200,24 @@ pub async fn register_secondary(
     // returned exactly once, here, and never stored.
     let nats_user = form.name.clone();
     let nats_password = generate_nats_password();
-    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password);
+    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let consumer_name = form.name.clone();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
+
+    // #1084: the auto-detected probe address -- the secondary's self-reported
+    // bind IP, accepted only if it is a valid private (RFC1918) IPv4 (see
+    // dns_probe::parse_private_ipv4). None if not reported or not private, in
+    // which case any existing stored address (e.g. a manual override) is kept
+    // via the COALESCE below rather than wiped by this re-registration.
+    let reported_address: Option<String> = form
+        .address
+        .as_deref()
+        .and_then(crate::dns_probe::parse_private_ipv4)
+        .map(|ip| ip.to_string());
 
     // INSERT OR REPLACE INTO secondaries. `nats_token` is a vestigial NOT
     // NULL column from the pre-#583 shared-token model (see
@@ -198,9 +230,9 @@ pub async fn register_secondary(
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         db.execute(
-            "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, nats_user, nats_password_hash, registered_at, last_seen)
-             VALUES (?1, ?2, '', ?3, ?4, ?5, NULL)",
-            rusqlite::params![form.name, consumer_name, nats_user, nats_password_hash, now],
+            "INSERT OR REPLACE INTO secondaries (name, consumer_name, nats_token, nats_user, nats_password_hash, registered_at, last_seen, address)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, NULL, COALESCE(?6, (SELECT address FROM secondaries WHERE name = ?1)))",
+            rusqlite::params![form.name, consumer_name, nats_user, nats_password_hash, now, reported_address],
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -254,6 +286,107 @@ pub async fn remove_secondary(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+// #1084: manually set/override a secondary's probe address. The fallback when
+// auto-detection did not capture a usable address. Validated as a private
+// (RFC1918) IPv4 so it can never become an SSRF probe target.
+pub async fn set_secondary_address(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    axum::extract::Json(form): axum::extract::Json<SetAddressForm>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&headers)?;
+    let Some(addr) = crate::dns_probe::parse_private_ipv4(&form.address) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let rows_affected = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        db.execute(
+            "UPDATE secondaries SET address = ? WHERE name = ?",
+            rusqlite::params![addr.to_string(), name],
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    if rows_affected == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(
+        serde_json::json!({"ok": true, "address": addr.to_string()}),
+    ))
+}
+
+// #1084: active DNS health probe. Looks up the secondary's stored address and
+// sends a real `lan.` SOA query to it (see dns_probe), returning the classified
+// status as JSON for the Admin UI. On a healthy authoritative answer this is
+// the first and only writer of the `last_seen` column (previously always NULL),
+// giving it a real "observed answering at" meaning.
+pub async fn check_secondary_health(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::routes::verify_csrf_header(&headers)?;
+
+    // Read the stored address (and confirm the row exists) under the lock, then
+    // drop the lock before the network probe -- never hold the DB mutex across
+    // an await/IO.
+    let stored_address: Option<String> = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        match db.query_row(
+            "SELECT address FROM secondaries WHERE name = ?",
+            [&name],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(addr) => addr,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(StatusCode::NOT_FOUND),
+            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    };
+
+    let Some(addr) = stored_address
+        .as_deref()
+        .and_then(crate::dns_probe::parse_private_ipv4)
+    else {
+        // No usable stored address: report it as a status rather than an error,
+        // so the UI can prompt the operator to set one (the manual fallback).
+        return Ok(Json(serde_json::json!({
+            "status": "no_address",
+            "serial": serde_json::Value::Null,
+            "detail": "no reachable address on record for this secondary -- set one to enable the health check",
+        })));
+    };
+
+    // Prod secondaries serve DNS on the standard port 53 (the dev 5300 offset
+    // is a local-Windows-conflict workaround, not a secondary concern).
+    let result = crate::dns_probe::probe_secondary_soa(addr, 53).await;
+
+    // Only a genuinely healthy authoritative answer advances last_seen.
+    if result.status == "ok" {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if let Ok(db) = state.db.lock() {
+            let _ = db.execute(
+                "UPDATE secondaries SET last_seen = ? WHERE name = ?",
+                rusqlite::params![now, name],
+            );
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": result.status,
+        "serial": result.serial,
+        "detail": result.detail,
+    })))
+}
+
 pub async fn rotate_token(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -282,7 +415,8 @@ pub async fn rotate_token(
     // working the instant this commits -- no separate revocation step.
     let nats_user = name.clone();
     let nats_password = generate_nats_password();
-    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password);
+    let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let rows_affected = {
         let db = state
