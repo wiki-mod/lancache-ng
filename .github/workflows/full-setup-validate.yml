@@ -59,8 +59,9 @@ jobs:
     # services/dhcp-proxy on a dedicated, isolated Docker bridge network it
     # creates and destroys itself (never the full-setup-validate compose
     # project's network, and never a host interface), then drives a real,
-    # synthetically-crafted PXE client (scapy, since no off-the-shelf DHCP
-    # client can send a real PXE-tagged DHCPDISCOVER) against it for legacy
+    # synthetically-crafted PXE client (the Rust tools/pxe-client-probe
+    # binary, since no off-the-shelf DHCP client can send a real PXE-tagged
+    # DHCPDISCOVER) against it for legacy
     # BIOS and both covered UEFI architecture codes, asserting each receives
     # a DHCPOFFER carrying the operator-configured external PXE boot server
     # address, the architecture-appropriate boot filename, and the LanCache
@@ -89,12 +90,13 @@ jobs:
 
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
-        # dhcp-kea-lease-flow-simulation's own reasoning above:
-        # python3-scapy/tcpdump (added to tools/build-tools/Dockerfile in
-        # this same change) only exist on this branch, not yet in any
-        # published build-tools image. This workflow only ever runs via
-        # workflow_dispatch (event_name != pull_request), so
-        # select-build-tools-image.sh's trusted-ref path already always
+        # dhcp-kea-lease-flow-simulation's own reasoning above: this job runs
+        # this checkout's tools/build-tools/Dockerfile, which can differ from
+        # any already-published image (e.g. this branch dropped python3-scapy
+        # once the PXE probe was rewritten to Rust), so a fresh branch-local
+        # image reflects the Dockerfile actually under test. This workflow
+        # only ever runs via workflow_dispatch (event_name != pull_request),
+        # so select-build-tools-image.sh's trusted-ref path already always
         # builds a fresh branch-local image instead of trying the published
         # tag first.
         id: build-tools-image
