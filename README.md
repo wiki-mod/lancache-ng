@@ -5,6 +5,7 @@
 # lancache-ng
 
 [![Rust coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwiki-mod%2Flancache-ng%2Fbadges%2Fcoverage%2Frust-master.json)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml?query=branch%3Amaster)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
 LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.
 
@@ -1028,4 +1029,4 @@ Use SSL mode when:
 
 ## License
 
-MIT
+AGPL-3.0 — see [LICENSE](LICENSE). Chosen specifically because this project is a network server: the AGPL closes the "SaaS loophole" plain GPL leaves open, so anyone running a modified version of lancache-ng as a network service (not just distributing binaries) must also make that modified source available to the service's users.
