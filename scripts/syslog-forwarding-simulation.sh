@@ -783,7 +783,16 @@ if ! dhcp_offered_address="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/
 fi
 [[ -n "$dhcp_offered_address" ]] || { echo "::error::dhclient's lease file had no fixed-address field." >&2; exit 1; }
 echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC log line names this address verbatim)."
-assert_marker_reaches_ui "$dhcp_offered_address" "dhcp/Kea (DHCP4_LEASE_ALLOC log line naming the real leased address)"
+# Marker is "lease <address> has been allocated" (Kea's own DHCP4_LEASE_ALLOC
+# wording, confirmed live), not the bare address alone: a bare IPv4 address
+# substring-matches other real lines in the same log (e.g. the pool's own
+# end address ".100", or an unrelated subnet-declaration line) that would
+# make this assertion pass even if the real lease-allocation line itself
+# never arrived. Matching the surrounding wording proves the specific event
+# this trigger claims to prove, not merely that this address appears
+# somewhere in the log.
+dhcp_lease_marker="lease ${dhcp_offered_address} has been allocated"
+assert_marker_reaches_ui "$dhcp_lease_marker" "dhcp/Kea (DHCP4_LEASE_ALLOC log line naming the real leased address)"
 
 echo "== Trigger 8/8: dhcp-proxy (dnsmasq) -- real DHCPDISCOVER over the isolated dhcp-proxy-test-net; per-run-unique proxy-subnet startup marker =="
 # dnsmasq-proxy mode (RFC 4388 ProxyDHCP) only ever supplements PXE options

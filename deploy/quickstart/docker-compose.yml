@@ -422,11 +422,30 @@ services:
       # input near the end of this command (tag=fluent-bit.selflog)
       # re-ingests exactly that file and forwards it to syslog-ng, the same
       # single-destination trade-off already documented for dnsmasq/
-      # nats-server in the logging matrix (`docker logs` goes quiet). No
-      # feedback loop: fluent-bit's default Log_Level (info) does not log
-      # per-line tail-read activity, only startup/error/state-change
-      # events -- confirmed empirically, a live run produced a fixed ~16
-      # startup lines with no unbounded growth.
+      # nats-server in the logging matrix (`docker logs` goes quiet). Healthy
+      # steady state produces a fixed, small number of startup lines with no
+      # growth (confirmed empirically -- fluent-bit's default Log_Level,
+      # info, does not log per-line tail-read activity, only startup/error/
+      # state-change events).
+      #
+      # KNOWN LIMITATION, confirmed empirically, not yet fixed: while
+      # syslog-ng is unreachable, fluent-bit logs its own connection/flush
+      # retries at roughly one line per second (real measured rate, 5s flush
+      # interval), and since this file is itself tailed by the self-log
+      # input above, those retry lines feed back into the same output that
+      # is already failing, compounding the growth for as long as the
+      # outage lasts -- a real outage-driven amplification, not merely
+      # theoretical. Neither syslog-ng's own size-based rotation
+      # (`SYSLOG_MAX_FILE_MB`) nor watchdog's `maybe_prune_syslog`
+      # (`SYSLOG_MAX_GB`/`SYSLOG_RETENTION_DAYS`) bound this file: both
+      # operate on syslog-ng's own output tree (`logs-syslog-ng`), not on
+      # this container's own `/data` (`syslog-data`) volume. This file is
+      # therefore unbounded for the duration of any real syslog-ng outage.
+      # STATUS (as of this writing): documented here rather than fixed in
+      # the same change, since a proper fix (most likely extending
+      # watchdog's existing pruning to also cover this volume, or an
+      # equivalent size cap) needs its own design and idempotence testing
+      # rather than a rushed addition -- tracked as issue #1236.
       - -l
       - /data/fluent-bit.log
       - -i
