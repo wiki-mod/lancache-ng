@@ -210,9 +210,15 @@ wait_for_marker() {
     # duplicated inline copies. Scoped to current_dev's post-#1112 topology
     # only -- master and any archived vY.X.Z branch still predate #1112 and
     # keep the original inline-duplicated shape.
-    sims_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-sims.yml")"
-    deep_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-deep-validate.yml")"
-    validate_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-validate.yml")"
+    # `grep -c` exits 1 (while still printing "0") when a file has zero
+    # matches -- full-setup-validate.yml is expected to be exactly that case
+    # post-#1112, so `|| true` is required here to keep that a legitimate
+    # zero-count result instead of letting bats' errexit-like test execution
+    # abort the test right here, before the explicit `-eq 0` assertion below
+    # ever runs.
+    sims_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-sims.yml" || true)"
+    deep_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-deep-validate.yml" || true)"
+    validate_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-validate.yml" || true)"
     [ "$sims_count" -eq 1 ] || fail "full-setup-sims.yml: expected 1 quickstart_compose_lock_acquire call site (setup-cli-simulation), found $sims_count"
     [ "$deep_count" -eq 1 ] || fail "full-setup-deep-validate.yml: expected 1 quickstart_compose_lock_acquire call site (syslog-forwarding-simulation), found $deep_count"
     [ "$validate_count" -eq 0 ] || fail "full-setup-validate.yml: expected 0 quickstart_compose_lock_acquire call sites (it delegates entirely to full-setup-sims.yml), found $validate_count"
