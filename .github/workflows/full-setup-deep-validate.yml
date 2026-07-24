@@ -69,6 +69,20 @@ on:
   # this comment has always claimed it does.
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
+    # Issue #1203: same trigger-level docs-only skip as build-push.yml's own
+    # pull_request trigger (see that block's comment for the full
+    # rationale/evidence) -- this workflow's own job names (`plan deep
+    # validation`, `ensure PR staging images`, `full-setup simulations`,
+    # `DNS zone/record rollback simulation`,
+    # `Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation`,
+    # `Syslog forwarding + Admin UI visibility simulation`,
+    # `deep full-setup validation`) do NOT appear in master's or v0.2.0's
+    # required-status-checks list at all (confirmed via the GitHub API), so
+    # unlike build-push.yml this carries no branch-protection risk on any
+    # branch this workflow triggers for.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch:
     inputs:
       image_tag:

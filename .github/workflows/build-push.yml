@@ -50,6 +50,49 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
+    # Issue #1203: skip the ENTIRE workflow run (no job is ever scheduled, so
+    # none of them queue for a lancache-light runner slot at all) when every
+    # changed file is documentation. This is a TRIGGER-level filter, distinct
+    # from and additional to detect-changes'/ci_scope_policy's existing
+    # job-level `if:` scoping below -- that scoping can only skip work AFTER
+    # a job already started competing for a runner slot; it cannot stop the
+    # job from being scheduled and queued in the first place. Confirmed for
+    # real (#1203): detect-changes/validate-compose/file-headers themselves
+    # sat queued for 17+ minutes with no runner ever assigned
+    # (`runner_name: ""`) behind unrelated PRs' work, for a PR whose entire
+    # diff was one .md file -- the job-level skip inside detect-changes can
+    # never fire before detect-changes itself gets a runner.
+    #
+    # Pattern mirrors scripts/classify-image-impact.sh's own touches_docs()/
+    # docs_only definition (`*.md | docs/*`) for consistency with the
+    # job-level scoping this trigger-level filter sits alongside.
+    # `!CHANGELOG.md` keeps that one file un-ignored: scripts/
+    # check-changelog-direct-edit.sh (run inside this same workflow's
+    # `shellcheck` job) is a warn-only guard that specifically fires when a
+    # PR edits CHANGELOG.md directly outside the automated release flow --
+    # a blanket `**/*.md` exclude would silently skip the whole workflow (and
+    # so that warning) for a CHANGELOG-only PR.
+    #
+    # RISK, deliberately not resolved by this comment alone -- see the PR
+    # that introduced this block for the full writeup: `master` and `v0.2.0`
+    # both require several of this workflow's jobs via branch protection
+    # (`shellcheck`, `validate-compose`, `CI scope policy`,
+    # `file purpose headers`, `PR template validation`,
+    # `PR tracking metadata (labels/milestone/project)`, `coverage (Rust)`,
+    # `validate full-setup image`). `paths-ignore` cannot be scoped per
+    # target branch within one trigger block -- if this workflow run never
+    # starts at all for a doc-only PR opened DIRECTLY against master or
+    # v0.2.0, none of those required checks can ever report, and GitHub
+    # blocks that PR from merging forever ("Expected -- Waiting for status
+    # to be reported"), not just slowly. `current_dev` -- where #1186/#1189/
+    # #1196 and effectively all day-to-day PRs land -- has NO branch
+    # protection at all (confirmed via the GitHub API), so this is safe
+    # where the problem actually occurs; it is a real, accepted risk only
+    # for the rare direct-to-master/v0.2.0 release/hotfix path.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "!CHANGELOG.md"
     # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
     # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
     # the github.event.pull_request webhook snapshot for this run (see that job's
