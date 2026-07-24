@@ -104,7 +104,7 @@ jobs:
       ui: ${{ steps.plan.outputs.ui }}
       build_tools: ${{ steps.plan.outputs.build_tools }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # detect-full-setup-changes.sh diffs from the PR's real merge-base,
           # which needs full history (same reason build-push's detect-changes
@@ -151,7 +151,7 @@ jobs:
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
@@ -186,7 +186,7 @@ jobs:
       # untouched service from it. Same requirement, and same fix, as the
       # `plan` job's own fetch-depth: 0 checkout above (needed for
       # detect-full-setup-changes.sh's merge-base diff).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -194,7 +194,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -282,7 +282,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build full-setup validation image
         run: |
@@ -629,7 +629,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # BUILD_TOOLS_REQUIRE_PUBLISHED=true: this job's dig/curl client checks
         # only need tools already in every published build-tools image, so it
@@ -700,7 +700,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
@@ -769,7 +769,7 @@ jobs:
       needs['ensure-pr-staging-images'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: setup-cli-simulation.sh needs
         # `expect` from build-tools. On a PR that touched tools/build-tools,
@@ -855,7 +855,7 @@ jobs:
     if: always() && needs.plan.outputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: needs isc-dhcp-client from
         # build-tools. Same PR-staging-tag preference as setup-cli-simulation
@@ -916,7 +916,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
@@ -982,7 +982,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
@@ -1044,7 +1044,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this job's curl check only needs
         # tools already in every published build-tools image, matching
@@ -1112,7 +1112,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
@@ -1179,7 +1179,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
@@ -1236,7 +1236,7 @@ jobs:
       needs['ensure-pr-staging-images'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
         # setup.sh CLI fresh install, same reason setup-cli-simulation.sh
