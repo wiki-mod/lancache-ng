@@ -159,8 +159,8 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     // A JoinError here (the blocking task panicked) is treated the same as a
     // missing/unreadable status.json -- Unavailable -- rather than failing
     // the whole dashboard render over one optional health widget.
-    let watchdog_status = watchdog_status_result
-        .unwrap_or(watchdog_status::WatchdogStatusReadResult::Unavailable);
+    let watchdog_status =
+        watchdog_status_result.unwrap_or(watchdog_status::WatchdogStatusReadResult::Unavailable);
 
     let cache_pct = cache_usage_pct(cache_used_gb, cfg.cache_max_gb);
 
@@ -297,8 +297,7 @@ mod tests {
     // find leftover fields it could accidentally render.
     #[test]
     fn watchdog_status_json_unavailable_carries_no_service_data() {
-        let value =
-            watchdog_status_json(watchdog_status::WatchdogStatusReadResult::Unavailable);
+        let value = watchdog_status_json(watchdog_status::WatchdogStatusReadResult::Unavailable);
         assert_eq!(value["state"], "unavailable");
         assert!(value.get("services").is_none());
         assert!(value.get("disk").is_none());
