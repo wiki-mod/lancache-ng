@@ -945,6 +945,7 @@ async fn main() -> Result<()> {
         .route("/dhcp/mode", post(routes::dhcp::update_dhcp_mode))
         .route("/dhcp/ddns", post(routes::dhcp::update_dhcp_ddns))
         .route("/dhcp/proxy", post(routes::dhcp::update_dhcp_proxy))
+        .route("/dhcp/relay", post(routes::dhcp::update_dhcp_relay))
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
         .route("/dhcp/subnet/remove", post(routes::dhcp::remove_subnet))

@@ -19,6 +19,22 @@ if [ -f /data/lancache-ui-settings.env ]; then
     . /data/lancache-ui-settings.env
 fi
 
+# DHCP_MODE (issue #844): this dnsmasq container serves two mutually-exclusive
+# sub-modes, selected by the Admin-UI-persisted DHCP_MODE (written into
+# /data/lancache-ui-settings.env, sourced above). `dnsmasq-relay` forwards each
+# client's DHCP request to a real upstream DHCP server (which then owns the
+# whole lease and every option); anything else -- the historical default --
+# is ProxyDHCP/PXE mode. Both share this container, its `dnsmasq --test`
+# validation, and its known-good-snapshot rollback machinery; only the
+# rendered config differs (see the render branch further down).
+: "${DHCP_MODE:=}"
+# Relay mode's own required value: this relay's address on the client-facing
+# network. dnsmasq stamps it into the relayed packet's giaddr, which the
+# upstream server uses to select the pool. Empty renders an invalid
+# `dhcp-relay=,...` line that `dnsmasq --test` rejects (same fail-closed path
+# as an empty proxy value below).
+: "${DHCP_RELAY_LOCAL_ADDR:=}"
+
 # DHCP_SUBNET_START/DHCP_DNS_PRIMARY/UPSTREAM_DHCP_IP are required for a
 # *working* dnsmasq proxy config, but must NOT hard-exit here (":?" aborts
 # the script immediately, before the known-good snapshot rollback path
@@ -28,13 +44,22 @@ fi
 # ("bad dhcp-range"/"bad dhcp-proxy address", confirmed live), so the
 # existing validate-then-rollback flow already handles this correctly once
 # it's actually allowed to run.
-if [ -z "${DHCP_SUBNET_START:-}" ]; then
-    echo "WARNING: DHCP_SUBNET_START is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+if [ "$DHCP_MODE" = "dnsmasq-relay" ]; then
+    # Relay mode does not answer DHCP itself, so DHCP_SUBNET_START and the DNS
+    # options are meaningless here -- only DHCP_RELAY_LOCAL_ADDR (checked here)
+    # and UPSTREAM_DHCP_IP (checked below, required in both modes) matter.
+    if [ -z "${DHCP_RELAY_LOCAL_ADDR:-}" ]; then
+        echo "WARNING: DHCP_RELAY_LOCAL_ADDR is not set; the generated dnsmasq relay config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+    fi
+else
+    if [ -z "${DHCP_SUBNET_START:-}" ]; then
+        echo "WARNING: DHCP_SUBNET_START is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+    fi
+    if [ -z "${DHCP_DNS_PRIMARY:-}" ]; then
+        echo "WARNING: DHCP_DNS_PRIMARY is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
+    fi
+    : "${DHCP_DNS_SECONDARY:=$DHCP_DNS_PRIMARY}"
 fi
-if [ -z "${DHCP_DNS_PRIMARY:-}" ]; then
-    echo "WARNING: DHCP_DNS_PRIMARY is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
-fi
-: "${DHCP_DNS_SECONDARY:=$DHCP_DNS_PRIMARY}"
 if [ -z "${UPSTREAM_DHCP_IP:-}" ]; then
     echo "WARNING: UPSTREAM_DHCP_IP is not set; the generated dnsmasq config will fail validation and this will attempt rollback to a known-good snapshot instead." >&2
 fi
@@ -161,6 +186,7 @@ fi
 : "${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:=}"
 
 export DHCP_SUBNET_START DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY UPSTREAM_DHCP_IP
+export DHCP_RELAY_LOCAL_ADDR
 export DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN
 export DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS
 export DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
@@ -382,7 +408,16 @@ kgs_snapshot_apply() {
 }
 # END known-good-snapshot library
 
-envsubst < /etc/dnsmasq.conf.template > /etc/dnsmasq.conf
+# Render the config for the active mode (issue #844). Relay mode uses its own
+# template and appends none of the ProxyDHCP optional/PXE directives below;
+# ProxyDHCP mode keeps the exact existing render path (template + optional +
+# pxe-service directives), so its behavior and the bats suites covering it are
+# unchanged.
+if [ "$DHCP_MODE" = "dnsmasq-relay" ]; then
+    envsubst < /etc/dnsmasq-relay.conf.template > /etc/dnsmasq.conf
+else
+    envsubst < /etc/dnsmasq.conf.template > /etc/dnsmasq.conf
+fi
 
 # _dhcp_proxy_render_optional_directives <dest_conf>
 #
@@ -631,8 +666,12 @@ _dhcp_proxy_render_pxe_service_directives() {
     fi
 }
 
-_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf
-_dhcp_proxy_render_pxe_service_directives /etc/dnsmasq.conf
+# ProxyDHCP-only: the #450 optional directives and #705 PXE boot-pointers ride
+# the supplemental ProxyDHCP/PXE exchange, which relay mode does not perform.
+if [ "$DHCP_MODE" != "dnsmasq-relay" ]; then
+    _dhcp_proxy_render_optional_directives /etc/dnsmasq.conf
+    _dhcp_proxy_render_pxe_service_directives /etc/dnsmasq.conf
+fi
 
 # _dhcp_proxy_validate_snapshot_or_rollback <file...>
 # Factored into its own function (rather than inline top-level script code)
@@ -671,5 +710,9 @@ _dhcp_proxy_validate_snapshot_or_rollback() {
 DHCP_PROXY_CANDIDATE_FILES=(/etc/dnsmasq.conf)
 _dhcp_proxy_validate_snapshot_or_rollback "${DHCP_PROXY_CANDIDATE_FILES[@]}" || exit 1
 
-echo "Starting dnsmasq DHCP proxy (subnet: $DHCP_SUBNET_START, DNS: $DHCP_DNS_PRIMARY, $DHCP_DNS_SECONDARY)..."
+if [ "$DHCP_MODE" = "dnsmasq-relay" ]; then
+    echo "Starting dnsmasq in DHCP-relay mode (relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP})..."
+else
+    echo "Starting dnsmasq DHCP proxy (subnet: $DHCP_SUBNET_START, DNS: $DHCP_DNS_PRIMARY, $DHCP_DNS_SECONDARY)..."
+fi
 exec dnsmasq -k -C /etc/dnsmasq.conf

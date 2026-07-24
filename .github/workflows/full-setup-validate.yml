@@ -112,6 +112,37 @@ jobs:
           set -euo pipefail
           bash scripts/dhcp-proxy-pxe-simulation.sh
 
+  dhcp-relay-flow-simulation:
+    # Real DHCP-relay behavior test for our own dnsmasq-relay mode (issue
+    # #844). Builds a throwaway relay container from THIS checkout's
+    # services/dhcp-proxy (DHCP_MODE=dnsmasq-relay), a throwaway upstream
+    # dnsmasq DHCP server, and a throwaway dhclient client, across TWO
+    # dedicated, isolated Docker bridge networks it creates and destroys
+    # itself (never the full-setup-validate compose project's network, never a
+    # host interface). The two-segment topology is deliberate: the client has
+    # no direct path to the upstream, so the upstream receiving the client's
+    # DISCOVER and offering an address from the CLIENT subnet pool is only
+    # possible if the relay genuinely forwarded the request across the segment
+    # boundary with the correct giaddr. See scripts/dhcp-relay-flow-
+    # simulation.sh's own header and docs/dhcp-modes.md for exactly what is and
+    # is not verified (the offer's return leg to the client, which depends on
+    # inter-bridge routing, is deliberately not what the assertion rests on).
+    #
+    # Self-contained (its own networks/containers, needs no published image
+    # and no build-tools image); chained after dhcp-proxy-pxe-simulation only
+    # to keep this workflow's jobs running one at a time on the shared runner,
+    # matching the sibling DHCP sims' own rationale.
+    name: DHCP relay flow simulation
+    needs: dhcp-proxy-pxe-simulation
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Run DHCP relay flow simulation
+        run: |
+          set -euo pipefail
+          bash scripts/dhcp-relay-flow-simulation.sh
+
   dhcp-kea-ctrl-agent-mutation-simulation:
     # Real Kea Control Agent mutation round-trip (issue #634): the sibling
     # dhcp-kea-lease-flow-simulation job above proves our Kea service hands
@@ -133,7 +164,7 @@ jobs:
     # standalone Kea container itself, tearing all of them down again), so
     # like dhcp-kea-lease-flow-simulation it does not need to chain after the
     # earlier jobs for IP-collision reasons -- chained after
-    # nats-auth-callout-simulation (the current last job in this workflow's
+    # dhcp-relay-flow-simulation (the current last job in this workflow's
     # serial chain) anyway simply to keep every job running one at a time on
     # the shared self-hosted runner tier rather than introducing new
     # concurrency here.
@@ -150,7 +181,7 @@ jobs:
     # its siblings use, so wrapping it here is sufficient -- no separate
     # per-job env threading is needed, the wrapper supplies the complete set.
     name: DHCP Kea Control Agent mutation simulation
-    needs: [full-setup-sims, dhcp-proxy-pxe-simulation]
+    needs: [full-setup-sims, dhcp-relay-flow-simulation]
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     steps:

@@ -261,11 +261,14 @@ is_valid_cidr() {
     return 0
 }
 
-# Enumerates the only three DHCP_MODE values setup.sh understands: DHCP off,
-# our own Kea server, or dnsmasq acting as a proxy-DHCP helper for PXE.
+# Enumerates the only DHCP_MODE values setup.sh understands: DHCP off, our own
+# Kea server, dnsmasq acting as a proxy-DHCP helper for PXE, or dnsmasq acting
+# as a real DHCP relay to an upstream server (issue #844). Both dnsmasq modes
+# run in the same `dhcp-proxy` container/profile; DHCP_MODE is what tells them
+# apart.
 is_valid_dhcp_mode() {
     case "$1" in
-        disabled|kea|dnsmasq-proxy) return 0 ;;
+        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -325,7 +328,12 @@ compose_profiles_for_runtime() {
             [[ -n "$result" ]] && result+=","
             result+="dhcp-kea"
             ;;
-        dnsmasq-proxy)
+        dnsmasq-proxy|dnsmasq-relay)
+            # Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in
+            # the same `dhcp-proxy` compose service, so they map to the same
+            # profile; the container reads DHCP_MODE to render the matching
+            # config. The strip loop above already removes `dhcp-proxy` from
+            # `existing`, so mutual exclusion with dhcp-kea still holds.
             [[ -n "$result" ]] && result+=","
             result+="dhcp-proxy"
             ;;
@@ -2679,6 +2687,10 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
+    # forwarded as giaddr). Required in dnsmasq-relay mode, ignored otherwise.
+    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "" "$env_file"
+    dhcp_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$env_file")
     # Issue #450: additional optional dnsmasq relay/proxy fields. Unlike the
     # four values above, none of these are required in dnsmasq-proxy mode --
     # an empty value just means entrypoint.sh renders no directive for it.
@@ -2731,6 +2743,16 @@ migrate_env_for_update() {
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             ;;
+        dnsmasq-relay)
+            # Issue #844: relay mode forwards to an upstream server and injects
+            # nothing of its own, so the only two required values are this
+            # relay's client-facing address (giaddr source) and the upstream
+            # server -- NOT the ProxyDHCP subnet/DNS fields.
+            is_valid_ipv4 "$dhcp_relay_local_addr" \
+                || die "DHCP_MODE=dnsmasq-relay requires DHCP_RELAY_LOCAL_ADDR (this relay's own IPv4 on the client network) in $env_file. Set it, then rerun setup.sh update."
+            is_valid_ipv4 "$upstream_dhcp_ip" \
+                || die "DHCP_MODE=dnsmasq-relay requires the upstream DHCP server IPv4 in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
+            ;;
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
             is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
@@ -2743,6 +2765,7 @@ migrate_env_for_update() {
     set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
     set_env_key DHCP_DNS_SECONDARY "$dhcp_dns_secondary" "$env_file"
     set_env_key UPSTREAM_DHCP_IP "$upstream_dhcp_ip" "$env_file"
+    set_env_key DHCP_RELAY_LOCAL_ADDR "$dhcp_relay_local_addr" "$env_file"
     set_env_key DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" "$env_file"
     set_env_key DHCP_PROXY_ROUTER "$dhcp_proxy_router" "$env_file"
     set_env_key DHCP_NTP_SERVERS "$dhcp_ntp_servers" "$env_file"
@@ -5895,10 +5918,11 @@ print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
 printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
+printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (relay only; injects nothing of its own)\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
-    ask "DHCP mode (disabled, kea, dnsmasq-proxy)" "disabled"
+    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "disabled"
     DHCP_MODE="${REPLY,,}"
     if is_valid_dhcp_mode "$DHCP_MODE"; then
         break
@@ -5916,6 +5940,8 @@ DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_STANDARD"
 DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
+# Issue #844: relay-mode local address, empty unless dnsmasq-relay is chosen.
+DHCP_RELAY_LOCAL_ADDR=""
 # Issue #450: additional optional dnsmasq relay/proxy fields, all left empty
 # unless the operator opts in below.
 DHCP_PROXY_INTERFACE=""
@@ -6085,6 +6111,28 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     fi
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
+elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
+    # Issue #844: real DHCP relay. Only two values matter -- this relay's own
+    # client-facing address (forwarded as giaddr) and the upstream server it
+    # relays to. No subnet/DNS/PXE prompts: a relay injects nothing of its own.
+    print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
+    print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
+
+    while true; do
+        ask "This relay's own IP on the client-facing network (giaddr)" ""
+        DHCP_RELAY_LOCAL_ADDR="$REPLY"
+        is_valid_ipv4 "$DHCP_RELAY_LOCAL_ADDR" && break
+        print_error "Invalid IPv4 address: $DHCP_RELAY_LOCAL_ADDR"
+    done
+
+    while true; do
+        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
+        UPSTREAM_DHCP_IP="$REPLY"
+        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
+        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
+    done
+
+    print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP}"
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
@@ -6228,6 +6276,7 @@ validate_env_values_for_initial_write \
     "DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}" \
     "DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}" \
     "UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}" \
+    "DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}" \
     "DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}" \
     "DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER}" \
     "DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS}" \
@@ -6320,6 +6369,9 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
+# Issue #844: DHCP-relay-mode local address (giaddr source). Empty unless
+# DHCP_MODE=dnsmasq-relay; see docs/dhcp-modes.md.
+DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}
 
 # Issue #450: additional optional dnsmasq relay/proxy options, all empty by
 # default. Delivered only via the supplemental ProxyDHCP/PXE exchange to

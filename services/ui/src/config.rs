@@ -33,19 +33,26 @@ pub enum HstsMode {
     Never,
 }
 
-// Which DHCP service, if any, this deployment runs -- mutually exclusive
-// with each other since both `Kea` and `DnsmasqProxy` bind DHCP port 67/udp.
-// `Disabled`: no DHCP here, the existing LAN router/DHCP server is
-// untouched. `Kea`: full DHCP server (isc-kea), this deployment owns
-// leases/reservations for the LAN. `DnsmasqProxy`: a proxy-DHCP relay that
-// runs *alongside* an existing DHCP server and only answers PXE/network-boot
-// clients -- it does not lease addresses or reliably replace DNS options for
-// ordinary clients (see docs/dhcp-modes.md).
+// Which DHCP service, if any, this deployment runs -- all mutually exclusive
+// since Kea, DnsmasqProxy, and DnsmasqRelay each bind DHCP port 67/udp (a
+// relay listens on 67 to receive client broadcasts). `Disabled`: no DHCP
+// here, the existing LAN router/DHCP server is untouched. `Kea`: full DHCP
+// server (isc-kea), this deployment owns leases/reservations for the LAN.
+// `DnsmasqProxy`: a proxy-DHCP helper that runs *alongside* an existing DHCP
+// server and only answers PXE/network-boot clients -- it does not lease
+// addresses or reliably replace DNS options for ordinary clients.
+// `DnsmasqRelay` (issue #844): a real DHCP relay that forwards every client's
+// DHCP request to an upstream DHCP server (which owns the whole lease) --
+// distinct from DnsmasqProxy and never combined with it. Both dnsmasq modes
+// run in the same `dhcp-proxy` container, which renders one config or the
+// other from DHCP_MODE (see services/dhcp-proxy/entrypoint.sh and
+// docs/dhcp-modes.md).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DhcpMode {
     Disabled,
     Kea,
     DnsmasqProxy,
+    DnsmasqRelay,
 }
 
 impl DhcpMode {
@@ -54,11 +61,26 @@ impl DhcpMode {
             Self::Disabled => "disabled",
             Self::Kea => "kea",
             Self::DnsmasqProxy => "dnsmasq-proxy",
+            Self::DnsmasqRelay => "dnsmasq-relay",
         }
     }
 
     pub fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
+    }
+
+    // True for either dnsmasq-backed mode (proxy or relay). Both run in the
+    // same `dhcp-proxy` container and share its config/UI surface, so callers
+    // that gate "is the dnsmasq DHCP container this deployment's DHCP" use
+    // this rather than testing the two variants separately.
+    pub fn is_dnsmasq(self) -> bool {
+        matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
+    }
+
+    // True only for the relay sub-mode (issue #844) -- used to render the
+    // relay-specific Admin UI panel and settings.
+    pub fn is_dnsmasq_relay(self) -> bool {
+        matches!(self, Self::DnsmasqRelay)
     }
 }
 
@@ -95,6 +117,7 @@ pub struct Config {
     pub dhcp_ntp_servers: String,
     pub dhcp_proxy_subnet_start: String,
     pub dhcp_upstream_dhcp_ip: String,
+    pub dhcp_relay_local_addr: String,
     pub dhcp_proxy_interface: String,
     pub dhcp_proxy_router: String,
     pub dhcp_proxy_domain: String,
@@ -282,6 +305,7 @@ impl fmt::Debug for Config {
             .field("dhcp_ntp_servers", &self.dhcp_ntp_servers)
             .field("dhcp_proxy_subnet_start", &self.dhcp_proxy_subnet_start)
             .field("dhcp_upstream_dhcp_ip", &self.dhcp_upstream_dhcp_ip)
+            .field("dhcp_relay_local_addr", &self.dhcp_relay_local_addr)
             .field("dhcp_proxy_interface", &self.dhcp_proxy_interface)
             .field("dhcp_proxy_router", &self.dhcp_proxy_router)
             .field("dhcp_proxy_domain", &self.dhcp_proxy_domain)
@@ -521,6 +545,14 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
     }
 
+    // The DHCP-relay-mode local address (issue #844): this relay's own IP on
+    // the client-facing network, forwarded as giaddr to UPSTREAM_DHCP_IP. Same
+    // env-default-then-UI-override resolution as every other dhcp-proxy field.
+    pub fn effective_dhcp_relay_local_addr(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_RELAY_LOCAL_ADDR")
+            .unwrap_or_else(|| self.dhcp_relay_local_addr.clone())
+    }
+
     // Issue #450: additional optional dnsmasq relay/proxy fields. All of
     // these ride the supplemental ProxyDHCP/PXE exchange, same as
     // DHCP_DNS_PRIMARY/SECONDARY above -- see docs/dhcp-modes.md and
@@ -624,6 +656,13 @@ impl Config {
         if !upstream_dhcp_ip.trim().is_empty() {
             lines.push(format!("UPSTREAM_DHCP_IP={}", upstream_dhcp_ip.trim()));
         }
+        let dhcp_relay_local_addr = self.effective_dhcp_relay_local_addr();
+        if !dhcp_relay_local_addr.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_RELAY_LOCAL_ADDR={}",
+                dhcp_relay_local_addr.trim()
+            ));
+        }
         let dhcp_ntp_servers = self.effective_dhcp_ntp_servers();
         if !dhcp_ntp_servers.trim().is_empty() {
             lines.push(format!("DHCP_NTP_SERVERS={}", dhcp_ntp_servers.trim()));
@@ -686,6 +725,7 @@ impl Config {
         let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "");
         let dhcp_proxy_subnet_start = env_str("DHCP_SUBNET_START", "");
         let dhcp_upstream_dhcp_ip = env_str("UPSTREAM_DHCP_IP", "");
+        let dhcp_relay_local_addr = env_str("DHCP_RELAY_LOCAL_ADDR", "");
         let dhcp_proxy_interface = env_str("DHCP_PROXY_INTERFACE", "");
         let dhcp_proxy_router = env_str("DHCP_PROXY_ROUTER", "");
         let dhcp_proxy_domain = env_str("DHCP_PROXY_DOMAIN", "");
@@ -723,6 +763,7 @@ impl Config {
             dhcp_ntp_servers,
             dhcp_proxy_subnet_start,
             dhcp_upstream_dhcp_ip,
+            dhcp_relay_local_addr,
             dhcp_proxy_interface,
             dhcp_proxy_router,
             dhcp_proxy_domain,
@@ -1020,6 +1061,7 @@ fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
         "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
+        "dnsmasq-relay" => DhcpMode::DnsmasqRelay,
         "disabled" => DhcpMode::Disabled,
         "" if legacy_enabled => DhcpMode::Kea,
         _ => DhcpMode::Disabled,
@@ -1410,6 +1452,14 @@ mod tests {
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::DnsmasqProxy
+        ));
+
+        // Issue #844: the relay mode is a distinct DHCP_MODE value, parsed as
+        // its own variant (not coerced to proxy or disabled).
+        env::set_var("DHCP_MODE", "dnsmasq-relay");
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::DnsmasqRelay
         ));
 
         env::set_var("DHCP_MODE", "kea");
