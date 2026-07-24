@@ -101,10 +101,13 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 digests:
 
 The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
-for Debian runtime bases, including `services/ui/Dockerfile`. This is a
+as the pull source for their runtime bases (Debian for most services;
+`services/dhcp-proxy/Dockerfile` moved to an Alpine base as of issue #815's
+staged Alpine migration), including `services/ui/Dockerfile`. This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
 the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
-configured pull source for these public Docker Hub bases. If Google evicts a
+configured pull source for these public Docker Hub bases, whichever
+distribution a given service's base image happens to be. If Google evicts a
 cached digest and a build can no longer pull it, the build must fail closed and
 the base reference must be refreshed in a reviewed PR; Dockerfiles must not
 carry a second fallback `FROM` path because Dockerfile syntax cannot express a
@@ -116,7 +119,7 @@ undocumented per-Dockerfile fallback logic.
 - `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
+- `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
 - `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 
