@@ -238,20 +238,25 @@ or restart any of those five itself.
 **Disk monitoring:**
 - `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
   color and writes it into `status.json` every 30 seconds, monitoring actual
-  disk usage, not just nginx `max_size` -- but, same gap as "Status" above,
-  nothing in the Admin UI reads or renders that file, so this warning/alarm
-  is not currently operator-visible in the UI (see #849 observability
-  finding #3). The dashboard's own cache-usage bar (`cache_pct` in
-  `services/ui/src/routes/dashboard.rs`) is a separate, independently
-  computed value (used cache bytes vs. `CACHE_MAX_GB`), not this disk-usage
-  color.
+  disk usage, not just nginx `max_size`. Since issue #870, the Admin UI's
+  dashboard reads this file (`services/ui/src/watchdog_status.rs`) and
+  renders the color in the "Service health" card's "Cache disk" indicator,
+  polling `GET /api/watchdog-status` every 10 seconds to stay live -- this
+  closes #849 observability finding #3. The dashboard's own cache-usage bar
+  (`cache_pct` in `services/ui/src/routes/dashboard.rs`) remains a separate,
+  independently computed value (used cache bytes vs. `CACHE_MAX_GB`), not
+  this disk-usage color.
 
 **Status:** `watchdog.sh` computes per-service health and disk-usage color
-(green/yellow/red) into `status.json` every 30 seconds, but nothing in the
-Admin UI (`services/ui/src/routes/dashboard.rs`, `templates/dashboard.html`)
-reads or renders that file as of this writing -- there is no per-service
-"traffic light" indicator in the UI today. Treat this as unfinished Admin UI
-delivery, not a shipped feature (see "Feature Completeness" in `AGENTS.md`).
+(green/yellow/red) into `status.json` every 30 seconds. Since issue #870,
+the Admin UI (`services/ui/src/routes/dashboard.rs`,
+`services/ui/src/watchdog_status.rs`, `templates/dashboard.html`) reads and
+renders that file as a per-service "traffic light" indicator in the
+dashboard's "Service health" card, sharing `status.json` via the
+`watchdog-status` named volume (mounted read-only into the `ui` container --
+see `deploy/*/docker-compose.yml`'s `ui:` service). A missing or stale
+`status.json` (watchdog not running, or crashed) renders as an explicit
+"unavailable"/"stale" state rather than a silently frozen last-known color.
 
 ## syslog-ng
 
@@ -334,9 +339,10 @@ Epic / GOG: not supported.
 - Netdata integrated (proxy via `/api/netdata`)
 - Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
 - Dashboard: cache fill level, hit/miss rate, active connections
-- Watchdog per-service traffic light bar: **not yet implemented** -- `watchdog.sh`
-  computes the underlying `status.json` state, but the Admin UI does not read
-  or render it (see the "Status" note under Watchdog above)
+- Watchdog per-service traffic light bar: one indicator per service
+  (green/yellow/red) plus a cache-disk usage indicator, persistently visible
+  in the dashboard's "Service health" card, live-polled every 10 seconds
+  (issue #870; see the "Status" note under Watchdog above)
 
 ## Admin UI
 
