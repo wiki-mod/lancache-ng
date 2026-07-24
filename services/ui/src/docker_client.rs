@@ -78,6 +78,7 @@ pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
         "dhcp-proxy" | "lancache-dhcp-proxy" => Ok("lancache-dhcp-proxy"),
         "dhcp-probe" | "lancache-dhcp-probe" => Ok("lancache-dhcp-probe"),
         "nats" | "lancache-nats" => Ok("lancache-nats"),
+        "ntp" | "lancache-ntp" => Ok("lancache-ntp"),
         _ => anyhow::bail!(
             "Docker service '{}' is not in the lancache-ng socket-proxy allowlist",
             service_name

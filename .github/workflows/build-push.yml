@@ -185,6 +185,7 @@ jobs:
       watchdog: ${{ steps.filter.outputs.watchdog }}
       dhcp: ${{ steps.filter.outputs.dhcp }}
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
+      ntp: ${{ steps.filter.outputs.ntp }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       workflow: ${{ steps.filter.outputs.workflow }}
@@ -4214,6 +4215,13 @@ jobs:
             platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+            platform: linux/amd64
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -4262,6 +4270,13 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
             platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4878,6 +4893,10 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -4912,6 +4931,7 @@ jobs:
               watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5590,6 +5610,10 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5624,6 +5648,7 @@ jobs:
               watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5938,7 +5963,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
 
@@ -5959,6 +5984,7 @@ jobs:
             [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
             [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
@@ -6054,7 +6080,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -6161,6 +6187,15 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest }}
 
+      - name: Attest ntp merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.ntp_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/ntp
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.ntp_digest }}
+
       - name: Attest ui merged manifest provenance
         if: steps.create-trusted-manifests.outputs.ui_digest != ''
         uses: ./.github/actions/ghcr-attest-retry
@@ -6227,6 +6262,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
+
+      - name: Attest ntp PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.ntp_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/ntp
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.ntp_digest }}
 
       - name: Attest ui PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.ui_digest != ''
@@ -6414,7 +6458,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
@@ -6865,7 +6909,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -6905,7 +6949,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false

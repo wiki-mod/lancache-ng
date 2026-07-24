@@ -63,6 +63,7 @@ on:
       - "services/dns/**"
       - "services/dhcp/**"
       - "services/dhcp-proxy/**"
+      - "services/ntp/**"
       - "services/proxy/**"
       - "services/watchdog/**"
       - "services/ui/dhcp-probe.sh"
@@ -110,6 +111,7 @@ on:
       - "services/dns/**"
       - "services/dhcp/**"
       - "services/dhcp-proxy/**"
+      - "services/ntp/**"
       - "services/proxy/**"
       - "services/watchdog/**"
       - "services/ui/dhcp-probe.sh"
@@ -183,7 +185,7 @@ jobs:
       # every other test-only path below (scripts/check-idempotence-test-
       # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries,
       # services/dns/**, services/dhcp/**, services/dhcp-proxy/**,
-      # services/proxy/**, services/watchdog/**, services/ui/dhcp-probe.sh,
+      # services/ntp/**, services/proxy/**, services/watchdog/**, services/ui/dhcp-probe.sh,
       # services/ui/docker-entrypoint.sh, and the deploy/*/docker-compose.yml
       # files) are in this workflow's path filter so the local smoke-test/
       # Bats/ShellSpec steps below actually run when one of those changes --

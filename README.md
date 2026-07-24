@@ -19,7 +19,7 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional scheduled automatic updates, and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
@@ -38,6 +38,7 @@ LanCache NG combines several services into one Docker based stack:
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
+  - optional LanCache-NG-NTP server (chrony), disciplined against public NTP servers, serving LAN clients on UDP/123, with an opt-in DHCP auto-populate toggle
   - optional scheduled automatic updates (ordered, health-gated, Admin UI last)
   - optional watchdog and convergence checks
   - optional secondary DNS nodes synced through NATS
@@ -483,6 +484,21 @@ See [docs/dhcp-modes.md](docs/dhcp-modes.md) for when to use each mode, what is
 not available in `dnsmasq-proxy` mode, how to set the upstream DHCP IP, and how
 to verify clients actually receive the LanCache NG DNS servers.
 
+## Optional NTP
+
+LanCache-NG-NTP is a small, self-contained NTP server (chrony) you can enable
+from the Admin UI's NTP page. It disciplines its own clock against a curated
+set of public NTP servers (never operating as a standalone/undisciplined time
+source) and serves that time to LAN clients on `123/udp`. The upstream server
+list is editable from the same page.
+
+A separate "auto-set this as the DHCP NTP server" toggle, off by default, only
+takes effect when both LanCache-NG-NTP and the Kea DHCP server are enabled: it
+pushes this container's LAN address into Kea's `ntp-servers` DHCP option for
+every subnet, so clients no longer need a manually-typed third-party NTP
+server address. Turning the container on does not enable this by itself —
+the DHCP auto-populate toggle is always a separate, explicit choice.
+
 ## Admin UI
 
 The Admin UI is available after setup:
@@ -500,6 +516,7 @@ The Admin UI can be used for:
 - domain management
 - LAN DNS records
 - DHCP leases
+- NTP settings
 - settings
 - secondary DNS management
 
@@ -871,6 +888,7 @@ If SSL mode is enabled, the container requires a second usable LAN IPs.
 | `8080` | TCP | Admin UI |
 | `67` | UDP | optional DHCP server |
 | `8000` | TCP | optional Kea control agent |
+| `123` | UDP | optional LanCache-NG-NTP server |
 
 Keep these ports inside your LAN.  
 Do not expose them directly to the internet.
@@ -891,6 +909,7 @@ services/ui/             Admin UI
 services/watchdog/       Watchdog service
 services/dhcp/           Kea DHCP service
 services/dhcp-proxy/     DHCP proxy service
+services/ntp/            LanCache-NG-NTP (chrony) service
 services/nats/           NATS sync service
 certs/                   Generated or mounted certificates
 ```

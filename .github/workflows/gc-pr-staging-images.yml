@@ -85,7 +85,7 @@ jobs:
           # (see #626's build-job change), so they need reaping too.
           # build-tools is included: full-setup-validate's client-simulation
           # step pulls it at the PR staging tag as well.
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
 
           declare -A pr_state_cache=()
 
