@@ -98,11 +98,12 @@ validation_subnet_derive_octet() {
     decimal=$((16#$digest))
 
     # Reserve the third octet of 172.30.0.0/16 as the per-run pool. 0 and 1
-    # are excluded outright; 28 is deploy/dev's docker-compose subnet
-    # (172.28.0.0/16, see deploy/dev/docker-compose.yml) so a derived run
-    # can never reproduce that unrelated network's third octet; 99 was the
-    # old fixed value, kept excluded so a derived pool stays visibly
-    # distinct from the previous hardcoded default.
+    # are excluded outright; 28 was `deploy/dev`'s docker-compose subnet
+    # (172.28.0.0/16) before that environment was retired in v0.3.0 (#766) --
+    # kept excluded as a harmless residual precaution against a leftover
+    # Docker network from an older checkout still using that third octet;
+    # 99 was the old fixed value, kept excluded so a derived pool stays
+    # visibly distinct from the previous hardcoded default.
     octet=$(( (decimal % 252) + 2 )) # 2..253
     case "$octet" in
         28|99) octet=$(( octet + 100 )) ;;

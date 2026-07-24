@@ -72,10 +72,13 @@ lancache_gen_base64_32() {
 # confirmed via tests/fixtures/placeholder-detection-cases.txt and
 # tests/bats/placeholder_detection_parity.bats:
 #   - This function does NOT recognize the legacy "lancache-*-secret"
-#     template-default shape. This omission IS deliberate:
-#     deploy/dev/docker-compose.yml and deploy/dev/.env ship real, working dev
-#     secrets in exactly that shape (e.g. lancache-nats-ui-dev-secret) that
-#     this read path must accept as configured, not regenerate.
+#     template-default shape. This omission IS deliberate: the now-retired
+#     deploy/dev/docker-compose.yml and deploy/dev/.env (v0.3.0, #766)
+#     shipped real, working dev secrets in exactly that shape (e.g.
+#     lancache-nats-ui-dev-secret) that this read path had to accept as
+#     configured, not regenerate. Kept as a regression pin (see the test
+#     fixtures below) so that shape is never misclassified if an operator's
+#     own secret happens to match it.
 #   - This function does NOT recognize a bare "change-me"/"change_me" infix
 #     without a CHANGE_ME/changeme prefix, unlike setup.sh/Rust. Pre-existing,
 #     not reconciled here (#967 Option B keeps the three pattern sets
@@ -706,9 +709,115 @@ if command -v iptables >/dev/null 2>&1; then
     echo "Kea Control Agent API restricted to Docker-internal access (using managed chain)"
 fi
 
+# ── Validate Kea DHCP4 Config and Attempt Rollback (#763) ──────────────────
+# Before starting kea-dhcp4, validate the generated config with `kea-dhcp4 -t`.
+# If validation fails, look for known-good snapshots under
+# /var/lib/kea/config-snapshots/<id>/dhcp4.json (sorted newest-first),
+# test each one, and use the first that validates. If no snapshot validates
+# (or none exist), enter Kea rescue mode: skip starting kea-dhcp4 but do
+# still start kea-ctrl-agent and kea-dhcp-ddns so the container remains
+# reachable and the healthcheck (which checks for kea-dhcp4 running) correctly
+# reports unhealthy.
+
+# list_kea_snapshot_ids <snapshot_root>
+# Lists snapshot ids under snapshot_root, oldest first, one per line.
+# Empty output when the directory doesn't exist yet. Excludes .staging.* entries.
+list_kea_snapshot_ids() {
+    local snapshot_root="$1"
+    [ -d "$snapshot_root" ] || return 0
+    find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -not -name '.staging.*' -printf '%f\n' 2>/dev/null | sort
+}
+
+# _kea_validate_dhcp4_config <config_file>
+# Tests kea-dhcp4.conf syntax via `kea-dhcp4 -t <config_file>`.
+# Returns 0 if the config is valid, 1 if invalid.
+_kea_validate_dhcp4_config() {
+    local config_file="$1"
+    if kea-dhcp4 -t "$config_file" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Attempt to validate the current/generated kea-dhcp4.conf
+KEAD_CONF_FILE="/var/lib/kea/kea-dhcp4.conf"
+# SNAPSHOT_FOUND=1 means "kea-dhcp4.conf is known-good, proceed normally" --
+# defaulted here (not just inside the failure branch below) so the
+# rescue-mode check after this block never reads an unset/empty
+# $SNAPSHOT_FOUND (`[ "" -eq 0 ]` is a bash syntax error, not a false
+# result, and would otherwise print a spurious error on every healthy start).
+SNAPSHOT_FOUND=1
+if _kea_validate_dhcp4_config "$KEAD_CONF_FILE"; then
+    echo "Kea DHCP4 config is valid; proceeding with normal startup."
+else
+    echo "ERROR: generated kea-dhcp4.conf failed validation (kea-dhcp4 -t)." >&2
+    echo "ERROR: attempting rollback to the newest known-good snapshot instead of starting with an invalid config." >&2
+
+    # Back up the invalid candidate before trying any snapshot, mirroring this
+    # file's own generic known-good-snapshot contract (kgs_snapshot_apply's
+    # documented guarantee, above): if every snapshot also fails, the live
+    # file must be restored to exactly what was live before this rollback
+    # attempt (the actual rejected candidate an operator needs to see to
+    # diagnose the root cause), never left holding some other, unrelated
+    # rejected snapshot's leftover content.
+    KEAD_CONF_BACKUP="$(mktemp)"
+    cp "$KEAD_CONF_FILE" "$KEAD_CONF_BACKUP" 2>/dev/null || true
+
+    # Look for known-good snapshots, newest-first. mapfile (not unquoted
+    # command substitution) matches setup.sh's own list_kea_snapshot_ids
+    # caller and avoids shellcheck SC2207's word-splitting warning.
+    SNAPSHOT_ROOT="/var/lib/kea/config-snapshots"
+    SNAPSHOT_IDS=()
+    while IFS= read -r _id; do
+        [ -n "$_id" ] && SNAPSHOT_IDS+=("$_id")
+    done < <(list_kea_snapshot_ids "$SNAPSHOT_ROOT" | sort -r)
+
+    SNAPSHOT_FOUND=0
+    for id in "${SNAPSHOT_IDS[@]}"; do
+        SNAPSHOT_FILE="${SNAPSHOT_ROOT}/${id}/dhcp4.json"
+        if [ ! -f "$SNAPSHOT_FILE" ]; then
+            echo "WARNING: known-good snapshot $id is missing its dhcp4.json; skipping." >&2
+            continue
+        fi
+
+        # Copy the snapshot onto the live config file
+        if ! cp "$SNAPSHOT_FILE" "$KEAD_CONF_FILE"; then
+            echo "WARNING: failed to copy snapshot $id onto live config; skipping." >&2
+            continue
+        fi
+
+        # Validate the restored config
+        if _kea_validate_dhcp4_config "$KEAD_CONF_FILE"; then
+            echo "[known-good-snapshot][kea][SELECT] selected known-good snapshot $id for rollback" >&2
+            echo "WARNING: Kea DHCP4 is starting from known-good snapshot ${id}, NOT the newly generated config." >&2
+            echo "WARNING: check DHCP_SUBNET/DHCP_RANGE_*/DHCP_GATEWAY and restart to pick up the intended change." >&2
+            SNAPSHOT_FOUND=1
+            break
+        else
+            echo "[known-good-snapshot][kea][REJECT] rejected known-good snapshot $id: failed validation" >&2
+        fi
+    done
+
+    if [ "$SNAPSHOT_FOUND" -eq 0 ]; then
+        # Restore the original rejected candidate (not a stale rejected
+        # snapshot from the loop above) so an operator inspecting
+        # kea-dhcp4.conf during rescue mode sees the actual thing that
+        # failed, not an unrelated historical snapshot.
+        cp "$KEAD_CONF_BACKUP" "$KEAD_CONF_FILE" 2>/dev/null || true
+        echo "[lancache-dhcp][rescue-mode] No known-good kea-dhcp4.conf snapshot available; refusing to start kea-dhcp4. Container will stay running for 'docker exec' access -- fix the underlying cause (DHCP_SUBNET / env var / template) and restart. See docs/known-good-config-snapshots.md." >&2
+    fi
+    rm -f "$KEAD_CONF_BACKUP"
+fi
+
 echo "Starting Kea DHCPv4 server (Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START - $DHCP_RANGE_END)..."
-kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
-DHCP_PID=$!
+if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"; then
+    echo "[lancache-dhcp][rescue-mode] Skipping kea-dhcp4 startup due to config validation failure (rescue mode active)."
+    # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
+    # and the final `wait` at the bottom keeps the container alive
+else
+    kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
+    DHCP_PID=$!
+fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
 kea-ctrl-agent -c /var/lib/kea/kea-ctrl-agent.conf &
@@ -721,8 +830,8 @@ if command -v kea-dhcp-ddns &> /dev/null; then
 fi
 
 trap '
-    # Kill all background processes
-    kill $DHCP_PID $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true
+    # Kill all background processes (DHCP_PID may not be set in rescue mode)
+    kill ${DHCP_PID:-} $AGENT_PID ${DDNS_PID:-} 2>/dev/null || true
 
     # Clean up iptables chain if it exists
     if command -v iptables >/dev/null 2>&1; then

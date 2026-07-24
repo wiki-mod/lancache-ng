@@ -478,7 +478,7 @@ services:
   netdata:
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata-validation
-    # pid: host: matches the real deploy profiles (deploy/dev, deploy/prod,
+    # pid: host: matches the real deploy profiles (deploy/prod,
     # deploy/quickstart) -- required by netdata's own official Docker
     # documentation for apps.plugin to read other containers' /proc/<pid>
     # entries; see those files' identical comment for the full reasoning.

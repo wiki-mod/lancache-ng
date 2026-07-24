@@ -112,7 +112,7 @@ reverse zones exist and are created, but have no Admin UI record-management
 route at all today, and — unlike `lan.` — neither is actually populated by
 DDNS by default today either. `services/dhcp/kea-dhcp-ddns.conf`'s
 `forward-ddns` sends lease host-record updates to `${DHCP_DOMAIN}`, which
-defaults to `lan` (`config/dev/dhcp.env`, `config/prod/dhcp.env`), so Kea's
+defaults to `lan` (`config/prod/dhcp.env`), so Kea's
 forward DDNS records land in the already-UI-managed `lan.` zone, not
 `local.lan.` — `local.lan.` is TSIG-enabled for updates
 (`configure_ddns_tsig()` grants it the same as every other zone in

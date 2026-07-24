@@ -3102,8 +3102,8 @@ validate_compose_config() {
 # Compose itself resolves this, in priority order, from: the
 # COMPOSE_PROJECT_NAME environment variable, a COMPOSE_PROJECT_NAME entry in
 # the env file, the top-level `name:` key in docker-compose.yml, and finally
-# the containing directory's basename. All three of this repo's compose files
-# (deploy/quickstart, deploy/dev, deploy/prod) pin `name: lancache-ng`, so the
+# the containing directory's basename. Both of this repo's compose files
+# (deploy/quickstart, deploy/prod) pin `name: lancache-ng`, so the
 # yaml fallback is what actually resolves today for every install — but
 # honoring an operator override first keeps this correct if that ever
 # changes. Reads the yaml directly (rather than shelling out to `docker
@@ -3216,7 +3216,7 @@ restore_compose_volumes() {
 }
 
 # The compose project name ("lancache-ng") is fixed across every compose file
-# in this repo (deploy/quickstart, deploy/dev, deploy/prod), not derived from
+# in this repo (deploy/quickstart, deploy/prod), not derived from
 # install_dir. Two installs on the same Docker host therefore resolve to the
 # SAME named Docker volumes regardless of install directory. `cmd_restore`'s
 # own --help documents remapping a restore to a different [install-dir] as
@@ -4882,12 +4882,12 @@ cmd_create_logs_for_issue() {
         logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-ssl config-snapshots \
             "$dest/known-good-snapshots/dns-ssl.txt"
     fi
-    # Kea's config-snapshots directory is a plain host bind mount in
-    # prod/quickstart (KEA_DATA_DIR) but a real named Docker volume in dev
-    # (see deploy/dev/docker-compose.yml's top-level kea-data: entry vs.
-    # prod/quickstart's ${KEA_DATA_DIR:-...}/kea bind path) — try the host
-    # path first and only fall back to the named-volume approach if it does
-    # not exist, so this works correctly for both.
+    # Kea's config-snapshots directory is a plain host bind mount in both
+    # remaining deploy profiles (prod/quickstart, KEA_DATA_DIR). The
+    # now-retired deploy/dev stack (v0.3.0, #766) used a real named Docker
+    # volume for the same path instead -- try the host path first and only
+    # fall back to the named-volume approach if it does not exist, so this
+    # keeps working for any pre-v0.3.0 dev-stack install still around.
     local kea_dir; kea_dir=$(get_env_var KEA_DATA_DIR "$env_file"); kea_dir="${kea_dir:-$state_dir/kea}"
     if [[ -d "$kea_dir" ]]; then
         logbundle_host_path_listing "$kea_dir/config-snapshots" "$dest/known-good-snapshots/kea.txt"

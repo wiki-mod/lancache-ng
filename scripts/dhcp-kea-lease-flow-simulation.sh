@@ -270,8 +270,8 @@ docker build -q -t "$image_tag" services/dhcp >/dev/null
 # outright with "Pool overlaps". This adopts the exact same host-local
 # flock-plus-retry primitives full-setup-deep-validate.yml's stack-starting
 # jobs use (scripts/lib/reserve-validation-subnet.sh), on a dedicated
-# 172.31.0.0/16 range (unused by deploy/dev's 172.28.0.0/16 and
-# full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
+# 172.31.0.0/16 range (unused by the now-retired deploy/dev's 172.28.0.0/16,
+# v0.3.0 #766, and full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
 # (/tmp/lancache-validation-locks-dhcp-kea) so this pool's octet contention
 # never unnecessarily serializes against the unrelated 172.30 pool.
 #
