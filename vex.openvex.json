@@ -1,0 +1,30 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-07-24T00:00:00Z",
+  "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
+  "timestamp": "2026-07-24T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-34040"
+      },
+      "timestamp": "2026-07-24T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/lib/docker/cli-plugins/docker-compose"
+            },
+            {
+              "@id": "usr/local/lib/docker/cli-plugins/docker-buildx"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Docker Compose v5.2.0, docker/buildx v0.35.0, and their respective upstream main branches currently embed github.com/docker/docker v28.5.2, and github.com/docker/docker does not publish v29.x Go module tags. Revisit when a scanner-visible fixed module version exists to bump to instead (see #787 for why docker-buildx was added here: unlike containerd/containerd/v2, which buildx's build now bumps directly, docker/docker genuinely cannot be bumped the same way). (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    }
+  ]
+}
