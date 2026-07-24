@@ -456,22 +456,55 @@ jobs:
 
       # Pull requests cannot push to GHCR, so they build a local scan image
       # and run the smoke/Trivy checks before the workflow can pass.
+      #
+      # Raw `docker buildx build` in a `run:` step wrapped by
+      # scripts/lib/docker-buildx-retry.sh's docker_buildx_retry, not
+      # docker/build-push-action directly: this is the exact step that
+      # failed with a containerd content-store "(*service).Write failed:
+      # rpc error: code = Unavailable desc = ref ... locked for <N>ms
+      # (since <timestamp>): unavailable" race at least 4 times on
+      # 2026-07-24 across #1117, #1179, #1206, #1209 -- contention on a
+      # shared base-image layer at the host Docker daemon level when
+      # multiple jobs on this self-hosted runner pool build concurrently
+      # (docker/setup-buildx-action gives every job its own isolated
+      # docker-container builder, so this is not two jobs sharing one
+      # builder instance). A `uses:` step's own log output cannot be
+      # grepped for that signature the way a plain shell command's captured
+      # stdout+stderr can, which is why this became a `run:` step instead of
+      # staying a `uses:` step wrapped by a composite action -- see
+      # docker-buildx-retry.sh's own header comment for why a
+      # signature-specific retry (not ghcr-build-push-retry's blind
+      # any-failure retry below, which is fine for a registry push but would
+      # also mask and merely delay a real Dockerfile/compile failure here)
+      # is the right shape for this specific step. docker/build-push-action
+      # is itself a thin wrapper over exactly this `docker buildx build`
+      # invocation; every flag below maps 1:1 to the `with:` input it
+      # replaces.
       - name: Build local amd64 scan image
         id: local-build-amd64
         timeout-minutes: 60
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: tools/build-tools
-          load: true
-          pull: true
-          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
-          platforms: linux/amd64
-          provenance: false
-          build-args: |
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
-          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
-          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+          BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
+          BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
+          APT_CACHE_BUST: ${{ steps.apt-cache-bust.outputs.value }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/docker-buildx-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-buildx-retry.sh"
+
+          docker_buildx_retry -- docker buildx build \
+            --builder "$BUILDX_BUILDER" \
+            --load \
+            --pull \
+            --tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" \
+            --platform linux/amd64 \
+            --provenance=false \
+            --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
+            --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
+            tools/build-tools
 
       # This tool list mirrors AG-VAL-017's (.github/AGENTS.md) required
       # build-tools contents exactly -- this step is the executable check
@@ -911,6 +944,16 @@ jobs:
           set -euo pipefail
           echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
+      # Deliberately NOT converted to the amd64 leg's docker_buildx_retry
+      # wrapper (see that step's own comment above): the amd64 layer-lock
+      # race is contention on a shared base-image layer at the *host*
+      # Docker daemon/containerd content-store level, which only happens
+      # when multiple jobs on the same runner build concurrently against
+      # that shared daemon. `ubuntu-24.04-arm` (see this job's own top
+      # comment) is a fresh, single-tenant GitHub-hosted VM per run -- no
+      # other job's build can ever share its Docker daemon, so this race is
+      # not reachable here. Kept as a plain `uses:` step rather than
+      # speculatively wrapping a race this leg cannot hit.
       - name: Build local arm64 scan image
         id: local-build-arm64
         timeout-minutes: 60
