@@ -73,6 +73,8 @@
           <tr class="border-b border-slate-700">
             <th class="text-left px-3 py-2 text-slate-300 font-semibold">Name</th>
             <th class="text-left px-3 py-2 text-slate-300 font-semibold">Consumer</th>
+            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Adresse</th>
+            <th class="text-left px-3 py-2 text-slate-300 font-semibold">DNS-Status</th>
             <th class="text-left px-3 py-2 text-slate-300 font-semibold">Registriert</th>
             <th class="text-left px-3 py-2 text-slate-300 font-semibold">Zuletzt gesehen</th>
             <th class="text-right px-3 py-2 text-slate-300 font-semibold">Aktionen</th>
@@ -83,6 +85,16 @@
           <tr class="hover:bg-slate-700/50 transition-colors">
             <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
             <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
+            <td class="px-3 py-2 text-slate-300 text-xs">
+              <span class="font-mono">{% if secondary.address %}{{ secondary.address }}{% else %}<span class="text-slate-500">—</span>{% endif %}</span>
+              <button onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}')"
+                      class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Ändern</button>
+            </td>
+            <td class="px-3 py-2 text-xs">
+              <span id="health-{{ secondary.name }}" class="text-slate-500">–</span>
+              <button onclick="checkSecondaryHealth('{{ secondary.name }}')"
+                      class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Prüfen</button>
+            </td>
             <td class="px-3 py-2 text-slate-400 text-xs">
               <time class="js-epoch" data-epoch="{{ secondary.registered_at }}"></time>
             </td>
@@ -224,6 +236,71 @@
     }
   }
 
+  // #1084: map a health-probe status code to a German label + colour class.
+  const HEALTH_LABELS = {
+    ok: ['OK (autoritativ)', 'text-green-400'],
+    not_authoritative: ['Nicht autoritativ', 'text-amber-400'],
+    no_zone: ['Zone fehlt (REFUSED)', 'text-red-400'],
+    broken: ['Fehler (SERVFAIL)', 'text-red-400'],
+    unreachable: ['Nicht erreichbar', 'text-red-400'],
+    no_address: ['Keine Adresse', 'text-slate-500'],
+    error: ['Unerwartete Antwort', 'text-amber-400'],
+  };
+
+  function renderHealth(span, data) {
+    const [label, cls] = HEALTH_LABELS[data.status] || ['Unbekannt', 'text-slate-500'];
+    span.className = cls;
+    span.textContent = data.serial != null ? `${label} · Serial ${data.serial}` : label;
+    if (data.detail) span.title = data.detail;
+  }
+
+  async function checkSecondaryHealth(name) {
+    const span = document.getElementById('health-' + name);
+    if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
+    try {
+      const response = await fetch(`/api/secondary/${name}/health`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': '{{ csrf_token }}' }
+      });
+      if (response.ok) {
+        renderHealth(span, await response.json());
+      } else if (span) {
+        span.className = 'text-red-400';
+        span.textContent = `Fehler (${response.status})`;
+      }
+    } catch (error) {
+      if (span) { span.className = 'text-red-400'; span.textContent = `Fehler: ${error.message}`; }
+    }
+  }
+
+  async function editSecondaryAddress(name, current) {
+    const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
+    if (input === null) return;
+    try {
+      const response = await fetch(`/api/secondary/${name}/address`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token }}' },
+        body: JSON.stringify({ address: input.trim() })
+      });
+      if (response.ok) {
+        location.reload();
+      } else if (response.status === 400) {
+        alert('Ungültige Adresse: nur private IPv4-Adressen (10.x, 172.16–31.x, 192.168.x) sind erlaubt.');
+      } else {
+        alert(`Fehler beim Speichern der Adresse: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
   formatEpochCells();
+
+  // Auto-run the health check for every listed secondary on page load, so the
+  // operator sees current status without clicking each row (matching the
+  // DHCP-Precheck tab's proactive-probe UX).
+  document.querySelectorAll('[id^="health-"]').forEach((span) => {
+    checkSecondaryHealth(span.id.slice('health-'.length));
+  });
 </script>
 {% endblock %}

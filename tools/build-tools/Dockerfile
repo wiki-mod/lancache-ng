@@ -266,7 +266,39 @@ RUN docker --version; \
 # tcpdump-written pcap file with scapy's offline rdpcap() is a separate,
 # already-written-to-disk code path unaffected by that live-capture gap,
 # and was confirmed reliable against the same real replies.
+#
+# APT_CACHE_BUST (issue #1147): BuildKit's local/gha layer cache has no
+# wall-clock expiry of its own, only cache-key (instruction text) expiry --
+# once this RUN's resolved command text has been built once, every later
+# build with the identical text reuses that same cached layer forever,
+# including its `apt-get upgrade -y` below, regardless of how much time has
+# passed or how many new Debian security fixes (e.g. #1147's bind9-libs/
+# bind9-dnsutils/bind9-host CVEs) have shipped to trixie-security since.
+# Referencing the ARG here (CI passes a value that changes once per ISO
+# week; see the workflows that build this image) makes this RUN's own cache
+# key change on that same weekly cadence, forcing `apt-get update`/`apt-get
+# upgrade -y` to actually re-run against the then-current archive instead of
+# silently replaying a stale layer.
+#
+# Declared here, immediately before the one RUN step that uses it -- NOT up
+# with the image's other ARGs near the top of this stage -- because of a
+# real, confirmed BuildKit caching behavior: an ARG's declaration point, not
+# just the instructions that actually expand it, affects cache-key
+# computation for every instruction from that point onward in the same
+# stage. Declaring this ARG earlier (verified empirically while building
+# this fix: three separate real builds on a disposable-per-run Buildx
+# builder, mirroring this project's actual CI cache handoff) caused
+# unrelated, unchanged earlier layers -- the first `apt-get install`,
+# sccache's `cargo install`, and the cargo-audit/tarpaulin fetch -- to
+# needlessly re-run on every APT_CACHE_BUST change too, exactly the
+# "unrelated layer" cache-busting this ARG must NOT cause. Keeping the
+# declaration immediately adjacent to its only use confines the weekly
+# cache-key change to this RUN step (and whatever follows it), leaving
+# every earlier, still-valid layer above (through the docker/compose/buildx
+# COPY steps and the docker-version-check RUN) cache-stable.
+ARG APT_CACHE_BUST=""
 RUN set -euo pipefail; \
+    : "apt-cache-bust=${APT_CACHE_BUST}"; \
     distcc_pump_tmp=""; \
     cleanup_build_tools_apt() { \
         if [ -n "${distcc_pump_tmp}" ]; then rm -rf "${distcc_pump_tmp}"; fi; \
