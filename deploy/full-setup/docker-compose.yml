@@ -318,6 +318,14 @@ services:
           # even though the no-op restart means this prebaked copy is the one
           # actually loaded.
           issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
+          # Public half of the ui service's NATS_XKEY_SEED below (issue #682),
+          # fixed for the same restart-no-op reason as issuer above -- without
+          # this, the prebaked config actually loaded by this harness would
+          # have no xkey field at all, and the auth-callout xkey encryption
+          # path this validation stack is meant to also exercise would go
+          # completely untested here even though it's exercised for real in
+          # dev/prod.
+          xkey: "XD2QB5UPSAVJTWTFAHROYX2PBK2JKJKJDZARP3SRYKHGU2R46FUV2BTY"
           # Every static user in nats.conf must be listed here (see
           # nats_auth_callout.rs's module docs for why) -- only real
           # secondaries, registered at runtime and absent from both lists,
@@ -413,6 +421,14 @@ services:
       # across concurrently-isolated `-p <project>` runs. Never use a literal
       # seed like this outside a throwaway validation context.
       - NATS_ISSUER_SEED=SAAIHYJ2XBQO3QSKX3V5MS4JH25WGTXEFOOXEZ5EXSGDGWOGCMCVWHWTYY
+      # Same rationale and fixed-literal-seed pattern as NATS_ISSUER_SEED
+      # immediately above, for the separate xkey encryption keypair (#682):
+      # this harness has no persistent /data volume, so the Admin UI's
+      # generate-and-persist path would produce a fresh, unpredictable xkey
+      # every run -- baking a fixed one here lets the nats service's own
+      # prebaked auth_callout.conf (see its xkey field's comment) match ahead
+      # of time.
+      - NATS_XKEY_SEED=SXADCNQXCKZPJEX3EBNKYHKTD2WGVLHBN6YZYP42MCR6IKRRMYS56WQILQ
       - SECONDARY_REGISTRATION_TOKEN=validation-secondary-registration-token
     networks:
       validation:

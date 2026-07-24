@@ -218,6 +218,21 @@ pub struct Config {
     // have no persistent /data volume to read a generated one back from --
     // not intended for dev/prod, which use the file-based path instead.
     pub nats_issuer_seed: Option<String>,
+    // Where the auth-callout responder's static X25519 (curve) NKey seed is
+    // persisted (issue #682). Distinct keypair from nats_issuer_seed_path's
+    // Ed25519 signing identity: this one is used to decrypt (xkey "open") the
+    // nats-server-sealed `AuthorizationRequest` payload and re-encrypt (xkey
+    // "seal") the response, per the NATS auth-callout xkey spec -- see
+    // nats_auth_callout.rs's module docs for the full mechanism. Mirrors
+    // nats_issuer_seed_path's generate-on-first-run + 0600 persistence
+    // exactly. Ignored if nats_xkey_seed is set.
+    pub nats_xkey_seed_path: String,
+    // Optional literal seed value, taking precedence over nats_xkey_seed_path
+    // when set -- same rationale as nats_issuer_seed: deterministic
+    // deployments (e.g. deploy/full-setup's validation harness) with no
+    // persistent /data volume need a fixed, pre-known xkey baked into the
+    // auth_callout fragment ahead of time.
+    pub nats_xkey_seed: Option<String>,
     pub secondary_registration_token: String,
     pub lancache_image_registry: String,
     pub lancache_image_prefix: String,
@@ -380,6 +395,11 @@ impl fmt::Debug for Config {
             .field(
                 "nats_issuer_seed",
                 &self.nats_issuer_seed.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("nats_xkey_seed_path", &self.nats_xkey_seed_path)
+            .field(
+                "nats_xkey_seed",
+                &self.nats_xkey_seed.as_ref().map(|_| "***REDACTED***"),
             )
             .field("secondary_registration_token", &"***REDACTED***")
             .field("lancache_image_registry", &self.lancache_image_registry)
@@ -830,6 +850,11 @@ impl Config {
                 "/data/lancache-nats-issuer.seed",
             ),
             nats_issuer_seed: env_opt("NATS_ISSUER_SEED"),
+            nats_xkey_seed_path: env_str(
+                "NATS_XKEY_SEED_PATH",
+                "/data/lancache-nats-xkey.seed",
+            ),
+            nats_xkey_seed: env_opt("NATS_XKEY_SEED"),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             // Kept as separate fields so the UI can display the running
             // release/channel without reconstructing image references from

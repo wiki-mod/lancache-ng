@@ -66,6 +66,13 @@ pub struct AppState {
     // matching private seed never leaves the loaded `KeyPair` the callout
     // responder task holds.
     pub nats_issuer_public_key: String,
+    // The auth-callout responder's own static X25519 (curve) public NKey,
+    // rendered into nats.conf's `auth_callout { xkey: ... }` field (issue
+    // #682: see nats_auth_callout.rs's xkey module docs). The matching
+    // private seed never leaves the loaded `XKey` the callout responder task
+    // holds -- a deliberately separate keypair from nats_issuer_public_key's
+    // Ed25519 signing identity above.
+    pub nats_callout_xkey_public_key: String,
 }
 
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
@@ -869,6 +876,29 @@ async fn main() -> Result<()> {
     };
     let nats_issuer_public_key = issuer_keypair.public_key();
 
+    // Same rationale and load-or-create shape as issuer_keypair immediately
+    // above, just for the separate xkey encryption keypair (issue #682).
+    // NATS_XKEY_SEED (a literal seed value) takes precedence over the
+    // file-based path when set, mirroring nats_issuer_seed exactly -- see
+    // config.rs's nats_xkey_seed docs.
+    let xkey = match &cfg.nats_xkey_seed {
+        Some(seed) => match nkeys::XKey::from_seed(seed) {
+            Ok(kp) => kp,
+            Err(e) => {
+                tracing::error!("NATS_XKEY_SEED is not a valid NKey seed: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => match nats_auth_callout::load_or_create_xkey(&cfg.nats_xkey_seed_path) {
+            Ok(kp) => kp,
+            Err(message) => {
+                tracing::error!("{message}");
+                std::process::exit(1);
+            }
+        },
+    };
+    let nats_callout_xkey_public_key = xkey.public_key();
+
     let db = {
         // This SQLite DB stores Admin-UI-local secondary registration metadata.
         // Runtime DNS/DHCP/proxy state stays in PowerDNS, Kea, NATS, and Docker.
@@ -901,6 +931,7 @@ async fn main() -> Result<()> {
         ui_session_secret,
         ui_session_ttl,
         nats_issuer_public_key,
+        nats_callout_xkey_public_key,
     });
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up
@@ -918,6 +949,7 @@ async fn main() -> Result<()> {
     tokio::spawn(nats_auth_callout::run_auth_callout(
         Arc::clone(&state),
         Arc::new(issuer_keypair),
+        Arc::new(xkey),
     ));
 
     // Routes that are always public (protected by their own token).
@@ -1639,6 +1671,7 @@ mod tests {
             ui_session_secret: secret,
             ui_session_ttl: ttl,
             nats_issuer_public_key: String::new(),
+            nats_callout_xkey_public_key: String::new(),
         })
     }
 
