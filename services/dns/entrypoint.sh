@@ -473,6 +473,20 @@ kgs_snapshot_prune() {
     done
 }
 
+# _dns_enter_rescue_mode <component>
+# Enters rescue mode for a crashed/crashing PowerDNS component (component is
+# "recursor" or "auth") when all known-good snapshots have been exhausted or
+# do not exist. Logs a clear, greppable rescue-mode banner and keeps the
+# container alive with `exec sleep infinity` so an operator can use
+# `docker exec` to investigate and fix the underlying cause. Does NOT start
+# any DNS daemons, satisfying the hard constraint that rescue mode must never
+# silently serve broken state to real clients.
+_dns_enter_rescue_mode() {
+    local component="$1"
+    echo "[lancache-dns][rescue-mode] No known-good ${component} config available; refusing to start. Container will stay running for 'docker exec' access -- fix the underlying cause (cdn-domains.txt / env var / template) and restart. See docs/known-good-config-snapshots.md." >&2
+    exec sleep infinity
+}
+
 # kgs_snapshot_apply <snapshot_root> <label> <validator_cmd> <dest...>
 # Attempts to roll the live config at <dest...> back to the newest snapshot
 # that passes <validator_cmd> (a command string evaluated with no arguments
@@ -895,7 +909,7 @@ if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
 fi
 render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$LOG_QUERIES"
-_dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || exit 1
+_dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
@@ -925,7 +939,7 @@ fi
 # -- if this rolls back to a known-good snapshot, every subsequent
 # pdnsutil/zone-creation call must see that rolled-back config, not the
 # rejected candidate.
-_dns_auth_validate_snapshot_or_rollback "$PDNS_AUTH_CONF_FILE" || exit 1
+_dns_auth_validate_snapshot_or_rollback "$PDNS_AUTH_CONF_FILE" || _dns_enter_rescue_mode "auth"
 
 # ── 5. Migrate Legacy AAAA Filter Marker ─────────────────────────────────────
 # The AAAA filter marker moved from this container's own data volume
