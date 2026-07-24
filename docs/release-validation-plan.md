@@ -229,6 +229,43 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   Confirm every service reaches `healthy` (`docker compose ps`) within a reasonable
   window — `docker inspect --format='{{.State.Health.Status}}' <container>` for any
   service whose Compose `ps` summary looks ambiguous.
+- **Known `deploy/dev`-only bring-up flake (issue #1215, confirmed live/reproduced 3/3,
+  2026-07-24):** `deploy/dev/docker-compose.yml`'s `lancache` bridge network gives some
+  services a static `ipv4_address` (`dns-standard`, `dns-ssl`, `dhcp`, `nats`, `syslog`,
+  `syslog-ng`, `proxy`) but leaves others (`ui`, `watchdog`, `netdata`,
+  `docker-socket-proxy`, `dhcp-probe`, `dhcp-proxy`, `ntp`) to Docker's dynamic IPAM pool
+  in the same subnet, with no `ip_range` carve-out. Whenever a dynamic-IP service starts
+  before a not-yet-running static-IP service claims its own address, `docker compose up`
+  fails with `Error response from daemon: failed to set up container networking: Address
+  already in use` for the static-IP service. This is most likely to bite when bringing a
+  profile-gated service (`dhcp`, `syslog`, `syslog-ng`) up for the first time, or on the
+  very first `--build` bring-up (a dynamic service can grab a base service's reserved
+  address before that service starts). Not a sign of a broken build: `docker stop` the
+  dynamic-IP service that won the race, bring up the static-IP one, then restart the
+  dynamic one. Confirmed NOT present on `deploy/quickstart`/`deploy/prod` (no custom
+  static-IP bridge there) or `deploy/full-setup` (every service has an explicit static IP).
+- **Image-freshness trap (confirmed live, 2026-07-24):** `deploy/dev`'s `--build` flag
+  builds every first-party image from the checked-out source, so it always tests the
+  exact commit under test — use it whenever validating a specific pending branch/commit
+  like a frozen release candidate. `deploy/quickstart`/`deploy/prod`/`deploy/full-setup`
+  instead **pull** published `${LANCACHE_IMAGE_REGISTRY}/.../<service>:${LANCACHE_IMAGE_TAG}`
+  images (default tag `latest`, or `nightly` if you set it) — these channel tags can lag
+  the commit under test by a large number of commits (confirmed live: `nightly` was 29
+  commits behind this same v0.3.0 commit, missing every feature merged that day) because
+  the promote pipeline can be backlogged. Before trusting a pulled-image validation run as
+  evidence for a specific commit, check the image's own revision label —
+  `docker inspect <image> --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
+  — and confirm it descends from the commit under test; if it doesn't (or the tag doesn't
+  exist yet for that commit), either build locally instead (`docker compose build
+  <service>` against `deploy/dev`, then `docker tag` the result to the registry-style name
+  the target compose file/script expects, e.g. `ghcr.io/wiki-mod/lancache-ng/dns:<local-tag>`,
+  and point `LANCACHE_IMAGE_TAG` at `<local-tag>`) or wait for a fresh `build-push.yml` run
+  against that exact commit. This applies to `scripts/*-simulation.sh` invocations too —
+  `nats-secondary-auth-callout-simulation.sh` and `syslog-forwarding-simulation.sh` both
+  default `LANCACHE_IMAGE_TAG` to a mutable channel and need the same treatment; the DHCP
+  simulation scripts (`dhcp-kea-lease-flow-simulation.sh`, `dhcp-proxy-pxe-simulation.sh`,
+  `dhcp-relay-flow-simulation.sh`) are unaffected — they always `docker build` their own
+  images directly from the checked-out source, never from a registry tag.
 - Tear down after the full pass: `docker compose -f deploy/<profile>/docker-compose.yml
   down -v`, and confirm via `docker ps -a` and `docker volume ls` that no stack
   containers or named volumes remain (see the Resource-Leak section below — this is
@@ -236,6 +273,15 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
 
 ### 2. DNS resolution — both modes
 
+- **Example-domain caveat (confirmed live, 2026-07-24):** not every domain in
+  `services/dns/cdn-domains.txt` resolves publicly from every validation host/network path
+  — `steamcontent.com`/`content1-5.steampowered.com`/`lancache.steampowered.com` returned no
+  answer at all from one real validation host even via `8.8.8.8` directly (not a proxy
+  problem, confirmed by querying public DNS with no proxy involved). If your chosen example
+  domain doesn't resolve, don't treat that as a proxy/DNS-spoofing failure — pick a
+  different entry from the same file (`download.epicgames.com` and `deb.debian.org` were
+  confirmed reachable and were used for this pass's evidence) before concluding anything is
+  broken.
 - **Standard mode**: `dig @<IP_STANDARD or dev DNS port> steamcontent.com` (or any
   configured CDN domain) resolves to the proxy's IP. Confirm the TLS handshake for
   that domain is **passthrough** (no interception) — `openssl s_client -connect
@@ -275,10 +321,28 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   (`AG-OP-001`/`AG-OP-012`): request the same path with two different query strings,
   confirm both hit the same cache entry (second request is a HIT even though the
   query string differs).
-- Repeat for both standard-mode passthrough HTTPS (should still cache — SNI-routed
-  connections still terminate at nginx's `stream` block only for the TLS layer; the
-  underlying HTTP proxying/caching is unaffected by which mode routed the TLS) and
-  SSL/MITM-mode intercepted HTTPS.
+- **Correction (confirmed live, 2026-07-24, against v0.3.0/commit 88ddbf6a): standard-mode
+  HTTPS is NOT cached, and this is not testable as a HIT/MISS check at all.** A prior
+  version of this document claimed standard-mode passthrough HTTPS "should still cache"
+  because "SNI-routed connections still terminate at nginx's `stream` block only for the
+  TLS layer" — that premise is wrong. Per `CLAUDE.md`'s own architecture section, standard
+  mode's `stream` block uses `ssl_preread` to read the ClientHello's SNI **without
+  terminating TLS at all**; it then blindly forwards the still-encrypted bytes straight to
+  the real origin (`proxy_pass` in the `stream` context). nginx never sees plaintext HTTP
+  on this path, so it cannot apply `proxy_cache` and cannot add `X-Cache-Status` (confirmed
+  live: a real request through the standard-mode HTTPS port returns the origin's own
+  `Server` header directly, e.g. `Server: Apache` for a real mirror, with no
+  `X-Cache-Status` header at all — compare against the passthrough certificate proof two
+  bullets above, which already demonstrates the same blind-forward behavior at the TLS
+  layer). Only **HTTP** is cached in standard mode. Do not attempt a HIT/MISS proof against
+  standard-mode HTTPS — there is nothing to observe.
+- SSL/MITM-mode intercepted HTTPS **is** cached (confirmed live: a real MISS-then-HIT with
+  byte-identical bodies, same as the HTTP case above) — nginx genuinely terminates TLS here,
+  so the request reaches the normal HTTP proxy/cache layer. Confirmed also that the cache is
+  shared across all three reachable paths (standard-mode HTTP, SSL/MITM HTTP, SSL/MITM
+  HTTPS) since the cache key is `$host$uri` regardless of scheme or which mode's listener
+  received the request — a request already cached via one path can come back as an
+  immediate HIT via a different path for the same host+URI.
 
 ### 5. NATS — full secondary lifecycle, incl. today's new mechanisms
 
@@ -422,6 +486,21 @@ explicit pass:**
   enforcing the new size) has never been run start-to-finish as a single live E2E
   proof — PR #1174 explicitly states this ("Could not run: a live end-to-end ...
   cycle"). The `deploy/prod` misleading-display gap is *documented* but not fixed.
+  **Partially advanced, 2026-07-24** (still not fully closed — see below): confirmed
+  live that a real UI form submission (`POST /cache/resize`) correctly persists
+  `CACHE_MAX_GB` into the `ui-data` volume's `lancache-ui-settings.env`, and that
+  `lancache-converge.service`'s ExecStart is actually **two separate steps**, not one —
+  `setup.sh converge-reconcile <install_dir>` (merges the UI override into the deploy
+  `.env`; confirmed live this correctly wrote `CACHE_MAX_SIZE`/`CACHE_MAX_GB`) followed by
+  a distinct, pre-existing container-drift-convergence `ExecStart` line that actually runs
+  `docker compose up -d` to recreate the drifted container. On a host with no
+  `lancache-converge` systemd units installed (any manual `docker compose` bring-up, not a
+  real `setup.sh install`), running `bash setup.sh converge-reconcile <install_dir>`
+  by hand exercises step 1 only — `nginx -T` will still show the old `max_size` until
+  something also runs `docker compose up -d proxy` (step 2). This pass did not run step 2
+  against a real convergence-driven recreate, so `nginx -T`'s rendered `max_size` was
+  **not** confirmed to change — the headline claim of this check remains unproven; do not
+  record this subsystem as validated on the strength of step 1 alone.
 - **`release-sbom`'s actual GitHub Releases API upload path** (PR #1194) has never
   been exercised against the live API — only the Trivy CycloneDX command and the
   shellchecked upload heredoc bodies were verified in isolation. This needs a real
