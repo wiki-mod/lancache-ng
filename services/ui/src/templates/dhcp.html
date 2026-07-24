@@ -42,6 +42,7 @@
           <option value="disabled" {% if dhcp_mode == "disabled" %}selected{% endif %}>disabled</option>
           <option value="kea" {% if dhcp_mode == "kea" %}selected{% endif %}>kea</option>
           <option value="dnsmasq-proxy" {% if dhcp_mode == "dnsmasq-proxy" %}selected{% endif %}>dnsmasq-proxy</option>
+          <option value="dnsmasq-relay" {% if dhcp_mode == "dnsmasq-relay" %}selected{% endif %}>dnsmasq-relay</option>
         </select>
       </div>
       <button type="submit"
@@ -132,6 +133,37 @@
           <button type="submit"
                   class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
             Proxy-Werte speichern
+          </button>
+        </form>
+      </div>
+    {% elif dhcp_mode == "dnsmasq-relay" %}
+      {# Issue #844: real DHCP-relay mode -- distinct from ProxyDHCP above. #}
+      <div class="text-sm text-sky-300 space-y-2">
+        <p>dnsmasq relay mode is active. dnsmasq forwards every client's DHCP request to the upstream DHCP server and relays the reply back, so the upstream server owns the whole lease and all options.</p>
+        <ul class="list-disc pl-5 space-y-1 text-sky-200">
+          <li>Unlike ProxyDHCP mode, this is a real relay: it is useful when clients and the upstream DHCP server are on different network segments and the client broadcasts cannot reach the server directly.</li>
+          <li>Only two values are needed: this relay's own address on the client-facing network (stamped into the relayed request's <code>giaddr</code>, which the upstream server uses to pick the pool) and the upstream server address.</li>
+          <li>No subnet/DNS/PXE fields here -- a relay injects nothing of its own. Use ProxyDHCP mode for PXE option injection, or Kea mode to own leases here.</li>
+        </ul>
+        <form method="post" action="/dhcp/relay" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="grid gap-3 md:grid-cols-2">
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Relay local address (this relay's client-facing IP)</label>
+              <input type="text" name="dhcp_relay_local_addr" value="{{ dhcp_relay_local_addr }}" placeholder="192.168.1.2" required
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool.</p>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server</label>
+              <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
+              <p class="text-xs text-slate-500 mt-1">The real DHCP server every relayed request is forwarded to.</p>
+            </div>
+          </div>
+          <button type="submit"
+                  class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+            Relay-Werte speichern
           </button>
         </form>
       </div>

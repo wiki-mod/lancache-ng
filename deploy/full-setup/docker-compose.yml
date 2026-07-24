@@ -195,6 +195,9 @@ services:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
       - proxy-cache:/var/cache/lancache
+      # Issue #870: shared with `ui` below (read-only) so this validation
+      # stack exercises the same status.json hand-off dev/prod/quickstart use.
+      - watchdog-status:/var/run/watchdog
     depends_on:
       - docker-socket-proxy
     networks:
@@ -331,6 +334,14 @@ services:
           # even though the no-op restart means this prebaked copy is the one
           # actually loaded.
           issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
+          # Public half of the ui service's NATS_XKEY_SEED below (issue #682),
+          # fixed for the same restart-no-op reason as issuer above -- without
+          # this, the prebaked config actually loaded by this harness would
+          # have no xkey field at all, and the auth-callout xkey encryption
+          # path this validation stack is meant to also exercise would go
+          # completely untested here even though it's exercised for real in
+          # dev/prod.
+          xkey: "XD2QB5UPSAVJTWTFAHROYX2PBK2JKJKJDZARP3SRYKHGU2R46FUV2BTY"
           # Every static user in nats.conf must be listed here (see
           # nats_auth_callout.rs's module docs for why) -- only real
           # secondaries, registered at runtime and absent from both lists,
@@ -373,6 +384,11 @@ services:
       # here (inert: this validation stack hardcodes a consistent PDNS_API_KEY).
       - shared-secrets:/var/lib/lancache-secrets
       - nats-conf:/etc/nats
+      # Issue #870: read-only reader for watchdog's status.json (per-service
+      # health + cache-disk usage color, rendered as the dashboard's
+      # "Service health" card) -- see the `watchdog` service above and
+      # dev/prod/quickstart's identical mount.
+      - watchdog-status:/var/run/watchdog:ro
     ports:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
     environment:
@@ -433,6 +449,14 @@ services:
       # across concurrently-isolated `-p <project>` runs. Never use a literal
       # seed like this outside a throwaway validation context.
       - NATS_ISSUER_SEED=SAAIHYJ2XBQO3QSKX3V5MS4JH25WGTXEFOOXEZ5EXSGDGWOGCMCVWHWTYY
+      # Same rationale and fixed-literal-seed pattern as NATS_ISSUER_SEED
+      # immediately above, for the separate xkey encryption keypair (#682):
+      # this harness has no persistent /data volume, so the Admin UI's
+      # generate-and-persist path would produce a fresh, unpredictable xkey
+      # every run -- baking a fixed one here lets the nats service's own
+      # prebaked auth_callout.conf (see its xkey field's comment) match ahead
+      # of time.
+      - NATS_XKEY_SEED=SXADCNQXCKZPJEX3EBNKYHKTD2WGVLHBN6YZYP42MCR6IKRRMYS56WQILQ
       - SECONDARY_REGISTRATION_TOKEN=validation-secondary-registration-token
     networks:
       validation:
@@ -515,3 +539,9 @@ volumes:
   netdataconfig:
   netdatalib:
   netdatacache:
+  # Issue #870: shared between `watchdog` (sole writer of status.json) and
+  # `ui` (read-only reader, see the "Service health" dashboard card) so this
+  # validation stack actually exercises the same mount dev/prod/quickstart
+  # rely on (AG-VAL-027) -- previously this stack's watchdog wrote
+  # status.json to its own container-local, unshared filesystem.
+  watchdog-status:

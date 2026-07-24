@@ -1477,6 +1477,14 @@ services:
       # SYSLOG_ENABLED=true to actually show anything on /logs or the
       # dashboard.
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
+      # Issue #870: read-only reader for watchdog's status.json (per-service
+      # health + cache-disk usage color, rendered as the dashboard's
+      # "Service health" card). watchdog is the sole writer of this named
+      # volume (see its own service block above); a missing mount here would
+      # make watchdog_status::read_status() see the file as simply absent,
+      # not fail, so this is required for the health card to show real data
+      # instead of its "unavailable" fallback state.
+      - watchdog-status:/var/run/watchdog:ro
     ports:
       - "127.0.0.1:8080:8080"
     environment:

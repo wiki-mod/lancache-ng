@@ -28,6 +28,48 @@
     {% endif %}
   </div>
 
+  <!-- Watchdog service health (issue #870): one indicator per service
+       services/watchdog/watchdog.sh's write_status() monitors, plus the
+       cache-disk usage color it also computes into status.json. This card
+       is what docs/architecture-ng.md's "traffic light bar" and
+       docs/threat-model.md's T9 disk-usage mitigation both describe --
+       neither existed until this card was added (see routes/dashboard.rs's
+       watchdog_status handling and watchdog_status.rs). Server-rendered on
+       first load from `watchdog_status`; kept live afterward by
+       refreshWatchdogStatus() below, which polls GET /api/watchdog-status
+       every 10s and patches the dot colors/note in place rather than
+       reloading the page. -->
+  <div class="card" id="watchdog-status-card">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-slate-200">Service health</h2>
+      <span class="text-xs text-slate-500" id="watchdog-status-note">
+        {% if watchdog_status.state == "stale" %}stale ({{ watchdog_status.age_seconds }}s old)
+        {% elif watchdog_status.state == "unavailable" %}watchdog status unavailable
+        {% else %}live
+        {% endif %}
+      </span>
+    </div>
+    {% if watchdog_status.state == "unavailable" %}
+    <p class="text-sm text-slate-500" id="watchdog-status-empty">Watchdog has not reported a status yet, or the status file could not be read.</p>
+    {% else %}
+    <div class="flex flex-wrap gap-x-6 gap-y-2" id="watchdog-services">
+      {% for svc in watchdog_status.services %}
+      <div class="flex items-center gap-2" data-service="{{ svc.name }}">
+        <span class="w-2.5 h-2.5 rounded-full {% if svc.status == "green" %}bg-green-400{% elif svc.status == "yellow" %}bg-yellow-400{% elif svc.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot"></span>
+        <span class="text-sm text-slate-300">{{ svc.label }}</span>
+        {% if svc.failures > 0 %}
+        <span class="text-xs text-amber-400" data-role="failures">({{ svc.failures }} failures)</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+      <div class="flex items-center gap-2" data-service="disk-cache">
+        <span class="w-2.5 h-2.5 rounded-full {% if watchdog_status.disk.cache.status == "green" %}bg-green-400{% elif watchdog_status.disk.cache.status == "yellow" %}bg-yellow-400{% elif watchdog_status.disk.cache.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot"></span>
+        <span class="text-sm text-slate-300">Cache disk: {{ watchdog_status.disk.cache.pct }}% used</span>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
   <!-- Cache overview: cache_dir/cache_used_gb/cache_pct come from a single
        shared CACHE_DIR (see config.rs), used by both standard and SSL mode.
        There is no separate standard-mode/SSL-mode cache size to show here. -->
@@ -238,5 +280,75 @@
   }
 
   setInterval(refreshDashboardMetrics, 10000);
+
+  // Issue #870: polls GET /api/watchdog-status (routes/dashboard.rs::
+  // watchdog_status_api) every 10s and patches the "Service health" card's
+  // dot colors and freshness note in place. Deliberately does not rebuild
+  // the whole card's markup: the set of services rendered server-side
+  // (watchdog_status.services) only changes on a container restart with a
+  // different SSL_ENABLED value, never mid-session, so patching existing
+  // [data-service] rows by name is enough and avoids re-deriving the same
+  // label/color mapping twice (once in Tera, once in JS).
+  const WATCHDOG_DOT_COLOR_CLASSES = ['bg-green-400', 'bg-yellow-400', 'bg-red-400', 'bg-slate-500'];
+
+  function watchdogColorClass(status) {
+    if (status === 'green') return 'bg-green-400';
+    if (status === 'yellow') return 'bg-yellow-400';
+    if (status === 'red') return 'bg-red-400';
+    return 'bg-slate-500';
+  }
+
+  function setWatchdogDotColor(dot, status) {
+    if (!dot) {
+      return;
+    }
+    dot.classList.remove(...WATCHDOG_DOT_COLOR_CLASSES);
+    dot.classList.add(watchdogColorClass(status));
+  }
+
+  async function refreshWatchdogStatus() {
+    try {
+      const response = await fetch('/api/watchdog-status');
+      if (!response.ok) {
+        return;
+      }
+      const data = await response.json();
+      const note = document.getElementById('watchdog-status-note');
+      if (note) {
+        if (data.state === 'stale') {
+          note.textContent = 'stale (' + data.age_seconds + 's old)';
+        } else if (data.state === 'unavailable') {
+          note.textContent = 'watchdog status unavailable';
+        } else {
+          note.textContent = 'live';
+        }
+      }
+      // Unavailable carries no services/disk data (see
+      // watchdog_status_json in routes/dashboard.rs) -- nothing further to
+      // patch, and the initial server render already shows the empty-state
+      // message for this case.
+      if (data.state === 'unavailable') {
+        return;
+      }
+      (data.services || []).forEach(function (svc) {
+        const row = document.querySelector('[data-service="' + svc.name + '"]');
+        if (!row) {
+          return;
+        }
+        setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status);
+      });
+      if (data.disk && data.disk.cache) {
+        const diskRow = document.querySelector('[data-service="disk-cache"]');
+        if (diskRow) {
+          setWatchdogDotColor(diskRow.querySelector('[data-role="dot"]'), data.disk.cache.status);
+        }
+      }
+    } catch (err) {
+      // Network hiccup or the UI itself restarting -- leave the last known
+      // colors on screen and try again on the next interval tick.
+    }
+  }
+
+  setInterval(refreshWatchdogStatus, 10000);
 </script>
 {% endblock %}
