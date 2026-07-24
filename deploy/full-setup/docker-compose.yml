@@ -306,7 +306,7 @@ services:
         # Issue #681: a minimal system account, additive alongside the flat
         # `authorization {}` block above -- mirrors dev/prod/quickstart's
         # entrypoint (see those files' matching comment for the full
-        # rationale: nats-server only exposes the $SYS.REQ.SERVER.* system-
+        # rationale: nats-server only exposes the $$SYS.REQ.SERVER.* system-
         # services API, used by nats_kick.rs to look up and force-disconnect a
         # removed/rotated secondary's live connection, to system-account
         # clients). Fixed literal credentials, same convention as every other

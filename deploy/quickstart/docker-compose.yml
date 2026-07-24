@@ -139,11 +139,11 @@ services:
           exit 1
         fi
         # Issue #681: the Admin UI's system-account identity, used ONLY to look
-        # up (CONNZ) and force-disconnect ($SYS.REQ.SERVER.<id>.KICK) a removed/
+        # up (CONNZ) and force-disconnect ($$SYS.REQ.SERVER.<id>.KICK) a removed/
         # rotated secondary's live connection. Every other static role above
-        # lives in the implicit default account ($G); this one is deliberately
+        # lives in the implicit default account ($$G); this one is deliberately
         # the sole member of a new `SYS` account (see the `accounts {}` block
-        # below), because nats-server only exposes the $SYS.REQ.SERVER.*
+        # below), because nats-server only exposes the $$SYS.REQ.SERVER.*
         # system-services API to system-account clients -- confirmed against a
         # real nats-server 2.14.3 (see nats_kick.rs's module docs).
         if secret_is_placeholder "$$NATS_SYS_PASSWORD"; then NATS_SYS_PASSWORD=""; fi
@@ -297,13 +297,13 @@ services:
         # `authorization {}` block above -- confirmed against a real
         # nats-server 2.14.3 that the two coexist with no effect on where the
         # four static roles/callout-authenticated secondaries live (still the
-        # implicit default account, $G) or on JetStream's LANCACHE_DNS stream
-        # (still owned by $G, unaffected). This is the ONLY account this
+        # implicit default account, $$G) or on JetStream's LANCACHE_DNS stream
+        # (still owned by $$G, unaffected). This is the ONLY account this
         # process is a member of, and it carries no application subject
         # permissions of its own -- it exists solely so the Admin UI can reach
-        # the $SYS.REQ.SERVER.* system-services API (CONNZ to look up a
+        # the $$SYS.REQ.SERVER.* system-services API (CONNZ to look up a
         # secondary's live connection ID, KICK to force-disconnect it), which
-        # nats-server does not expose to $G clients at all.
+        # nats-server does not expose to $$G clients at all.
         accounts {
           SYS: {
             users: [
