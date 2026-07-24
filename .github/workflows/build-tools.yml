@@ -173,7 +173,7 @@ jobs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
       # every other test-only path below (scripts/check-idempotence-test-
@@ -292,7 +292,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         id: buildx
@@ -341,7 +341,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -769,7 +769,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         # Issue #930: retried via .github/actions/buildx-setup-retry -- this
@@ -786,7 +786,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -977,13 +977,13 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
