@@ -39,13 +39,24 @@ setup() {
 # DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
 # (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
-# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583), and AUTO_UPDATE_ENABLED
-# (#819): migrate_env_for_update() backfills all of these unconditionally when
-# missing, so a fixture predating any of these features would no longer be
-# "fully converged" and would make the no-op test below fail on its first
-# run, not just its second -- confirmed the hard way when #819's own PR
-# broke this exact test on first CI run, which is exactly the failure mode
-# this comment exists to warn the next feature about.
+# NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583), AUTO_UPDATE_ENABLED
+# (#819), and NTP_ENABLED (#1082, LanCache-NG-NTP): migrate_env_for_update()
+# backfills all of these unconditionally when missing, so a fixture predating
+# any of these features would no longer be "fully converged" and would make
+# the no-op test below fail on its first run, not just its second --
+# confirmed the hard way when #819's own PR broke this exact test on first CI
+# run, and again by #1082's NTP feature (issue #1171), which is exactly the
+# failure mode this comment exists to warn the next feature about.
+#
+# NTP_DATA_DIR is deliberately NOT listed here even though
+# migrate_env_for_update() also sets it: it goes through
+# set_optional_env_path_override_if_needed(), which is a no-op (writes
+# nothing) whenever the key is absent and the desired path already equals the
+# derived default -- exactly this fixture's case, since there is no legacy
+# NTP state directory to migrate from. The same reasoning is why this fixture
+# also omits KEA_DATA_DIR, PDNS_STANDARD_DIR/PDNS_SSL_DIR/
+# PDNS_FILTER_STATE_DIR, NATS_DATA_DIR, and NATS_CONF_DIR: all go through the
+# same helper and stay silent under these exact defaults.
 write_converged_env_fixture() {
     printf '%s\n' \
         'IP_STANDARD=192.0.2.10' \
@@ -103,6 +114,7 @@ write_converged_env_fixture() {
         'UI_AUTH_PASSWORD=RealAdminPassword123' \
         'ALLOW_INSECURE_UI=false' \
         'AUTO_UPDATE_ENABLED=0' \
+        'NTP_ENABLED=0' \
         > "$env_file"
 }
 

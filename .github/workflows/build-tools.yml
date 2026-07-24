@@ -62,7 +62,9 @@ on:
       - ".github/workflows/build-push.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
+      - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
+      - ".github/actions/wait-validation-stack-health/action.yml"
       - "services/dns/**"
       - "services/dhcp/**"
       - "services/dhcp-proxy/**"
@@ -113,7 +115,9 @@ on:
       - ".github/workflows/build-push.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
+      - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
+      - ".github/actions/wait-validation-stack-health/action.yml"
       - "services/dns/**"
       - "services/dhcp/**"
       - "services/dhcp-proxy/**"
@@ -255,6 +259,23 @@ jobs:
       # setup_secondary_docker_compose.bats's checked-in reference file for
       # its cmd_secondary heredoc sync-guard, #946) are added alongside them
       # for the same reason.
+      #
+      # .github/workflows/full-setup-sims.yml and .github/actions/
+      # wait-validation-stack-health/action.yml (#1171): #1112 extracted the
+      # shared full-setup jobs into this reusable workflow and composite
+      # action, which moved tests/bats/healthcheck_service_lists.bats's and
+      # tests/bats/quickstart_compose_lock.bats's real dependencies out of
+      # build-push.yml/full-setup-validate.yml/full-setup-deep-validate.yml
+      # and into these two new files -- #1112 itself did not add them here,
+      # which is exactly why both bats suites went on failing deterministically
+      # against current_dev's own tip until #1171 fixed both the tests and
+      # this list together. scripts/check-bats-path-filter-coverage.sh's own
+      # existence-filtered dependency scan against the real repo tree is what
+      # caught this gap (tests/bats/check_bats_path_filter_coverage.bats's
+      # "the guard also passes when pointed at the real repository tree"
+      # case), not a fixture -- the same "the guard proves itself against
+      # today's real tree" property called out for the other four-file group
+      # above.
       - name: Determine whether build-tools inputs actually changed
         id: should-publish
         run: |
