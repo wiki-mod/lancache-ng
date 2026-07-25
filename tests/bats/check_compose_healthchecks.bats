@@ -19,6 +19,18 @@ teardown() {
     rm -rf "$fixture_root"
 }
 
+# fail <message>: neither bats-core nor this project defines a `fail` helper
+# globally (confirmed empirically against the pinned build-tools image's bats
+# 1.11.1 -- no tests/bats/*.bats file loads bats-support/bats-assert, the
+# libraries that normally provide one), so it must be defined locally in
+# every file that uses the `[ cond ] || fail "..."` assertion style, the same
+# way tests/bats/healthcheck_service_lists.bats does. See that file's own
+# comment for the full incident this was found from.
+fail() {
+    echo "$1" >&2
+    return 1
+}
+
 # write_compose <path> <heredoc content via stdin>
 write_compose() {
     cat > "$1"

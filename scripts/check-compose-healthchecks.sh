@@ -43,6 +43,19 @@ repo_root=$(cd "$script_dir/.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
 
+# nullglob: without it, an UNMATCHED glob expands to its own literal pattern
+# string ("deploy/*/docker-compose.yml") as a single array element instead of
+# zero elements, so the "${#compose_files[@]} -eq 0" fail-closed check just
+# below could never actually be true -- confirmed live: an empty target_root
+# still produced a 1-element array, silently proceeding into the loop where
+# `[[ -f "$f" ]] || continue` skipped the non-existent literal path, which
+# only then fell through to this script's OTHER fail-closed check (`checked`
+# staying 0). Both checks are fail-closed either way, but leaving the first
+# one unreachable dead code (indistinguishable from a working guard by
+# reading it alone) is exactly the AG-VAL-024 class of bug -- a real failing
+# input must exercise a fail-closed branch, not just a passing run.
+shopt -s nullglob
+
 # Exactly this glob (not "docker-compose*.yml"): deploy/prod also ships
 # docker-compose.nats-secondary.yml, an intentionally partial override file
 # (see its own header) that redeclares only `nats:`'s `ports:` -- it has no

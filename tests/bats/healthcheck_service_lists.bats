@@ -47,6 +47,26 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 }
 
+# fail <message>: this file's own `[ cond ] || fail "..."` assertions (a
+# pattern already used throughout this file before this addition) rely on a
+# `fail` helper that neither bats-core nor this project provides globally --
+# confirmed empirically (bats 1.11.1 in the pinned build-tools image has no
+# such builtin, and no tests/bats/*.bats file loads bats-support/bats-assert,
+# the libraries that normally define one). Without a local definition, every
+# `|| fail "..."` in this file was dormant dead code: it would only ever run
+# if its guarded condition actually went false, and when it did, bash would
+# report "fail: command not found" (exit 127) instead of the intended
+# diagnostic -- silently turning a real, clear assertion failure into a
+# confusing crash. This exact latent bug was found live while adding this
+# file's own #1169 tests below. Defined locally here (not fixed repo-wide):
+# 9 other tests/bats/*.bats files share the same undefined-`fail` pattern,
+# which is a separate, pre-existing, cross-cutting issue outside #1169's
+# scope -- flagged for a follow-up rather than silently left unmentioned.
+fail() {
+    echo "$1" >&2
+    return 1
+}
+
 # Extracts the RHS of the first `services_with_healthcheck="..."` (or
 # `local services_with_healthcheck="..."`) assignment in a file.
 extract_services_with_healthcheck() {
