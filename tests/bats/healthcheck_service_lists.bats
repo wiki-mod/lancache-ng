@@ -47,6 +47,26 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 }
 
+# fail <message>: this file's own `[ cond ] || fail "..."` assertions (a
+# pattern already used throughout this file before this addition) rely on a
+# `fail` helper that neither bats-core nor this project provides globally --
+# confirmed empirically (bats 1.11.1 in the pinned build-tools image has no
+# such builtin, and no tests/bats/*.bats file loads bats-support/bats-assert,
+# the libraries that normally define one). Without a local definition, every
+# `|| fail "..."` in this file was dormant dead code: it would only ever run
+# if its guarded condition actually went false, and when it did, bash would
+# report "fail: command not found" (exit 127) instead of the intended
+# diagnostic -- silently turning a real, clear assertion failure into a
+# confusing crash. This exact latent bug was found live while adding this
+# file's own #1169 tests below. Defined locally here (not fixed repo-wide):
+# 9 other tests/bats/*.bats files share the same undefined-`fail` pattern,
+# which is a separate, pre-existing, cross-cutting issue outside #1169's
+# scope -- flagged for a follow-up rather than silently left unmentioned.
+fail() {
+    echo "$1" >&2
+    return 1
+}
+
 # Extracts the RHS of the first `services_with_healthcheck="..."` (or
 # `local services_with_healthcheck="..."`) assignment in a file.
 extract_services_with_healthcheck() {
@@ -97,6 +117,40 @@ extract_services_with_healthcheck() {
     # must not itself list watchdog a second time.
     prefix="$(printf '%s\n' "$all_line" | sed -E 's/^all_services="//; s/\$\{?services_with_healthcheck\}?.*$//; s/"$//')"
     [[ " $prefix " != *" watchdog "* ]] || fail "watchdog is listed both in all_services' static prefix ('$prefix') and services_with_healthcheck -- would appear twice in the loop"
+}
+
+@test "wait-validation-stack-health/action.yml includes docker-socket-proxy in services_with_healthcheck (regression guard, #1169)" {
+    # deploy/full-setup/docker-compose.yml's docker-socket-proxy service
+    # gained a real Docker HEALTHCHECK under #1169 (an HTTP probe against the
+    # Docker API's own /_ping) -- previously it had none, which is why it was
+    # excluded here. Guards against this silently regressing back to the
+    # weaker "running + restart-count ceiling" check.
+    hc="$(extract_services_with_healthcheck "$repo_root/.github/actions/wait-validation-stack-health/action.yml")"
+    [ -n "$hc" ] || fail "wait-validation-stack-health/action.yml: services_with_healthcheck not found"
+    [[ " $hc " == *" docker-socket-proxy "* ]] || fail "wait-validation-stack-health/action.yml's services_with_healthcheck ('$hc') no longer includes docker-socket-proxy, despite deploy/full-setup/docker-compose.yml's docker-socket-proxy service defining a real HEALTHCHECK"
+}
+
+@test "setup-cli-simulation.sh includes docker-socket-proxy and netdata in services_with_healthcheck (regression guard, #1169)" {
+    # deploy/quickstart/docker-compose.yml's docker-socket-proxy and netdata
+    # services both gained a real Docker HEALTHCHECK under #1169 -- neither
+    # had one before.
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/setup-cli-simulation.sh")"
+    [ -n "$hc" ] || fail "setup-cli-simulation.sh: services_with_healthcheck not found"
+    [[ " $hc " == *" docker-socket-proxy "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes docker-socket-proxy"
+    [[ " $hc " == *" netdata "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes netdata"
+}
+
+@test "syslog-forwarding-simulation.sh includes docker-socket-proxy, dhcp-proxy, syslog, and syslog-ng in services_with_healthcheck (regression guard, #1169)" {
+    # docker-socket-proxy and dhcp-proxy gained a real Docker HEALTHCHECK
+    # under #1169 (neither had one before). syslog and syslog-ng have had a
+    # real Docker HEALTHCHECK since issue #633 (predating #1169) but were
+    # incorrectly grouped with docker-socket-proxy as having "genuinely none"
+    # in this file's own comment -- #1169 corrected that stale claim too.
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/syslog-forwarding-simulation.sh")"
+    [ -n "$hc" ] || fail "syslog-forwarding-simulation.sh: services_with_healthcheck not found"
+    for svc in docker-socket-proxy dhcp-proxy syslog syslog-ng; do
+        [[ " $hc " == *" $svc "* ]] || fail "syslog-forwarding-simulation.sh's services_with_healthcheck ('$hc') no longer includes $svc"
+    done
 }
 
 @test "setup-cli-simulation.sh's smaller services_with_healthcheck list stays intentional (sanity: still a subset of all_services)" {
