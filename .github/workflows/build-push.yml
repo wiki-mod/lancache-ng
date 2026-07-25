@@ -2697,6 +2697,34 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-bats-path-filter-coverage.sh
 
+      - name: Check setup.sh/simulation-script prompt drift (issue #1176)
+        # Guards the failure class #1112/#1171 and #1082/#1175 both share:
+        # a PR changes something several other files depend on by hand-
+        # duplicated convention, and nothing catches the ones left stale
+        # until CI happens to exercise them days later on an unrelated PR.
+        # This instance: setup.sh's interactive install wizard and the two
+        # expect-driven simulation scripts (scripts/setup-cli-simulation.sh,
+        # scripts/syslog-forwarding-simulation.sh) that hand-encode its
+        # prompt sequence. PR #1082 added a new unconditional prompt without
+        # updating either simulation script, hanging both until timeout
+        # (#1175) -- discovered only because those specific jobs happened to
+        # run against an unrelated PR. scripts/check-setup-prompt-drift.sh
+        # fails closed whenever an unconditional wizard prompt is missing a
+        # matching expect_prompt answer in either simulation script, or a
+        # simulation script's pattern no longer matches any real prompt.
+        # Runs in the build-tools container for the same reason as the
+        # other check-*.sh guards above: real bash/grep/awk/sed semantics,
+        # not whatever happens to be on the runner host.
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-setup-prompt-drift.sh
+
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
         # check-logging-matrix.sh itself shells out to `docker compose ...
         # config --services` per Compose file, which -- same as the "Validate
