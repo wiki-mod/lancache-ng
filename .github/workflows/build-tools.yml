@@ -874,6 +874,18 @@ jobs:
         run: |
           docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
 
+      # The docker-container builder "Set up Docker Buildx" created above is
+      # never torn down by setup-buildx-action itself, and this runner pool
+      # is persistent (self-hosted), not a one-shot GitHub-hosted VM -- every
+      # run without this step leaves an orphaned builder container plus its
+      # buildkit state volume behind forever. `|| true` because a missing
+      # builder (e.g. an earlier step failed before "Set up Docker Buildx"
+      # ever ran) must not fail an otherwise-successful job.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   build-tools-arm64:
     # Native linux/arm64 leg, same rationale as build-push.yml's build-arm64
     # (added by #592): a GitHub-hosted arm64 runner instead of QEMU on the
@@ -1088,6 +1100,18 @@ jobs:
         run: |
           docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
 
+      # Same leak as the amd64 leg's own "Remove buildx builder" step above:
+      # setup-buildx-action never tears its builder down on its own. This
+      # job runs on a GitHub-hosted ubuntu-24.04-arm runner (destroyed after
+      # the job, unlike the amd64 leg's persistent self-hosted pool), so the
+      # leak this closes is latent rather than actively observed here -- kept
+      # for consistency and in case this job is ever moved to a persistent
+      # runner.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   merge-build-tools-manifests:
     # Combines build-tools's linux/amd64 tag with build-tools-arm64's
     # linux/arm64 tag into the real sha-<commit> multi-platform tag that
@@ -1122,6 +1146,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -1296,3 +1321,14 @@ jobs:
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
           fi
+
+      # Same leak as the other two jobs' own "Remove buildx builder" steps:
+      # this job never builds a local image (only `imagetools create`/
+      # `inspect` against already-pushed digests), so it had no local-image
+      # cleanup step to piggyback on before now, but "Set up Docker Buildx"
+      # above still creates a real docker-container builder + state volume
+      # that was never removed on this persistent self-hosted runner pool.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true

@@ -107,6 +107,7 @@ jobs:
           promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -274,6 +275,18 @@ jobs:
             printf -- '- Source commit: %s\n' "$declared_commit"
             printf -- '- Target channel: latest\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # #1241: this job's buildx builder is only ever used for the
+      # `docker buildx imagetools inspect/create` calls inside the
+      # "Backfill latest channel" step above -- torn down immediately after
+      # its one use, same pattern build-push.yml/build-tools.yml/
+      # build-push-hosted-fallback.yml already apply, so this manual
+      # recovery workflow stops leaving an orphaned buildx_buildkit_*
+      # builder container/volume behind on every dispatch.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       # `if: always()` (issue #897): release regardless of whether the
       # backfill above succeeded or failed, so a real backfill failure
