@@ -103,6 +103,7 @@ jobs:
     # channel tag inside a gate), and turns the `services` input into a JSON
     # matrix the downstream jobs can consume via fromJSON().
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       build_tools_image: ${{ steps.select-image.outputs.build_tools_image }}
       matrix: ${{ steps.services.outputs.matrix }}
@@ -243,6 +244,14 @@ jobs:
     # -- there is nothing here for that machinery to protect).
     needs: preflight
     runs-on: ubuntu-latest
+    # 75, not the file's default 30: "Build local scan image" below is an
+    # UNCACHED amd64 build (--pull, no cache-from/cache-to) and dns/ui are
+    # real Rust services -- a cold cargo build of either on ubuntu-latest can
+    # plausibly exceed 30 minutes on its own, before the Trivy scan step even
+    # starts. A flat 30 here would turn a working uncached Rust build into a
+    # guaranteed-timeout job, the same failure class avoided below for
+    # build-hosted-fallback's own 90-minute build step.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
@@ -343,6 +352,15 @@ jobs:
     # job would have published for this commit.
     needs: [preflight, container-scan-hosted-fallback]
     runs-on: ubuntu-latest
+    # 120, not the file's default 30: this job's own "Build and push" step
+    # below already declares timeout-minutes: 90, plus a conditional 20-minute
+    # Trivy scan step for the build-tools row -- a flat 30-minute job timeout
+    # would contradict that existing step budget and guarantee this job is
+    # killed before its own build step could ever finish, regardless of a
+    # real build's actual health. 120 keeps a real, meaningfully bounding cap
+    # (vs. the 360-minute GitHub default) while clearing the documented
+    # worst case (90 + 20 + smaller step overhead).
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -531,6 +549,7 @@ jobs:
     needs: [preflight, build-hosted-fallback]
     if: ${{ inputs.merge_manifest }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
