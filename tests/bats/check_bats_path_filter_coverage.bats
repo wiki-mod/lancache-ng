@@ -2,19 +2,24 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-bats-path-filter-coverage.sh (#879): the CI
-# guard that fails a build if .github/workflows/build-tools.yml's
+# guard that fails a build if .github/workflows/build-tools-smoke.yml's
 # on.push.paths / on.pull_request.paths filter drifts out of sync with the
 # real, non-fixture file dependencies of tests/bats/*.bats and
-# tests/bats/helpers/*.sh.
+# tests/bats/helpers/*.sh. (#1253, Q1 of #1255: the guard's target moved from
+# build-tools.yml to the new build-tools-smoke.yml, which now owns the broad
+# test-input trigger and runs these suites against the published image
+# instead of rebuilding; this fixture's own workflow filename below moved
+# with it.)
 #
 # Mirrors check_idempotence_test_coverage.bats's pattern: this file does NOT
 # merely run the guard against the real repo (that only proves "passes
 # today," not that the guard actually catches a regression) -- it builds a
 # small fixture repo (a fixture tests/bats/*.bats file plus a fixture
-# .github/workflows/build-tools.yml) and exercises the guard's pass/fail
-# branches directly, including the exact #880-warned failure mode ("added to
-# one list, forgot the other") and the fixture/example-path exclusions #879
-# itself calls out as the over-matching risk of a naive implementation.
+# .github/workflows/build-tools-smoke.yml) and exercises the guard's
+# pass/fail branches directly, including the exact #880-warned failure mode
+# ("added to one list, forgot the other") and the fixture/example-path
+# exclusions #879 itself calls out as the over-matching risk of a naive
+# implementation.
 #
 # Invoked as `run bash "$script" ...` throughout (never `run "$script"
 # ..."`), matching check_workflow_service_lists.bats's own convention: this
@@ -39,14 +44,14 @@ setup() {
 }
 
 # write_workflow <push_paths_string> <pull_request_paths_string>
-# Writes a minimal, real-shape build-tools.yml fixture: same fixed
+# Writes a minimal, real-shape build-tools-smoke.yml fixture: same fixed
 # indentation this script's extract_workflow_paths() anchors to (on: at
 # column 0, push:/pull_request: at 2 spaces, paths: at 4, list items at 6).
 # Each argument is a newline-separated list of quoted-path lines already
 # formatted (e.g. '      - "setup.sh"').
 write_workflow() {
     local push_paths="$1" pr_paths="$2"
-    cat > "$fixture_root/.github/workflows/build-tools.yml" <<EOF
+    cat > "$fixture_root/.github/workflows/build-tools-smoke.yml" <<EOF
 on:
   push:
     branches: [master]
@@ -271,7 +276,7 @@ ${at_test} "reads setup.sh" {
     [ -f "\$repo_root/setup.sh" ]
 }
 EOF
-    cat > "$fixture_root/.github/workflows/build-tools.yml" <<'EOF'
+    cat > "$fixture_root/.github/workflows/build-tools-smoke.yml" <<'EOF'
 on:
   workflow_dispatch:
 EOF
@@ -292,7 +297,7 @@ ${at_test} "reads setup.sh" {
     [ -f "\$repo_root/setup.sh" ]
 }
 EOF
-    rm -f "$fixture_root/.github/workflows/build-tools.yml"
+    rm -f "$fixture_root/.github/workflows/build-tools-smoke.yml"
 
     run bash "$script" "$fixture_root"
     [ "$status" -ne 0 ]

@@ -216,7 +216,7 @@ resolved unilaterally in this audit.
 | #647 | spec: define full dnsmasq relay/proxy DHCP Admin UI feature scope | **OPEN** | Predates PXE boot-pointer vars; does not cover the §6 gap |
 | #840 | DHCP (Kea + dnsmasq-proxy): umbrella for scattered feature/bug/research work | **OPEN** | References #646/#647/#770/#815; does not reference the deep-validate coverage gap (§5.2) or the UI PXE-vars gap (§6) |
 | #716 | governance: no rule requires a new service to be added to full-stack CI validation | **OPEN** | General governance gap; cites dhcp-proxy's original 2026-06-22 omission as evidence, but is not itself the tracking issue for promoting the PXE simulation into the automatic gate |
-| #815 | Evaluate migrating DNS/DHCP services to Alpine base images | **OPEN** | Would affect `services/dhcp-proxy/Dockerfile`'s `mirror.gcr.io/library/debian:trixie-slim` base + `dnsmasq`/`gettext` packages |
+| #815 | Evaluate migrating DNS/DHCP services to Alpine base images | **OPEN** | `services/dhcp-proxy/Dockerfile` migrated to `mirror.gcr.io/library/alpine:3.24` (dnsmasq-first, per this issue's own staged recommendation); `services/dhcp` (Kea) and `services/dns` (PowerDNS) remain on Debian, issue stays open for those |
 
 ## 8. Recommended follow-ups (not filed — for maintainer decision)
 

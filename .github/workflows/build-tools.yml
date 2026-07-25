@@ -29,124 +29,46 @@ on:
     # both stay listed so this trigger keeps covering whichever integration
     # branch is actually receiving pushes (#709).
     branches: [master, current_dev, v0.2.0]
+    # Narrowed to real image-content paths only (#1253, Q1 of #1255): this
+    # workflow builds, scans, and publishes the actual build-tools image, so
+    # its trigger must fire only when something that changes that image's
+    # bytes changed -- tools/build-tools/** (the Dockerfile and everything it
+    # COPYs/builds in its own build context) or this workflow file itself
+    # (which defines the build/scan/publish steps).
+    #
+    # This list used to be much broader (tests/bats/**, tests/shellspec/**,
+    # scripts/lib/**, individual services/*/entrypoint.sh files, several
+    # other workflow files, deploy/*/docker-compose.yml, ...), but none of
+    # that is image content -- it was here only so this job's "Run Bats setup
+    # fixtures"/"Run ShellSpec setup fixtures" steps re-ran the project's
+    # regression suites whenever one of their real dependencies changed. That
+    # forced a byte-identical multi-arch image rebuild on scarce
+    # lancache-heavy capacity for every such change, confirmed wasteful in
+    # #1253 since most of the current CI-hardening work touches exactly
+    # those broad paths and never tools/build-tools/** itself. That
+    # regression coverage now lives in the separate, cheap
+    # build-tools-smoke.yml workflow, which runs the identical suites
+    # against the already-published image (pulled, never rebuilt) on its
+    # own broad trigger -- see that file for the per-path provenance this
+    # comment used to carry, and AG-CI-010 (CLAUDE.md) for the "routine PRs
+    # must not rebuild the build-tools image" contract this narrowing
+    # restores. scripts/check-bats-path-filter-coverage.sh (#879) now
+    # targets build-tools-smoke.yml's on.push.paths/on.pull_request.paths
+    # instead of this workflow's, since that is where the suites actually
+    # run today.
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
-      - "certs/generate-ca.sh"
-      - "tests/bats/**"
-      - "tests/shellspec/**"
-      - "tests/fixtures/**"
-      - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
-      - "scripts/check-validation-subnet-wrapper-coverage.sh"
-      - "scripts/check-bats-path-filter-coverage.sh"
-      - "scripts/check-build-tools-smoke-coverage.sh"
-      - "scripts/select-build-tools-image.sh"
-      - "scripts/lib/**"
-      - "scripts/classify-image-impact.sh"
-      - "scripts/compute-next-release-tag.sh"
-      - "scripts/detect-full-setup-changes.sh"
-      - "scripts/ensure-pr-staging-images.sh"
-      - "scripts/plan-deep-validation.sh"
-      - "scripts/docker-socket-proxy.sh"
-      - "scripts/check-action-node-versions.sh"
-      - "scripts/check-executable-bits.sh"
-      - "scripts/check-workflow-service-lists.sh"
-      - "scripts/check-orphaned-branches.sh"
-      - "scripts/check-changelog-direct-edit.sh"
-      - "scripts/check-pr-title-convention.sh"
-      - "scripts/setup-cli-simulation.sh"
-      - "scripts/syslog-forwarding-simulation.sh"
-      - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
-      - ".github/workflows/build-push.yml"
-      - ".github/workflows/full-setup-validate.yml"
-      - ".github/workflows/full-setup-deep-validate.yml"
-      - ".github/workflows/full-setup-sims.yml"
-      - ".github/actions/derive-validation-network/action.yml"
-      - ".github/actions/wait-validation-stack-health/action.yml"
-      # Individual files, not "services/<name>/**" wildcards (#1198): each
-      # service directory also holds its own Dockerfile, nginx/lua/config
-      # assets, and in services/dns's case an entire nats-subscriber Rust
-      # crate -- none of which any tests/bats/*.bats or tests/shellspec/**
-      # suite actually reads. scripts/check-bats-path-filter-coverage.sh
-      # (#879) is the source of truth for exactly which files below are real
-      # bats dependencies; re-run it after touching this list.
-      - "services/dns/cdn-domains.txt"
-      - "services/dns/entrypoint.sh"
-      - "services/dhcp/entrypoint.sh"
-      - "services/dhcp/kea-ctrl-agent.conf"
-      - "services/dhcp/kea-dhcp4.conf"
-      - "services/dhcp/kea-dhcp-ddns.conf"
-      - "services/dhcp-proxy/dnsmasq.conf.template"
-      - "services/dhcp-proxy/dnsmasq-relay.conf.template"
-      - "services/dhcp-proxy/entrypoint.sh"
-      - "services/ntp/entrypoint.sh"
-      - "services/proxy/entrypoint.sh"
-      - "services/watchdog/watchdog.sh"
-      - "services/ui/dhcp-probe.sh"
-      - "services/ui/docker-entrypoint.sh"
-      - "deploy/prod/docker-compose.yml"
-      - "deploy/quickstart/docker-compose.yml"
-      - "deploy/secondary/docker-compose.yml"
   pull_request:
     # current_dev is the active development branch today (v0.2.0 is frozen);
     # both stay listed so this trigger keeps covering whichever integration
     # branch is actually receiving pushes (#709).
     branches: [master, current_dev, v0.2.0]
+    # See the on.push.paths comment above -- identical narrowing, identical
+    # reasoning (#1253).
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
-      - "certs/generate-ca.sh"
-      - "tests/bats/**"
-      - "tests/shellspec/**"
-      - "tests/fixtures/**"
-      - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
-      - "scripts/check-validation-subnet-wrapper-coverage.sh"
-      - "scripts/check-bats-path-filter-coverage.sh"
-      - "scripts/check-build-tools-smoke-coverage.sh"
-      - "scripts/select-build-tools-image.sh"
-      - "scripts/lib/**"
-      - "scripts/classify-image-impact.sh"
-      - "scripts/compute-next-release-tag.sh"
-      - "scripts/detect-full-setup-changes.sh"
-      - "scripts/ensure-pr-staging-images.sh"
-      - "scripts/plan-deep-validation.sh"
-      - "scripts/docker-socket-proxy.sh"
-      - "scripts/check-action-node-versions.sh"
-      - "scripts/check-executable-bits.sh"
-      - "scripts/check-workflow-service-lists.sh"
-      - "scripts/check-orphaned-branches.sh"
-      - "scripts/check-changelog-direct-edit.sh"
-      - "scripts/check-pr-title-convention.sh"
-      - "scripts/setup-cli-simulation.sh"
-      - "scripts/syslog-forwarding-simulation.sh"
-      - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
-      - ".github/workflows/build-push.yml"
-      - ".github/workflows/full-setup-validate.yml"
-      - ".github/workflows/full-setup-deep-validate.yml"
-      - ".github/workflows/full-setup-sims.yml"
-      - ".github/actions/derive-validation-network/action.yml"
-      - ".github/actions/wait-validation-stack-health/action.yml"
-      - "services/dns/cdn-domains.txt"
-      - "services/dns/entrypoint.sh"
-      - "services/dhcp/entrypoint.sh"
-      - "services/dhcp/kea-ctrl-agent.conf"
-      - "services/dhcp/kea-dhcp4.conf"
-      - "services/dhcp/kea-dhcp-ddns.conf"
-      - "services/dhcp-proxy/dnsmasq.conf.template"
-      - "services/dhcp-proxy/dnsmasq-relay.conf.template"
-      - "services/dhcp-proxy/entrypoint.sh"
-      - "services/ntp/entrypoint.sh"
-      - "services/proxy/entrypoint.sh"
-      - "services/watchdog/watchdog.sh"
-      - "services/ui/dhcp-probe.sh"
-      - "services/ui/docker-entrypoint.sh"
-      - "deploy/prod/docker-compose.yml"
-      - "deploy/quickstart/docker-compose.yml"
-      - "deploy/secondary/docker-compose.yml"
 
 permissions:
   contents: read
@@ -216,92 +138,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
-      # every other test-only path below (scripts/check-idempotence-test-
-      # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries, the
-      # individual services/**/*.{sh,conf,template,txt} entries (#1198: listed
-      # file-by-file rather than as "services/<name>/**" wildcards, since each
-      # service directory also holds Dockerfiles/nginx/lua/Rust-crate content
-      # no bats suite reads), and the deploy/*/docker-compose.yml
-      # files) are in this workflow's path filter so the local smoke-test/
-      # Bats/ShellSpec steps below actually run when one of those changes --
-      # each one is a real dependency of at least one tests/bats/*.bats suite
-      # (#873: the filter previously covered only setup.sh and the
-      # idempotence-coverage guard, so a PR touching any of these other
-      # tested files never ran the bats suite written for it). Such a change
-      # must not also rebuild and publish the build-tools image itself --
-      # that stays tied to build-tools inputs (tools/build-tools/** or this
-      # workflow file), per the "routine PRs must not rebuild the build-tools
-      # image unless build-tools inputs changed" contract. This entire list
-      # is kept in sync automatically by scripts/check-bats-path-filter-
-      # coverage.sh (#879), which fails the light-tier static-check step in
-      # build-push.yml if any tests/bats/*.bats or tests/bats/helpers/*.sh
-      # dependency is not covered by an entry in this list (or its
-      # pull_request twin below) -- this comment documents WHY specific
-      # entries exist, the guard is what stops the list from silently
-      # drifting out of sync again.
+      # This diff is a second, narrower gate underneath the trigger's own
+      # path filter above (#1253, Q1 of #1255): that filter already restricts
+      # push events reaching this job to tools/build-tools/** or this
+      # workflow file, and a push event's before..after range is exactly the
+      # same compare range GitHub's own path-filter evaluation used to decide
+      # to fire this job in the first place -- so for an ordinary push this
+      # almost always resolves true. It stays as a real, independent check
+      # rather than being deleted as redundant because (a) workflow_dispatch
+      # and schedule bypass it entirely via the early return just below, and
+      # (b) it is the only thing that would still catch a future edit that
+      # widens the trigger's path list again without updating this diff to
+      # match -- trusting "the trigger filter already proved it" would make
+      # that drift silent instead of merely unlikely today.
       #
-      # scripts/check-idempotence-test-coverage.sh specifically (#732 review):
-      # its own tests/bats/check_idempotence_test_coverage.bats fixture suite
-      # is what actually proves the guard *catches* a regression (unlike
-      # build-push.yml's step, which only runs the guard once against
-      # today's real repo -- a happy-path check that can't detect the guard
-      # itself silently breaking). Without this entry, a PR touching only
-      # the guard script would not already match tests/bats/** and so would
-      # never run that suite. scripts/check-validation-subnet-wrapper-
-      # coverage.sh (#896) and scripts/check-bats-path-filter-coverage.sh
-      # itself (#879) are listed for the identical reason -- each one's own
-      # fixture suite (tests/bats/check_validation_subnet_wrapper_coverage.
-      # bats, tests/bats/check_bats_path_filter_coverage.bats) is what proves
-      # THAT guard catches a real regression, not just that it currently
-      # passes against today's tree.
-      #
-      # .github/workflows/build-push.yml, .github/workflows/
-      # full-setup-validate.yml, .github/workflows/full-setup-deep-
-      # validate.yml, and .github/actions/derive-validation-network/
-      # action.yml (#879): an earlier version of this comment argued full-
-      # setup-validate.yml/full-setup-deep-validate.yml did not need to be
-      # listed here, since an unwrapped job added to either file is already
-      # blocked by build-push.yml's unconditional (no-path-filter)
-      # shellcheck jobs. That reasoning covered only the validation-subnet-
-      # wrapper class of regression -- it did not account for
-      # tests/bats/healthcheck_service_lists.bats (byte-for-byte parity of
-      # services_with_healthcheck across build-push.yml, full-setup-
-      # validate.yml, and full-setup-deep-validate.yml, and its subset check
-      # against scripts/setup-cli-simulation.sh and scripts/syslog-
-      # forwarding-simulation.sh), tests/bats/validation_image_tag.bats
-      # (build-push.yml must keep calling scripts/lib/validation-image-
-      # tag.sh's functions instead of reimplementing them), or
-      # tests/bats/reserve_validation_subnet.bats (derive-validation-
-      # network/action.yml must keep sourcing scripts/lib/reserve-validation-
-      # subnet.sh instead of reimplementing its formula) -- none of which
-      # shellcheck can catch, since they assert cross-file content agreement,
-      # not shell syntax. scripts/check-bats-path-filter-coverage.sh's own
-      # existence-filtered dependency scan found this gap directly against
-      # the real repo tree; these four files are added here to close it.
-      # scripts/setup-cli-simulation.sh and scripts/syslog-forwarding-
-      # simulation.sh (also real healthcheck_service_lists.bats dependencies)
-      # and deploy/secondary/docker-compose.yml (tests/bats/
-      # setup_secondary_docker_compose.bats's checked-in reference file for
-      # its cmd_secondary heredoc sync-guard, #946) are added alongside them
-      # for the same reason.
-      #
-      # .github/workflows/full-setup-sims.yml and .github/actions/
-      # wait-validation-stack-health/action.yml (#1171): #1112 extracted the
-      # shared full-setup jobs into this reusable workflow and composite
-      # action, which moved tests/bats/healthcheck_service_lists.bats's and
-      # tests/bats/quickstart_compose_lock.bats's real dependencies out of
-      # build-push.yml/full-setup-validate.yml/full-setup-deep-validate.yml
-      # and into these two new files -- #1112 itself did not add them here,
-      # which is exactly why both bats suites went on failing deterministically
-      # against current_dev's own tip until #1171 fixed both the tests and
-      # this list together. scripts/check-bats-path-filter-coverage.sh's own
-      # existence-filtered dependency scan against the real repo tree is what
-      # caught this gap (tests/bats/check_bats_path_filter_coverage.bats's
-      # "the guard also passes when pointed at the real repository tree"
-      # case), not a fixture -- the same "the guard proves itself against
-      # today's real tree" property called out for the other four-file group
-      # above.
+      # This workflow's trigger used to carry a much broader path list here
+      # (tests/bats/**, scripts/lib/**, individual services/*/entrypoint.sh
+      # files, other workflow files, ...), and this same job's "Determine
+      # whether build-tools inputs actually changed" step is what kept those
+      # broad-path pushes from actually publishing a rebuilt image (only
+      # skipping the publish, not the heavy local build/scan/smoke-test
+      # steps that ran regardless). #1253 removed that broad list from this
+      # workflow's own trigger entirely -- see build-tools-smoke.yml for
+      # where that regression coverage (and scripts/check-bats-path-filter-
+      # coverage.sh's #879 target) now lives -- so this step's practical
+      # effect today is narrower than its history above suggests, but its
+      # logic is deliberately left unchanged (see #1253's own scope: narrow
+      # the trigger and extract the smoke tests, do not touch the
+      # build/scan/merge/promote logic itself).
       - name: Determine whether build-tools inputs actually changed
         id: should-publish
         run: |
@@ -340,7 +204,7 @@ jobs:
           if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Only test-only paths (tests/bats/**, tests/shellspec/**, setup.sh) changed; skipping build-tools image rebuild/publish."
+            echo "::notice::No tools/build-tools/** or workflow-file change found in this push's commit range; skipping build-tools image rebuild/publish."
             echo "should-publish=false" >> "$GITHUB_OUTPUT"
           fi
 
