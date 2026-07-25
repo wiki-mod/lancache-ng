@@ -70,7 +70,10 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     if: inputs.should_run == 'true'
+    # Stays light (not a stack-driving job): pure subnet/IP derivation via a
+    # composite action, no Docker/compose stack of its own.
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 45
     outputs:
       subnet: ${{ steps.derive.outputs.subnet }}
       gateway: ${{ steps.derive.outputs.gateway }}
@@ -103,7 +106,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
     steps:
@@ -201,7 +205,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # Per-run compose project name + UI host port keep this sim isolated from
@@ -298,7 +303,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above for why the
@@ -391,7 +397,8 @@ jobs:
     # ui-nats-dns-integration-simulation instead.
     needs: [ui-nats-dns-integration-simulation]
     if: always() && inputs.should_run == 'true'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve build-tools image
@@ -486,7 +493,8 @@ jobs:
     name: DHCP Kea lease-flow simulation
     needs: [setup-cli-simulation]
     if: always() && inputs.should_run == 'true'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve build-tools image
@@ -536,7 +544,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above: this job's own
@@ -605,7 +614,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above: this job's own
@@ -684,7 +694,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
@@ -761,7 +772,8 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}

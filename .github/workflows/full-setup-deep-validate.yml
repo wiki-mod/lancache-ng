@@ -34,15 +34,25 @@
 # is safe to require without blocking docs-only PRs -- a required check that
 # gets skipped would otherwise leave a PR permanently un-mergeable.
 #
-# RUNNER CAPACITY NOTE: these sims run serially on the shared lancache-light
-# tier (per AG-CI-002); the image BUILDS they wait on run on the scarce
-# lancache-heavy tier, so the wait cannot deadlock the builds (different
-# runner pools). But this does roughly double the light-tier full-setup
-# footprint per PR (build-push's own shallow job still runs too), and the
-# staging-wait job holds one light slot while polling. See the PR body for
-# the capacity trade-off; #715 states CI time is not the constraint but
-# acknowledges self-hosted CAPACITY under higher trigger frequency is a real,
-# separate concern to watch.
+# RUNNER CAPACITY NOTE (updated for the lancache-heavy tier move, see the
+# job-level comments below): these sims now run serially on the scarce
+# lancache-heavy tier (AG-CI-002 -- they build and run real Docker
+# containers/compose stacks, not just plan or poll), the same tier the image
+# BUILDS they wait on also use. That no longer gives a "different runner
+# pools" guarantee against self-deadlock; what still prevents it is ordering,
+# not isolation: every heavy-tier sim job's `needs:` chain runs through
+# ensure-pr-staging-images (which stays on lancache-light and internally
+# polls until build-push's builds finish and push this PR's staging tags), so
+# a sim never requests a heavy slot until this PR's OWN builds have already
+# finished and released theirs. It does not prevent contention with OTHER
+# PRs' concurrent heavy-tier builds/sims -- this change increases total
+# heavy-tier demand per PR run (sims move off light onto the same small pool
+# builds already compete for), a real, separate capacity concern that
+# intersects with issue #1065's heavy-pool saturation finding, not one this
+# note's ordering argument resolves. See the PR body for the capacity
+# trade-off; #715 states CI time is not the constraint but acknowledges
+# self-hosted CAPACITY under higher trigger frequency is a real, separate
+# concern to watch.
 
 name: Full-Setup Deep Validate
 
@@ -111,6 +121,7 @@ jobs:
   plan:
     name: plan deep validation
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
     outputs:
       should_run: ${{ steps.plan.outputs.should_run }}
       image_tag: ${{ steps.plan.outputs.image_tag }}
@@ -158,6 +169,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.should_run == 'true' && needs.plan.outputs.pr_staging_available == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # 100 minutes: this job's own scripts/ensure-pr-staging-images.sh runs an
+    # internal ~90-minute poll loop waiting for build-push.yml's staging tags,
+    # so the job timeout must clear that poll budget with headroom, not just
+    # cover the wrapper's own overhead.
+    timeout-minutes: 100
     permissions:
       contents: read
       packages: write
@@ -196,18 +212,22 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ needs.plan.outputs.image_tag }}
-          BASE_CHANNEL_TAG: ${{ needs.plan.outputs.base_channel_tag }}
           WORKFLOW_CHANGED: ${{ needs.plan.outputs.workflow }}
           PROXY_TOUCHED: ${{ needs.plan.outputs.proxy }}
           DNS_TOUCHED: ${{ needs.plan.outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs.plan.outputs.watchdog }}
           UI_TOUCHED: ${{ needs.plan.outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
-          # #808: this PR's own base commit, needed to prove a base-channel
-          # image was actually built from a commit at or after it before
-          # backfilling an untouched service from that channel. Always
-          # present here: this job only runs on a pull_request event (see
-          # this job's own `if:` above, gated on pr_staging_available).
+          # #808/#1254/#1255: this PR's own base commit. Needed both to prove
+          # the back-fill source image was actually built from it (or later)
+          # before backfilling an untouched service, AND (since #1254/#1255)
+          # to derive that source image's own tag directly (this PR's base
+          # commit's durable sha-<short> image, not a mutable channel tag --
+          # no separate BASE_CHANNEL_TAG input is passed anymore, see
+          # scripts/ensure-pr-staging-images.sh's own base_sha_short
+          # computation). Always present here: this job only runs on a
+          # pull_request event (see this job's own `if:` above, gated on
+          # pr_staging_available).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # #895: github.sha on a pull_request event is the same synthetic
           # merge commit build-push.yml built and tagged (see this workflow's
@@ -292,7 +312,10 @@ jobs:
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job brings up a real full-setup stack subset
+    # (PowerDNS/nats-subscriber/UI) rather than just polling or planning.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
       # The run-in-validation-subnet.sh wrapper below self-reserves a
@@ -368,7 +391,10 @@ jobs:
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job builds and runs a real Kea container plus
+    # the Admin UI/NATS stack, not just planning or polling.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
       # The run-in-validation-subnet.sh wrapper below self-reserves a
@@ -442,7 +468,10 @@ jobs:
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job brings up the real quickstart stack to
+    # exercise syslog forwarding end-to-end, not just planning or polling.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve build-tools image
@@ -557,7 +586,14 @@ jobs:
       - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
     if: always()
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy per explicit maintainer judgment, even though this job itself is
+    # a pure shell aggregator (no compose/stack of its own): every job it
+    # `needs:` above already runs on heavy, so the incremental heavy-pool
+    # cost of also routing this aggregate there is one brief slot, not a
+    # second full stack run. AG-CI-002 would nominally leave a job this
+    # light on the light tier; noted here rather than silently overridden.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 60
     steps:
       - name: Aggregate deep validation result
         env:

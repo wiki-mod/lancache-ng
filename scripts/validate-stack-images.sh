@@ -180,12 +180,13 @@ forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
 if grep -Fq "$forbidden_latest_default_branch" "$repo_root/.github/workflows/build-push.yml"; then
   fail 'default branch must not publish latest via an unaudited build-time tag; latest may only move through the gated promote job'
 fi
-# #825/#1141 branch-model decision: master -> latest, current_dev -> nightly,
-# archived vY.X.Z branches -> no live channel. Scoped to each branch's own
-# if/elif arm (not a flat grep for the channel_tags line alone) so a
-# regression that keeps both literal strings in the file but ties them to
-# the wrong branch would still be caught -- mirrors the equivalent guard in
-# build-push.yml's own governance-guards job.
+# #825/#1141 branch-model decision: master -> latest, archived vY.X.Z
+# branches -> no live channel. current_dev's own mapping was SUPERSEDED by
+# #1254/#1255 below. Scoped to each branch's own if/elif arm (not a flat grep
+# for the channel_tags line alone) so a regression that keeps both literal
+# strings in the file but ties them to the wrong branch would still be
+# caught -- mirrors the equivalent guard in build-push.yml's own
+# governance-guards job.
 if ! awk '
   /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
   in_branch && /^ *elif/ { in_branch=0 }
@@ -194,13 +195,23 @@ if ! awk '
 ' "$repo_root/.github/workflows/build-push.yml"; then
   fail 'master branch promotion must publish the latest channel'
 fi
-if ! awk '
+# #1254/#1255 (2026-07-25): current_dev push must NOT auto-publish nightly
+# anymore (nightly is now a real once-daily scheduled/dispatch-only,
+# green-gated channel -- see nightly-refresh.yml). Mirror image of the old
+# check above: fails if the auto-publish regresses back in.
+if awk '
   /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
   in_branch && /^ *elif/ { in_branch=0 }
   in_branch && /channel_tags\+=\(nightly\)/ { found=1 }
   END { exit found ? 0 : 1 }
 ' "$repo_root/.github/workflows/build-push.yml"; then
-  fail 'current_dev branch promotion must publish the nightly channel'
+  fail 'current_dev push must no longer auto-publish the nightly channel (#1254/#1255); nightly is promoted only via the scheduled/manual channel-input dispatch path (see nightly-refresh.yml)'
+fi
+require_file '.github/workflows/nightly-refresh.yml'
+if ! { grep -Fq 'build-push.yml' "$repo_root/.github/workflows/nightly-refresh.yml" \
+    && grep -Fq 'current_dev' "$repo_root/.github/workflows/nightly-refresh.yml" \
+    && grep -Fq 'channel=nightly' "$repo_root/.github/workflows/nightly-refresh.yml"; }; then
+  fail 'nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)'
 fi
 if ! awk '
   /^ *channel_tags=\(\)$/ { in_scope=1; next }

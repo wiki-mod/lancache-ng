@@ -114,23 +114,26 @@ build_retry() {
   while (( attempt <= BUILD_RETRY_MAX_ATTEMPTS )); do
     : > "$logfile"
 
-    # Deliberately `if "$@" 2>&1 | tee "$logfile"; then status=0; else
-    # status="${PIPESTATUS[0]}"; fi`, not a bare pipeline statement followed
-    # by reading `${PIPESTATUS[0]}` after the fact: under a caller's
-    # `set -e`/`set -o pipefail` (every workflow `run:` step in this repo
-    # sets both), a bare failing pipeline aborts the script on the spot,
-    # before build_retry ever gets to inspect the log or decide whether to
-    # retry -- the exact footgun scripts/lib/ghcr-retry.sh's own ghcr_retry()
-    # already documents and avoids for the same reason. Keeping the pipeline
-    # in `if` condition position neutralizes both `-e` and `pipefail` for
-    # this one statement; `${PIPESTATUS[0]}` (not `$?`, which after a
-    # pipeline reports `tee`'s own exit status) is the tested command's real
-    # exit code.
-    if "$@" 2>&1 | tee "$logfile"; then
-      status=0
-    else
-      status="${PIPESTATUS[0]}"
-    fi
+    # A caller's `set -e` must never abort mid-retry-loop on a failing
+    # attempt (same reasoning scripts/lib/ghcr-retry.sh's own ghcr_retry()
+    # documents), so errexit is suspended for exactly this one pipeline and
+    # restored right after. Two earlier approaches were tried and both were
+    # wrong: (1) reading `$?` after the pipe reports `tee`'s exit status,
+    # not "$@"'s, since this function deliberately never sets `pipefail`
+    # (sourcing into a caller's shell would change the caller's own
+    # pipeline semantics for everything after this call, not just this
+    # statement); (2) wrapping the pipe in `if ... ; then :; fi` and
+    # reading PIPESTATUS afterward still breaks, because executing the `:`
+    # no-op inside the `then` branch is itself a new pipeline that
+    # overwrites PIPESTATUS before it's ever read. PIPESTATUS must be read
+    # as the STATEMENT IMMEDIATELY following the pipe, with no command --
+    # not even a no-op -- executed in between.
+    local errexit_was_set=0
+    case "$-" in *e*) errexit_was_set=1 ;; esac
+    set +e
+    "$@" 2>&1 | tee "$logfile"
+    status="${PIPESTATUS[0]}"
+    (( errexit_was_set )) && set -e
 
     if (( status == 0 )); then
       rm -f "$logfile"

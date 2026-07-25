@@ -8,7 +8,7 @@
 # STAGING_BACKFILL_CMD so the touched-vs-untouched decision and the
 # fail-closed behaviour are exercised without a real daemon or registry. This
 # is the safety property that keeps the deep gate from ever silently
-# validating stale base-channel content behind a PR-looking tag.
+# validating stale content behind a PR-looking tag.
 #
 # #895 congestion-probe coverage: the tests below stub
 # STAGING_BUILD_RUN_STATUS_CMD (build_push_run_active()'s indirection) the
@@ -29,16 +29,23 @@
 # unset and put a fake `gh` executable on PATH, so the real query construction
 # is exercised and would fail against the pre-#975 implementation.
 #
-# #808 base-channel freshness coverage: every real backfill now first calls
+# #808 base-image freshness coverage: every real backfill now first calls
 # scripts/lib/staging-image-freshness.sh's sif_wait_for_fresh_base_image().
 # The default setup() below makes that check pass immediately for every
-# pre-#808 test (a disposable one-commit git repo, BASE_SHA set to that
+# pre-#808 test (a disposable two-commit git repo, BASE_SHA set to the newer
 # commit, and a revision stub that always echoes it back -- "equal" is
 # "fresh") so their existing touched/untouched back-fill-count assertions
 # stay meaningful without being coupled to the freshness mechanism itself.
 # Dedicated staleness/failure coverage for that mechanism lives in
 # staging_image_freshness.bats; the tests further down in THIS file only add
 # the integration point (a stale base image blocks the back-fill here too).
+#
+# #1254/#1255 (2026-07-25): the back-fill source itself is no longer the
+# mutable nightly/latest channel tag -- it is this PR's own base commit's
+# durable per-commit sha-<short> image (base_sha_short, derived from BASE_SHA
+# by the script itself). setup() below no longer sets BASE_CHANNEL_TAG (the
+# script no longer reads it at all); base_sha_short is computed here purely
+# for the tests' own assertions about which tag was backfilled from.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -77,6 +84,9 @@ STUB
     older_sha="$(git -C "$git_dir" rev-parse HEAD)"
     git -C "$git_dir" commit -q --allow-empty -m base
     base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    # #1254/#1255: the back-fill source image is now tagged sha-<this>, not a
+    # channel tag -- matches the script's own base_sha_short="${BASE_SHA:0:7}".
+    base_sha_short="${base_sha:0:7}"
     revision_stub="$BATS_TEST_TMPDIR/revision.sh"
     cat > "$revision_stub" <<STUB
 #!/usr/bin/env bash
@@ -97,18 +107,17 @@ STUB
     export BASE_FRESHNESS_POLL_INTERVAL_SECONDS=0
     export REPOSITORY="wiki-mod/lancache-ng"
     export PR_TAG="pr-715-sha-abcdef0"
-    export BASE_CHANNEL_TAG="nightly"
 }
 
-@test "untouched services are all back-filled from the base channel" {
+@test "untouched services are all back-filled from the PR base commit's own per-commit image" {
     export EXISTING_IMAGES=""
     export WORKFLOW_CHANGED="false"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # All five full-setup services get a base-channel back-fill.
+    # All five full-setup services get a base-commit back-fill.
     [ "$(wc -l < "$backfill_log")" -eq 5 ]
-    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:nightly" "$backfill_log"
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha_short}" "$backfill_log"
 }
 
 @test "a touched service already present passes without a back-fill" {

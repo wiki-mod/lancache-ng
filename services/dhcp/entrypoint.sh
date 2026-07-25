@@ -523,7 +523,29 @@ migrate_dhcp4_config() {
 
         .Dhcp4["control-socket"]["socket-name"] = "/run/kea/kea4.sock"
         |
-        .Dhcp4["hooks-libraries"] = ((.Dhcp4["hooks-libraries"] // []) | if any(.[]; .library == $lease_cmds_hook_path) then . else . + [{"library": $lease_cmds_hook_path}] end)
+        # Match by basename, not full path, before appending: an existing
+        # persisted config may carry the hook at a DIFFERENT distro path
+        # (e.g. Debian multiarch /usr/lib/x86_64-linux-gnu/kea/hooks/...
+        # vs. Alpine /usr/lib/kea/hooks/..., see issue #815 Alpine
+        # migration). An exact-path equality check would never match that
+        # old entry and would append a second one alongside it instead of
+        # replacing it -- confirmed for real: upgrading a Debian-based
+        # install persisted kea-dhcp4.conf straight onto the Alpine image
+        # left BOTH paths in hooks-libraries, and Kea own `kea-dhcp4 -t`
+        # rejected the config outright because the stale Debian path does
+        # not exist on Alpine, taking DHCP down until rescue mode
+        # intervened. Dropping every existing entry whose library basename
+        # is libdhcp_lease_cmds.so before adding the current resolved path
+        # keeps this idempotent (re-running with the same path yields the
+        # same single entry) and self-heals a cross-distro base-image
+        # change instead of silently duplicating a now-broken reference.
+        # NOTE: this comment block itself must never contain an apostrophe
+        # -- it lives inside the jq program below, which is a SINGLE-quoted
+        # bash string; an apostrophe here would silently close that string
+        # early and turn the rest of the jq program into literal bash code
+        # (confirmed empirically: `bash -n` failed with a syntax error at
+        # the very next jq line until this was fixed).
+        .Dhcp4["hooks-libraries"] = ((.Dhcp4["hooks-libraries"] // []) | map(select((.library | split("/") | last) != "libdhcp_lease_cmds.so")) | . + [{"library": $lease_cmds_hook_path}])
         |
         # Deliberately disabled default, not an oversight -- see the Kea DHCP
         # section of docs/architecture-ng.md for the full reasoning.

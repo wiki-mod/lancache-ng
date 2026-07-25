@@ -6,14 +6,19 @@
 # and the image retention policy. Consumed by the release/promotion CI
 # workflow and validated by scripts/validate-stack-images.sh.
 #
-# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23): master publishes
-# `latest`; current_dev (the permanent active-development branch) publishes
-# `nightly` continuously from its own tip; archived vY.X.Z release branches
-# take deliberate backports but publish no live channel at all. The `dev`
-# channel that used to be published from a vX.Y.Z branch is retired -- see
-# docs/release-versioning.md's "Retired: the dev channel" note for the full
-# history and setup.sh's validate_lancache_image_channel for the operator-
-# facing hard cut (mirrors the earlier edge -> nightly rename precedent).
+# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23; current_dev's own
+# nightly publishing model changed again in #1254/#1255, 2026-07-25): master
+# publishes `latest` continuously from its own tip; current_dev (the
+# permanent active-development branch) publishes `nightly` once a day
+# (01:00 UTC) plus on-demand, gated on a full green build+scan -- NOT
+# continuously on every push anymore, see docs/release-versioning.md's
+# "Branch/channel model" section and nightly-refresh.yml; archived vY.X.Z
+# release branches take deliberate backports but publish no live channel at
+# all. The `dev` channel that used to be published from a vX.Y.Z branch is
+# retired -- see docs/release-versioning.md's "Retired: the dev channel" note
+# for the full history and setup.sh's validate_lancache_image_channel for the
+# operator-facing hard cut (mirrors the earlier edge -> nightly rename
+# precedent).
 schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io
@@ -34,7 +39,7 @@ channels:
   nightly:
     tag: nightly
     mutable: true
-    description: Tested pre-stable integration channel built continuously from current_dev.
+    description: Tested pre-stable integration channel, built from current_dev's tip once daily plus on-demand (not continuously on every push).
   release_candidate:
     tag: vX.Y.Z-rc.N
     mutable: false

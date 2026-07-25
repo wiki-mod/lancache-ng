@@ -54,6 +54,7 @@ jobs:
   gc:
     name: reap closed-PR staging tags
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
     steps:
       # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
       # storing it is a deliberate human/admin action (a new credential with
