@@ -238,6 +238,17 @@ watchdog uses (`services/watchdog/watchdog.sh`) must be a subset of this
 allowlist — code must never assume it can act on a name the allowlist
 doesn't grant, even if that assumption happens to be harmless today.
 
+Issue #1170 Part 1 note: watchdog's `probe_docker_socket_proxy` function
+calls `GET /_ping` on `docker-socket-proxy` directly by URL (`DOCKER_PROXY_URL`),
+not a `/containers/<name>/...` Docker-API call built from a `CONTAINER_*`
+default. Its `C_DOCKER_PROXY="lancache-docker-socket-proxy"` label is
+therefore a plain literal, not a `${CONTAINER_*:-lancache-*}`-shaped
+default — `scripts/check-naming-consistency.sh`'s `watchdog_names`
+extraction (which greps for exactly that shape) correctly never sees it, and
+it correctly is not, and must not become, an allowlist entry (see
+"Operator-visible consistency" above: `docker-socket-proxy` has a real
+`container_name` but is deliberately not an allowlist target).
+
 Historical note: earlier revisions of this project also carried three
 near-identical copies of this HAProxy config as an unused Compose YAML
 anchor (`x-docker-socket-proxy-command`) at the top of each of the three
