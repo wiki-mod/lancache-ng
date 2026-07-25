@@ -664,6 +664,7 @@ mod tests {
         std::env::temp_dir().join(format!("lancache-ng-{name}-{}-{stamp}", process::id()))
     }
 
+    // Generated NATS passwords must be exactly 64 hex characters (32 bytes) and never repeat, proving CSPRNG is working and entropy is sufficient.
     #[test]
     fn generate_nats_password_is_high_entropy_and_never_repeats() {
         let a = generate_nats_password();
@@ -677,6 +678,7 @@ mod tests {
         );
     }
 
+    // RegisterResponse must serialize all image configuration fields so secondaries receive complete image reference details for deployment.
     #[test]
     fn register_response_serializes_image_tag_for_secondary_setup() {
         let response = RegisterResponse {
@@ -699,6 +701,7 @@ mod tests {
         assert_eq!(value["image_tag"], "v1.2.3");
     }
 
+    // Atomic file writes must replace the target file entirely with new content and clean up all temporary files, preventing partial writes and leftover temp files.
     #[test]
     fn nats_conf_write_replaces_file_atomically() {
         let dir = temp_dir("nats-conf-atomic");
