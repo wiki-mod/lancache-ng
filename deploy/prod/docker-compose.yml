@@ -265,6 +265,18 @@ services:
       # watchdog *looks*, not where the mount or syslog-ng actually write,
       # so it would silently break pruning (log_root wouldn't exist) instead
       # of doing anything useful. The var stays script-internal / test-only.
+      #
+      # Fluent-bit self-log rotation (#1236): deliberately NOT gated behind
+      # SYSLOG_ENABLED, unlike the three vars above. See
+      # maybe_rotate_fluent_bit_selflog()'s own comment in watchdog.sh for
+      # why the double-opt-in that protects the syslog-ng tree does not fit
+      # here -- this bounds fluent-bit's OWN operational log on its own
+      # /data volume, a disk-safety concern that applies whenever the
+      # `logging` profile is active at all, independent of whether the
+      # operator separately opted into SYSLOG_ENABLED's tree-wide pruning or
+      # the Admin UI's syslog viewer.
+      - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
+      - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
       # Watchdog sees the same cache tree as nginx so disk alerts and purge
       # decisions match the real proxy cache, not a stale split-cache path.
@@ -272,6 +284,13 @@ services:
       - watchdog-status:/var/run/watchdog
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
       - watchdog-logs:/var/log/lancache-watchdog
+      # Fluent-bit self-log rotation (#1236): same syslog-data named volume
+      # the `syslog` (fluent-bit) service below mounts as /data -- read-write
+      # here since maybe_rotate_fluent_bit_selflog() truncates/rotates the
+      # file in place. Mounted at a distinct in-container path (not /data)
+      # to avoid implying any relationship with watchdog's own unrelated
+      # paths above.
+      - syslog-data:/var/lib/lancache-syslog-data
     healthcheck:
       # Freshness-based (mtime), not just existence -- see
       # services/watchdog/healthcheck.sh's own comment for why a stalled
@@ -824,24 +843,27 @@ services:
       # info, does not log per-line tail-read activity, only startup/error/
       # state-change events).
       #
-      # KNOWN LIMITATION, confirmed empirically, not yet fixed: while
-      # syslog-ng is unreachable, fluent-bit logs its own connection/flush
-      # retries at roughly one line per second (real measured rate, 5s flush
-      # interval), and since this file is itself tailed by the self-log
-      # input above, those retry lines feed back into the same output that
-      # is already failing, compounding the growth for as long as the
-      # outage lasts -- a real outage-driven amplification, not merely
-      # theoretical. Neither syslog-ng's own size-based rotation
+      # FIXED (#1236): while syslog-ng is unreachable, fluent-bit logs its
+      # own connection/flush retries at roughly one line per second (real
+      # measured rate, 5s flush interval), and since this file is itself
+      # tailed by the self-log input above, those retry lines feed back into
+      # the same output that is already failing, compounding the growth for
+      # as long as the outage lasts -- a real outage-driven amplification,
+      # not merely theoretical. Neither syslog-ng's own size-based rotation
       # (`SYSLOG_MAX_FILE_MB`) nor watchdog's `maybe_prune_syslog`
       # (`SYSLOG_MAX_GB`/`SYSLOG_RETENTION_DAYS`) bound this file: both
       # operate on syslog-ng's own output tree (`logs-syslog-ng`), not on
-      # this container's own `/data` (`syslog-data`) volume. This file is
-      # therefore unbounded for the duration of any real syslog-ng outage.
-      # STATUS (as of this writing): documented here rather than fixed in
-      # the same change, since a proper fix (most likely extending
-      # watchdog's existing pruning to also cover this volume, or an
-      # equivalent size cap) needs its own design and idempotence testing
-      # rather than a rushed addition -- tracked as issue #1236.
+      # this container's own `/data` (`syslog-data`) volume. Fixed by a
+      # third watchdog function, `maybe_rotate_fluent_bit_selflog()`
+      # (`FLUENT_BIT_SELFLOG_MAX_MB`/`FLUENT_BIT_SELFLOG_MAX_ROTATIONS`, see
+      # the `watchdog` service below and watchdog.sh's own comment for the
+      # full mechanism and why it deliberately has no `SYSLOG_ENABLED`
+      # gate): fluent-bit's own `--help` documents no native rotation option
+      # for `-l` at all (confirmed against the pinned image, AG-VAL-023), so
+      # watchdog copies this file aside (preserving its content -- nothing
+      # an operator needs during the outage is dropped) and truncates it in
+      # place once it exceeds budget, checked every watchdog cycle rather
+      # than the daily rate limit `maybe_prune_syslog()` uses.
       - -l
       - /data/fluent-bit.log
       - -i
