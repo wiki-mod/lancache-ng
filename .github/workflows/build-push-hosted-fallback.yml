@@ -127,6 +127,7 @@ jobs:
         # validate-compose job, which sets this up before calling the same
         # script for the same reason, rather than relying on the hosted
         # runner's default Docker install already having a usable builder.
+        id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Resolve build-tools image
@@ -144,6 +145,17 @@ jobs:
               ;;
           esac
           printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # This job runs on a GitHub-hosted ubuntu-latest runner (ephemeral --
+      # destroyed after the job), so the builder leak this closes doesn't
+      # actually accumulate here the way it does on this workflow's own
+      # persistent self-hosted counterpart (build-push.yml); kept for
+      # consistency with every other builder-creation site in this repo and
+      # in case this job is ever moved to a persistent runner.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Compute service matrix
         id: services
@@ -272,6 +284,7 @@ jobs:
         # Retried, not the plain action: this is a fresh GitHub-hosted VM
         # every run with no local image cache, the same rate-limit exposure
         # build-arm64 hit and worked around in issue #930.
+        id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Build local scan image
@@ -313,6 +326,13 @@ jobs:
       - name: Remove scan image
         if: always()
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} || true
+
+      # Same leak as build-tools.yml/build-push.yml's own builder-teardown
+      # steps: "Set up Docker Buildx" above never removes its own builder.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
   build-hosted-fallback:
     # Mirrors build-push.yml's build-arm64 job's own steps almost exactly
@@ -484,6 +504,13 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+      # Same leak as every other builder-creation site in this repo: "Set up
+      # Docker Buildx" above never removes its own builder.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   merge-manifest-hosted-fallback:
     # Combines the sha-<short>-amd64 tag just published above with
     # build-arm64's existing sha-<short>-arm64 tag (already published by
@@ -514,6 +541,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -565,6 +593,13 @@ jobs:
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
           done
+
+      # Same leak as every other builder-creation site in this repo: "Set up
+      # Docker Buildx" above never removes its own builder.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Summary
         run: |
