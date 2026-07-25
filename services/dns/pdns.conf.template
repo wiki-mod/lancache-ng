@@ -30,6 +30,8 @@ allow-dnsupdate-from=${DDNS_ALLOW_FROM}
 # PowerDNS with each zone's own name. Matches the RPZ zone's own existing
 # MNAME/RNAME convention (see entrypoint.sh's RPZ_FILE generation:
 # "@ SOA localhost. admin.rpz. ...") instead of inventing a second style.
+# Fields after serial=0, in standard RFC 1035 order:
+# refresh=10800s (3h) retry=3600s (1h) expire=604800s (7d) minimum-ttl=3600s (1h)
 default-soa-content=localhost. admin.@ 0 10800 3600 604800 3600
 
 webserver=yes

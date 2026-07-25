@@ -80,6 +80,7 @@ mod tests {
             .collect()
     }
 
+    // Allowed endpoints like "data" must build valid URLs with the /api/v1/ path prefix and attach all query parameters correctly.
     #[test]
     fn builds_allowed_data_url_with_query_params() {
         let url = build_netdata_url(
@@ -105,6 +106,7 @@ mod tests {
         assert_eq!(pairs.get("format"), Some(&"json".to_string()));
     }
 
+    // URL builder must properly percent-encode special characters in query parameter names and values to prevent injection attacks.
     #[test]
     fn encodes_query_params_with_url_builder() {
         let url = build_netdata_url(
@@ -126,6 +128,7 @@ mod tests {
         );
     }
 
+    // The "charts" endpoint must be included in the allowlist and generate the correct /api/v1/charts URL.
     #[test]
     fn allows_charts_endpoint() {
         let url = build_netdata_url("http://netdata:19999", "charts", &HashMap::new())
@@ -134,6 +137,7 @@ mod tests {
         assert_eq!(url.as_str(), "http://netdata:19999/api/v1/charts");
     }
 
+    // Path traversal attempts (..), slashes within paths, empty paths, and unapproved endpoints must all be rejected to prevent bypassing the allowlist.
     #[test]
     fn rejects_unsafe_or_unapproved_paths() {
         for path in ["", "data/anything", "../data", "foo", "api/v1/data"] {

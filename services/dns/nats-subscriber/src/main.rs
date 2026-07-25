@@ -1083,6 +1083,8 @@ mod tests {
         assert!(!json.contains("changetype"));
     }
 
+    // DNSRecord must parse the exact message format published by NATS subscribers,
+    // ensuring the serialization contract with record-publishing callers remains stable.
     #[test]
     fn dns_record_deserializes_from_nats_message() {
         let json = r#"{
@@ -1098,6 +1100,8 @@ mod tests {
         assert_eq!(record.zone, "lan");
     }
 
+    // REPLACE action must produce a zone update with all required fields (ttl, records)
+    // to ensure PowerDNS can apply the record update correctly.
     #[test]
     fn dns_record_to_zone_update_replace_action() {
         let record = DNSRecord {
@@ -1124,6 +1128,8 @@ mod tests {
         assert!(rrset.records.is_some());
     }
 
+    // DELETE action must clear ttl and records fields as required by PowerDNS API;
+    // sending them would violate the API contract and potentially cause silent failures.
     #[test]
     fn dns_record_to_zone_update_delete_action() {
         let record = DNSRecord {
@@ -1146,6 +1152,8 @@ mod tests {
         assert!(rrset.records.is_none());
     }
 
+    // Unknown action strings must be rejected immediately with a clear error,
+    // preventing silent acceptance of typos that would corrupt DNS state.
     #[test]
     fn dns_record_to_zone_update_invalid_action() {
         let record = DNSRecord {
@@ -1162,6 +1170,8 @@ mod tests {
         assert!(result.err().unwrap().contains("unknown action"));
     }
 
+    // REPLACE must succeed even when TTL is None, allowing PowerDNS to preserve
+    // the existing record's TTL when updating only its content.
     #[test]
     fn dns_record_to_zone_update_replace_without_ttl() {
         let record = DNSRecord {
@@ -1184,6 +1194,8 @@ mod tests {
         assert!(rrset.records.is_some());
     }
 
+    // Empty records lists must be preserved in the zone update (not converted to None),
+    // ensuring PowerDNS receives the correct "delete all records of this type" semantics.
     #[test]
     fn dns_record_to_zone_update_replace_empty_records() {
         let record = DNSRecord {
@@ -1249,6 +1261,9 @@ mod tests {
         outcomes
     }
 
+    // Record-update failures must stop batch processing immediately (see #653) to prevent
+    // later messages for the same zone/name/type from reaching handlers and getting acked
+    // while earlier stale retries are still pending redelivery.
     #[test]
     fn decide_msg_acks_on_success_and_naks_and_stops_on_record_failure() {
         assert_eq!(decide_msg(HandleOutcome::Ack), MsgDecision::AckAndContinue);
