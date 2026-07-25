@@ -1251,6 +1251,22 @@ services:
       - ./scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
+    healthcheck:
+      # Real HTTP probe against the Docker API's own /_ping endpoint (#1169),
+      # not just a bare TCP connect -- proves the HAProxy frontend generated
+      # by lancache-docker-socket-proxy.sh is actually forwarding to the real
+      # Docker socket backend, not just that something is listening on 2375.
+      # /_ping is explicitly allowlisted by that script's own `safe_ping` ACL
+      # (see scripts/docker-socket-proxy.sh), so this exercises the same path
+      # watchdog itself depends on. Uses wget (BusyBox): verified empirically
+      # against this exact pinned image (tecnativa/docker-socket-proxy, Alpine
+      # base) that wget is present but curl is not -- same reasoning as nats'
+      # healthcheck below.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: always
     logging:
       driver: json-file
@@ -1449,6 +1465,27 @@ services:
       # broken before this issue's new options existed. Matches the dhcp
       # (Kea) service's cap_add, which needs it for the same reason.
       - NET_ADMIN
+    healthcheck:
+      # dnsmasq has no REST/control-socket API the way Kea does, and this
+      # config disables DNS entirely (port=0 in dnsmasq.conf.template), so a
+      # dig-based query/response probe (like dns-standard/dns-ssl) is not
+      # possible here -- and actively synthesizing a real DHCPDISCOVER every
+      # interval would inject genuine broadcast traffic onto the LAN, which a
+      # healthcheck must not do as a side effect. This is therefore liveness
+      # + config-integrity, not a functional DHCP probe (same class of honest
+      # limitation as fluent-bit's `-V` check): the entrypoint execs dnsmasq
+      # directly (no wrapper shell), so PID 1 being "dnsmasq" proves the real
+      # daemon is still running rather than having crashed out from under a
+      # lingering shell, and re-running `dnsmasq --test` against the exact
+      # on-disk config proves it has not been corrupted since the daemon last
+      # (successfully) loaded it. Verified live: `dnsmasq --test` only parses
+      # the file, it does not bind sockets, so it never conflicts with the
+      # already-running daemon.
+      test: ["CMD-SHELL", "[ \"$$(cat /proc/1/comm 2>/dev/null)\" = dnsmasq ] && dnsmasq --test -C /etc/dnsmasq.conf >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: always
     logging:
       driver: json-file
@@ -1479,6 +1516,23 @@ services:
       # chronyd needs to step/slew the container HOST's real system clock to
       # genuinely discipline time -- see services/ntp/Dockerfile's comment.
       - SYS_TIME
+    healthcheck:
+      # Real query/response probe (#1169, matching AG-VAL-018's spirit for
+      # DNS): `chronyc tracking` is a genuine round-trip over chronyd's own
+      # command socket, not a bare port-listen check, so a hung/crashed
+      # daemon (socket refuses/times out) is distinguished from a live one.
+      # Deliberately does NOT require "Leap status: Normal"/a synced stratum
+      # -- a daemon that is alive but has not yet reached (or has
+      # temporarily lost) its upstream servers is a legitimate, non-crashed
+      # state during start_period or a transient network blip, and must not
+      # flap this healthcheck unhealthy for that reason alone. Verified live:
+      # a freshly started, not-yet-synchronised chronyd still returns a
+      # "Reference ID" line immediately.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -1701,6 +1755,16 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
+    healthcheck:
+      # Real HTTP probe against netdata's own REST API (#1169), matching the
+      # check deploy/full-setup/docker-compose.yml's validation stack already
+      # uses for the same pinned image -- proves the daemon is actually
+      # serving its API, not just that the process exists or a port is open.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19999/api/v1/info >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file

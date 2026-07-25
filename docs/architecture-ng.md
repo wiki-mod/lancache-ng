@@ -208,16 +208,28 @@ Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse p
 
 Lightweight container with Docker socket access (restart permission).
 
-**Health checks:** every service below has a Docker Compose `healthcheck:`
-block, but `watchdog.sh` itself only *acts* on a subset of them -- see the
-"Auto-restart" scope note directly below this list before assuming every
-entry here is watched and restarted by the watchdog daemon.
+**Health checks:** every persistent-daemon service across `deploy/*/docker-compose.yml`
+has a Docker Compose `healthcheck:` block (#1169 closed the last gaps:
+`dhcp-proxy`, `ntp`, `netdata`, and `docker-socket-proxy` previously had none
+at all), enforced going forward by `scripts/check-compose-healthchecks.sh`
+(CI job `compose-healthchecks` in `build-push.yml`) so a newly added service
+can't silently regress this. The one deliberate exception is `dhcp-probe`
+(see its own row further down) -- a one-shot helper the Admin UI starts and
+stops on demand, never a long-running daemon, so a liveness healthcheck has
+no meaningful state to probe. `watchdog.sh` itself only *acts* on a subset of
+the services below -- see the "Auto-restart" scope note directly below this
+list before assuming every entry here is watched and restarted by the
+watchdog daemon.
 - nginx: HTTP request on `/health`
 - PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
 - nats: HTTP probe against nats-server's own monitor endpoint (`http_port: 8222` set in the compose-generated boot config, checked via `wget` against `/healthz` -- nats:2-alpine ships BusyBox's wget/nc but no curl, verified empirically)
 - ui: HTTP request on `/health` (`services/ui/src/main.rs`'s shallow liveness route, checked via `curl`, present in the image)
 - syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit: `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build)
+- dhcp-proxy (dnsmasq): liveness + config-integrity, not a functional DHCP probe (#1169) -- dnsmasq has no REST/control-socket API and this config disables DNS entirely (`port=0`), so a query/response probe like PowerDNS's isn't possible, and synthesizing a real DHCPDISCOVER every interval would inject genuine broadcast LAN traffic as a healthcheck side effect. Checks that PID 1 is still `dnsmasq` (the entrypoint execs it directly, no wrapper shell) and that `dnsmasq --test` still validates the on-disk config
+- ntp (chrony): real query/response probe via `chronyc tracking` against chronyd's own command socket (#1169) -- a genuine round-trip, not a bare port-listen check, but deliberately does not require an already-synchronised stratum, since "alive but not yet synced" is a legitimate transient state during `start_period` or an upstream network blip
+- netdata: HTTP probe against its own REST API, `GET /api/v1/info` (#1169), matching the check `deploy/full-setup/docker-compose.yml`'s validation stack already used for the same pinned image
+- docker-socket-proxy: HTTP probe against the Docker API's own `/_ping` endpoint (#1169), explicitly allowlisted by `scripts/docker-socket-proxy.sh`'s own `safe_ping` ACL -- proves the HAProxy frontend is actually forwarding to the real Docker socket backend, not just that port 2375 is open
 
 **Auto-restart:** X failed checks → `docker restart <container>`. Scope,
 verified against `services/watchdog/watchdog.sh`: the daemon's own
@@ -236,10 +248,13 @@ non-restart-capable `probe_docker_socket_proxy` check each cycle against
 `docker-socket-proxy` itself -- see the dedicated bullet below for why this
 is alert-only rather than part of the auto-restart list above.
 
-Kea, syslog-ng, fluent-bit, and `ui` all have a real Docker healthcheck too
-(so `docker inspect`/`docker compose ps` and CI's own wait-for-healthy
-scripts can see it), but the watchdog daemon does not poll or restart any of
-those four itself (issue #842's per-service decision, not an oversight):
+Kea, syslog-ng, fluent-bit, `ui`, `dhcp-proxy`, `ntp`, `netdata`, and
+`docker-socket-proxy` all have a real Docker healthcheck too (so
+`docker inspect`/`docker compose ps` and CI's own wait-for-healthy scripts
+can see it), but the watchdog daemon does not poll or restart any of those
+eight itself (issue #842's per-service decision, not an oversight; #1169
+only added the missing healthchecks themselves, it deliberately did not
+widen watchdog's own monitored-service list -- see #842):
 
 - **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
   adding either to watchdog's blind restart-on-unhealthy loop would need the
@@ -253,13 +268,14 @@ those four itself (issue #842's per-service decision, not an oversight):
   own right, not a side effect of extending a monitored-container list, so
   #842 left both out of scope for a follow-up PR to decide deliberately
   rather than as a byproduct of this change.
-- **`dhcp-proxy` (dnsmasq) and `netdata`**: neither has a Docker `healthcheck:`
-  block at all in any Compose file, so `get_health()` would always read
-  `.State.Health.Status` as absent ("none") for either -- adding either to
-  the monitored list today would be a silent no-op, not real coverage.
-  Defining a meaningful health probe for dnsmasq (no HTTP/control-socket API
-  the way Kea's Control Agent has) or for netdata is its own separate
-  scoping question, deferred rather than bolted on here.
+- **`dhcp-proxy` (dnsmasq), `ntp` (chrony), and `netdata`**: all three now
+  have a real Docker `healthcheck:` block (#1169; previously
+  `get_health()` would have read `.State.Health.Status` as absent ("none")
+  for all three, so adding any of them to the monitored list before #1169
+  would have been a silent no-op, not real coverage). Whether to actually
+  add them to watchdog's polled/auto-restarted list is still its own
+  separate scoping question (#842), deliberately not decided as a byproduct
+  of #1169 landing their healthchecks.
 - **`syslog` (fluent-bit) and `syslog-ng`**: `syslog` has no `container_name:`
   set in any Compose file at all (Compose auto-generates one), so it cannot
   be addressed by a fixed name the way every other allowlisted/monitored
@@ -270,14 +286,12 @@ those four itself (issue #842's per-service decision, not an oversight):
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
-  docker-socket-proxy" cannot work by construction. It also has no Docker
-  healthcheck defined (see issue #1169, tracking a real Compose
-  `healthcheck:` block for this and four other currently-uncovered
-  services -- a separate, Docker-evaluated mechanism from the probe
-  described below). Docker's own `restart: always` already covers a hard
-  process crash; a crash is not the failure mode this project's watchdog
-  could ever act on here anyway, since restarting it would still require
-  going through the very channel that's down.
+  docker-socket-proxy" cannot work by construction. It now has a real Docker
+  healthcheck too (#1169, an HTTP probe against the Docker API's own
+  `/_ping`), which makes the problem visible/measurable via `docker inspect`,
+  but does not fix the chicken-and-egg restart problem above -- Docker's own
+  `restart: always` already covers a hard process crash, which is the only
+  failure mode watchdog could conceivably help with here anyway.
 
   **Alert-only probe (issue #1170 Part 1, added after the above analysis):**
   a *hung-but-not-crashed* docker-socket-proxy (process alive, HAProxy not

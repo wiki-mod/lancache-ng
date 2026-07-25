@@ -47,6 +47,7 @@ per-class status instead of a single yes/no answer.
 | Job | Class | Hosted fallback |
 |---|---|---|
 | `file-headers` | cheap lint | `file-headers-hosted` (PR #499) |
+| `compose-healthchecks` | cheap lint | `compose-healthchecks-hosted` (issue #1169) |
 | `line-endings` | cheap lint | `line-endings-hosted` (issue #601) |
 | `shellcheck` | cheap lint | `shellcheck-hosted` (PR #591) |
 | `pr-template-check` | cheap lint | `pr-template-check-hosted` (this change) |
@@ -229,7 +230,7 @@ alongside this increment -- see that workflow's own header comment.
 
 | Class | Status | Fallback path |
 |---|---|---|
-| Cheap lint (file-headers, line-endings, shellcheck, pr-template-check, watchdog_test) | done | Always-on parallel hosted job |
+| Cheap lint (file-headers, compose-healthchecks, line-endings, shellcheck, pr-template-check, watchdog_test) | done | Always-on parallel hosted job |
 | `ci_scope_policy` | decided: not feasible | None -- inherits Rust jobs' own unavailability |
 | Rust build/test/audit | acceptable-but-slow | Not implemented; needs opt-in scoping, not always-on. Follow-up issue tracks prototyping (#685). |
 | Image build/scan/merge (amd64/publish) | done (opt-in overflow) | `.github/workflows/build-push-hosted-fallback.yml`, `workflow_dispatch`-gated (issue #686) |
