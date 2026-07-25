@@ -302,6 +302,7 @@ mod tests {
         assert_eq!(value["disk"]["cache"]["pct"], 10);
     }
 
+    // Stale watchdog status must be marked as such and include the age so the UI can alert the operator that status data is outdated.
     #[test]
     fn watchdog_status_json_marks_stale_state_and_includes_age() {
         let value = watchdog_status_json(watchdog_status::WatchdogStatusReadResult::Stale(
