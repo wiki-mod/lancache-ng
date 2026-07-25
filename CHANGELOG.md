@@ -472,6 +472,17 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Corrected `AGENTS.md`'s AG-CODE-001, which had drifted to describe a
+  "default: no comments" convention that does not match this project's
+  actual, long-standing practice of commenting liberally (WHY, not WHAT)
+  and auditing a touched file's comments in full per AG-CODE-008's
+  "you touch it, you comment it -- entirely" rule. Also fixed AG-CODE-010's
+  cross-reference, which had described AG-CODE-001 as the "minimal-comment
+  default" it overrides -- AG-CODE-010's per-test-comment requirement is
+  additive to AG-CODE-001's liberal baseline, not an exception carved out
+  of a stricter one. Updated the Rule Enforcement Matrix entry for
+  AG-CODE-001 to match. No code behavior change -- documentation only.
+
 - Fixed remote secondary DNS node registration handing out a NATS URL that
   can never be reached from outside the primary's own Docker network (#866).
   `routes/secondaries.rs::register_secondary`'s JSON response always
