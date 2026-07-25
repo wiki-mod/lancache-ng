@@ -2329,8 +2329,9 @@ resolve_lancache_stack_channel_tag() {
 ${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'nightly' testing channel continuously from current_dev, a formal stable release
-with a published 'latest'/'stable' channel tag has not yet been created.
+to the 'nightly' testing channel from current_dev (built once daily plus on-demand,
+gated on a full green build+scan), a formal stable release with a published
+'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 

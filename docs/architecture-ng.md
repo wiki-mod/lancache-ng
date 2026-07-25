@@ -226,9 +226,15 @@ verified against `services/watchdog/watchdog.sh`: the daemon's own
 `SSL_ENABLED=1`) `dns-ssl` -- the container names it takes via
 `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_NATS`/
 `CONTAINER_DNS_SSL`. `watchdog.sh` writes this state to a `status.json` file
-every 30 seconds, but as of this writing the Admin UI has no route or
-template that reads that file -- there is no per-service dashboard status
-indicator today (UI delivery debt; see "Status" below).
+every 30 seconds; see "Status" below for how the Admin UI renders it (this
+sentence previously claimed the Admin UI had no route reading that file at
+all -- stale since issue #870 added one, corrected here while updating the
+adjacent docker-socket-proxy bullet below for issue #1170).
+
+Since issue #1170 Part 1, `watchdog.sh` also runs a separate,
+non-restart-capable `probe_docker_socket_proxy` check each cycle against
+`docker-socket-proxy` itself -- see the dedicated bullet below for why this
+is alert-only rather than part of the auto-restart list above.
 
 Kea, syslog-ng, fluent-bit, and `ui` all have a real Docker healthcheck too
 (so `docker inspect`/`docker compose ps` and CI's own wait-for-healthy
@@ -265,9 +271,32 @@ those four itself (issue #842's per-service decision, not an oversight):
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
   docker-socket-proxy" cannot work by construction. It also has no Docker
-  healthcheck defined. Docker's own `restart: always` already covers a hard
-  process crash, which is the only failure mode watchdog could conceivably
-  help with here anyway.
+  healthcheck defined (see issue #1169, tracking a real Compose
+  `healthcheck:` block for this and four other currently-uncovered
+  services -- a separate, Docker-evaluated mechanism from the probe
+  described below). Docker's own `restart: always` already covers a hard
+  process crash; a crash is not the failure mode this project's watchdog
+  could ever act on here anyway, since restarting it would still require
+  going through the very channel that's down.
+
+  **Alert-only probe (issue #1170 Part 1, added after the above analysis):**
+  a *hung-but-not-crashed* docker-socket-proxy (process alive, HAProxy not
+  answering) used to be completely invisible -- Docker's own `restart:
+  always` only reacts to the process exiting, and nothing else in the stack
+  polled it at all. `watchdog.sh`'s `probe_docker_socket_proxy` function now
+  hits `docker-socket-proxy`'s own `GET /_ping` endpoint every cycle (already
+  permitted by `scripts/docker-socket-proxy.sh`'s `safe_ping` ACL -- zero new
+  privilege) and writes the result into `status.json`'s `services` map like
+  any other monitored container, so it renders on the Admin UI dashboard.
+  This is deliberately alert-only: `probe_docker_socket_proxy` is never
+  passed to `check_and_maybe_restart` and never calls `restart_container` --
+  the circular-dependency reasoning above still fully applies to *restarting*
+  it. Actually self-healing docker-socket-proxy from inside its own
+  container (a supervisor that kills its own PID 1 so `restart: always`
+  recovers it) is tracked separately as issue #1170 Part 2 and was not
+  implemented here; it has open verification questions (reliable
+  in-container hang detection, a clean way to trigger PID 1 exit) that this
+  alert-only probe does not need to answer.
 
 All of the above still get Docker's own `restart: always`/`restart: "no"`
 policy (`deploy/*/docker-compose.yml`), which restarts a container that
@@ -301,6 +330,10 @@ dashboard's "Service health" card, sharing `status.json` via the
 see `deploy/*/docker-compose.yml`'s `ui:` service). A missing or stale
 `status.json` (watchdog not running, or crashed) renders as an explicit
 "unavailable"/"stale" state rather than a silently frozen last-known color.
+Since issue #1170 Part 1, the `services` map also includes an entry for
+`docker-socket-proxy` itself (alert-only -- see its dedicated bullet above);
+the dashboard renders it through the same generic per-service loop as every
+other entry, with no template or route changes needed for it specifically.
 
 ## syslog-ng
 

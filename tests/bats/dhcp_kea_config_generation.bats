@@ -629,3 +629,96 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$output" = "example.com." ]
 }
+
+@test "migrate_dhcp4_config replaces a stale lease_cmds hook path instead of duplicating it" {
+    # Regression test for a real bug found during issue #815's Alpine
+    # migration: a persisted kea-dhcp4.conf from a Debian-based install
+    # already has hooks-libraries pointing at Debian's multiarch path
+    # (/usr/lib/x86_64-linux-gnu/kea/hooks/...). Alpine's resolved path is
+    # different (/usr/lib/kea/hooks/...). An exact-path equality check
+    # between the persisted entry and the newly-resolved path would never
+    # match, so migrate_dhcp4_config would APPEND a second hooks-libraries
+    # entry instead of replacing the stale one -- confirmed for real on a
+    # runner: upgrading a Debian-based install's volume straight onto the
+    # Alpine image left both paths in hooks-libraries, and Kea's own
+    # `kea-dhcp4 -t` rejected the config outright because the stale Debian
+    # path doesn't exist on Alpine, taking DHCP down until rescue mode
+    # intervened. This test proves the basename-matching fix: the stale
+    # entry is dropped and exactly one correct entry remains.
+    runtime="$test_config_dir/kea-dhcp4-hook-migration.conf"
+    cat > "$runtime" <<'EOF'
+{
+  "Dhcp4": {
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-name": "/run/kea/kea4.sock"
+    },
+    "hooks-libraries": [
+      {
+        "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"
+      }
+    ],
+    "dhcp-ddns": {
+      "enable-updates": false
+    },
+    "subnet4": [
+      {
+        "id": 1,
+        "subnet": "10.0.0.0/24",
+        "valid-lifetime": 86400
+      }
+    ],
+    "loggers": []
+  }
+}
+EOF
+
+    export KEA_LEASE_CMDS_HOOK_PATH="/usr/lib/kea/hooks/libdhcp_lease_cmds.so"
+    migrate_dhcp4_config "$runtime"
+
+    run jq -c '.Dhcp4["hooks-libraries"]' "$runtime"
+    [ "$status" -eq 0 ]
+    [ "$output" = '[{"library":"/usr/lib/kea/hooks/libdhcp_lease_cmds.so"}]' ]
+}
+
+@test "migrate_dhcp4_config stays idempotent when the lease_cmds hook path already matches" {
+    # Companion to the migration test above: running the merge a second
+    # time with an already-correct path must not grow the array further
+    # (AG-OP-006/AG-OP-007 idempotence -- an already-converged install is
+    # left alone, not re-mutated).
+    runtime="$test_config_dir/kea-dhcp4-hook-idempotent.conf"
+    cat > "$runtime" <<'EOF'
+{
+  "Dhcp4": {
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-name": "/run/kea/kea4.sock"
+    },
+    "hooks-libraries": [
+      {
+        "library": "/usr/lib/kea/hooks/libdhcp_lease_cmds.so"
+      }
+    ],
+    "dhcp-ddns": {
+      "enable-updates": false
+    },
+    "subnet4": [
+      {
+        "id": 1,
+        "subnet": "10.0.0.0/24",
+        "valid-lifetime": 86400
+      }
+    ],
+    "loggers": []
+  }
+}
+EOF
+
+    export KEA_LEASE_CMDS_HOOK_PATH="/usr/lib/kea/hooks/libdhcp_lease_cmds.so"
+    migrate_dhcp4_config "$runtime"
+    migrate_dhcp4_config "$runtime"
+
+    run jq -c '.Dhcp4["hooks-libraries"]' "$runtime"
+    [ "$status" -eq 0 ]
+    [ "$output" = '[{"library":"/usr/lib/kea/hooks/libdhcp_lease_cmds.so"}]' ]
+}

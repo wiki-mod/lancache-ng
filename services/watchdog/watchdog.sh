@@ -26,8 +26,8 @@ PURGE_STAMP="/var/run/watchdog/purge.stamp"
 SYSLOG_ENABLED="${SYSLOG_ENABLED:-false}"
 SYSLOG_PRUNE_STAMP="/var/run/watchdog/syslog-prune.stamp"
 
-F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0
-H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
 # Some diagnostics (resolve_cache_dir()'s fail-closed error, the CONTAINER_*
@@ -120,6 +120,23 @@ fi
 # disconnect/reconnect cycle to that loop, not a novel failure mode it was
 # never built to handle.
 C_NATS="${CONTAINER_NATS:-lancache-nats}"
+
+# docker-socket-proxy (issue #1170 Part 1): a fixed literal, not a
+# ${CONTAINER_*:-...}-style override like the four names above. Those four
+# are validated against scripts/docker-socket-proxy.sh's allowlist below
+# because get_health()/restart_container() build a real
+# /containers/<name>/... Docker-API URL out of them. This constant is never
+# used that way -- probe_docker_socket_proxy() (below) hits
+# DOCKER_PROXY_URL's own /_ping endpoint directly, with no container-name
+# path segment at all -- so it is deliberately NOT wired through a
+# CONTAINER_* env var, and scripts/check-naming-consistency.sh's watchdog_names
+# extraction (which greps for exactly that ${CONTAINER_*:-lancache-*} shape)
+# correctly never sees it. Per docs/naming-conventions.md's "Operator-visible
+# consistency" section, docker-socket-proxy has a real container_name but is
+# intentionally NOT an allowlist target; adding this constant to that
+# allowlist would be wrong, not merely unnecessary. It exists purely as the
+# stable status.json/dashboard key and log label for this probe.
+C_DOCKER_PROXY="lancache-docker-socket-proxy"
 
 if [ "$C_PROXY" != "lancache-proxy" ]; then
     log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-proxy'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
@@ -248,6 +265,57 @@ restart_container() {
         || log "WARNING: restart call failed for $name"
 }
 
+# Issue #1170 Part 1: docker-socket-proxy is watchdog's own gateway to the
+# Docker API (DOCKER_PROXY_URL, above) -- every get_health()/restart_container()
+# call in this file goes through it. If it crashes outright, Docker's own
+# `restart: always` already recovers it (docs/architecture-ng.md's
+# docker-socket-proxy bullet). But if it only *hangs* (process alive, HAProxy
+# not answering), nothing in the stack could previously detect that: this
+# daemon's only restart channel goes THROUGH docker-socket-proxy, so "restart
+# docker-socket-proxy via docker-socket-proxy" is circular by construction --
+# it has no Docker healthcheck either, so even `docker inspect` can't see a
+# hang. This function is deliberately alert-only: it is never passed to
+# check_and_maybe_restart() and restart_container() is never called for it.
+# Actually self-healing docker-socket-proxy (a supervisor inside its own
+# container that kills its own PID 1 so `restart: always` recovers it) is a
+# separate, harder change with open verification questions (reliable
+# in-container hang detection, clean PID 1 shutdown) and is tracked
+# separately as issue #1170 Part 2 -- not implemented here.
+#
+# GET /_ping is already permitted by scripts/docker-socket-proxy.sh's
+# safe_ping ACL (the same allowlist entry get_health() and every other
+# caller in this file already rely on), so this needs zero new privilege.
+# Unlike get_health() (which parses a Docker /containers/.../json health
+# JSON body), /_ping returns a bare "OK" string on success with no JSON body
+# to fall back on -- curl -sf's exit status alone (a non-2xx HTTP response,
+# or the connection/timeout failure --max-time itself produces) is
+# sufficient. The "healthy"/"unhealthy" strings this writes into
+# H_DOCKER_PROXY are a synthetic reachability result, not a real Docker
+# `.State.Health.Status` value like every other H_* variable in this file --
+# health_color() still maps them the same way (unhealthy -> red) because
+# that is the correct dashboard color for "the management plane cannot
+# currently reach its own Docker API gateway", but a future reader should
+# not assume this came from a real container healthcheck.
+probe_docker_socket_proxy() {
+    local -n _fcount="$1"
+    local -n _hstring="$2"
+
+    if curl -sf --max-time "$CURL_MAX_TIME" "${DOCKER_PROXY_URL}/_ping" >/dev/null 2>&1; then
+        _hstring="healthy"
+        [ "$_fcount" -gt 0 ] && log "RECOVERED $C_DOCKER_PROXY"
+        _fcount=0
+    else
+        _fcount=$((_fcount + 1))
+        _hstring="unhealthy"
+        # Unlike check_and_maybe_restart()'s services, this counter never resets
+        # via a restart (there is none) -- it keeps climbing for as long as
+        # docker-socket-proxy stays unreachable, which is itself useful
+        # operator-visible information (how many consecutive ~CHECK_INTERVAL-second
+        # cycles this has been down), not a bug to cap at RESTART_AFTER.
+        log "UNHEALTHY $C_DOCKER_PROXY (${_fcount} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel (see issue #1170)"
+    fi
+}
+
 health_color() {
     # Dashboard cards consume these stable color names directly.
     case "$1" in
@@ -334,7 +402,8 @@ write_status() {
   "services": {
     "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
   "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD},
-  "$C_NATS":   {"status": "$(health_color "$H_NATS")",   "health": "$H_NATS",   "failures": $F_NATS}${ssl_services}
+  "$C_NATS":   {"status": "$(health_color "$H_NATS")",   "health": "$H_NATS",   "failures": $F_NATS},
+  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}
   },
   "disk": {
     "cache": ${disk_cache}
@@ -826,7 +895,7 @@ maybe_rotate_fluent_bit_selflog() {
     fi
     rm -f "$rotation_scan"
 }
-log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED)"
+log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 log "Fluent-bit self-log rotation (#1236): dir=${FLUENT_BIT_SELFLOG_DIR:-/var/lib/lancache-syslog-data} budget=${FLUENT_BIT_SELFLOG_MAX_MB:-20}MB rotations=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5} (always active, no SYSLOG_ENABLED gate; see maybe_rotate_fluent_bit_selflog()'s comment)"
@@ -838,6 +907,10 @@ while true; do
         check_and_maybe_restart "$C_DNS_SSL"   F_DNS_SSL   H_DNS_SSL
     fi
     check_and_maybe_restart "$C_NATS" F_NATS H_NATS
+    # Alert-only (issue #1170 Part 1): deliberately NOT check_and_maybe_restart --
+    # see probe_docker_socket_proxy()'s own comment for why this daemon must
+    # never attempt to restart its own Docker API gateway.
+    probe_docker_socket_proxy F_DOCKER_PROXY H_DOCKER_PROXY
     write_status
     maybe_purge
     maybe_prune_syslog

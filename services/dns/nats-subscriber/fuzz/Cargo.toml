@@ -1,0 +1,47 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# cargo-fuzz harness crate for nats-subscriber (issue #1252): fuzzes the
+# NATS DNSRecord/zone-update deserialization path and the PowerDNS zone-export
+# API response deserialization path, both against the real nats-subscriber
+# library (see ../src/lib.rs), not a reimplementation of it.
+
+[package]
+name = "nats-subscriber-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.nats-subscriber]
+path = ".."
+# Opts out of the "runtime" feature (async-nats/futures/tokio/reqwest/axum --
+# see the parent Cargo.toml's [dependencies]/[features] comments): these fuzz
+# targets only exercise the pure DNSRecord/ZoneInfo parsing surface in
+# src/lib.rs, and compiling tokio's "full" feature set under cargo-fuzz's
+# sanitizer instrumentation hit a real rustc ICE (confirmed empirically).
+default-features = false
+
+# Prevents `cargo fmt`/`cargo test`/`cargo clippy --workspace`-style tooling
+# run from the parent crate from also trying to treat this directory as one
+# of its own workspace members; this fuzz crate is only ever invoked directly
+# via `cargo fuzz run --fuzz-dir services/dns/nats-subscriber/fuzz ...`.
+[workspace]
+
+[[bin]]
+name = "dns_record_parse"
+path = "fuzz_targets/dns_record_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zone_info_parse"
+path = "fuzz_targets/zone_info_parse.rs"
+test = false
+doc = false
+bench = false

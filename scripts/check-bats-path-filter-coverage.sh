@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# CI guard for issue #879: keeps .github/workflows/build-tools.yml's
-# `on.push.paths` / `on.pull_request.paths` filter in sync with the real,
-# non-fixture file dependencies of tests/bats/*.bats and
-# tests/bats/helpers/*.sh. build-tools.yml is the ONLY workflow that ever
-# executes `bats tests/bats` (confirmed: it is the sole place `bats
-# tests/bats` appears in .github/workflows/*.yml); if a bats suite depends on
-# a file that is not covered by at least one of that workflow's path-filter
-# entries, a PR that changes only that file never runs the suite written for
-# it -- the regression net exists on paper but is blind to the exact change
-# most likely to need it.
+# CI guard for issue #879: keeps
+# .github/workflows/build-tools-smoke.yml's `on.push.paths` /
+# `on.pull_request.paths` filter in sync with the real, non-fixture file
+# dependencies of tests/bats/*.bats and tests/bats/helpers/*.sh.
+# build-tools-smoke.yml is the workflow that runs these suites against the
+# already-published build-tools image (confirmed: it is the sole place `bats
+# tests/bats` appears in .github/workflows/*.yml, alongside build-tools.yml's
+# own identical steps against its freshly-built local image -- see the
+# #1253 note below); if a bats suite depends on a file that is not covered by
+# at least one of that workflow's path-filter entries, a PR that changes only
+# that file never runs the suite written for it -- the regression net exists
+# on paper but is blind to the exact change most likely to need it.
+#
+# #1253 (Q1 of #1255) moved this guard's target from build-tools.yml to
+# build-tools-smoke.yml: build-tools.yml's own trigger was narrowed to real
+# image-content paths only (tools/build-tools/**, that workflow file), since
+# rebuilding the (heavy, multi-arch) build-tools image on every test/script
+# change was pure waste -- the byte-identical image never actually changed.
+# build-tools.yml still runs `bats tests/bats`/`shellspec tests/shellspec`
+# too, but only as a smoke test of the image it just rebuilt on its own
+# (now narrow) trigger, not as a regression gate for test/script changes --
+# that gate is what this script (and build-tools-smoke.yml) now cover.
 #
 # #873/#880 already fixed the concrete filter gaps known at the time via a
 # one-off manual trace, but explicitly did NOT build a guard preventing the
@@ -87,7 +99,7 @@ set -euo pipefail
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$repo_root"
 
-workflow_file=".github/workflows/build-tools.yml"
+workflow_file=".github/workflows/build-tools-smoke.yml"
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
@@ -124,7 +136,7 @@ fi
 
 # extract_workflow_paths <section>
 # Prints one path-filter entry per line (quotes stripped) from
-# build-tools.yml's on.<section>.paths list. Anchored to this file's exact,
+# build-tools-smoke.yml's on.<section>.paths list. Anchored to this file's exact,
 # fixed indentation (on: at column 0; push:/pull_request: at 2 spaces;
 # paths: at 4 spaces; list items at 6 spaces) -- the same
 # tightly-coupled-to-current-layout tradeoff check-workflow-service-lists.sh
