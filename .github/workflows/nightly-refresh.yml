@@ -1,0 +1,103 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Scheduled/manual refresh for the `nightly` channel (#1254/#1255, 2026-07-25
+# maintainer decision: nightly becomes a real once-daily build, like Firefox
+# Nightly, instead of being republished on every current_dev push).
+#
+# This workflow does NOT build, scan, or promote anything itself -- it is a
+# thin dispatcher that triggers build-push.yml's own full pipeline (build,
+# test, container-scan, then `promote`) against current_dev's current tip
+# with the existing `channel: nightly` workflow_dispatch input, exactly the
+# ad-hoc "spot-check a branch as nightly" path a human operator already had
+# available (see build-push.yml's `inputs.channel` description). Because
+# build-push.yml's `promote` job only runs `needs: merge-manifests` and after
+# `!cancelled() && needs['merge-manifests'].result == 'success'`, nightly is
+# green-gated and fail-closed by construction: if current_dev's tip fails to
+# build, test, or scan clean, promote never runs and `nightly` keeps
+# pointing at its last good state instead of being force-moved onto a red
+# commit. See build-push.yml's own "Branch-to-channel mapping" comment in the
+# `promote` job for the other half of this decision (current_dev push no
+# longer auto-adds `nightly` to channel_tags).
+#
+# TWO THINGS TO KNOW ABOUT THIS SCHEDULE, BOTH DELIBERATELY ACCEPTED:
+#
+# (a) DST: 01:00 UTC == 02:00 CET (the intended local refresh time) only
+#     during CET (winter). GitHub Actions cron has no timezone concept and
+#     always fires in UTC, so during CEST (European summer DST, UTC+2) this
+#     lands at 03:00 local instead. That one-hour seasonal drift is
+#     deliberately accepted rather than worked around -- there is no
+#     DST-aware cron here to match, and an off-by-one-hour refresh has no
+#     correctness impact (matches build-push.yml's own `latest` daily
+#     schedule, which accepts the identical drift for the same reason).
+#
+# (b) DEFAULT-BRANCH-ONLY FIRING: GitHub Actions `schedule:` triggers only
+#     ever run from a workflow file as it exists on the repository's default
+#     branch (currently master), regardless of which branch the workflow
+#     file itself lives on or what this workflow's own job logic targets.
+#     Concretely: this cron does not actually start firing until this file
+#     has been merged to master, not merely merged to current_dev where it
+#     was authored. Until then (and, per the same rule, if this file is ever
+#     edited only on current_dev afterward without a follow-up merge to
+#     master), nightly refreshes ONLY via the manual workflow_dispatch path
+#     below -- and since master itself lags current_dev by however long it
+#     takes for changes to get promoted there, the operator-facing `nightly`
+#     channel can sit frozen at whatever it last resolved to for that whole
+#     window. This is accepted as a real, bounded gap (identical in shape to
+#     the "KNOWN GAP" build-push.yml's own daily `latest` schedule already
+#     documents for the same underlying GitHub limitation) rather than
+#     solved here: #808's untouched-service PR backfill no longer depends on
+#     nightly staying continuously fresh (it now reads the PR base commit's
+#     own durable sha-<commit> tag instead, see build-push.yml's "Ensure PR
+#     staging tags exist for full-setup services" step), so a temporarily
+#     stale nightly channel is an operator-visible staleness question, not a
+#     CI-correctness one.
+
+name: Nightly Refresh
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  # Manual escape hatch: an operator or maintainer can force an immediate
+  # nightly refresh (e.g. to unblock the default-branch-only gap in (b)
+  # above, or just to pick up a current_dev fix sooner) without waiting for
+  # the next scheduled tick.
+  workflow_dispatch: {}
+
+# Only needs to call the Actions API to dispatch a different workflow file in
+# this same repository -- no checkout, no package/content writes. Scoped down
+# from the repository default rather than left implicit.
+permissions:
+  actions: write
+
+concurrency:
+  # A scheduled tick firing while a previous manual dispatch (or a slow prior
+  # tick) is still in flight would just queue a second, redundant
+  # build-push.yml dispatch for what is very likely the same current_dev tip
+  # -- cancel-in-progress: false so a manual dispatch is never silently
+  # dropped by an unlucky same-minute scheduled tick, it simply waits its
+  # turn (this job's own runtime is seconds, not minutes, so the wait is
+  # negligible).
+  group: nightly-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-nightly:
+    name: dispatch nightly channel refresh
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # This job only makes one `gh workflow run` API call and exits -- it does
+    # not wait for build-push.yml's own (much longer) pipeline to finish.
+    # Generous headroom over that trivial expected runtime still bounds a
+    # genuinely hung API call rather than relying on GitHub's 360-minute
+    # default (AG-CI-015).
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch build-push.yml against current_dev with channel=nightly
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run build-push.yml \
+            --repo "${{ github.repository }}" \
+            --ref current_dev \
+            -f channel=nightly

@@ -2578,10 +2578,19 @@ jobs:
             echo "::error::nightly-refresh.yml is missing; nightly would never be promoted once current_dev pushes stop auto-publishing it (#1254/#1255)."
             exit 1
           fi
-          grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
-            && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
-            && grep -F 'channel=nightly' .github/workflows/nightly-refresh.yml >/dev/null \
-            || { echo "::error::nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)."; exit 1; }
+          # Explicit if/! instead of a chained `A && B && C || D` (shellcheck
+          # SC2015: that shape is not real if-then-else, since D can also run
+          # when an earlier `&&` term itself fails to execute for an
+          # unrelated reason -- not just when the check's condition is
+          # false). Not a false positive here: this is a real, if narrow,
+          # correctness footgun this project's own AG-VAL-001 ("warnings are
+          # errors") does not carve out an exception for.
+          if ! { grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
+              && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
+              && grep -F 'channel=nightly' .github/workflows/nightly-refresh.yml >/dev/null; }; then
+            echo "::error::nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)."
+            exit 1
+          fi
           # Scoped to the promote job's own channel_tags=() ... 0-tags-check
           # block (not a flat file-wide grep -F): a flat search for this
           # exact literal would also match this very guard's own source line
