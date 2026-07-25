@@ -273,7 +273,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    mkdir -p src && echo 'fn main() {}' > src/main.rs \
+    mkdir -p src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
     && run_cargo_build \
     && rm -rf src
 
