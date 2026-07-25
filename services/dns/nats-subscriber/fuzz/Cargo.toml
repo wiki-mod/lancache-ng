@@ -19,6 +19,12 @@ serde_json = "1"
 
 [dependencies.nats-subscriber]
 path = ".."
+# Opts out of the "runtime" feature (async-nats/futures/tokio/reqwest/axum --
+# see the parent Cargo.toml's [dependencies]/[features] comments): these fuzz
+# targets only exercise the pure DNSRecord/ZoneInfo parsing surface in
+# src/lib.rs, and compiling tokio's "full" feature set under cargo-fuzz's
+# sanitizer instrumentation hit a real rustc ICE (confirmed empirically).
+default-features = false
 
 # Prevents `cargo fmt`/`cargo test`/`cargo clippy --workspace`-style tooling
 # run from the parent crate from also trying to treat this directory as one

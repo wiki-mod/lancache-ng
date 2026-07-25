@@ -20,13 +20,40 @@ name = "nats-subscriber"
 path = "src/main.rs"
 
 [dependencies]
-async-nats = "0.49"
-futures = "0.3"
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# async-nats/futures/tokio/reqwest/axum are only needed by main.rs's actual
+# NATS/PowerDNS/HTTP runtime -- src/lib.rs (the pure DNSRecord/ZoneInfo
+# parsing surface fuzz/'s cargo-fuzz harnesses link) needs only serde/
+# serde_json below. Gating the runtime crates behind this default-on feature
+# lets fuzz/Cargo.toml depend on this crate with `default-features = false`,
+# so cargo-fuzz's sanitizer-instrumented build compiles only what the fuzz
+# targets actually exercise. This is load-bearing, not just build-time
+# tidiness: cargo compiles every declared dependency for every target in a
+# package regardless of whether that target's source uses it, and tokio's
+# "full" feature set (needed by main.rs, irrelevant to the pure parsing fuzz
+# targets) hit a real rustc ICE (internal compiler error) under
+# cargo-fuzz's default AddressSanitizer + SanitizerCoverage instrumentation
+# on nightly-2026-07-24 -- confirmed empirically while building this issue's
+# fuzz harness, not a hypothetical concern.
+async-nats = { version = "0.49", optional = true }
+futures = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-axum = "0.8"
+axum = { version = "0.8", optional = true }
+
+[features]
+default = ["runtime"]
+# The actual NATS JetStream subscriber binary's runtime dependencies (see the
+# [dependencies] comment above). Never disabled for a normal build --
+# main.rs unconditionally uses all five crates below, so `cargo build`/the
+# production Docker image are unaffected; only fuzz/Cargo.toml's
+# `default-features = false` path dependency opts out, for the pure-parsing
+# fuzz targets that need none of them.
+runtime = ["dep:async-nats", "dep:futures", "dep:tokio", "dep:reqwest", "dep:axum"]
 
 # Deliberate release-profile tuning: fat LTO (not thin) for maximum
 # cross-crate inlining, and codegen-units=2 (down from Cargo's default 16)

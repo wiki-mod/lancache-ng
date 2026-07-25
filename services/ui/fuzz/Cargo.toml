@@ -24,6 +24,13 @@ arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.lancache-ui]
 path = ".."
+# Opts out of the "runtime" feature (tokio/bollard/async-nats/rusqlite/etc. --
+# see the parent Cargo.toml's [dependencies]/[features] comments): these fuzz
+# targets only exercise the pure kea_response_parse/netdata_url modules in
+# src/lib.rs, and compiling tokio's "full" feature set under cargo-fuzz's
+# sanitizer instrumentation hit a real rustc ICE (confirmed empirically,
+# same issue as services/dns/nats-subscriber/fuzz/Cargo.toml).
+default-features = false
 
 # Prevents `cargo fmt`/`cargo test`/`cargo clippy --workspace`-style tooling
 # run from the parent crate from also trying to treat this directory as one
