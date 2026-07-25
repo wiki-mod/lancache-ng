@@ -2536,12 +2536,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # #825/#1141 branch-model decision: master -> latest, current_dev
-          # -> nightly, archived vY.X.Z branches -> no live channel. These
-          # awk guards are scoped to each branch's own if/elif arm (not a
-          # flat grep -F for the channel_tags line alone) so a regression
-          # that keeps both literal strings in the file but ties them to the
-          # wrong branch would still be caught.
+          # #825/#1141 branch-model decision: master -> latest, archived
+          # vY.X.Z branches -> no live channel. current_dev's own mapping was
+          # SUPERSEDED by #1254/#1255 below -- see that guard for the current
+          # invariant. These awk guards are scoped to each branch's own
+          # if/elif arm (not a flat grep -F for the channel_tags line alone)
+          # so a regression that keeps both literal strings in the file but
+          # ties them to the wrong branch would still be caught.
           if ! awk '
             /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
             in_branch && /^ *elif/ { in_branch=0 }
@@ -2551,15 +2552,36 @@ jobs:
             echo "::error::Master promotion must publish the latest channel."
             exit 1
           fi
-          if ! awk '
+          # #1254/#1255 (2026-07-25) supersedes the current_dev half of the
+          # #825/#1141 mapping above: a current_dev PUSH must NOT auto-publish
+          # the nightly channel anymore (nightly is now a real once-daily
+          # scheduled/dispatch-only, green-gated channel -- see the `promote`
+          # job's own "Branch-to-channel mapping" comment for the full
+          # reasoning). This guard is the mirror image of the old one: it
+          # fails if the auto-publish regresses back in, rather than failing
+          # if it's missing.
+          if awk '
             /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
             in_branch && /^ *elif/ { in_branch=0 }
             in_branch && /channel_tags\+=\(nightly\)/ { found=1 }
             END { exit found ? 0 : 1 }
           ' .github/workflows/build-push.yml; then
-            echo "::error::current_dev promotion must publish the nightly channel."
+            echo "::error::current_dev push must no longer auto-publish the nightly channel (#1254/#1255 -- nightly is promoted only via the scheduled/manual channel-input dispatch path, see nightly-refresh.yml)."
             exit 1
           fi
+          # The scheduled/manual refresh path itself must actually exist and
+          # target current_dev with channel=nightly -- otherwise removing the
+          # auto-publish above would leave nightly never refreshed at all
+          # (a silent full outage of the pre-1.0 default channel, not merely
+          # slower staleness).
+          if [[ ! -f .github/workflows/nightly-refresh.yml ]]; then
+            echo "::error::nightly-refresh.yml is missing; nightly would never be promoted once current_dev pushes stop auto-publishing it (#1254/#1255)."
+            exit 1
+          fi
+          grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
+            && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
+            && grep -F 'channel=nightly' .github/workflows/nightly-refresh.yml >/dev/null \
+            || { echo "::error::nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)."; exit 1; }
           # Scoped to the promote job's own channel_tags=() ... 0-tags-check
           # block (not a flat file-wide grep -F): a flat search for this
           # exact literal would also match this very guard's own source line
@@ -6919,13 +6941,40 @@ jobs:
             fi
           fi
 
-          # Branch-to-channel mapping (#825/#1141, decided 2026-07-23:
-          # "master = stable, current_dev = nightly, vY.X.Z = archived
-          # release, ganz simpel"). master publishes the stable `latest`
-          # channel; current_dev (the permanent active-development branch)
-          # publishes `nightly` continuously from its own tip -- taking over
-          # the role master used to have here before this decision. A
-          # version-numbered integration branch (v0.2.0, v0.3.0, ...) is an
+          # Branch-to-channel mapping. Original #825/#1141 decision
+          # (2026-07-23): "master = stable, current_dev = nightly, vY.X.Z =
+          # archived release, ganz simpel" -- master publishes the stable
+          # `latest` channel; current_dev (the permanent active-development
+          # branch) published `nightly` continuously from its own tip.
+          #
+          # SUPERSEDED for current_dev by the #1254/#1255 "real once-daily
+          # nightly" decision (2026-07-25): a plain current_dev PUSH no
+          # longer moves the mutable `nightly` pointer at all. Every push
+          # still builds, scans, and publishes that commit's durable
+          # per-service `sha-<commit>` tags completely unchanged (that
+          # publishing happens in the build/build-arm64/merge-manifests jobs
+          # above, not here in promote, and does not depend on channel_tags
+          # in any way) -- the ONLY thing that changes is that this job no
+          # longer also repoints `nightly` at every one of those commits
+          # unconditionally. `nightly` is instead refreshed exactly once a
+          # day (01:00 UTC) plus on-demand, by nightly-refresh.yml
+          # dispatching this same workflow against current_dev's current tip
+          # with `channel: nightly` -- landing in the workflow_dispatch
+          # REQUESTED_CHANNEL path a few lines below, the same path a human
+          # operator already had available for an ad-hoc spot-check
+          # promotion. Because promote only runs after build/test/scan
+          # succeed (see this job's own `needs: merge-manifests` /
+          # `if:` above), this keeps nightly green-gated and fail-closed: a
+          # broken current_dev tip simply never reaches this job, so nightly
+          # holds its last good state instead of being force-moved onto a
+          # red commit on every push regardless of downstream stability. See
+          # #1254's feasibility comment for why #808's untouched-service
+          # backfill (this workflow's "Ensure PR staging tags exist for
+          # full-setup services" step) does not depend on nightly staying
+          # continuously fresh either -- it now backfills from the PR base
+          # commit's own durable sha-<commit> tag instead.
+          #
+          # A version-numbered integration branch (v0.2.0, v0.3.0, ...) is an
           # archived release freeze: it still takes deliberate backports, but
           # deliberately gets NO channel_tags entry at all -- there is no
           # live channel fed from it anymore (see setup.sh's matching hard
@@ -6934,7 +6983,8 @@ jobs:
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(latest)
           elif [[ "$GITHUB_REF" = "refs/heads/current_dev" ]]; then
-            channel_tags+=(nightly)
+            : # #1254/#1255: deliberately no automatic channel tag on a plain
+              # push anymore -- see the comment above this if/elif chain.
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
