@@ -199,6 +199,13 @@ resolve_cache_dir() {
 CACHE_DIR="$(resolve_cache_dir)"
 
 CURL_MAX_TIME="${CURL_MAX_TIME:-5}"
+# restart_container()'s own timeout budget must exceed Docker's stop grace period
+# (default 10s) plus the container's worst-case startup time (several seconds for
+# cert generation in the proxy service). See #1166 for the race condition this
+# fixes: without a generous budget, curl times out on a successful-but-slow restart.
+# get_health() keeps CURL_MAX_TIME (5s) to catch a stalled docker-socket-proxy
+# quickly without blocking the health-check loop.
+CURL_MAX_TIME_RESTART="${CURL_MAX_TIME_RESTART:-30}"
 
 get_health() {
     local name="$1" body
@@ -230,8 +237,14 @@ restart_container() {
     log "RESTARTING $name"
     # Restart is intentionally the only mutating Docker operation watchdog uses.
     # Container creation/exec remain unavailable through the proxy allowlist.
-    # --max-time: see get_health() above -- same stalled-proxy risk applies here.
-    curl -sf --max-time "$CURL_MAX_TIME" -X POST "${DOCKER_PROXY_URL}/containers/${name}/restart" >/dev/null 2>&1 \
+    # --max-time uses CURL_MAX_TIME_RESTART (30s default), not CURL_MAX_TIME (5s),
+    # because restart includes both a stop phase (Docker's grace period, up to 10s
+    # by default, controlled by t= below) plus a start phase (which can take several
+    # seconds for cert generation). See #1166 for the race that prompted this.
+    # t=2 tells Docker to wait 2 seconds for SIGTERM before sending SIGKILL, ensuring
+    # the total operation completes well within the curl budget even for wedged
+    # containers. The two timeouts are now coordinated instead of racing.
+    curl -sf --max-time "$CURL_MAX_TIME_RESTART" -X POST "${DOCKER_PROXY_URL}/containers/${name}/restart?t=2" >/dev/null 2>&1 \
         || log "WARNING: restart call failed for $name"
 }
 

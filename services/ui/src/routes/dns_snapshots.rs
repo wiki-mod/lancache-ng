@@ -225,6 +225,7 @@ pub async fn rollback_zone_snapshot(
 mod tests {
     use super::*;
 
+    // Snapshots missing the "id" field must be silently skipped so a partially-malformed response degrades gracefully instead of losing all snapshots.
     #[test]
     fn parse_zone_snapshot_summaries_skips_entries_missing_an_id() {
         let snaps = json!([
@@ -238,6 +239,7 @@ mod tests {
         assert_eq!(parsed[1].id, "00000000002000000000");
     }
 
+    // Missing created_unix must default to 0 instead of failing, allowing older/partially-specified snapshot formats to parse gracefully.
     #[test]
     fn parse_zone_snapshot_summaries_defaults_a_missing_created_unix_to_zero() {
         let snaps = json!([{"id": "abc"}]);
@@ -246,6 +248,7 @@ mod tests {
         assert_eq!(parsed[0].created_unix, 0);
     }
 
+    // Non-array values (null, objects) must return an empty vector instead of panicking, allowing robust handling of unexpected response shapes.
     #[test]
     fn parse_zone_snapshot_summaries_returns_empty_for_a_non_array_value() {
         assert!(parse_zone_snapshot_summaries(&json!(null)).is_empty());
