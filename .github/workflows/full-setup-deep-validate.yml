@@ -111,6 +111,7 @@ jobs:
   plan:
     name: plan deep validation
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
     outputs:
       should_run: ${{ steps.plan.outputs.should_run }}
       image_tag: ${{ steps.plan.outputs.image_tag }}
@@ -158,6 +159,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.should_run == 'true' && needs.plan.outputs.pr_staging_available == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # 100 minutes: this job's own scripts/ensure-pr-staging-images.sh runs an
+    # internal ~90-minute poll loop waiting for build-push.yml's staging tags,
+    # so the job timeout must clear that poll budget with headroom, not just
+    # cover the wrapper's own overhead.
+    timeout-minutes: 100
     permissions:
       contents: read
       packages: write
@@ -292,7 +298,10 @@ jobs:
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job brings up a real full-setup stack subset
+    # (PowerDNS/nats-subscriber/UI) rather than just polling or planning.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
       # The run-in-validation-subnet.sh wrapper below self-reserves a
@@ -368,7 +377,10 @@ jobs:
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job builds and runs a real Kea container plus
+    # the Admin UI/NATS stack, not just planning or polling.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
       # The run-in-validation-subnet.sh wrapper below self-reserves a
@@ -442,7 +454,10 @@ jobs:
       needs.plan.outputs.should_run == 'true' &&
       needs['ensure-pr-staging-images'].result != 'failure' &&
       needs['ensure-pr-staging-images'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job brings up the real quickstart stack to
+    # exercise syslog forwarding end-to-end, not just planning or polling.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Resolve build-tools image
@@ -557,7 +572,14 @@ jobs:
       - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
     if: always()
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy per explicit maintainer judgment, even though this job itself is
+    # a pure shell aggregator (no compose/stack of its own): every job it
+    # `needs:` above already runs on heavy, so the incremental heavy-pool
+    # cost of also routing this aggregate there is one brief slot, not a
+    # second full stack run. AG-CI-002 would nominally leave a job this
+    # light on the light tier; noted here rather than silently overridden.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 60
     steps:
       - name: Aggregate deep validation result
         env:

@@ -59,7 +59,10 @@ permissions:
 jobs:
   channel-install-smoke:
     name: install-smoke (published channel)
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job builds and brings up the full production
+    # stack against a published channel image, not just planning/polling.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     env:
       LANCACHE_IMAGE_REGISTRY: ghcr.io
       LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng

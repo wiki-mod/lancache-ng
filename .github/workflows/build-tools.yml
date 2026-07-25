@@ -124,6 +124,7 @@ jobs:
     # capacity on it.
     name: determine build-tools publish scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Narrows the workflow-level grant (packages/id-token/attestations/
     # artifact-metadata: write, needed by the build/publish jobs below) down
     # to what this job actually uses: a checkout plus a git diff to compute an
@@ -377,6 +378,7 @@ jobs:
       # broken/mis-linked (e.g. a dynamic library the image forgot to
       # install), which `command -v` alone would not.
       - name: Smoke-test acceleration-infrastructure tools
+        timeout-minutes: 15
         run: |
           set -euo pipefail
 
@@ -434,6 +436,7 @@ jobs:
       # that `bats`/`shellspec` are present on PATH (which "Smoke-test
       # acceleration-infrastructure tools" above already checked).
       - name: Run Bats setup fixtures
+        timeout-minutes: 20
         run: |
           set -euo pipefail
 
@@ -445,6 +448,7 @@ jobs:
             bash -lc 'set -euo pipefail; bats tests/bats'
 
       - name: Run ShellSpec setup fixtures
+        timeout-minutes: 20
         run: |
           set -euo pipefail
 
@@ -994,6 +998,7 @@ jobs:
         needs['determine-publish-scope'].outputs.should-publish == 'true'
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 20
     # A job-level permissions block replaces the workflow-level default
     # above entirely rather than merging with it, so artifact-metadata:
     # write has to be repeated here too -- omitting it left this job with
