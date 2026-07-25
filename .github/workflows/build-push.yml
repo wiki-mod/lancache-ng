@@ -892,20 +892,26 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # Real incident (2026-07-24): actionlint's default invocation embeds its
-      # own shellcheck integration, which was found to hang indefinitely (not
-      # merely slow) -- reproduced 3/3 times on a real self-hosted runner.
-      # With no timeout, GitHub's own 360-minute job default was the only
-      # backstop, and this job's own workflow-level concurrency group
-      # (build-push.yml's top-level `{workflow}-{ref}` group, cancel-in-progress
-      # false for pull_request) meant the hang also blocked every subsequent
-      # push to the same PR from ever starting a new Build & Push run at all --
-      # confirmed live: a stuck run sat at this exact step for 5+ hours,
-      # occupying a runner slot and wedging the PR's own concurrency group
-      # the whole time, even though other runners were idle. A real run of
-      # this step normally completes in ~1-2 minutes; 15 minutes is a
-      # generous bound that still turns an unbounded hang into a fast,
-      # automatic failure instead of a silent multi-hour stall.
+      # Real incident (2026-07-24/25): actionlint's default invocation embeds
+      # its own shellcheck integration, which intermittently hangs INDEFINITELY
+      # in a Go-runtime deadlock (observed on-host: STAT Ssl, WCHAN
+      # futex_do_wait, no child processes, signal-deaf) -- a normal run finishes
+      # in ~1-2s. `timeout-minutes: 15` alone is NOT sufficient against this:
+      # GitHub cancels a timed-out step by sending SIGTERM to the `docker run`
+      # client, the client forwards SIGTERM into the container, and a deadlocked
+      # actionlint ignores it -- so BOTH the client and the container keep
+      # running, the runner slot stays occupied, and `--rm` never fires
+      # (verified on-host 2026-07-25: SIGTERM to a `docker run` whose container
+      # traps TERM leaves both alive). That is exactly how accumulated hung lint
+      # containers exhausted the entire lancache-light runner tier for hours on
+      # 2026-07-25 (containers seen alive 5-14h despite this 15-minute bound).
+      # The real guard is the INNER `timeout --kill-after=30 300` around
+      # actionlint below: SIGTERM at 300s, then an UNIGNORABLE SIGKILL 30s later,
+      # so even a deadlocked actionlint is force-killed from inside the
+      # container, the container exits, `--rm` cleans up, and the slot is freed
+      # fast (verified on-host: `timeout -s KILL` reaps a TERM-trapping process,
+      # exit 137, container removed). `timeout-minutes: 15` is kept as a
+      # coarse job-level backstop for any unrelated stall.
       - name: Run ShellCheck and ActionLint
         timeout-minutes: 15
         run: |
@@ -915,7 +921,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
+            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
 
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
@@ -1146,8 +1152,11 @@ jobs:
       # 5+ hour indefinite hang, reproduced 3/3 times, from actionlint's
       # embedded shellcheck integration). That fix only covered the
       # self-hosted job; this hosted fallback carried the identical
-      # unbounded-hang risk and had no timeout at all until now. Same
-      # 15-minute bound, for the same reason.
+      # unbounded-hang risk and had no timeout at all until now. Same coarse
+      # 15-minute job-level bound AND the same inner `timeout --kill-after=30
+      # 300` SIGKILL guard around actionlint (see the self-hosted job's comment
+      # for why the step timeout-minutes alone cannot reap a signal-deaf,
+      # deadlocked container), for the same reason.
       - name: Run ShellCheck and ActionLint
         timeout-minutes: 15
         run: |
@@ -1157,7 +1166,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
+            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
 
       - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
         env:
