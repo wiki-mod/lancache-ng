@@ -77,3 +77,25 @@ setup() {
     run cat "$curl_calls_file"
     [[ "$output" == *"--max-time"* ]]
 }
+
+@test "restart_container uses CURL_MAX_TIME_RESTART (not CURL_MAX_TIME) for its timeout budget" {
+    export CURL_MAX_TIME=5
+    export CURL_MAX_TIME_RESTART=30
+    load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-restart-timeout.sh"
+    curl() {
+        printf '%s\n' "$*" >> "$curl_calls_file"
+        echo '{"State":{"Health":{"Status":"healthy"}}}'
+    }
+
+    restart_container "lancache-proxy" >/dev/null
+    run cat "$curl_calls_file"
+    [[ "$output" == *"--max-time 30 "* ]]
+    # Verify it's using 30, not 5
+    [[ "$output" != *"--max-time 5 "* ]]
+}
+
+@test "restart_container passes t=2 query parameter to coordinate with Docker's grace period" {
+    restart_container "lancache-proxy" >/dev/null
+    run cat "$curl_calls_file"
+    [[ "$output" == *"?t=2"* ]]
+}
