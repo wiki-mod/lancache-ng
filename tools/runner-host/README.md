@@ -1,7 +1,7 @@
 # Runner-host maintenance (`lancache-ci-cleanup`)
 
 Repository-versioned source of truth for the scheduled docker cleanup that runs
-on every self-hosted CI runner host (AG-CI-015: any cleanup CI depends on must
+on every self-hosted CI runner host (AG-CI-016: any cleanup CI depends on must
 live in the repo, PR-reviewable and consistent across all hosts).
 
 ## Files

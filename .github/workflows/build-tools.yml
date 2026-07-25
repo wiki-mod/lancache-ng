@@ -214,7 +214,7 @@ jobs:
     needs: determine-publish-scope
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 90
-    # AG-CI-016: several runner instances on one host share a single Docker/
+    # AG-CI-017: several runner instances on one host share a single Docker/
     # BuildKit daemon and content store, so two build-tools image builds that
     # land on the same host race on the same base-image layers -- the recurring
     # `ref layer-sha256:...locked ... unavailable` signature (#1246-#1249) that

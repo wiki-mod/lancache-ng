@@ -88,7 +88,7 @@ jobs:
     # not wait for build-push.yml's own (much longer) pipeline to finish.
     # Generous headroom over that trivial expected runtime still bounds a
     # genuinely hung API call rather than relying on GitHub's 360-minute
-    # default (AG-CI-015).
+    # default (AG-CI-016).
     timeout-minutes: 10
     steps:
       - name: Dispatch build-push.yml against current_dev with channel=nightly

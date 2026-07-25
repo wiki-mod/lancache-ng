@@ -7,7 +7,7 @@
 # containers and *long-orphaned running build-tools containers* indefinitely.
 #
 # This is the repository-versioned source of truth for the cleanup that used to
-# live only in host-local /usr/local/sbin (AG-CI-015: any cleanup CI depends on
+# live only in host-local /usr/local/sbin (AG-CI-016: any cleanup CI depends on
 # must live in the repo, PR-reviewable and consistent across all hosts). Deploy
 # it identically to EVERY self-hosted runner host (see README.md in this dir) --
 # a prior host-local copy ran only on a subset of hosts, which is why one host
@@ -20,10 +20,10 @@
 #     (shellcheck/actionlint lint, bats, shellspec) complete in minutes; a
 #     build-tools container alive for hours is an orphaned/hung CI job (the exact
 #     leak class of the 2026-07-25 actionlint deadlock that exhausted the light
-#     runner tier). The actionlint SIGKILL guard (AG-CI-015) fixes that leak at
+#     runner tier). The actionlint SIGKILL guard (AG-CI-016) fixes that leak at
 #     the source; this reap is a defense-in-depth net for any future signal-deaf
 #     hang from another tool.
-#   - measures disk usage BEFORE and AFTER and logs the delta (AG-CI-015:
+#   - measures disk usage BEFORE and AFTER and logs the delta (AG-CI-016:
 #     measure -> clean -> re-measure, so a run that reclaimed nothing is visible
 #     rather than assumed successful).
 #
