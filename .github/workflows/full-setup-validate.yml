@@ -84,7 +84,10 @@ jobs:
     name: DHCP proxy PXE simulation
     needs: full-setup-sims
     if: always()
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job builds and runs a real throwaway
+    # dnsmasq-proxy container plus a synthetic PXE client, not just planning.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -135,7 +138,10 @@ jobs:
     name: DHCP relay flow simulation
     needs: dhcp-proxy-pxe-simulation
     if: always()
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job builds and runs throwaway relay/upstream/
+    # client containers across two dedicated bridge networks, not just planning.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Run DHCP relay flow simulation
@@ -183,7 +189,10 @@ jobs:
     name: DHCP Kea Control Agent mutation simulation
     needs: [full-setup-sims, dhcp-relay-flow-simulation]
     if: always()
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # heavy, not light: this job starts docker-socket-proxy/proxy/nats/ui plus
+    # a standalone Kea container, not just planning.
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

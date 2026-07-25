@@ -352,9 +352,11 @@ Compose. The interactive installer asks which channel to use, defaulting to
 - `stable` (default) is the channel promoted after the full release
   validation gate. `LANCACHE_IMAGE_CHANNEL=latest` is the same channel under
   its original name — both resolve to the identical published image.
-- `nightly` is the most recently built, less tested pre-stable channel promoted
-  from `master` (built daily; renamed from `edge` in v0.3.0). Opt in only if you
-  want the newest changes.
+- `nightly` is the most recently built, less tested pre-stable channel, built
+  from `current_dev`'s tip once a day plus on-demand (renamed from `edge` in
+  v0.3.0; corrected from "published on every current_dev push" to this
+  once-daily/on-demand model in #1254/#1255). Opt in only if you want the
+  newest changes.
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
