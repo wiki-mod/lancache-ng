@@ -7,8 +7,13 @@ mod zone_snapshots;
 
 use async_nats::jetstream;
 use futures::StreamExt;
+// DNSRecord/RRset/ZoneUpdate/ZoneInfo/dns_record_to_zone_update now live in
+// lib.rs (see its module doc comment) so fuzz/ can link them without faking a
+// NATS/PowerDNS connection -- this binary uses the exact same types/function,
+// not a redefinition of them.
+use nats_subscriber::{DNSRecord, ZoneInfo, dns_record_to_zone_update};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
@@ -16,42 +21,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct DNSRecord {
-    action: String,
-    zone: String,
-    name: String,
-    #[serde(rename = "type")]
-    record_type: String,
-    #[serde(default)]
-    ttl: Option<i32>,
-    #[serde(default)]
-    records: Option<Vec<HashMap<String, serde_json::Value>>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct RRset {
-    name: String,
-    #[serde(rename = "type")]
-    record_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ttl: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changetype: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    records: Option<Vec<HashMap<String, serde_json::Value>>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ZoneUpdate {
-    rrsets: Vec<RRset>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ZoneInfo {
-    rrsets: Vec<RRset>,
-}
 
 /// Shared configuration + coordination for the zone/record known-good
 /// snapshot adapter (#628). `lock` is held for the whole
@@ -710,32 +679,6 @@ async fn handle_message(
     HandleOutcome::Ack
 }
 
-fn dns_record_to_zone_update(record: &DNSRecord) -> Result<ZoneUpdate, String> {
-    let (changetype, ttl_val, records_val) = match record.action.as_str() {
-        "delete" => (Some("DELETE".to_string()), None, None),
-        "replace" => (
-            Some("REPLACE".to_string()),
-            record.ttl,
-            record.records.clone(),
-        ),
-        action => {
-            return Err(format!("unknown action: {}", action));
-        }
-    };
-
-    let rrset = RRset {
-        name: record.name.clone(),
-        record_type: record.record_type.clone(),
-        ttl: ttl_val,
-        changetype,
-        records: records_val,
-    };
-
-    Ok(ZoneUpdate {
-        rrsets: vec![rrset],
-    })
-}
-
 async fn handle_dns_record(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
@@ -1036,6 +979,14 @@ async fn reconciler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // RRset is only constructed/inspected directly in these tests --
+    // production code in this file only names DNSRecord/ZoneInfo/
+    // dns_record_to_zone_update directly (see the crate-level import above),
+    // so it needs its own explicit import here to avoid an unused-import
+    // warning on the non-test build. ZoneUpdate itself is only ever used via
+    // type inference in these tests (never named directly), so it does not
+    // need the same treatment.
+    use nats_subscriber::RRset;
 
     // PDNS GET /zones/{zone} responses do NOT include changetype.
     // This test guards against regressions where changetype becomes

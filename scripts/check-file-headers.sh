@@ -43,6 +43,13 @@ is_excluded() {
         # Vendored third-party data file (Mozilla Public Suffix List) —
         # already carries its own upstream MPL-2.0 header.
         services/proxy/public_suffix_list.dat) return 0 ;;
+        # cargo-fuzz seed corpus fixtures (issue #1252): raw bytes libFuzzer
+        # feeds directly to the harness under test (JSON in this repo's
+        # current targets, but this exclusion is by directory, not
+        # extension, since a fuzz corpus is fixture data in whatever shape
+        # the target parses). A header would corrupt the exact bytes being
+        # fuzzed — the same reason JSON config files are excluded above.
+        */fuzz/corpus/* | fuzz/corpus/*) return 0 ;;
         # Binary/compiled asset types a comment header cannot apply to.
         *.png | *.jpg | *.jpeg | *.gif | *.ico | *.svg | *.woff | *.woff2 | *.ttf | *.eot | *.crt | *.key | *.pem) return 0 ;;
         *) return 1 ;;

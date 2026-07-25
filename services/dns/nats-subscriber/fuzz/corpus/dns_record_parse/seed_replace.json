@@ -1,0 +1,1 @@
+{"action": "replace", "zone": "lan", "name": "myhost.lan.", "type": "A", "ttl": 60, "records": [{"content": "10.0.0.5", "disabled": false}]}

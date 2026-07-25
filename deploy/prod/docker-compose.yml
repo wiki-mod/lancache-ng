@@ -1732,6 +1732,19 @@ services:
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - netdata-logs:/var/log/netdata
+      # web_log collector (go.d.plugin) wiring: netdata's built-in web_log
+      # module reads the proxy's plain-text access-log copy (fluent-bit's
+      # `file=nginx-proxy.log` output into the `logs` volume, see the
+      # `syslog` service above) to expose live per-request nginx analytics
+      # (per-status-code counters, response time, etc.) that the system
+      # metrics collectors above don't otherwise surface. This mirrors the
+      # wiring the now-retired deploy/dev profile used to have (the only
+      # profile where this collector was ever fully working); prod has a
+      # real repo checkout at build/deploy time (see the cdn-domains.txt
+      # bind-mount on the proxy/dns services above), so the job config can
+      # be bind-mounted directly rather than generated inline.
+      - logs:/var/log/lancache:ro
+      - ../../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
     restart: always
     logging:
       driver: json-file
