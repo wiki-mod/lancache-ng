@@ -714,9 +714,191 @@ maybe_prune_syslog() {
     mkdir -p "$(dirname "$SYSLOG_PRUNE_STAMP")"
     echo "$now" > "$SYSLOG_PRUNE_STAMP"
 }
+
+# Bounds fluent-bit's own operational self-log file (issue #1236; see the
+# `syslog` service's `-l`/`--log_file` comment in deploy/*/docker-compose.yml
+# for the full background). Confirmed empirically (real syslog-ng outage
+# reproduction, #1236): while syslog-ng is unreachable, fluent-bit logs its
+# own connection/flush retries at roughly one line/second (the project's 5s
+# flush interval), and since this file is itself re-tailed by the self-log
+# input PR #1235 added, that growth compounds for as long as the outage
+# lasts. Neither syslog-ng's own rotation nor maybe_prune_syslog() above
+# bound this file: both operate on syslog-ng's OUTPUT tree
+# ($SYSLOG_LOG_ROOT), not this container's own mount of the `syslog` service's
+# /data (`syslog-data`) volume.
+#
+# Deliberately has NO SYSLOG_ENABLED gate, unlike maybe_prune_syslog() above,
+# and is NOT rate-limited by a daily stamp file:
+#   - No gate: the `syslog` service's `-l` flag and its self-log tail input
+#     are unconditional CLI flags on that service's command, never gated by
+#     SYSLOG_ENABLED at all. An install with `--profile logging` active but
+#     SYSLOG_ENABLED=false (a real, supported combination -- e.g. forwarding
+#     to an external syslog-ng without opting into watchdog's own tree-wide
+#     pruning or the Admin UI's log viewer) would otherwise keep the exact
+#     bug this function fixes. This is a pure disk-safety concern on
+#     fluent-bit's OWN volume, categorically different from the operator
+#     log-data tree SYSLOG_ENABLED's "double opt-in" (see deploy/prod/.env's
+#     comment) deliberately protects from unsolicited deletion -- so reusing
+#     that gate here would silently reintroduce the bug for exactly the
+#     installs most likely to only want passthrough forwarding.
+#   - No rate limit: unlike maybe_prune_syslog()'s tree-wide `du -sb`/`find`
+#     walk (expensive enough to need a once-daily stamp), checking ONE
+#     file's size via `stat` is effectively free, and the growth this guards
+#     against is fast enough (confirmed ~1 line/sec during a real outage)
+#     that a once-a-day check would let many hours of unbounded growth
+#     through before the first prune ever ran.
+maybe_rotate_fluent_bit_selflog() {
+    local selflog_dir="${FLUENT_BIT_SELFLOG_DIR:-/var/lib/lancache-syslog-data}"
+    local selflog_file="$selflog_dir/fluent-bit.log"
+
+    # Fail-safe no-op, mirroring maybe_prune_syslog()'s SYSLOG_LOG_ROOT
+    # existence check above: covers both "logging profile never enabled"
+    # (mount target never populated) and "fluent-bit hasn't written its
+    # first line yet" (container just started).
+    if [ ! -f "$selflog_file" ]; then
+        return
+    fi
+
+    local max_mb="${FLUENT_BIT_SELFLOG_MAX_MB:-20}"
+    case "$max_mb" in
+        ''|*[!0-9]*)
+            log "Invalid FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-}; using default 20"
+            max_mb=20
+            ;;
+    esac
+    # Minimum-value floor, same idiom as maybe_prune_syslog()'s SYSLOG_MAX_GB
+    # clamp above: a literal 0 is all-digits (passes the check unchanged)
+    # but would set budget_bytes to 0, rotating on every single cycle
+    # regardless of actual size -- never a sane operator intent.
+    if [ "$max_mb" -lt 1 ]; then
+        log "FLUENT_BIT_SELFLOG_MAX_MB=${max_mb} is below the supported minimum (1 MiB); using default 20"
+        max_mb=20
+    fi
+    # Overflow guard, same idiom as maybe_prune_syslog()'s SYSLOG_MAX_GB
+    # ceiling above, scaled for MB instead of GB: 1048576 MiB (1 TiB) is far
+    # beyond any plausible self-log budget but stays well clear of the point
+    # where the byte multiplication below would overflow Bash's signed
+    # 64-bit arithmetic.
+    if [ "$max_mb" -gt 1048576 ]; then
+        log "FLUENT_BIT_SELFLOG_MAX_MB=${max_mb} exceeds supported maximum (1048576 MiB); clamping to 1048576"
+        max_mb=1048576
+    fi
+
+    local max_rotations="${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}"
+    case "$max_rotations" in
+        ''|*[!0-9]*)
+            log "Invalid FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-}; using default 5"
+            max_rotations=5
+            ;;
+    esac
+    if [ "$max_rotations" -lt 1 ]; then
+        log "FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${max_rotations} is below the supported minimum (1); using default 5"
+        max_rotations=5
+    fi
+
+    local max_bytes=$(( max_mb * 1024 * 1024 ))
+    local size_bytes
+    size_bytes=$(stat -c '%s' "$selflog_file" 2>/dev/null || echo 0)
+
+    if [ "$size_bytes" -le "$max_bytes" ]; then
+        return
+    fi
+
+    log "Fluent-bit self-log budget exceeded: ${size_bytes} bytes > ${max_bytes} bytes (${max_mb}MB); rotating"
+
+    local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    local rotated="${selflog_file}.${ts}"
+
+    # Copy-then-truncate ("copytruncate"), NOT mv+reopen like syslog-ng's own
+    # rotation loop in deploy/*/docker-compose.yml: fluent-bit's `-l`/
+    # `--log_file` has no equivalent SIGHUP-driven (or any other)
+    # reopen-on-rename support (confirmed against the pinned image's
+    # `--help` output -- no rotation flag exists at all, see issue #1236),
+    # so renaming this file away would leave fluent-bit's already-open file
+    # descriptor writing into the renamed (now-hidden) inode forever, and
+    # nothing would ever tail-read the NEW path again. Truncating the SAME
+    # inode in place is safe because fluent-bit's `-l` implementation opens
+    # the path append-only and writes sequentially by file position, not by
+    # an internally tracked offset independent of the file -- confirmed
+    # empirically on a real runner (#1236): a live fluent-bit process kept
+    # writing correctly after an external `cp file backup && : > file`, with
+    # no data corruption, no sparse holes, and no leading NUL bytes (verified
+    # via a full-file NUL-byte scan, not just apparent-size/`du` block-count
+    # comparison -- an initial block-count reading looked like a possible
+    # hole but turned out to be a filesystem-compression artifact of that
+    # runner's storage, not an actual gap; the NUL-byte scan is the reliable
+    # discriminator on any filesystem).
+    #
+    # `cp` before `: > file` (not the other way around) is deliberate: if
+    # the copy fails partway (disk full, permission error), the live file
+    # must be left untouched rather than truncated with its content already
+    # lost -- see the `else` branch below. This leaves a small, accepted
+    # race window (matching classic logrotate's own documented
+    # `copytruncate` trade-off): a line fluent-bit writes between the `cp`
+    # and the truncate could end up duplicated (present in both the backup
+    # and the start of the freshly-truncated live file) or, in the opposite
+    # timing, briefly invisible to both until its next write flushes -- never
+    # silently and permanently lost.
+    if cp -- "$selflog_file" "$rotated"; then
+        : > "$selflog_file"
+        log "Rotated fluent-bit self-log to $rotated (live file truncated in place)"
+        # zstd is installed at build time in services/watchdog/Dockerfile
+        # specifically for this (#1236), matching the compression tool
+        # syslog-ng's own rotation loop uses. No gzip fallback: unlike
+        # syslog-ng's official image (which needs a runtime `apt-get
+        # install` because its Dockerfile isn't ours to control), this
+        # project owns the watchdog Dockerfile directly, so a missing zstd
+        # here would mean a build defect, not a legitimate runtime
+        # fallback case. Compression failure/absence still leaves the
+        # rotation-count cap below in force, so disk usage stays bounded
+        # either way, just less densely.
+        if command -v zstd >/dev/null 2>&1; then
+            zstd -q -T0 -19 --rm "$rotated" 2>/dev/null || true
+        fi
+    else
+        # Do NOT truncate on a failed copy -- that would be a silent,
+        # unrecoverable loss of exactly the retry/error diagnostics an
+        # operator needs during the outage this feature exists to surface
+        # (issue #1236's explicit "must not silently drop" acceptance
+        # criterion).
+        log "ERROR: failed to copy $selflog_file to $rotated; skipping this cycle's rotation to avoid losing unarchived content"
+        return
+    fi
+
+    # Cap total rotated-backup count regardless of outage length: without
+    # this, an outage lasting long enough to trigger many rotations would
+    # make the ROTATED BACKUPS themselves grow without bound, defeating the
+    # whole point of this function. Oldest-first by mtime, same idiom as
+    # maybe_prune_syslog()'s Pass 2 above.
+    local rotation_scan; rotation_scan="$(mktemp)"
+    if ! find "$selflog_dir" -maxdepth 1 -type f \
+            -name "fluent-bit.log.*" -printf '%T@\t%p\n' > "$rotation_scan" 2>/dev/null; then
+        log "ERROR: find failed while listing rotated fluent-bit self-log backups; skipping rotation-count cleanup this cycle"
+        rm -f "$rotation_scan"
+        return
+    fi
+
+    local rotation_count
+    rotation_count=$(wc -l < "$rotation_scan")
+    if [ "$rotation_count" -gt "$max_rotations" ]; then
+        local excess=$(( rotation_count - max_rotations ))
+        local rotation_sorted; rotation_sorted="$(mktemp)"
+        sort -n "$rotation_scan" > "$rotation_sorted"
+        local pruned=0
+        while IFS=$'\t' read -r _mtime file && [ "$pruned" -lt "$excess" ]; do
+            if rm -- "$file"; then
+                pruned=$(( pruned + 1 ))
+                log "Pruned old fluent-bit self-log rotation (rotation-count budget, oldest-first): $file"
+            fi
+        done < "$rotation_sorted"
+        rm -f "$rotation_sorted"
+    fi
+    rm -f "$rotation_scan"
+}
 log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
+log "Fluent-bit self-log rotation (#1236): dir=${FLUENT_BIT_SELFLOG_DIR:-/var/lib/lancache-syslog-data} budget=${FLUENT_BIT_SELFLOG_MAX_MB:-20}MB rotations=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5} (always active, no SYSLOG_ENABLED gate; see maybe_rotate_fluent_bit_selflog()'s comment)"
 
 while true; do
     check_and_maybe_restart "$C_PROXY" F_PROXY H_PROXY
@@ -732,6 +914,10 @@ while true; do
     write_status
     maybe_purge
     maybe_prune_syslog
+    # Unlike the two above, maybe_rotate_fluent_bit_selflog() (#1236) runs
+    # every cycle rather than once every ~24h -- see its own comment for why
+    # a daily rate limit doesn't fit a single-file `stat` check.
+    maybe_rotate_fluent_bit_selflog
     # maybe_purge()/maybe_prune_syslog() only actually scan once every ~24h,
     # but that scan can legitimately run for minutes against a large cache or
     # syslog tree -- without this second write, status.json's mtime would go
