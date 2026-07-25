@@ -1264,6 +1264,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx for manifest inspection
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Resolve compose validation image
@@ -1308,6 +1309,18 @@ jobs:
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # This is the only step in this job that uses the builder set up above
+      # (select-build-tools-image.sh's own `docker buildx imagetools
+      # inspect` call) -- its own trusted-ref fallback path, if ever taken,
+      # uses plain `docker build`, not buildx, so nothing later in this job
+      # needs the builder kept alive. Torn down here rather than left
+      # running to the job's own much-later "Remove fallback compose
+      # validation image" cleanup near the end of this file.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Validate stack image contract
         run: |
@@ -2958,6 +2971,7 @@ jobs:
       # skipping cleanly.
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -3092,6 +3106,15 @@ jobs:
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
+
+      # This is the last step in the job that uses the builder set up above --
+      # "Build full-setup validation image" below is a plain `docker build`,
+      # not buildx. Same `pr-staging-available` gate as the setup step itself,
+      # since there is nothing to remove when that step never ran.
+      - name: Remove buildx builder
+        if: ${{ always() && steps.channel.outputs.pr-staging-available == 'true' }}
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Build full-setup validation image
         env:
@@ -4779,6 +4802,7 @@ jobs:
         if: >-
           matrix.platform_tag == 'amd64' &&
           (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+        id: buildx-amd64
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Set up Docker Buildx for scan build (arm64, retried)
@@ -4793,6 +4817,7 @@ jobs:
         if: >-
           matrix.platform_tag == 'arm64' &&
           (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+        id: buildx-arm64
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Build local scan image
@@ -4856,6 +4881,18 @@ jobs:
             "${build_context_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
             ${{ matrix.context }}
+
+      # Exactly one of the two "Set up Docker Buildx for scan build" rows
+      # above actually ran per matrix row (gated on matrix.platform_tag), so
+      # exactly one of steps.buildx-amd64/steps.buildx-arm64 has a real
+      # builder name -- the other is empty and the `||` falls through to it.
+      # Same should-scan gate as "Build local scan image" above: nothing to
+      # remove when that step (and therefore the builder setup) was skipped.
+      - name: Remove buildx builder
+        if: ${{ always() && (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') }}
+        run: |
+          docker buildx rm "${{ steps.buildx-amd64.outputs.name || steps.buildx-arm64.outputs.name }}" || true
+
       - name: Prepare local Trivy cache
         # Trivy's cache backend (BoltDB) only allows one process to hold a
         # given cache directory open at a time. This directory used to be
@@ -5635,6 +5672,19 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      # This job never `--load`s a local image (push-only), so unlike
+      # container-scan it had no existing "Remove scan image"-style final
+      # cleanup step to piggyback on -- but "Set up Docker Buildx" above
+      # still creates a real docker-container builder + state volume on this
+      # persistent self-hosted runner pool that setup-buildx-action never
+      # removes on its own. "Build and push" above is the only step in this
+      # job that uses it; "Rotate local Buildx cache" below only manipulates
+      # the local cache directory on disk, not the builder itself.
+      - name: Remove buildx builder
+        if: ${{ always() && steps.should-build.outputs.should-build == 'true' }}
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       - name: Rotate local Buildx cache
         if: >-
           ${{
@@ -6137,6 +6187,19 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}-arm64
           cache-to: type=gha,scope=${{ matrix.service }}-arm64,mode=max
 
+      # Same leak as build's own equivalent step: this job never `--load`s a
+      # local image (push-only), so it had no existing local-image cleanup
+      # step -- but "Set up Docker Buildx" above still creates a real
+      # docker-container builder that setup-buildx-action/buildx-setup-retry
+      # never remove on their own. This runner is GitHub-hosted (ephemeral),
+      # so unlike build's self-hosted equivalent this is a defensive no-op
+      # today rather than an active leak, but kept for consistency and in
+      # case this job is ever moved to a persistent runner.
+      - name: Remove buildx builder
+        if: ${{ always() && steps.should-build.outputs.should-build == 'true' }}
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       - name: Scan pushed build-tools digest with Trivy
         # Same exact-pushed-digest scan build performs for its linux/amd64
         # build-tools image, mirrored here for the linux/arm64 digest.
@@ -6223,6 +6286,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -6414,6 +6478,15 @@ jobs:
             merged_digest="$(digest_for_image "$target_image")"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
+
+      # "Set up Docker Buildx" above runs unconditionally (unlike the two
+      # mutually-exclusive "Create ..." steps that consume it), so this
+      # teardown is unconditional too -- exactly one of those two steps ever
+      # uses the builder per run, but it was created either way.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       # actions/attest is a standalone action step, so it cannot run inside
       # the bash loops above -- one explicit step per service is required,
@@ -6726,6 +6799,7 @@ jobs:
           promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -6987,6 +7061,16 @@ jobs:
               docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
           done
 
+      # "Promote coherent stack tags" above is the only step in this job
+      # that uses the builder set up above -- neither "Cut an automated
+      # patch release tag" nor anything after it touches buildx. Torn down
+      # here rather than left running until this job's own much-later
+      # "Release the cross-workflow promote lock" cleanup.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       # Automated SemVer patch (Z) tagging (#819). Gated to the release-
       # bearing branch (master) only -- on any other ref (including this
       # workflow's current v0.2.0 host branch) this step is a deliberate
@@ -7218,6 +7302,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -7435,6 +7520,15 @@ jobs:
           fi
           UPDATE_RELEASE
 
+      # "Create or update GitHub release for built images" above is the last
+      # step in this job that uses the builder set up above -- "Attach
+      # OpenVEX document to the release" below only touches a release asset
+      # via curl, no buildx.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       - name: Attach OpenVEX document to the release
         # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json,
         # kept in sync with .trivyignore.yaml by the validate-compose drift
@@ -7537,6 +7631,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
@@ -7572,6 +7667,14 @@ jobs:
             exit 1
           fi
           echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
+
+      # "Resolve released image digest" above is the only step in this job
+      # that uses the builder set up above -- the Trivy scan and release
+      # upload steps below don't touch buildx.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Generate CycloneDX SBOM with Trivy
         # Same pinned trivy-action the scan jobs use, in SBOM mode. Scans the
