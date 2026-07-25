@@ -17,26 +17,33 @@ on:
         default: none
   schedule:
     # Daily stable-channel refresh (issues #1035, #1056; re-scoped for the
-    # #825/#1141 branch-model decision: master = `latest`, current_dev =
-    # `nightly`, archived vY.X.Z branches publish no live channel). The
-    # `promote` job only moves the `latest` stack channel on a push to
-    # master, so between master pushes the channel's images can silently go
-    # stale (exactly #1035's failure mode for the old `edge` name, back when
-    # this same schedule kept the then-master-fed `nightly` channel fresh
-    # instead). A `schedule` event always runs from the repository's default
-    # branch (currently master), and because `detect-changes` only gates
-    # pull_request events -- every non-PR event builds all services
-    # unconditionally -- this rebuilds the full stack and re-runs `promote`,
-    # whose `refs/heads/master -> latest` case then re-points the channel. So
-    # `latest` can never drift more than ~24h behind master even with no push.
+    # #825/#1141 branch-model decision: master = `latest`, archived vY.X.Z
+    # branches publish no live channel). The `promote` job only moves the
+    # `latest` stack channel on a push to master, so between master pushes
+    # the channel's images can silently go stale (exactly #1035's failure
+    # mode for the old `edge` name, back when this same schedule kept the
+    # then-master-fed `nightly` channel fresh instead). A `schedule` event
+    # always runs from the repository's default branch (currently master),
+    # and because `detect-changes` only gates pull_request events -- every
+    # non-PR event builds all services unconditionally -- this rebuilds the
+    # full stack and re-runs `promote`, whose `refs/heads/master -> latest`
+    # case then re-points the channel. So `latest` can never drift more than
+    # ~24h behind master even with no push.
     #
-    # KNOWN GAP: this schedule cannot give `nightly` (current_dev's channel)
-    # the same guarantee. GitHub Actions `schedule:` triggers only ever run
-    # from the repository's default branch, never from current_dev, so there
-    # is no equivalent daily safety net if current_dev goes a while without a
-    # push. #825 explicitly left the GitHub default-branch question open, so
-    # this is not solved here; revisit if nightly staleness between pushes
-    # becomes a real operational problem.
+    # `nightly` (current_dev's channel) is DELIBERATELY NOT covered by this
+    # same cron since #1254/#1255 (2026-07-25): current_dev no longer
+    # auto-publishes nightly on every push at all (see the `promote` job's
+    # own "Branch-to-channel mapping" comment), so "keep nightly from drifting
+    # between pushes" is no longer this schedule's job to do. `nightly` has
+    # its OWN dedicated schedule instead -- see nightly-refresh.yml, which
+    # dispatches this same workflow against current_dev's tip once a day
+    # (same 01:00 UTC cron time as this one, for the identical DST-drift
+    # reason documented below) plus on-demand. That file's own header
+    # documents the one gap this split still carries: GitHub's `schedule:`
+    # trigger only fires from a workflow file as it exists on the default
+    # branch, so nightly-refresh.yml's cron is inert until it has itself been
+    # merged to master, even though it lives in a repo whose active
+    # development happens on current_dev.
     #
     # 01:00 UTC == 02:00 CET (the intended local refresh time). GitHub Actions
     # cron has no timezone concept and always fires in UTC, so during CEST

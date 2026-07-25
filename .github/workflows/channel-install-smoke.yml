@@ -25,13 +25,16 @@
 # CAPACITY NOTE). The install+health check is exactly the "still installable?"
 # coverage #785 asks to restore, and no more.
 #
-# CHANNEL: defaults to `nightly` (published continuously from current_dev --
-# #825/#1141's branch-model decision retired the old `dev` channel this
-# default used to point at: archived vY.X.Z release branches no longer
-# publish a live channel at all). `latest` (published continuously from
-# master under the same decision) is intentionally NOT included yet as a
-# second matrix channel/input -- add it as a deliberate follow-up once
-# smoke-testing both channels is worth the extra scheduled-job runtime.
+# CHANNEL: defaults to `nightly` (built from current_dev's tip -- #825/#1141's
+# branch-model decision retired the old `dev` channel this default used to
+# point at: archived vY.X.Z release branches no longer publish a live channel
+# at all). Since #1254/#1255 (2026-07-25), `nightly` is a real once-daily
+# plus on-demand green-gated build rather than being republished on every
+# current_dev push -- see nightly-refresh.yml and docs/release-versioning.md.
+# `latest` (published continuously from master under the original decision)
+# is intentionally NOT included yet as a second matrix channel/input -- add
+# it as a deliberate follow-up once smoke-testing both channels is worth the
+# extra scheduled-job runtime.
 #
 # NOTE ON TRIGGERS: `schedule:` only fires from the default branch (master), so
 # this check becomes live once this file is synced from v0.2.0 to master via the

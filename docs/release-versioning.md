@@ -39,7 +39,7 @@ must stay consistent with that file.
 | Channel | Meaning | Mutability | Intended use |
 | --- | --- | --- | --- |
 | `sha-<commit>` | Immutable build identity for a source commit | Immutable | Debugging, rollback, provenance, and promotion source |
-| `nightly` | Tested pre-stable integration channel built continuously from `current_dev` (renamed from `edge` in v0.3.0, #1056; re-pointed from `master` to `current_dev` in v0.3.0, #825/#1141) | Mutable | Operators who explicitly opt into pre-stable builds |
+| `nightly` | Tested pre-stable integration channel, built from `current_dev`'s tip once a day (01:00 UTC) plus on-demand, gated on a full green build+scan (renamed from `edge` in v0.3.0, #1056; re-pointed from `master` to `current_dev` in v0.3.0, #825/#1141; changed from "republished on every current_dev push" to this once-daily/on-demand model in #1254/#1255, 2026-07-25) | Mutable | Operators who explicitly opt into pre-stable builds |
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
 | `latest` | Latest stable release, published continuously from `master` | Mutable | Default stable install path |
@@ -49,14 +49,48 @@ must stay consistent with that file.
 current_dev = nightly, vY.X.Z = archived release, ganz simpel")**: `master`
 publishes `latest` continuously after the required checks pass -- this is its
 sole, permanent role, not an exception that needs a separate justification
-each time. `current_dev` (the permanent active-development branch, decoupled
-from any version number) publishes `nightly` continuously from its own tip,
-taking over the role `master` used to have here before this decision.
-`vY.X.Z` branches (e.g. `v0.2.0`) are archived release freezes: they still
-take deliberate backports, exactly as before, but publish no live channel at
-all -- nothing tracks them as a rolling install target. Stable release tags
-(`vX.Y.Z`) publish the matching immutable tag and move `latest` (and, being
-the same pointer, `stable`) to the same digest.
+each time. `vY.X.Z` branches (e.g. `v0.2.0`) are archived release freezes:
+they still take deliberate backports, exactly as before, but publish no live
+channel at all -- nothing tracks them as a rolling install target. Stable
+release tags (`vX.Y.Z`) publish the matching immutable tag and move `latest`
+(and, being the same pointer, `stable`) to the same digest.
+
+**`current_dev` -> `nightly` publishing model changed (#1254/#1255, decided
+2026-07-25 -- "nightly should be a real once-a-day build, like Firefox
+Nightly, not republished on every push")**: originally (#825/#1141),
+`current_dev` published `nightly` continuously from its own tip on every
+push, taking over the role `master` used to have here before that decision.
+In practice this meant `nightly` moved dozens of times a day, which defeated
+the point of a distinct "tested" channel separate from the raw commit stream
+and gave operators no meaningfully different guarantee than tracking
+`current_dev` directly. The corrected model: a plain `current_dev` push no
+longer moves the `nightly` channel tag at all -- it still builds, scans, and
+publishes that commit's durable per-service `sha-<commit>` tags exactly as
+before (unaffected by this change). `nightly` is instead refreshed exactly
+once a day, by `.github/workflows/nightly-refresh.yml`'s `schedule` trigger
+(`0 1 * * *`, i.e. 01:00 UTC == 02:00 CET in winter / 03:00 CEST in summer --
+GitHub Actions cron has no timezone concept and always fires in UTC, so this
+one-hour seasonal drift is deliberately accepted, matching the drift
+`build-push.yml`'s own daily `latest` schedule already accepts for the same
+reason), plus on-demand via that same workflow's `workflow_dispatch` trigger
+or via `build-push.yml`'s own pre-existing `channel: nightly`
+`workflow_dispatch` input dispatched directly against `current_dev`.
+Either path runs build-push.yml's full pipeline (build, test, scan, then
+`promote`) against `current_dev`'s tip, so `nightly` remains green-gated and
+fail-closed by construction: `promote` only runs `needs: merge-manifests`
+after the build/scan jobs succeed, so a broken `current_dev` tip simply never
+reaches `promote` and `nightly` holds its last good state instead of being
+force-moved onto a red commit. One accepted gap: GitHub's `schedule:` trigger
+only ever fires from a workflow file as it exists on the repository's default
+branch (`master`), so the daily cron does not actually start firing until
+`nightly-refresh.yml` itself has been merged to `master` -- until then (and
+whenever it lags `current_dev` afterward), `nightly` refreshes only via
+manual dispatch. This is accepted rather than solved here, the same way
+`build-push.yml`'s own daily `latest` schedule already documents an identical
+GitHub limitation as a "KNOWN GAP" comment. This change does not affect
+#808's untouched-service PR backfill correctness guarantee: that mechanism no
+longer depends on `nightly` staying continuously fresh at all -- see the
+Promotion section below.
 
 The `nightly` channel was named `edge` before v0.3.0 (#1056). The rename is a
 deliberate breaking change with no alias: an install still carrying
@@ -132,6 +166,29 @@ The promotion flow is:
 5. create or update release notes from the same package set
 
 If one required image is missing, the channel must not be promoted.
+
+**Step 4, for `nightly` specifically, no longer fires on every `current_dev`
+push (#1254/#1255)** -- see the "Branch/channel model" section above for the
+full corrected model (once-daily scheduled + on-demand, still gated on steps
+1-3 passing).
+
+**PR validation's own untouched-service back-fill no longer depends on
+`nightly` (#1254/#1255)**: a PR's full-setup validation back-fills any
+full-setup service the PR itself did not touch so the suite still tests a
+complete, coherent stack. Before #1254/#1255 this back-filled from the
+`nightly`/`latest` base-channel tag (guarded by #808's "confirm the channel
+image was actually built at or after this PR's base commit" ancestry check,
+since a channel tag can lag). Now that `nightly` is no longer continuously
+fresh, that channel tag is no longer a reliable "at or after PR base"
+source, so the back-fill instead sources directly from the PR base commit's
+own durable `sha-<base_sha_short>` per-commit image -- exactly the right
+commit by construction, made possible because every non-PR push already
+publishes a fresh per-commit tag for every service (see `build-push.yml`'s
+"Ensure PR staging tags exist for full-setup services" step and
+`scripts/ensure-pr-staging-images.sh`). #808's bounded-wait/ancestry-check
+mechanism (`scripts/lib/staging-image-freshness.sh`) is unchanged and still
+used: it doubles as the poll for the base commit's own push-triggered build
+finishing, and still guards against a corrupted or mislabeled image.
 
 ## Setup And Update Selection
 
