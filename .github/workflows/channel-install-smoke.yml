@@ -20,9 +20,10 @@
 # the stack up, and asserts every service is healthy and not crash-looping. It
 # does NOT run the heavy SSL/HTTP/DHCP/NATS client simulations that
 # full-setup-validate.yml / full-setup-deep-validate.yml run -- scheduling that
-# whole suite on a cron would strain the shared lancache-light tier (see that
-# workflow's RUNNER CAPACITY NOTE). The install+health check is exactly the
-# "still installable?" coverage #785 asks to restore, and no more.
+# whole suite on a cron would strain the shared lancache-heavy tier those
+# simulations now run on (see full-setup-deep-validate.yml's own RUNNER
+# CAPACITY NOTE). The install+health check is exactly the "still installable?"
+# coverage #785 asks to restore, and no more.
 #
 # CHANNEL: defaults to `nightly` (published continuously from current_dev --
 # #825/#1141's branch-model decision retired the old `dev` channel this

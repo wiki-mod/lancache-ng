@@ -34,15 +34,25 @@
 # is safe to require without blocking docs-only PRs -- a required check that
 # gets skipped would otherwise leave a PR permanently un-mergeable.
 #
-# RUNNER CAPACITY NOTE: these sims run serially on the shared lancache-light
-# tier (per AG-CI-002); the image BUILDS they wait on run on the scarce
-# lancache-heavy tier, so the wait cannot deadlock the builds (different
-# runner pools). But this does roughly double the light-tier full-setup
-# footprint per PR (build-push's own shallow job still runs too), and the
-# staging-wait job holds one light slot while polling. See the PR body for
-# the capacity trade-off; #715 states CI time is not the constraint but
-# acknowledges self-hosted CAPACITY under higher trigger frequency is a real,
-# separate concern to watch.
+# RUNNER CAPACITY NOTE (updated for the lancache-heavy tier move, see the
+# job-level comments below): these sims now run serially on the scarce
+# lancache-heavy tier (AG-CI-002 -- they build and run real Docker
+# containers/compose stacks, not just plan or poll), the same tier the image
+# BUILDS they wait on also use. That no longer gives a "different runner
+# pools" guarantee against self-deadlock; what still prevents it is ordering,
+# not isolation: every heavy-tier sim job's `needs:` chain runs through
+# ensure-pr-staging-images (which stays on lancache-light and internally
+# polls until build-push's builds finish and push this PR's staging tags), so
+# a sim never requests a heavy slot until this PR's OWN builds have already
+# finished and released theirs. It does not prevent contention with OTHER
+# PRs' concurrent heavy-tier builds/sims -- this change increases total
+# heavy-tier demand per PR run (sims move off light onto the same small pool
+# builds already compete for), a real, separate capacity concern that
+# intersects with issue #1065's heavy-pool saturation finding, not one this
+# note's ordering argument resolves. See the PR body for the capacity
+# trade-off; #715 states CI time is not the constraint but acknowledges
+# self-hosted CAPACITY under higher trigger frequency is a real, separate
+# concern to watch.
 
 name: Full-Setup Deep Validate
 
