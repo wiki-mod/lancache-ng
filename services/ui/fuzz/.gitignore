@@ -1,0 +1,5 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Ignores this cargo-fuzz harness crate's build output and crash artifacts;
+# corpus/ (seed inputs) stays tracked.
+/target
+/artifacts
