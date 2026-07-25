@@ -7,6 +7,14 @@ version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
+[lib]
+# Exposes pure, client/external-input-parsing helpers (kea_response_parse,
+# netdata_url) so fuzz/'s cargo-fuzz harnesses can link them directly instead
+# of constructing a real AppState/axum router/Docker/NATS client. See
+# src/lib.rs's module doc comment.
+name = "lancache_ui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lancache-ui"
 path = "src/main.rs"

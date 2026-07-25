@@ -10,12 +10,17 @@
 
 use crate::{AppState, docker_client, kea_snapshots};
 use anyhow::Context as AnyhowContext;
+// Reservation/normalize_mac/parse_reservation_entry now live in the
+// lancache_ui library crate (see services/ui/src/kea_response_parse.rs) so
+// fuzz/'s cargo-fuzz harness can link parse_reservation_entry directly --
+// this module uses the exact same items, not a redefinition of them.
 use axum::Json;
 use axum::extract::{Form, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use bollard::container::LogOutput;
+use lancache_ui::kea_response_parse::{Reservation, normalize_mac, parse_reservation_entry};
 // The DHCP probe path deliberately uses only start/stop/wait/logs operations
 // because Docker exec and generic container creation are banned from the UI's
 // Docker API surface for security reasons.
@@ -272,13 +277,8 @@ pub struct Lease {
     pub expires: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Reservation {
-    pub subnet_id: u32,
-    pub ip: String,
-    pub mac: String,
-    pub hostname: String,
-}
+// Reservation is now defined in the lancache_ui library crate (see the
+// `use lancache_ui::kea_response_parse::...` import above).
 
 // ─── Form Structs ───
 //
@@ -3568,29 +3568,8 @@ async fn stop_container_if_running(
 
 // ─── Validators ───
 
-fn normalize_mac(mac: &str) -> String {
-    // Accept common operator input styles (`aa:bb`, `aa-bb`, `aabb`) by keeping
-    // only hex digits, then rebuild the canonical colon-separated form used by
-    // Kea reservations. Validation remains separate below, so this helper does
-    // not silently accept malformed lengths.
-    let hex: String = mac
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
-
-    // Reinsert a colon before every byte boundary after the first byte.
-    hex.chars()
-        .enumerate()
-        .flat_map(|(i, c)| {
-            if i > 0 && i % 2 == 0 {
-                vec![':', c]
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
-}
+// normalize_mac is now defined in the lancache_ui library crate (see the
+// `use lancache_ui::kea_response_parse::...` import near the top of this file).
 
 fn is_valid_ip(ip: &str) -> bool {
     parse_ipv4(ip).is_some()
@@ -4472,31 +4451,9 @@ fn compatible_reservations_for_subnet(
         .unwrap_or_default())
 }
 
-// Converts one Kea reservation JSON entry into the Reservation read-model.
-// Always returns Some (never None) despite the Option return type -- kept
-// as Option to match fetch_reservations_from_config's filter_map call site,
-// which is written generically enough to skip an entry in the future if a
-// stricter reservation shape check is ever added here.
-fn parse_reservation_entry(subnet_id: u32, reservation: &Value) -> Option<Reservation> {
-    Some(Reservation {
-        subnet_id,
-        ip: reservation
-            .get("ip-address")
-            .and_then(|v| v.as_str())
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "?".to_string()),
-        mac: reservation
-            .get("hw-address")
-            .and_then(|v| v.as_str())
-            .map(normalize_mac)
-            .unwrap_or_else(|| "?".to_string()),
-        hostname: reservation
-            .get("hostname")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    })
-}
+// parse_reservation_entry is now defined in the lancache_ui library crate
+// (see the `use lancache_ui::kea_response_parse::...` import near the top of
+// this file), fuzzed directly by fuzz/fuzz_targets/kea_reservation_parse.rs.
 
 // Same "create the array if it's the first entry" pattern as
 // subnet_options_mut, but for a subnet's reservations array instead of its
