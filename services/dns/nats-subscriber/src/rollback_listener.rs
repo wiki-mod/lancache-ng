@@ -666,6 +666,8 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    // Constant-time comparison must never short-circuit on mismatch, preventing
+    // timing-side-channel attacks that could allow guessing the API key byte-by-byte.
     #[test]
     fn constant_time_eq_matches_equal_strings_and_rejects_mismatches() {
         assert!(constant_time_eq("secret-key", "secret-key"));
@@ -675,6 +677,8 @@ mod tests {
         assert!(constant_time_eq("", ""));
     }
 
+    // API key validation must reject partial/wrong headers and missing headers,
+    // preventing unauthorized access to this control-plane rollback endpoint.
     #[test]
     fn check_api_key_requires_exact_header_match() {
         let mut headers = HeaderMap::new();
@@ -686,6 +690,8 @@ mod tests {
         assert!(!check_api_key(&empty_headers, "correct-key"));
     }
 
+    // The request struct must parse the exact JSON format the Admin UI sends,
+    // ensuring the serialization contract between the UI and this rollback handler is stable.
     #[test]
     fn rollback_request_deserializes_from_the_json_body_the_admin_ui_sends() {
         let body = r#"{"zone": "lan.", "snapshot_id": "00000000001234567890"}"#;
@@ -694,6 +700,8 @@ mod tests {
         assert_eq!(req.snapshot_id, "00000000001234567890");
     }
 
+    // Missing snapshot_id must fail deserialization, preventing incomplete requests
+    // from reaching the handler where they'd cause confusing errors downstream.
     #[test]
     fn rollback_request_rejects_a_body_missing_snapshot_id() {
         let body = r#"{"zone": "lan."}"#;
@@ -717,6 +725,8 @@ mod tests {
         assert_eq!(body["republished_to_nats"], json!(false));
     }
 
+    // Cache-flush failures must be reported separately from the PATCH success,
+    // preventing callers from misinterpreting a partial failure as complete success.
     #[test]
     fn rollback_response_surfaces_flush_failure_instead_of_silently_claiming_success() {
         let changed = vec!["steamcontent.com".to_string(), "akamai.net".to_string()];
@@ -730,6 +740,8 @@ mod tests {
         assert_eq!(body["flush_failed_names"], json!(flush_failed));
     }
 
+    // Complete flush failure (all names) must be reported as flush_ok: false
+    // so callers can distinguish between partial and total cache-flush failures.
     #[test]
     fn rollback_response_flush_ok_is_false_when_every_name_fails() {
         let changed = vec!["steamcontent.com".to_string()];
