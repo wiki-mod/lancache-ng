@@ -47,10 +47,20 @@ until *all three* background jobs exit -- if exactly one daemon dies, PID 1
 never exits and Docker's restart policy never fires (tracked as bug-hunt
 finding #1, already in `docs/bug-hunt/dhcp.md`, not repeated in full here).
 
-**Dockerfile**: built `FROM debian:trixie-slim`, installs
-`kea-dhcp4-server`, `kea-ctrl-agent`, `kea-dhcp-ddns-server`, `kea-admin`,
-plus `nmap`, `gettext` (`envsubst`), `openssl`, `curl`, `jq`, `iptables`.
-`nmap` is present in this image for exactly one caller: `setup.sh`'s
+**Dockerfile**: at the time this section was audited (`origin/v0.2.0`), built
+`FROM debian:trixie-slim`, installing `kea-dhcp4-server`, `kea-ctrl-agent`,
+`kea-dhcp-ddns-server`, `kea-admin`, plus `nmap`, `gettext` (`envsubst`),
+`openssl`, `curl`, `jq`, `iptables`. **Stale as of issue #815's Kea-stage
+migration**: on `current_dev`, the base image is now
+`mirror.gcr.io/library/alpine:3.24` and the package names are `kea-dhcp4`,
+`kea-ctrl-agent`, `kea-dhcp-ddns`, `kea-admin`, plus the separately-packaged
+`kea-hook-lease-cmds` (Alpine splits every Kea hook into its own package,
+unlike Debian which bundles `libdhcp_lease_cmds.so` into `kea-dhcp4-server`
+directly), `bash`, `gettext-envsubst`, `nmap`, `openssl`, `curl`, `jq`,
+`iptables` -- see §12's #815 entry. The rest of this section's behavioral
+description (entrypoint logic, trap/wait behavior, nmap passthrough) is
+unaffected by the base-image swap and remains accurate. `nmap` is present in
+this image for exactly one caller: `setup.sh`'s
 `run_kea_dhcp_activation_preflight()` (see §7), which runs
 `docker compose ... run --rm --no-deps dhcp nmap --script
 broadcast-dhcp-discover ...` -- this is caught by `entrypoint.sh`'s very
@@ -455,6 +465,12 @@ mocked unit coverage (already tracked as issue #837, open, v0.3.0).
   never filed as its own issue until this pass.
 - **#159** (protect Kea Control Agent from LAN exposure) -- CLOSED; the
   iptables chain (§3) is present and self-healing.
+- **#815** (Evaluate migrating DNS/DHCP services to Alpine base images) --
+  **OPEN**; this service's Dockerfile was migrated to
+  `mirror.gcr.io/library/alpine:3.24` (Kea 3.0.3 LTS) as the second stage
+  of this issue's own staged (dnsmasq-first) migration -- see §1's updated
+  note. `services/dns` (PowerDNS) remains on Debian, issue stays open for
+  that stage.
 
 ## 13. Summary
 
