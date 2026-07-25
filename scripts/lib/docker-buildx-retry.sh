@@ -95,25 +95,30 @@ docker_buildx_retry() {
   local status=0
   while (( attempt <= DOCKER_BUILDX_RETRY_MAX_ATTEMPTS )); do
     : > "$log_file"
-    # Deliberately `if "$@" 2>&1 | tee "$log_file"; then status=0; else
-    # status=${PIPESTATUS[0]}; fi`, not a bare
-    # `"$@" 2>&1 | tee "$log_file"; status=${PIPESTATUS[0]}` statement: under
-    # a caller's `set -euo pipefail` (every workflow `run:` step in this repo
-    # sets this), `pipefail` makes the whole pipeline's exit status the
-    # rightmost failing command -- so a failing "$@" makes the *pipeline
-    # statement itself* fail, and `set -e` would abort this function right
-    # there, before the retry/signature-matching logic below ever runs.
-    # Keeping the pipeline in `if` condition position is errexit-safe (a
-    # command tested by if/while/until never triggers -e on failure, even
-    # under pipefail) while `${PIPESTATUS[0]}` in the else branch still reads
-    # the wrapped command's own real exit code, not tee's (which always
-    # succeeds). Same defensive idiom ghcr_retry uses for the analogous
-    # `set -e` hazard on its own bare command.
-    if "$@" 2>&1 | tee "$log_file"; then
-      status=0
-    else
-      status="${PIPESTATUS[0]}"
-    fi
+    # A caller's `set -e` must never abort mid-retry-loop on a failing
+    # attempt (same reasoning ghcr_retry documents for its own bare
+    # command), so errexit is suspended for exactly this one pipeline and
+    # restored right after. Relying on the caller having `pipefail` set (as
+    # an earlier version of this comment assumed "every workflow run: step
+    # in this repo sets this") is not a safe basis for this function's own
+    # correctness: this file is sourced into whatever shell state the
+    # caller happens to have, and if pipefail is ever NOT active there (a
+    # bats test harness sourcing this file directly, for one -- see the
+    # identical bug found and fixed in scripts/lib/build-retry.sh),
+    # `if cmd1 | cmd2; then` branches on cmd2's exit status (`tee`, which
+    # essentially always succeeds), so the status=0/else-PIPESTATUS split
+    # above would take the true-branch and silently record status=0 even
+    # when "$@" itself failed. PIPESTATUS[0] is populated correctly for the
+    # just-executed pipeline regardless of pipefail, so long as it is read
+    # as the statement immediately following the pipe -- not even a no-op
+    # command may run in between, since executing any command starts a new
+    # pipeline and overwrites PIPESTATUS first.
+    local errexit_was_set=0
+    case "$-" in *e*) errexit_was_set=1 ;; esac
+    set +e
+    "$@" 2>&1 | tee "$log_file"
+    status="${PIPESTATUS[0]}"
+    (( errexit_was_set )) && set -e
 
     if (( status == 0 )); then
       return 0
