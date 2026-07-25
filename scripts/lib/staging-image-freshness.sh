@@ -1,20 +1,20 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# #808: shared "is this base-channel image actually fresh enough to validate
-# an untouched service against" check. scripts/ensure-pr-staging-images.sh
+# #808: shared "is this back-fill source image actually fresh enough to
+# validate an untouched service against" check. scripts/ensure-pr-staging-images.sh
 # (full-setup-deep-validate.yml) and build-push.yml's own "Ensure PR staging
 # tags exist for full-setup services" step both back-fill any full-setup
-# service a PR did NOT touch by re-pointing that PR's staging tag at whatever
-# the base channel (dev/nightly/latest) resolves to AT THE MOMENT THE JOB RUNS --
-# with no check that the base branch's own post-merge build for the exact
-# base commit has actually finished. Confirmed live (#808): PRs #911/#914 each
-# backfilled `dns` from a `dev` tag that was still ~41 minutes stale relative
-# to their own `base.sha`, because another PR's build+scan+promote pipeline
-# for a newer base-branch commit was still in flight when the backfill ran.
+# service a PR did NOT touch by re-pointing that PR's staging tag at a source
+# image, with no check (originally) that the source's own post-merge build
+# for the exact base commit had actually finished. Confirmed live (#808): PRs
+# #911/#914 each backfilled `dns` from a `dev` channel tag that was still ~41
+# minutes stale relative to their own `base.sha`, because another PR's
+# build+scan+promote pipeline for a newer base-branch commit was still in
+# flight when the backfill ran.
 #
 # The fix: read the `org.opencontainers.image.revision` OCI label off the
-# base-channel image (set by docker/metadata-action's default label set in
+# source image (set by docker/metadata-action's default label set in
 # build-push.yml's "Extract metadata" step -- see that step; the custom
 # `labels:` input there only overrides `.description`, so the default
 # `.revision=<github.sha>` label is untouched) and confirm, via real git
@@ -22,8 +22,21 @@
 # `base.sha`. Labels live in the image config blob, which `docker buildx
 # imagetools create` (used by both `promote` and this back-fill) copies
 # byte-for-byte when moving a tag -- retagging never rewrites them, so the
-# label on a `dev`/`nightly`/`latest` tag always reflects the real commit that
-# channel image's underlying build actually compiled.
+# label always reflects the real commit the image's underlying build actually
+# compiled.
+#
+# CALL-SITE HISTORY: originally (#808) both real callers passed a mutable
+# channel tag (`dev`/`nightly`/`latest`) as `base_image`, so this ancestry
+# check answered a genuine ">= base.sha" question against a moving target.
+# Since #1254/#1255 (2026-07-25, nightly decoupled from current_dev push),
+# both callers instead pass the PR base commit's own durable per-commit
+# `sha-<short>` image -- the check now normally resolves to an exact equality
+# rather than a real ">"; it is kept rather than simplified to a bare
+# existence probe because it still doubles as the bounded poll for the #808
+# race (that base-commit image may not have been pushed yet) and still
+# guards against a corrupted/mislabeled image reporting the wrong revision.
+# This function itself is agnostic to which kind of tag `base_image` is --
+# only its callers' choice of tag changed.
 #
 # Pure-ish functions (one intentional side effect: sif_image_revision shells
 # out to the registry). Sourced directly by scripts/ensure-pr-staging-images.sh

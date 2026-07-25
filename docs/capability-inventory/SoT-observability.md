@@ -63,32 +63,32 @@ time of this pass; `deploy/dev` was retired outright in v0.3.0, #766 — its
 row below is kept for historical comparison, see the finding update
 immediately after the table)
 
-| Compose file | `netdata-logs` volume (own logs → fluent-bit) | `logs:/var/log/lancache:ro` mount (web_log source file) | `netdata-web_log.conf` bind-mount (web_log job config) | Healthcheck |
+| Compose file | `netdata-logs` volume (own logs → fluent-bit) | `logs:/var/log/lancache:ro` mount (web_log source file) | `netdata-web_log.conf` bind-mount/inline-generated (web_log job config) | Healthcheck |
 |---|---|---|---|---|
 | `deploy/dev` (retired, v0.3.0) | yes | yes | yes | **none** |
-| `deploy/quickstart` | yes | yes | **no** | **none** |
-| `deploy/prod` | yes | **no** | **no** | **none** |
+| `deploy/quickstart` | yes | yes | yes (generated inline via the `command:` heredoc, since quickstart has no `services/` checkout to bind-mount from) | **none** |
+| `deploy/prod` | yes | yes | yes (bind-mounted from `services/syslog/netdata-web_log.conf`, same as the retired `dev` profile) | **none** |
 | `deploy/full-setup` (CI validation only) | **no** (no logging profile at all here) | n/a | n/a | yes — `curl http://127.0.0.1:19999/api/v1/info` |
 
-**Finding (new, not previously flagged in #453/#633 threads), UPDATED for
-v0.3.0's dev-folder retirement (#766):** Netdata's `web_log` collector (live
-per-request nginx analytics: per-status-code counters, response time, etc.,
-configured via `services/syslog/netdata-web_log.conf` pointing at
-`/var/log/lancache/nginx-proxy.log`) used to be only fully wired in `dev`. In
-`quickstart` the source file mount exists but the collector config
-bind-mount does not, so netdata has no `web_log` job at all. In `prod`
-neither exists, even though the file is actually produced there (fluent-bit's
-`file=nginx-proxy.log` output is present in both surviving deployment
-composes — confirmed at `deploy/{prod,quickstart}/docker-compose.yml`, the
-`syslog` service's fluent-bit command args). **Now that `deploy/dev` is gone,
-this collector is not fully wired in any surviving deployment profile at
-all** — retiring `dev` did not fix this pre-existing quickstart/prod gap, it
-just removed the one profile that happened to have it wired, so the gap is
-now worse in coverage terms (0 of 2 real profiles instead of 1 of 3). Still
+**Finding (originally flagged here, not previously called out in #453/#633
+threads), RESOLVED for v0.3.0 (issue #1219):** Netdata's `web_log` collector
+(live per-request nginx analytics: per-status-code counters, response time,
+etc., configured via `services/syslog/netdata-web_log.conf` pointing at
+`/var/log/lancache/nginx-proxy.log`) used to be only fully wired in the
+now-retired `dev` profile — v0.3.0's dev-folder retirement (#766) removed
+that profile without fixing the pre-existing `prod`/`quickstart` gap, briefly
+leaving the collector wired in **zero** surviving profiles (0 of 2, worse in
+coverage terms than the earlier 1 of 3). This is now fixed: `prod` gained
+both the `logs:/var/log/lancache:ro` source mount and a direct bind-mount of
+`services/syslog/netdata-web_log.conf` (prod has a real repo checkout at
+deploy time, so this mirrors the retired `dev` profile's own approach
+exactly); `quickstart` already had the source mount, and now generates the
+same job config inline via its existing `netdata` `command:` heredoc (the
+same technique already used there for `netdata.conf` itself), since
+quickstart's install_dir has no `services/` directory to bind-mount a file
+from. Both surviving deployment profiles now expose the `web_log` job. Still
 independent of and in addition to the general central-logging matrix that
-#633 already closed out; tracked as a small follow-up in #1219 to wire the
-missing `netdata-web_log.conf` bind-mount into `prod`/`quickstart` (not
-attempted here — out of scope for a dev-folder retirement).
+#633 already closed out.
 
 **Finding:** netdata has **no Docker `HEALTHCHECK`** in `prod` or
 `quickstart` (nor, historically, in the now-retired `dev`) — only the CI-only `full-setup` compose defines one (and that
@@ -245,7 +245,7 @@ per source, all sharing one process:
 
 | Source tailed | fluent-bit tag | Local plain-file copy too? | `record host=` | `record ident=` |
 |---|---|---|---|---|
-| `/var/log/nginx/access.log` | `nginx.syslog` | **yes** → `nginx-proxy.log` (feeds netdata's `web_log` job, dev only — see §2.1) | `lancache-proxy` | (unset in filter shown; access log keeps nginx's own format) |
+| `/var/log/nginx/access.log` | `nginx.syslog` | **yes** → `nginx-proxy.log` (feeds netdata's `web_log` job in both surviving profiles — see §2.1) | `lancache-proxy` | (unset in filter shown; access log keeps nginx's own format) |
 | `/var/log/nginx/error.log` | `nginx-error.syslog` | yes (own file) | `lancache-proxy` | — |
 | `/var/log/nginx/stream.log` (SNI passthrough, standard mode) | `nginx-stream.syslog` | yes (own file) | `lancache-proxy` | — |
 | `/var/log/lancache-dns-standard/*.log` | `dns-standard.syslog` | no | `lancache-dns-standard` | `pdns` |
@@ -458,7 +458,7 @@ above, just on the dashboard instead of the logs page.
 | Dedicated `syslog-ng` central receiver | Done — TCP/601, RFC5424, per-host/per-day file destination |
 | `fluent-bit` as collector/forwarder (not final authority) | Done |
 | All lancache-ng containers routed into syslog-ng | Done for 9/9 applicable services; `dhcp-probe` justified N/A |
-| dev/prod/quickstart profile consistency | Done for the **logging pipeline** itself (all 3 have `syslog`+`syslog-ng` with `profiles: [logging]`) — but **not** done for netdata's `web_log` collector specifically (§2.1 finding, new) |
+| dev/prod/quickstart profile consistency | Done for the **logging pipeline** itself (all 3 have/had `syslog`+`syslog-ng` with `profiles: [logging]`); netdata's `web_log` collector specifically was inconsistent across profiles (§2.1 finding) until fixed by #1219 — now wired in both surviving (`prod`/`quickstart`) profiles |
 | Persisted log storage path defined | `SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng`, fixed, not independently overridable by design |
 | Admin UI reads aggregated central logs | Partially — `/logs` and dashboard both read from syslog-ng store when enabled, but with the real per-host/filter gaps in §3.4 |
 | Retention/storage-budget engine | Done — `watchdog.sh`'s `maybe_prune_syslog()`, age-first-then-size-budget-priority |
@@ -474,10 +474,11 @@ above, just on the dashboard instead of the logs page.
 2. `docs/architecture-ng.md` cites the now-closed #633 for a still-open gap
    (documentation drift, `AG-DOC-001` territory) — needs a live tracking
    issue reference once one exists.
-3. netdata's `web_log` collector wiring is inconsistent across
+3. ~~netdata's `web_log` collector wiring is inconsistent across
    dev/quickstart/prod (full in dev, source-file-only in quickstart,
    nothing in prod) — never previously called out in the #453/#633 threads
-   reviewed.
+   reviewed.~~ **FIXED by #1219**: both surviving profiles (`prod`,
+   `quickstart`) now wire the collector (see §2.1).
 4. netdata has no Docker healthcheck in any real deployment profile.
 5. Dashboard's `syslog_stats` per-host breakdown (files/size/days) is
    computed but not rendered.

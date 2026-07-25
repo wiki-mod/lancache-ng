@@ -6,11 +6,35 @@ vulnerabilities:
       - usr/local/lib/docker/cli-plugins/docker-compose
       - usr/local/lib/docker/cli-plugins/docker-buildx
     statement: >-
-      Docker Compose v5.2.0, docker/buildx v0.35.0, and their respective
-      upstream main branches currently embed github.com/docker/docker
-      v28.5.2, and github.com/docker/docker does not publish v29.x Go module
-      tags. Revisit when a scanner-visible fixed module version exists to
-      bump to instead (see #787 for why docker-buildx was added here: unlike
-      containerd/containerd/v2, which buildx's build now bumps directly,
-      docker/docker genuinely cannot be bumped the same way).
-    expired_at: 2026-08-15
+      Not exploitable in these artifacts (vulnerable code not present).
+      CVE-2026-34040 is a Docker daemon authorization-plugin bypass: the
+      vulnerable code lives entirely in github.com/docker/docker's
+      pkg/authorization middleware, and the upstream fix (moby/moby commit
+      e89edb19ad7de0407a5d31e3111cb01aa10b5a38, released v29.3.1) changes only
+      pkg/authorization/authz.go. docker-compose and docker-buildx embed
+      github.com/docker/docker solely as an API client library; they neither
+      contain nor execute the daemon-side AuthZ middleware, so the vulnerable
+      code path is absent from these CLI plugin binaries and the scanner is
+      matching the embedded module version string, not reachable code. A
+      version bump does not remove the finding either, verified against upstream
+      on 2026-07-25: from v29 the fix lives in newly split, separately versioned
+      modules (github.com/moby/moby/client, github.com/moby/moby/api), and there
+      is NO v29.x at the old github.com/docker/docker path to pin to (a
+      pseudo-version has nothing to point at). docker/buildx master still
+      requires github.com/docker/docker v28.5.2+incompatible DIRECTLY, and
+      docker/compose main still pulls it in INDIRECTLY, both alongside the new
+      moby/moby/client v0.5.0 + moby/moby/api v1.55.0 modules -- upstream's
+      migration off the old path is incomplete, so building buildx/compose even
+      from their latest main would still embed docker/docker v28.5.2 and trip the
+      same scanner match; completing that import migration ourselves would mean
+      forking their dependency trees (not viable). This is unlike the grpc
+      v1.81.1->v1.82.1 and containerd/containerd/v2 v2.2.4->v2.2.5 minor/patch
+      pins those builds already apply (see #787), where a fixed version existed
+      at the same module path. Verified against the upstream fix commit's file
+      scope AND the current upstream go.mod files. Re-review when upstream
+      buildx/compose finish dropping github.com/docker/docker; this is a
+      non-exploitability disposition, not a wait for a fix at the old path, and
+      ideally belongs as an OpenVEX not_affected/vulnerable_code_not_present
+      statement once generate-vex.sh gains that mapping (its header already
+      anticipates this case).
+    expired_at: 2026-11-15
