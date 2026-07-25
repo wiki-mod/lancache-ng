@@ -87,11 +87,11 @@ copies in `services/dns/entrypoint.sh` and
   Deliberately narrower than `setup.sh`'s own separate
   `secret_value_is_placeholder()` in two ways (documented, not
   reconciled -- maintainer's Option B decision on #967): does not recognize
-  the legacy `lancache-*-secret` template shape (because
-  `deploy/dev/docker-compose.yml`/`deploy/dev/.env` ship a real, working
-  dev secret in exactly that shape, e.g. the dev `KEA_CTRL_TOKEN` value
-  below) or a bare infix `change-me`/`change_me` without a
-  `CHANGE_ME`/`changeme` **prefix**.
+  the legacy `lancache-*-secret` template shape (because the now-retired
+  `deploy/dev/docker-compose.yml`/`deploy/dev/.env`, v0.3.0 #766, shipped a
+  real, working dev secret in exactly that shape, e.g. the former dev
+  `KEA_CTRL_TOKEN` value below -- kept as a regression case) or a bare infix
+  `change-me`/`change_me` without a `CHANGE_ME`/`changeme` **prefix**.
 - **`resolve_shared_secret(name, current_value_or_empty, gen_func)`** -- if
   a non-empty configured value is passed, uses it verbatim (never persisted
   to the shared volume -- every container already reads the same `.env`).
@@ -127,10 +127,12 @@ copies in `services/dns/entrypoint.sh` and
   `docs/threat-model.md` T12), has no safe degraded mode for DDNS and
   always requires a real key.
 - **Real config values, not placeholders, by design**:
-  `deploy/dev/.env`'s `KEA_CTRL_TOKEN=lancache-dev-kea-control-token-change-me`
-  is a genuine working dev secret (the `-change-me` **infix**, not a
+  the now-retired `deploy/dev/.env`'s (v0.3.0, #766)
+  `KEA_CTRL_TOKEN=lancache-dev-kea-control-token-change-me` was a genuine
+  working dev secret (the `-change-me` **infix**, not a
   `CHANGE_ME`/`changeme` prefix, is exactly the shape `secret_is_placeholder`
-  is documented to deliberately not match) -- `deploy/prod/.env` and
+  is documented to deliberately not match, kept as a regression case) --
+  `deploy/prod/.env` and
   `deploy/quickstart/.env` both ship the literal
   `KEA_CTRL_TOKEN=CHANGE_ME_KEA_CTRL_TOKEN`, which *does* match (prefix
   `change_me`) and is expected to be regenerated/operator-replaced.

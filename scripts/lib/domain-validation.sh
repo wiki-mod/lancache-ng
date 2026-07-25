@@ -76,7 +76,7 @@ _is_valid_domain() {
     # Must not be empty after normalization
     [ -n "$domain" ] || return 1
 
-    # Must be <= 253 chars total
+    # Must be <= 253 chars total (RFC 1035 domain name length limit)
     [ ${#domain} -le 253 ] || return 1
 
     # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)

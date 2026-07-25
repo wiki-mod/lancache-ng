@@ -54,6 +54,367 @@ adapter) is:
    `[known-good-snapshot][<service>][<LEVEL>]` with `LEVEL` one of `CREATE`,
    `PRUNE`, `SELECT` (chosen for rollback), or `REJECT`/`FATAL`.
 
+## Incident Runbooks
+
+**Use this section when a service fails to start or crashes in a loop.** Each procedure below covers one adapter and one failure scenario. Start by identifying which service is failing (check `docker compose ps` or the Admin UI Status page), then follow the corresponding procedure. All commands assume you are running `docker compose` from the stack's root directory with `-f deploy/prod/docker-compose.yml` (or use the exact `-f` syntax shown in each procedure if you need to target a specific environment).
+
+### Prerequisites for all procedures
+
+1. SSH or console access to the LanCache-NG host
+2. The stack installed at `/opt/lancache-ng` (default; adjust `install-dir` below if different)
+3. `docker` and `docker compose` available on your PATH
+
+### nginx / Proxy (`proxy` service) — Configuration validation failure
+
+**Symptoms:**  `proxy` container in `Exited` or `Restarting` state. Log shows error like:
+```
+[lancache] ERROR: generated nginx config failed validation (nginx -t).
+```
+
+**What's happening:** The generated `nginx.conf`, `proxy-params.conf`, or SSL/stream maps failed validation. This usually means a broken `cdn-domains.txt` entry or a bad environment variable substitution.
+
+**Procedure:**
+
+1. Check the container's recent logs:
+   ```bash
+   cd /opt/lancache-ng
+   docker compose -f deploy/prod/docker-compose.yml logs --tail=50 proxy
+   ```
+   Look for lines like:
+   - `[lancache] WARNING: skipping invalid domain entry: …` — a domain in `cdn-domains.txt` is malformed
+   - `[lancache] ERROR: generated nginx config failed validation (nginx -t).` — syntax error in generated config
+   - `[lancache] ERROR: PROXY_SECURITY_MODE must be lazy or strict…` — env var typo or wrong value
+
+2. If you see `WARNING: skipping invalid domain entry`, fix `services/dns/cdn-domains.txt` (shared by proxy and DNS):
+   ```bash
+   # Edit the file
+   vim /opt/lancache-ng/services/dns/cdn-domains.txt
+   
+   # Each line should be a plain domain name, one per line (no spaces, no wildcards)
+   # Example (correct):
+   # steamcontent.com
+   # origin.gog.com
+   ```
+
+3. If you see `ERROR: PROXY_SECURITY_MODE`, check your `.env`:
+   ```bash
+   grep PROXY_SECURITY_MODE /opt/lancache-ng/.env
+   # Must be one of: lazy, strict
+   ```
+
+4. Restart the proxy after any fix:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml up -d proxy
+   docker compose -f deploy/prod/docker-compose.yml logs proxy
+   ```
+
+5. If the container still exits, the automatic known-good config rollback tried (and the logs should show `[known-good-snapshot][proxy][SELECT]` lines). Verify rollback:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml logs proxy | grep "known-good-snapshot"
+   ```
+
+6. **If you see `[known-good-snapshot][proxy][FATAL]`**: all rollback snapshots are exhausted. This means even the previously-working config no longer validates (e.g., an nginx version upgrade in a new image build). See "Exhaustion: no valid snapshots remain" below.
+
+### dnsmasq / DHCP Proxy (`dhcp-proxy` service) — Configuration validation failure
+
+**Symptoms:** `dhcp-proxy` container in `Exited` or `Restarting` state. Log shows error like:
+```
+[lancache] ERROR: generated dnsmasq config failed validation (dnsmasq --test).
+```
+
+**What's happening:** The rendered `dnsmasq.conf` failed validation. This usually means a bad environment variable or an invalid DHCP/relay option configuration.
+
+**Procedure:**
+
+1. Check recent logs:
+   ```bash
+   cd /opt/lancache-ng
+   docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dhcp-proxy
+   ```
+   Look for lines like:
+   - `[lancache] ERROR: generated dnsmasq config failed validation (dnsmasq --test).` — syntax error
+   - `Error in config file…` — specific dnsmasq directive is malformed
+
+2. Check the `.env` for DHCP-related variables:
+   ```bash
+   grep -E "DHCP_|UPSTREAM_DHCP" /opt/lancache-ng/.env
+   # Required variables that must be set and valid:
+   # DHCP_SUBNET_START=<IP>  (e.g., 192.168.1.100)
+   # DHCP_DNS_PRIMARY=<IP>   (e.g., 192.168.1.10)
+   # DHCP_DNS_SECONDARY=<IP> (e.g., 192.168.1.11)
+   # UPSTREAM_DHCP_IP=<IP>   (IP of real upstream DHCP server, if relaying)
+   ```
+
+3. If an IP address looks wrong, fix it in `.env`:
+   ```bash
+   vim /opt/lancache-ng/.env
+   # Edit the line, save
+   ```
+
+4. Restart and check logs:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml up -d dhcp-proxy
+   docker compose -f deploy/prod/docker-compose.yml logs dhcp-proxy
+   ```
+
+5. Verify rollback:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml logs dhcp-proxy | grep "known-good-snapshot"
+   ```
+
+6. **If you see `[known-good-snapshot][dhcp-proxy][FATAL]`**: all rollback snapshots are exhausted. See "Exhaustion: no valid snapshots remain" below.
+
+### Kea DHCP Server (`dhcp` service) — Configuration validation failure
+
+**Symptoms:** `dhcp` container in `Exited` or `Restarting` state (if using the DHCP profile), or running but reporting `unhealthy` from `docker compose ps`. Admin UI DHCP page shows errors.
+
+**What's happening:** Kea's configuration validation failed during startup, OR the Admin UI tried to apply a new config and it failed to validate.
+
+**Procedure:**
+
+1. Check container status:
+   ```bash
+   cd /opt/lancache-ng
+   docker compose -f deploy/prod/docker-compose.yml ps dhcp
+   # If the container is not running at all, skip to step 3 below.
+   # If it's running but unhealthy, Kea Control Agent may still be reachable.
+   ```
+
+2. **If the container is running (even if unhealthy), try the Admin UI first:**
+   - Open the Admin UI in your browser and navigate to the **DHCP** page
+   - The page lists known-good Kea config snapshots (newest first)
+   - Click **Rollback** on the newest snapshot that you remember being valid
+   - Admin UI logs the rollback; check `docker compose logs ui` for status
+
+3. **If the container is not running, or Admin UI is unreachable, use the CLI fallback:**
+   ```bash
+   ./setup.sh reset-to-last-known-good-config kea [--yes]
+   ```
+   
+   This command:
+   - Lists known-good `dhcp4.json` snapshots stored on disk (newest first, with UTC timestamps)
+   - Prompts you to confirm which snapshot to restore (or use `--yes` to restore the newest without prompting)
+   - Applies the snapshot via Kea's Control Agent API (the same sequence the Admin UI uses)
+   - Persists the config to disk
+
+4. Check logs after rollback:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml logs dhcp
+   ```
+
+5. **If the container still fails to start or stays unhealthy after rollback**, or if `setup.sh reset-to-last-known-good-config kea` reports no snapshots exist: the snapshot history is exhausted. See "Exhaustion: no valid snapshots remain" below.
+
+### PowerDNS — Static config (`dns-standard`, `dns-ssl` services) — Configuration validation failure
+
+**Symptoms:** `dns-standard` or `dns-ssl` container exits with a log like:
+```
+[lancache-dns] ERROR: generated recursor.conf/pdns.conf failed validation.
+[lancache-dns] ERROR: attempting rollback to the newest known-good snapshot instead.
+```
+
+**What's happening:** The generated `recursor.conf` (PowerDNS Recursor) or `pdns.conf` (Authoritative server) failed validation. This usually means a bad `PDNS_API_KEY`, `DDNS_ALLOW_FROM`, or `DDNS_TSIG_KEY` value.
+
+**Procedure:**
+
+1. Identify which file failed by checking logs:
+   ```bash
+   cd /opt/lancache-ng
+   docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns-standard
+   # or: docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns-ssl
+   ```
+   
+   Look for which validation failed:
+   - `pdns_recursor --config=check` → recursor.conf validation failed
+   - `pdns_server --config=check` → pdns.conf (authoritative) validation failed
+
+2. Check environment variables used in config template:
+   ```bash
+   grep -E "PDNS_API_KEY|DDNS_ALLOW_FROM|DDNS_TSIG_KEY|LOG_QUERIES" /opt/lancache-ng/.env
+   ```
+   These variables are baked into the config. Common issues:
+   - `PDNS_API_KEY` is empty or contains invalid characters
+   - `DDNS_ALLOW_FROM` is set to a malformed CIDR/IP list
+
+3. Fix the variable in `.env`:
+   ```bash
+   vim /opt/lancache-ng/.env
+   # Edit and save
+   ```
+
+4. Restart the DNS container:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml up -d dns-standard
+   # or dns-ssl, or both
+   docker compose -f deploy/prod/docker-compose.yml logs dns-standard
+   ```
+
+5. Verify rollback happened:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml logs dns-standard | grep "\[known-good-snapshot\]"
+   # Look for [SELECT] lines showing a snapshot was chosen
+   ```
+
+6. **If you see `[known-good-snapshot][dns][FATAL]`**: all static-config snapshots are exhausted. See "Exhaustion: no valid snapshots remain" below.
+
+**Note for secondary DNS nodes:** If running a secondary DNS node (from `setup.sh secondary`), it uses the same `dns` image and entrypoint, so the same procedure applies. Secondary nodes have their own independent `pdns-config-snapshots` volume.
+
+### PowerDNS — Zone/record rollback (`dns-standard`, `dns-ssl` services) — Incorrect zone data
+
+**Symptoms:** DNS queries return wrong answers, or zones contain stale/incorrect records. You did NOT recently change the zone manually — this is data corruption or an erroneous NATS message.
+
+**What's happening:** The zone data in `pdns.sqlite3` (stored in `lan.`, `local.lan.`, or a private reverse zone) is incorrect. This can happen due to a bug in Kea's DDNS updates, a bad Admin UI publish, or corrupted NATS messages.
+
+**Procedure:**
+
+1. **If the Admin UI is reachable, use it first:**
+   - Open the Admin UI, navigate to **DNS** > **Zones**
+   - Click on the affected zone name (e.g., `lan.`)
+   - Scroll to "Known-good zone snapshots" and see the list
+   - Click **Rollback** on a snapshot you remember being correct (usually the newest, unless you suspect it's also bad)
+
+2. **If the Admin UI is unreachable, use the CLI fallback:**
+   ```bash
+   ./setup.sh reset-to-last-known-good-config dns /opt/lancache-ng lan [--yes]
+   # Replace "/opt/lancache-ng" with your install directory if different -- this
+   # argument is REQUIRED here even if you're using the default, because the
+   # zone argument that follows it is positional (there is no way to skip it)
+   # Replace "dns" with "dns-standard" or "dns-ssl" to target a specific container
+   # Replace "lan" with the zone you want to fix (with or without a trailing dot -- both work)
+   ```
+   
+   This command:
+   - Lists known-good snapshots for that zone (newest first, with UTC timestamps)
+   - Applies the chosen snapshot (or the newest with `--yes`)
+   - Re-publishes the restored records to secondary DNS nodes (if applicable)
+   - Flushes PowerDNS Recursor caches so clients see the fix immediately
+
+3. Verify the zone is fixed:
+   ```bash
+   # From inside the dns-standard container, check one record:
+   docker compose -f deploy/prod/docker-compose.yml exec dns-standard sh -c \
+     'dig @127.0.0.1 <hostname>.<zone> +short'
+   # Example: dig @127.0.0.1 mydevice.lan +short
+   ```
+
+4. Check logs:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml logs dns-standard | grep -E "\[known-good-snapshot\]|rollback"
+   ```
+
+5. **If the rollback command fails because no snapshots exist for that zone**: zone snapshots have never been taken (the zone has no NATS-driven updates yet, or automatic snapshotting is not enabled). Manual fixes in this case require direct database inspection; see "Exhaustion: no valid snapshots remain" below.
+
+### Exhaustion: no valid snapshots remain
+
+**Symptoms:** A service exits with `[known-good-snapshot][<service>][FATAL]` after trying all stored snapshots, or `./setup.sh reset-to-last-known-good-config` reports no snapshots exist.
+
+**What's happening:** The service's generated config failed validation, every previously-stored snapshot also fails validation (e.g., an nginx/dnsmasq version upgrade), and there is no further automatic recovery. This is exactly the scenario rescue mode (issue #763 part 1) is meant to address.
+
+**Procedure:**
+
+1. Identify the root cause. Check the logs for the *first* validation error (before the rollback attempts):
+   ```bash
+   cd /opt/lancache-ng
+   docker compose -f deploy/prod/docker-compose.yml logs <service> 2>&1 | head -100
+   # Example for proxy: docker compose -f deploy/prod/docker-compose.yml logs proxy 2>&1 | head -100
+   ```
+   The error message before the "attempting rollback" line tells you what was wrong with the config.
+
+2. **Fix the root cause:**
+   - If it's a `cdn-domains.txt` malformed entry, edit `services/dns/cdn-domains.txt`
+   - If it's an env var, edit `.env`
+   - If it's a template bug (rare), this requires a code fix or downgrade (consult project documentation)
+
+3. **Once you've fixed the input**, check if rescue mode is enabled for this service:
+   ```bash
+   # Rescue mode means the container is still running even though the service failed to start.
+   # Check if the container is up but unhealthy:
+   docker compose -f deploy/prod/docker-compose.yml ps <service>
+   ```
+   
+   If the container is running, you may be able to `docker exec` into it for inspection:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml exec <service> sh
+   # Inside: check logs, inspect config files, etc.
+   exit
+   ```
+
+4. Once the underlying issue is fixed, restart the container fresh:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml restart <service>
+   docker compose -f deploy/prod/docker-compose.yml logs <service>
+   ```
+
+5. **If the container does NOT come up**, and you haven't enabled rescue mode, you must either:
+   - Fix the config from outside the container (as above) and restart
+   - OR inspect the snapshot files directly on disk to understand why they're failing:
+     ```bash
+     # List snapshot directories per service:
+     # nginx/proxy: docker run --rm -v proxy-config-snapshots:/data busybox ls -la /data
+     # dnsmasq: docker run --rm -v dhcp-proxy-config-snapshots:/data busybox ls -la /data
+     # PowerDNS: docker run --rm -v pdns-config-snapshots-standard:/data busybox ls -la /data/recursor
+     # Kea: docker run --rm -v kea-data:/data busybox ls -la /data/config-snapshots
+     ```
+
+6. **Critical: if the issue is persistent and you cannot fix it**, contact project maintainers with:
+   - The exact error message from `docker compose logs`
+   - The content of the bad config file (if safe to share)
+   - The `.env` values for any variables involved
+   - Whether this happened after an image upgrade
+
+### Admin UI unreachable
+
+**Symptoms:** You cannot open the Admin UI in your browser, or the IP/port it should be on does not respond.
+
+**What's happening:** The `ui` service may have crashed, or there's a network/port binding issue.
+
+**Procedure:**
+
+1. Check if the container is running:
+   ```bash
+   cd /opt/lancache-ng
+   docker compose -f deploy/prod/docker-compose.yml ps ui
+   # If it shows "Exited" or "Restarting", the UI itself crashed
+   # If it's running, check step 2
+   ```
+
+2. Check recent UI logs:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml logs --tail=100 ui
+   ```
+   Look for errors like:
+   - `Connection refused` — the Admin UI process started but cannot reach another service
+   - `Panic` or `thread panicked` — UI code crashed
+   - `Port X already in use` — another process owns the port
+
+3. If the UI container crashed, restart it:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml up -d ui
+   docker compose -f deploy/prod/docker-compose.yml logs ui
+   ```
+
+4. Check that core services are running:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml ps
+   # Required for UI to work: proxy, dns-standard (or dns-ssl), nats, ui
+   # (dhcp/dhcp-proxy/ntp only required if their profiles are enabled)
+   ```
+
+5. If core services are down (Exited), fix them first using the procedures above, then restart UI:
+   ```bash
+   docker compose -f deploy/prod/docker-compose.yml up -d
+   ```
+
+6. Once the UI container is healthy (`docker compose ps ui` shows `(healthy)`), try accessing it:
+   - On a production host, open `http://<IP_STANDARD>:8080/admin/` in your browser
+   - On a dev host, open `http://localhost:3000/admin/`
+
+7. **If the UI still doesn't respond** after the container is healthy, check:
+   - Network connectivity: `ping <IP_STANDARD>` from your client
+   - Firewall rules: check if port 8080 (or 3000 for dev) is blocked
+   - Proxy/nginx health: `docker compose ps proxy` and `docker compose logs proxy`
+
+---
+
 ### Why the contract is one document but several files per adapter, not one shared file
 
 `scripts/lib/known-good-snapshots.sh` is the canonical, tested reference
@@ -614,7 +975,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
     container's own identity runs `rollback_handler` (`NATS_DNS_WRITER_USER`
     on `dns-standard`, `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only
     works if that identity's `publish` allow-list in `nats.conf` (and the
-    byte-identical generators in `deploy/dev`, `deploy/prod`,
+    byte-identical generators in `deploy/prod` and
     `deploy/quickstart/docker-compose.yml`) actually includes that subject.
     It shipped without it: every rollback correctly patched PowerDNS but
     the flush was silently denied server-side, and the `POST /rollback`
@@ -684,40 +1045,37 @@ things follow from that:
   way, this design does not silently assume replication that does not
   exist.
 
-**Known gap: this rollback path assumes the container is reachable.**
-Everything described above — the Admin UI listing zone snapshots, an
+**Container reachability during crash-loops:** Everything described above — the Admin UI listing zone snapshots, an
 operator picking one, `nats-subscriber`'s local admin listener applying the
 diffed `PATCH` inside the `dns-standard`/`dns-ssl` container — depends on an
 operator (or the Admin UI acting on their behalf) actually being able to
-reach that container's listener. That assumption is not safe in precisely the scenario this mechanism
-exists to help with: if PowerDNS is crash-looping because its own
-zone/record data is broken — the same class of problem `check-zone` and
-rollback are meant to fix — the container may never stay up long enough
-to be reached, and the rollback tool built to fix that state becomes
-unreachable during the very crash-loop it exists to resolve. This is not
-unique to PowerDNS: the Kea adapter documented above has the identical
-latent gap, since its rollback also goes through a running Kea Control
-Agent. A real fix — a degraded-but-reachable "rescue mode" a
-crash-looping service can come up in specifically so an operator can
-intervene, plus a DAU-readable recovery runbook for this whole document —
-is tracked separately in issue #763 and is explicitly out of scope for
-this design. Until #763 lands, read everything in this section as *the
-rollback mechanism once the container is reachable*, not as a complete
-incident-recovery story for a PowerDNS zone/record crash-loop.
+reach that container's listener. This assumption is most at risk in exactly
+the scenario this mechanism exists for: if PowerDNS is crash-looping because
+its own zone/record data is broken, the container may never stay up long
+enough to be reached, and the rollback tool becomes unreachable during the
+very crash-loop it exists to resolve. The Admin UI CLI fallback
+(`./setup.sh reset-to-last-known-good-config dns …`) mitigates this by
+executing the rollback from *inside* the container via `docker compose
+exec`, so it works as long as the container can be exec'd into — which
+includes the rescue-mode scenario where the container is running but its
+main service (PowerDNS) is not. For the complete incident-response story
+(including what to do when rescue mode itself is needed), see "Incident
+Runbooks" near the beginning of this document.
 
-## Manual recovery
+## Manual recovery and exhaustion
 
 If a service ever exhausts its known-good snapshots (fresh install with no
 prior successful start, or every snapshot also fails validation — e.g. after
 a `dnsmasq`/`nginx` version upgrade that rejects previously-valid syntax),
-the container refuses to start and logs `FATAL` known-good-snapshot lines.
-Fix the underlying input (`cdn-domains.txt`, template, env var) and restart;
-there is no separate CLI to inspect or hand-pick a snapshot for the
-nginx/dnsmasq/PowerDNS adapters. The snapshot directories are plain files
-under the volumes listed above and can be inspected directly with
-`docker compose exec` /
-`docker run --rm -v <volume>:/data busybox ls -la /data` for manual triage if
-needed.
+the container refuses to start and logs `[known-good-snapshot][…][FATAL]`
+lines. **For step-by-step recovery procedures covering all services and
+failure scenarios**, see "Incident Runbooks" near the beginning of this
+document — it includes identifying the root cause, applying fixes, and
+deciding whether rescue mode is needed. The snapshot directories are plain
+files under the volumes listed in the "Contract" section above and can be
+inspected directly with `docker compose exec` or
+`docker run --rm -v <volume>:/data busybox ls -la /data` for manual
+inspection if needed.
 
 Kea has no equivalent exhaustion state, since it never rolls back
 automatically: an operator picks a snapshot from the `/dhcp` page's list, and

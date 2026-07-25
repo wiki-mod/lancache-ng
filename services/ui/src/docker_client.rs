@@ -114,7 +114,8 @@ pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
 mod tests {
     use super::*;
 
-    // Live-reproduced on a real dev stack (issue #1068 item 6): starting a
+    // Live-reproduced on a real deploy/dev stack (issue #1068 item 6, before
+    // that stack was retired in v0.3.0, #766): starting a
     // profile-gated container that was never created returns exactly this
     // 404 shape from the docker-socket-proxy. Confirms is_container_not_created
     // recognizes it so callers can turn it into actionable guidance instead

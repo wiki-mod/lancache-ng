@@ -31,10 +31,8 @@ See `.github/AGENTS.md` for the full coding standards and architecture reference
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
 services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (split into standard + SSL instances)
-config/dev/              # Settings for local development
 config/prod/             # Settings for production deployment
 certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
-deploy/dev/              # docker-compose for local dev
 deploy/prod/             # docker-compose for production
 docs/                    # End-user guides (e.g. how to install the CA cert)
 ```
@@ -132,42 +130,42 @@ by configuring which DNS server IP they point to:
   clean (0 HIGH/CRITICAL across all four binaries) via a real Docker build + real Trivy scan
   with CI's exact flags, not just a module-graph inspection.
 
-## Dev vs Prod Split
+## No Separate Dev Environment
 
-| | dev | prod |
-|---|---|---|
-| Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache` on host |
-| CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
-| DNS query logging | On | Off |
-| Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
-| Ports (ssl DNS) | 5353 | 53 |
-| Container restart | `unless-stopped` | `always` |
+There is only one deployment profile, `deploy/prod/` — there used to be a parallel
+`deploy/dev/`/`config/dev/` pair (separate LAN IPs, offset DNS ports, a separate compose
+file kept in sync with prod by hand), retired in v0.3.0 (#766). That split was never
+something the maintainer actually asked for: the original, much simpler intent behind
+"dev" was just "the branch I currently develop on" (`current_dev`, see
+`docs/release-versioning.md` and #825/#1141's branch model), not a second live deployment
+environment. An earlier AI session misread that as a request to build a whole parallel
+profile, and it grew from there — this has now been undone.
+
+Local iteration and real validation both use `deploy/prod/docker-compose.yml` directly;
+the difference between "developing" and "deploying" is which git ref is checked out
+(`current_dev` vs. a `vX.Y.Z` release branch vs. `master`), not which compose file or
+config directory is used. In practice, most real validation for this project happens via
+SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
+builds and full-stack `docker compose up` runs are not exercised on the Windows
+authoring host — see the IPv6 note below for one concrete Docker-Desktop-on-Windows
+limitation).
 
 ## Running
 
 ```bash
-# Development
-docker compose -f deploy/dev/docker-compose.yml up --build
-
-# Production
 docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
 ## First-time Setup
 
-1. **Dev**: just `docker compose up` — CA and all certs are auto-generated.
-   Copy `certs/ca.crt` to clients and install it (see `docs/install-ca-cert.md`).
-   DNS ports are offset (5300/5353) to avoid the Windows DNS client conflict.
-
-2. **[AG-SETUP-001]** **Prod**: two LAN IPs are required. Add the second:
-   ```
-   ip addr add 192.168.1.11/24 dev eth0
-   ```
-   Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
-   Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
-   Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directory: `mkdir -p /opt/lancache-ng/cache` (or wherever `LANCACHE_STATE_DIR` points)
+**[AG-SETUP-001]** **Prod**: two LAN IPs are required. Add the second:
+```
+ip addr add 192.168.1.11/24 dev eth0
+```
+Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
+Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
+Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
+Create cache directory: `mkdir -p /opt/lancache-ng/cache` (or wherever `LANCACHE_STATE_DIR` points)
 
 ## Adding More CDN Domains
 

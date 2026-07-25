@@ -220,16 +220,26 @@ images.
 
 ### Building the full stack
 
-```bash
-# Development: builds every service image from this checkout's source
-# and starts the stack (CA cert and all runtime certs are auto-generated).
-docker compose -f deploy/dev/docker-compose.yml up --build
-```
+There is only one deployment profile, `deploy/prod/docker-compose.yml` (the
+former `deploy/dev/` stack was retired in v0.3.0, #766 — see `CLAUDE.md`'s
+"No Separate Dev Environment"). It, like `deploy/quickstart/` and
+`deploy/full-setup/`, references every service by `image:` rather than
+`build:`, so there is no compose-level `--build` shortcut to rebuild every
+service from source in one command. This matches how CI itself builds first
+-party images: `docker buildx build` directly against each
+`services/<name>/Dockerfile` (see `.github/workflows/build-push.yml`), then
+whatever compose file is in use pulls (or, if a matching tag already exists
+locally, simply reuses) the resulting image.
 
-`deploy/dev/docker-compose.yml` and each `services/<name>/Dockerfile`
-under it are the actual build definitions; `--build` forces a rebuild
-from source instead of pulling the prebuilt image tags the compose file
-otherwise references.
+To exercise the full stack against local source changes, build and tag each
+service you changed the same way (see "Building a single service image"
+below), matching the image reference `deploy/prod/docker-compose.yml`
+resolves by default (`ghcr.io/wiki-mod/lancache-ng/<service>:latest`, or
+whatever `LANCACHE_IMAGE_REGISTRY`/`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG`
+you have set in `deploy/prod/.env`/`.env.local`), then run
+`docker compose -f deploy/prod/docker-compose.yml up -d` as usual — Compose's
+default pull policy only pulls an image that is missing locally, so a
+matching local tag is used as-is, with no push/pull round-trip required.
 
 ### Building a single service image
 

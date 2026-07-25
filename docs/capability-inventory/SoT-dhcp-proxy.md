@@ -10,8 +10,8 @@ Scope examined (all against `origin/v0.2.0`):
 - `services/dhcp-proxy/Dockerfile`, `.dockerignore`
 - `services/dhcp-proxy/dnsmasq.conf.template`
 - `services/dhcp-proxy/entrypoint.sh` (675 lines)
-- `config/dev/dhcp-proxy.env`, `config/prod/dhcp-proxy.env`
-- `deploy/dev/docker-compose.yml`, `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
+- `config/prod/dhcp-proxy.env`
+- `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
 - `scripts/dhcp-proxy-pxe-simulation.sh` (389 lines)
 - `tests/bats/dhcp_proxy_known_good_snapshot.bats`, `tests/bats/dhcp_proxy_optional_directives.bats` + their helpers
 - `docs/dhcp-modes.md`

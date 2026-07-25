@@ -127,8 +127,9 @@ docker build -q -t "$image_tag" services/dhcp-proxy >/dev/null
 # class full-setup-deep-validate.yml's stack-starting jobs had before #820.
 # Adopts the same host-local flock-plus-retry primitives
 # (scripts/lib/reserve-validation-subnet.sh) on a dedicated 172.29.0.0/16
-# range (unused by deploy/dev's 172.28.0.0/16, full-setup-validate's
-# 172.30.0.0/16, and dhcp-kea-lease-flow-simulation's own 172.31.0.0/16;
+# range (unused by the now-retired deploy/dev's 172.28.0.0/16 (v0.3.0, #766),
+# full-setup-validate's 172.30.0.0/16, and dhcp-kea-lease-flow-simulation's
+# own 172.31.0.0/16;
 # deliberately NOT 172.32.0.0/16 -- RFC 1918's 172.16.0.0/12 private block
 # ends at 172.31.255.255, so 172.32.0.0/16 is public address space and a
 # Docker bridge route there could hijack traffic to a real public

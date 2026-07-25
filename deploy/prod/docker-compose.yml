@@ -3,7 +3,8 @@
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# See CLAUDE.md's "Dev vs Prod Split" for the differences from deploy/dev.
+# This is the only deployment profile -- see CLAUDE.md's "No Separate Dev
+# Environment" for why there is no parallel deploy/dev stack.
 
 name: lancache-ng
 

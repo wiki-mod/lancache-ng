@@ -166,22 +166,19 @@ nats_conf_content() {
     grep -q 'system_account: SYS' "$root_a/etc/nats/nats.conf"
 }
 
-# ── the three generating compose files must not drift apart ───────────────────
+# ── the two generating compose files must not drift apart ─────────────────────
 
-@test "dev/prod/quickstart nats entrypoints generate byte-identical nats.conf for identical env (no cross-compose drift)" {
-    local root_dev root_prod root_quick
-    root_dev="$(make_sandbox dev-drift)"
+@test "prod/quickstart nats entrypoints generate byte-identical nats.conf for identical env (no cross-compose drift)" {
+    local root_prod root_quick
     root_prod="$(make_sandbox prod-drift)"
     root_quick="$(make_sandbox quick-drift)"
 
-    generate "$repo_root/deploy/dev/docker-compose.yml" "$root_dev"
     generate "$repo_root/deploy/prod/docker-compose.yml" "$root_prod"
     generate "$repo_root/deploy/quickstart/docker-compose.yml" "$root_quick"
 
     # The sandbox root is rewritten identically into each, so the only remaining
     # difference would be a real divergence in the entrypoint logic between the
-    # three deployments -- which must never happen silently.
-    [ "$(nats_conf_content "$root_dev")" = "$(nats_conf_content "$root_prod")" ]
+    # two deployments -- which must never happen silently.
     [ "$(nats_conf_content "$root_prod")" = "$(nats_conf_content "$root_quick")" ]
 }
 
@@ -198,12 +195,11 @@ nats_conf_content() {
 # `c.perms.pub.allow == nil && c.perms.pub.deny == nil` returns `true`, i.e.
 # no restriction), so the deep-validate E2E rollback simulation
 # (scripts/dns-zone-rollback-simulation.sh) never actually exercises the
-# restrictive allow-list dev/prod/quickstart ship -- it would pass
+# restrictive allow-list prod/quickstart ship -- it would pass
 # identically with or without this fix. This test closes that gap directly
 # against the real generated config content instead.
-@test "dev/prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.flush" {
+@test "prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.flush" {
     for compose in \
-        "$repo_root/deploy/dev/docker-compose.yml" \
         "$repo_root/deploy/prod/docker-compose.yml" \
         "$repo_root/deploy/quickstart/docker-compose.yml"
     do
@@ -262,9 +258,8 @@ nats_conf_content() {
 # `full-setup`'s equivalent identities carry no `publish` block at all
 # (unrestricted, see the flush test's comment), so only this direct
 # assertion against the real generated config proves the grant.
-@test "dev/prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.record" {
+@test "prod/quickstart nats entrypoints grant the dns-writer and dns-replica identities publish on lancache.dns.record" {
     for compose in \
-        "$repo_root/deploy/dev/docker-compose.yml" \
         "$repo_root/deploy/prod/docker-compose.yml" \
         "$repo_root/deploy/quickstart/docker-compose.yml"
     do

@@ -140,35 +140,30 @@ external:
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: nats
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: fluent-bit
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: syslog-ng
     image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: busybox
     image: busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
     policy: digest-pinned

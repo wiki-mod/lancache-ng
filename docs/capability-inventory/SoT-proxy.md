@@ -257,10 +257,10 @@ different checkout should expect it to look like an older component.
 - `services/proxy/entrypoint.sh`, `nginx.conf`, `proxy-params.conf`,
   `conf.d/http.conf`, `conf.d/https.conf`, `Dockerfile`,
   `public_suffix_list.dat` (presence/purpose only, not full content)
-- `deploy/dev/docker-compose.yml`, `deploy/prod/docker-compose.yml`,
+- `deploy/prod/docker-compose.yml`,
   `deploy/quickstart/docker-compose.yml`, `deploy/full-setup/docker-compose.yml`,
   `deploy/full-setup/Dockerfile`, `deploy/secondary/docker-compose.yml`
-- `config/dev/proxy.env`, `config/prod/proxy.env`
+- `config/prod/proxy.env`
 - `tests/bats/proxy_cert_generation.bats`, `tests/bats/proxy_known_good_snapshot.bats`,
   `tests/bats/known_good_snapshots_sync.bats`
 - `scripts/ssl-mitm-cache-simulation.sh` (header/body read in full)

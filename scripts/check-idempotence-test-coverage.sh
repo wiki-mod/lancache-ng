@@ -77,13 +77,12 @@ WRITER_TEST_EVIDENCE=(
     # nats:2-alpine image (no Dockerfile to hold a services/nats/entrypoint.sh),
     # the generator is inline in each deploy/*/docker-compose.yml `command:`
     # block; nats_conf_entrypoint_idempotence.bats extracts and drives the real
-    # block twice (see tests/bats/helpers/nats-entrypoint-helpers.sh). All three
-    # generating compose files are listed so deleting/renaming any one surfaces
-    # here; the bats suite additionally asserts the three do not drift apart.
+    # block twice (see tests/bats/helpers/nats-entrypoint-helpers.sh). Both
+    # generating compose files are listed so deleting/renaming either surfaces
+    # here; the bats suite additionally asserts the two do not drift apart.
     # full-setup's compose is deliberately NOT listed: it prebakes a static
     # nats.conf (fixed validation-* users, no env-driven template) rather than
     # generating one, so it is not a config-writer in this sense.
-    "deploy/dev/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
     "deploy/prod/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
     "deploy/quickstart/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
 )

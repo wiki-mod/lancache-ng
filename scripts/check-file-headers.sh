@@ -34,6 +34,10 @@ is_excluded() {
         # cannot carry the repo header); produced by scripts/generate-vex.sh
         # from .trivyignore.yaml and kept in sync by scripts/check-vex-drift.sh.
         vex.openvex.json | */vex.openvex.json) return 0 ;;
+        # Validation-state tracking record (JSON, no comment syntax) referenced
+        # by docs/release-validation-plan.md — same exclusion rationale as
+        # vex.openvex.json above.
+        docs/validation-state.json | */docs/validation-state.json) return 0 ;;
         # Vendored third-party file and generated/compiled build output.
         services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;
         # Vendored third-party data file (Mozilla Public Suffix List) —

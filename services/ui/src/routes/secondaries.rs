@@ -390,8 +390,9 @@ pub async fn check_secondary_health(
         })));
     };
 
-    // Prod secondaries serve DNS on the standard port 53 (the dev 5300 offset
-    // is a local-Windows-conflict workaround, not a secondary concern).
+    // Secondaries serve DNS on the standard port 53 -- the now-retired
+    // deploy/dev stack's 5300 offset (v0.3.0, #766) was a local-Windows-conflict
+    // workaround that never applied to secondaries in the first place.
     let result = crate::dns_probe::probe_secondary_soa(addr, 53).await;
 
     // Only a genuinely healthy authoritative answer advances last_seen.

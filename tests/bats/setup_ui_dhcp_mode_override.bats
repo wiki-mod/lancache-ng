@@ -5,7 +5,7 @@
 # #1068 item 6) -- the pure gate cmd_converge_reconcile uses before ever
 # folding an Admin-UI-written DHCP_MODE override into .env's DHCP_MODE and
 # COMPOSE_PROFILES. Mirrors setup_ui_channel_override.bats exactly: this
-# control only ever writes one of the three values
+# control only ever writes one of the four values
 # parse_dhcp_mode_input in services/ui/src/routes/dhcp.rs accepts, and must
 # silently no-op (never die()) on anything else, since it runs inside a
 # scheduled systemd service tick that must not abort over an unexpected or
@@ -32,6 +32,15 @@ setup() {
 
 @test "accepts dnsmasq-proxy" {
     run lancache_ui_dhcp_mode_override_is_valid "dnsmasq-proxy"
+    [ "$status" -eq 0 ]
+}
+
+# Regression test for issue #1216: this accept-list was not updated when
+# PR #1117 (#844) added dnsmasq-relay as a fourth DHCP_MODE value, so a
+# relay-mode override silently failed to fold into .env on every
+# convergence tick.
+@test "accepts dnsmasq-relay" {
+    run lancache_ui_dhcp_mode_override_is_valid "dnsmasq-relay"
     [ "$status" -eq 0 ]
 }
 
