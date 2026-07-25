@@ -2980,7 +2980,13 @@ jobs:
           tag="$(vit_resolve_tag "$EVENT_NAME" "$BASE_REF" "$PR_NUMBER" "$BUILD_SHA" "$ACTOR" "$HEAD_REPO" "$REPOSITORY" "")"
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; base-channel fallback for untouched services: '$base_channel_tag')."
+            # #1254/#1255: any untouched service is backfilled from this PR's
+            # own base commit's per-commit sha-* image in the next step
+            # ("Ensure PR staging tags exist for full-setup services"), not
+            # from base_channel_tag -- that variable is computed above only
+            # for the pr_staging_available == false branch's whole-suite
+            # fallback below, and is otherwise unused by this step.
+            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
           else
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
               echo "::notice::$ACTOR's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
@@ -3029,24 +3035,27 @@ jobs:
       # validate now waits for merge-manifests (see this job's own `needs:`
       # comment above) specifically so that's true. If it's missing anyway --
       # build/build-arm64 actually failed to push it, or imagetools inspect
-      # hit a transient registry error -- silently copying base-channel
-      # content into that service's pr-<N>-sha-<short> tag would make this
-      # job green while testing exactly the stale image #626 exists to stop
-      # testing, just now hidden behind a tag name that LOOKS PR-specific.
-      # Fail loudly instead; only a genuinely untouched service gets the
-      # base-channel back-fill.
+      # hit a transient registry error -- silently copying the PR base
+      # commit's own per-commit image into that service's pr-<N>-sha-<short>
+      # tag would make this job green while testing exactly the stale image
+      # #626 exists to stop testing, just now hidden behind a tag name that
+      # LOOKS PR-specific. Fail loudly instead; only a genuinely untouched
+      # service gets the base-commit back-fill (#1254/#1255: sourced from the
+      # PR base commit's own durable sha-<short> tag, not a mutable channel).
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          BASE_CHANNEL_TAG: ${{ steps.channel.outputs.base-channel-tag }}
-          # #808: this PR's own base commit, needed to prove a base-channel
-          # image was actually built from a commit at or after it before
-          # backfilling an untouched service from that channel. Always
-          # present here: this step only runs when pr-staging-available is
-          # true, which requires a pull_request event (see "Determine
-          # validation image channel" above).
+          # #808/#1254/#1255: this PR's own base commit. Needed both to prove
+          # the back-fill source image was actually built from it (or later)
+          # before backfilling an untouched service, AND (since #1254/#1255)
+          # to derive that source image's own tag directly (sha-<short of
+          # this>) -- no separate BASE_CHANNEL_TAG input is used anymore, see
+          # this step's own base_sha_short computation below. Always present
+          # here: this step only runs when pr-staging-available is true,
+          # which requires a pull_request event (see "Determine validation
+          # image channel" above).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
@@ -3067,6 +3076,27 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
+
+          # #1254/#1255 (2026-07-25): the #808 back-fill source below is now
+          # this PR's own base commit's durable per-commit sha-<short> image,
+          # not the mutable nightly/latest base-channel tag. Slice matches
+          # docker/metadata-action's `type=sha,prefix=sha-,format=short`
+          # convention (7 hex chars) used for every service's real sha-*
+          # tag -- the exact same 7-char slice the `promote` job's own
+          # short_sha="${COMMIT_SHA::7}" already relies on for the identical
+          # tag shape. This is a deliberate correctness improvement, not just
+          # a rename: nightly is no longer republished on every current_dev
+          # push (it is now a once-daily scheduled/dispatch-only green-gated
+          # channel -- see nightly-refresh.yml), so it could otherwise lag an
+          # untouched service's back-fill behind this PR's real base by up to
+          # a day. The base commit's own sha-* tag is always exactly the
+          # right commit by construction; #1254's feasibility investigation
+          # confirmed every non-PR push still publishes a fresh per-commit
+          # tag for every service (issue #1095's "build all services per
+          # push" behavior, not yet changed), so this image reliably exists
+          # (or appears shortly after -- the bounded poll below still handles
+          # that race exactly as it did for the base channel before).
+          base_sha_short="${BASE_SHA:0:7}"
 
           # Calls vit_service_should_have_staging_tag directly instead of
           # reimplementing the same "workflow/CI-contract change forces
@@ -3096,17 +3126,15 @@ jobs:
           # already exists. A prior run of this exact PR head (a manual
           # re-run, or this job simply running twice for the same commit) may
           # already have back-filled an untouched service's pr-<N>-sha-<short>
-          # tag from whatever the base channel pointed at THEN. If the base
-          # channel (nightly/dev) has since moved -- another PR merged in the
-          # meantime -- an existence check alone would see the stale alias,
-          # assume it's still correct, and `continue` without refreshing it:
-          # this job would then validate a deploy/workflow-only PR that
-          # doesn't touch that service against an old, no-longer-current
-          # base image, silently. So an untouched service is unconditionally
-          # (re)pointed at whatever the base channel resolves to RIGHT NOW --
-          # `imagetools create` is a cheap registry-side manifest write, not
-          # a rebuild, so refreshing it even when nothing actually changed
-          # costs nothing worth optimizing away.
+          # tag from this PR's base commit image. That source is now pinned
+          # to one fixed commit (base_sha_short, computed above) rather than
+          # a moving channel, so re-pointing it every run is no longer about
+          # chasing a channel that "moved since" -- it is still done
+          # unconditionally anyway, both for defense-in-depth (a prior partial
+          # run, or a manually-retried job) and because `imagetools create`
+          # is a cheap registry-side manifest write, not a rebuild, so
+          # refreshing it even when nothing actually changed costs nothing
+          # worth optimizing away.
           full_setup_services=(proxy dns watchdog ui build-tools)
           for service in "${full_setup_services[@]}"; do
             pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
@@ -3122,17 +3150,23 @@ jobs:
                 echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
                 continue
               fi
-              echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to base-channel content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
+              echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to the PR base commit's content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
               exit 1
             fi
 
-            base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
-            echo "::notice::$service is untouched by this PR; verifying $BASE_CHANNEL_TAG ($base_image) was built from a commit at or after this PR's base commit ($BASE_SHA) before backfilling..."
-            # #808: never back-fill from a base-channel image without first
-            # proving it was actually built from base.sha or later -- see
+            base_image="ghcr.io/${REPOSITORY}/${service}:sha-${base_sha_short}"
+            echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $BASE_SHA before backfilling (#1254/#1255: no longer sourced from the mutable nightly/latest channel)..."
+            # #808: never back-fill without first proving the source image
+            # was actually built from base.sha or later -- see
             # scripts/lib/staging-image-freshness.sh for the mechanism and
             # the "validate full-setup image" job's own checkout step
             # (fetch-depth: 0) for why full git history is available here.
+            # sif_wait_for_fresh_base_image's revision-ancestry check is still
+            # meaningful even though base_image is now pinned to base_sha_short
+            # by construction: it also doubles as the existence poll for the
+            # #808 race (the base commit's own push-triggered build may not
+            # have pushed this tag yet), and it still guards against a
+            # corrupted/mislabeled image reporting the wrong revision.
             # 900/5400/15 (normal budget / hard ceiling / poll interval, in
             # seconds) intentionally match scripts/ensure-pr-staging-images.sh's
             # own BASE_FRESHNESS_POLL_* defaults exactly -- keep in sync by
@@ -3142,7 +3176,7 @@ jobs:
               echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
               exit 1
             fi
-            echo "::notice::(re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
+            echo "::notice::(re)pointing $PR_TAG at the PR base commit's own per-commit image ($base_image)."
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
