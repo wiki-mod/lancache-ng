@@ -1218,6 +1218,20 @@ jobs:
         id: select-compose-validation-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          # Without these, select-build-tools-image.sh's ghcr_retry call pulls
+          # ghcr.io/.../build-tools:nightly anonymously. An unauthenticated pull
+          # has a much lower GHCR rate limit than an authenticated one, and
+          # under real load (many concurrent workflow runs each pulling this
+          # same tag) it fails closed with "denied: denied" -- confirmed for
+          # real: this exact job failed this way on a real push to current_dev
+          # during a burst of concurrent CI activity, blocking build/build-arm64
+          # (which unconditionally need this job to succeed) and starving the
+          # channel/nightly-tag refresh entirely. Every other GHCR-pulling job
+          # in this workflow already authenticates the same way (see
+          # docker/login-action usages elsewhere in this file); this job was
+          # the one gap.
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
