@@ -774,10 +774,62 @@ jobs:
       - name: Check tracked files use Unix (LF) line endings
         run: bash scripts/check-line-endings.sh
 
+  language-policy:
+    # Enforces AG-GOV-003 (project language: Rust and shell for code we
+    # write) by asserting the ABSENCE of banned-language source files, rather
+    # than scanning code IN a banned language for vulnerabilities the way
+    # CodeQL's per-language analysis does. That distinction matters here:
+    # after issue #1158's Rust rewrite of the last Python file
+    # (tools/pxe-client-probe), this repository has zero Python files, which
+    # makes CodeQL's separate, GitHub-managed "default setup" Python analysis
+    # fail every real run with "could not process any code" -- a scan that
+    # can never pass again is not a useful gate. This job instead fails the
+    # moment a banned-language file reappears, which is the actual property
+    # AG-GOV-003 wants enforced.
+    name: language policy
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: a few seconds (pure git ls-files + case-statement scan).
+    # Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-language-policy-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-language-policy-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check for banned-language source files (AG-GOV-003)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
+
+  language-policy-hosted:
+    name: language policy (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check for banned-language source files (AG-GOV-003)
+        run: bash scripts/check-language-policy.sh
+
   # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs
   # with no LAN dependency of their own: file-headers-hosted,
-  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted, and
-  # watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
+  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted,
+  # language-policy-hosted, and watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
   # self-hosted runners because they still depend on the shared build-tools
   # image, sccache/distcc acceleration, or registry credentials that do not
   # have a safe hosted equivalent yet -- see
