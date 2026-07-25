@@ -1660,6 +1660,22 @@ services:
         daemon = /var/log/netdata/daemon.file.log
         health = /var/log/netdata/health.file.log
         CONF
+        # web_log collector (go.d.plugin) wiring: reads the proxy's
+        # plain-text access-log copy (fluent-bit's `file=nginx-proxy.log`
+        # output into the `logs` volume, already mounted read-only below)
+        # to expose live per-request nginx analytics (per-status-code
+        # counters, response time, etc.). quickstart's install_dir has no
+        # services/ directory to bind-mount services/syslog/netdata-web_log.conf
+        # from (same constraint as netdata.conf itself, above), so the job
+        # config is generated inline instead. Keep this content byte-identical
+        # to services/syslog/netdata-web_log.conf if that file ever changes.
+        mkdir -p /etc/netdata/go.d
+        cat > /etc/netdata/go.d/web_log.conf <<'CONF'
+        jobs:
+          - name: nginx_proxy
+            path: /var/log/lancache/nginx-proxy.log
+            log_type: nginx
+        CONF
         exec /usr/sbin/run.sh
     volumes:
       - netdataconfig:/etc/netdata
