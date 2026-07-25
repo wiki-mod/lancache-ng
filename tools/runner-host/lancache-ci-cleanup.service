@@ -1,0 +1,12 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# systemd oneshot service that runs the versioned runner-host docker cleanup
+# script (lancache-ci-cleanup.sh); see README.md in this directory.
+[Unit]
+Description=lancache-ng CI runner host docker cleanup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Deploy target (see README.md); the repo path is the source of truth.
+ExecStart=/usr/local/sbin/lancache-ci-cleanup.sh
