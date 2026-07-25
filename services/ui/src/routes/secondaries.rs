@@ -401,6 +401,8 @@ pub async fn check_secondary_health(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        // DB update is best-effort; a lock/DB error here does not affect the probe result returned to
+        // the UI, so we silently ignore failures rather than blocking the response on a transient DB glitch.
         if let Ok(db) = state.db.lock() {
             let _ = db.execute(
                 "UPDATE secondaries SET last_seen = ? WHERE name = ?",
