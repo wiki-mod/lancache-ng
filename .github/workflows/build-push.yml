@@ -4805,6 +4805,7 @@ jobs:
           MATRIX_BUILD_CONTEXTS: ${{ matrix.build_contexts }}
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-buildx-retry.sh"
 
           secret_args=()
           if [ -n "$SCCACHE_REDIS_FILE" ]; then
@@ -4843,7 +4844,7 @@ jobs:
           # (hence the cache key) for build-tools's own Dockerfile.
           apt_cache_bust="$(date -u +%G-W%V)"
 
-          docker buildx build \
+          docker_buildx_retry -- docker buildx build \
             --load \
             --pull \
             --platform ${{ matrix.platform }} \
