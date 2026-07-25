@@ -99,8 +99,15 @@ write_both_sims() {
 }
 
 @test "fails when a new unconditional prompt has no matching expect_prompt in either simulation script (#1082/#1175 shape)" {
-    write_setup 'ask "Enable Widget Mode? [y/N]" "N"'
-    write_both_sims '# no expect_prompt at all'
+    # A second, already-covered baseline prompt keeps both sim scripts'
+    # pattern sets non-empty -- this test is specifically about the coverage
+    # check, not the separate "zero expect_prompt patterns at all" vacuity
+    # guard (that guard has its own dedicated test below).
+    write_setup '
+ask "Server IP (Standard mode)" "192.168.1.10"
+ask "Enable Widget Mode? [y/N]" "N"
+'
+    write_both_sims 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 
     run bash "$script" "$fixture_root"
     [ "$status" -ne 0 ]
@@ -110,9 +117,17 @@ write_both_sims() {
 }
 
 @test "fails when only one of the two simulation scripts is missing coverage for an unconditional prompt" {
-    write_setup 'ask "Enable Widget Mode? [y/N]" "N"'
-    write_sim "$fixture_root/scripts/setup-cli-simulation.sh" 'expect_prompt {Enable Widget Mode\? \[y/N\]} ""'
-    write_sim "$fixture_root/scripts/syslog-forwarding-simulation.sh" '# forgot to add it here'
+    write_setup '
+ask "Server IP (Standard mode)" "192.168.1.10"
+ask "Enable Widget Mode? [y/N]" "N"
+'
+    write_sim "$fixture_root/scripts/setup-cli-simulation.sh" '
+expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"
+expect_prompt {Enable Widget Mode\? \[y/N\]} ""
+'
+    write_sim "$fixture_root/scripts/syslog-forwarding-simulation.sh" '
+expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"
+'
 
     run bash "$script" "$fixture_root"
     [ "$status" -ne 0 ]
@@ -139,27 +154,32 @@ write_both_sims() {
 }
 
 @test "does not require simulation-script coverage for a prompt reachable only inside an if branch" {
+    # Baseline unconditional prompt (covered) keeps sim pattern sets
+    # non-empty, isolating this test to whether the IF-conditional prompt
+    # specifically is wrongly required.
     write_setup '
+ask "Server IP (Standard mode)" "192.168.1.10"
 if [[ "${SOME_FLAG:-}" = "y" ]]; then
     ask "Extra conditional prompt" "N"
 fi
 '
-    write_both_sims '# no expect_prompt at all -- must still pass'
+    write_both_sims 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"All 0 unconditional"* ]]
+    [[ "$output" == *"All 1 unconditional"* ]]
 }
 
 @test "does not require simulation-script coverage for a prompt reachable only inside a case branch" {
     write_setup '
+ask "Server IP (Standard mode)" "192.168.1.10"
 case "${MODE:-x}" in
     special)
         ask "Special-mode-only prompt" "N"
         ;;
 esac
 '
-    write_both_sims '# no expect_prompt at all -- must still pass'
+    write_both_sims 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
@@ -167,13 +187,14 @@ esac
 
 @test "treats a retry-until-valid while loop as unconditional, not conditional (matches setup.sh's real IP/CIDR/path retry style)" {
     write_setup '
+ask "Server IP (Standard mode)" "192.168.1.10"
 while true; do
     ask "Cache directory" "/opt/lancache-ng/cache"
     CACHE_DIR="$REPLY"
     [[ -n "$CACHE_DIR" ]] && break
 done
 '
-    write_both_sims '# forgot to add expect_prompt for it'
+    write_both_sims 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 
     run bash "$script" "$fixture_root"
     [ "$status" -ne 0 ]
