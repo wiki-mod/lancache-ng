@@ -150,13 +150,17 @@ trap cleanup EXIT
 # deploy/quickstart/docker-compose.yml previously left nats/ui without one
 # (no http_port set for nats, no HEALTHCHECK in the ui image), which is why
 # they were absent from this list; both now have one, matching
-# full-setup-validate.yml's own list. Everything else here (docker-socket-
-# proxy, watchdog, netdata) is only checked for "running" plus a
-# restart-count ceiling (catches a crash loop without needing a healthcheck
-# definition for every service).
+# full-setup-validate.yml's own list. docker-socket-proxy and netdata joined
+# this list under #1169 (real HTTP probes against /_ping and /api/v1/info
+# respectively) -- previously both had no Docker healthcheck at all, so this
+# script could never have reported them "healthy" regardless of timing.
+# watchdog is the one remaining service still only checked for "running" plus
+# a restart-count ceiling here, despite already having a real (freshness-
+# based) healthcheck of its own -- unlike the additions above, that gap
+# predates #1169 and is not something this issue's scope covers fixing.
 wait_for_stack_healthy() {
     local compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env")
-    local services_with_healthcheck="proxy dns-standard nats ui"
+    local services_with_healthcheck="proxy dns-standard nats ui docker-socket-proxy netdata"
     local all_services="proxy dns-standard nats docker-socket-proxy watchdog ui netdata"
     local deadline=$((SECONDS + 90)) service cid status all_ready
 

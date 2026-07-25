@@ -99,6 +99,40 @@ extract_services_with_healthcheck() {
     [[ " $prefix " != *" watchdog "* ]] || fail "watchdog is listed both in all_services' static prefix ('$prefix') and services_with_healthcheck -- would appear twice in the loop"
 }
 
+@test "wait-validation-stack-health/action.yml includes docker-socket-proxy in services_with_healthcheck (regression guard, #1169)" {
+    # deploy/full-setup/docker-compose.yml's docker-socket-proxy service
+    # gained a real Docker HEALTHCHECK under #1169 (an HTTP probe against the
+    # Docker API's own /_ping) -- previously it had none, which is why it was
+    # excluded here. Guards against this silently regressing back to the
+    # weaker "running + restart-count ceiling" check.
+    hc="$(extract_services_with_healthcheck "$repo_root/.github/actions/wait-validation-stack-health/action.yml")"
+    [ -n "$hc" ] || fail "wait-validation-stack-health/action.yml: services_with_healthcheck not found"
+    [[ " $hc " == *" docker-socket-proxy "* ]] || fail "wait-validation-stack-health/action.yml's services_with_healthcheck ('$hc') no longer includes docker-socket-proxy, despite deploy/full-setup/docker-compose.yml's docker-socket-proxy service defining a real HEALTHCHECK"
+}
+
+@test "setup-cli-simulation.sh includes docker-socket-proxy and netdata in services_with_healthcheck (regression guard, #1169)" {
+    # deploy/quickstart/docker-compose.yml's docker-socket-proxy and netdata
+    # services both gained a real Docker HEALTHCHECK under #1169 -- neither
+    # had one before.
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/setup-cli-simulation.sh")"
+    [ -n "$hc" ] || fail "setup-cli-simulation.sh: services_with_healthcheck not found"
+    [[ " $hc " == *" docker-socket-proxy "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes docker-socket-proxy"
+    [[ " $hc " == *" netdata "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes netdata"
+}
+
+@test "syslog-forwarding-simulation.sh includes docker-socket-proxy, dhcp-proxy, syslog, and syslog-ng in services_with_healthcheck (regression guard, #1169)" {
+    # docker-socket-proxy and dhcp-proxy gained a real Docker HEALTHCHECK
+    # under #1169 (neither had one before). syslog and syslog-ng have had a
+    # real Docker HEALTHCHECK since issue #633 (predating #1169) but were
+    # incorrectly grouped with docker-socket-proxy as having "genuinely none"
+    # in this file's own comment -- #1169 corrected that stale claim too.
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/syslog-forwarding-simulation.sh")"
+    [ -n "$hc" ] || fail "syslog-forwarding-simulation.sh: services_with_healthcheck not found"
+    for svc in docker-socket-proxy dhcp-proxy syslog syslog-ng; do
+        [[ " $hc " == *" $svc "* ]] || fail "syslog-forwarding-simulation.sh's services_with_healthcheck ('$hc') no longer includes $svc"
+    done
+}
+
 @test "setup-cli-simulation.sh's smaller services_with_healthcheck list stays intentional (sanity: still a subset of all_services)" {
     # Not compared against the other files (deliberately a different,
     # smaller quickstart-minimal-profile list, per its own inline comment) --

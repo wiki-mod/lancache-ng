@@ -469,12 +469,26 @@ echo "== Phase 3: bringing the stack up (ssl + logging + dhcp-kea + dhcp-proxy p
 # dhcp (Kea) service has a real Docker HEALTHCHECK (Control Agent config-get
 # probe, self-healing against the shared-secret KEA_CTRL_TOKEN per #858 --
 # see docs/architecture-ng.md's logging matrix / that healthcheck block's own
-# comment). dhcp-proxy (dnsmasq) has no Docker healthcheck at all (matches
-# docs/architecture-ng.md: "dhcp-proxy (dnsmasq) and netdata: neither has a
-# Docker healthcheck"), so it stays in all_services only, getting the weaker
-# running+restart-count check like docker-socket-proxy/syslog/syslog-ng.
-services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp"
-all_services="docker-socket-proxy syslog syslog-ng dhcp-proxy $services_with_healthcheck"
+# comment).
+# docker-socket-proxy and dhcp-proxy join this list under #1169, which added
+# real Docker HEALTHCHECKs for both (an HTTP probe against the Docker API's
+# own /_ping for docker-socket-proxy; a PID-1-is-dnsmasq + `dnsmasq --test`
+# liveness/config-integrity check for dhcp-proxy, since dnsmasq has no
+# HTTP/control-socket API and this config disables DNS entirely). Neither had
+# any Docker healthcheck before #1169.
+# syslog and syslog-ng ALSO join this list under #1169 -- correcting a
+# pre-existing, unrelated inaccuracy in this file rather than something #1169
+# itself introduced: both have had a real healthcheck since issue #633
+# (`fluent-bit -V` / `syslog-ng-ctl healthcheck`, see
+# docs/architecture-ng.md's "syslog-ng" section), well before #1169 existed.
+# This script's own comment previously (incorrectly) grouped them with
+# docker-socket-proxy as services that "genuinely have none" -- #1169's
+# ground-truth compose-file audit caught the same stale claim in issue
+# #1169's own description and in docs/architecture-ng.md's now-updated
+# healthcheck list, so it is fixed here too rather than left as the one
+# place still asserting it.
+services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp docker-socket-proxy dhcp-proxy syslog syslog-ng"
+all_services="$services_with_healthcheck"
 
 deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do

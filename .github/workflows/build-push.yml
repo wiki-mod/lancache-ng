@@ -328,6 +328,35 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  compose-healthchecks:
+    # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
+    # shape exactly: a plain bash/grep script with no build-tools/Docker
+    # dependency of its own, so it runs directly on a light runner rather
+    # than waiting on validate-compose's image selection.
+    name: compose healthchecks
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs expected in the same 8-15s range as file-headers (a single
+    # bash script scanning ~4 compose files). Same generous 15-minute floor
+    # as detect-changes above.
+    timeout-minutes: 15
+    # Job-level concurrency, mirroring file-headers' own group exactly: safe
+    # to cancel mid-flight since nothing but build/build-arm64's own PR-only
+    # `if:` gate (`needs['compose-healthchecks'].result == 'success'`)
+    # consumes this job's result, and that gate cleanly skips rather than
+    # errors on a cancelled result.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-compose-healthchecks-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-compose-healthchecks-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
+        run: bash scripts/check-compose-healthchecks.sh
+
   pr-template-check:
     name: PR template validation
     if: github.event_name == 'pull_request'
@@ -723,6 +752,20 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  compose-healthchecks-hosted:
+    name: compose healthchecks (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    # Real runs: same order of magnitude as file-headers-hosted. Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
+        run: bash scripts/check-compose-healthchecks.sh
+
   line-endings:
     # Cheap repository hygiene gate (issue #601). .gitattributes already
     # normalizes line endings for files git touches going forward, but does
@@ -835,8 +878,9 @@ jobs:
 
   # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs
   # with no LAN dependency of their own: file-headers-hosted,
-  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted,
-  # language-policy-hosted, and watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
+  # compose-healthchecks-hosted (#1169), line-endings-hosted,
+  # shellcheck-hosted, pr-template-check-hosted, language-policy-hosted, and
+  # watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
   # self-hosted runners because they still depend on the shared build-tools
   # image, sccache/distcc acceleration, or registry credentials that do not
   # have a safe hosted equivalent yet -- see
@@ -5219,6 +5263,7 @@ jobs:
       - detect-changes
       - ci_scope_policy
       - file-headers
+      - compose-healthchecks
       - pr-template-check
       - pr-tracking-metadata-check
       - pr-title-convention-check
@@ -5232,6 +5277,7 @@ jobs:
         needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
@@ -5980,6 +6026,7 @@ jobs:
       - detect-changes
       - ci_scope_policy
       - file-headers
+      - compose-healthchecks
       - pr-template-check
       - pr-tracking-metadata-check
       - pr-title-convention-check
@@ -5993,6 +6040,7 @@ jobs:
         needs['line-endings'].result == 'success' &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')

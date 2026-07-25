@@ -189,6 +189,20 @@ services:
     networks:
       - validation-api
     restart: unless-stopped
+    healthcheck:
+      # Real HTTP probe against the Docker API's own /_ping endpoint (#1169).
+      # Unlike prod/quickstart, this validation stack uses the vanilla image
+      # entrypoint (PING=1 is on by default upstream) rather than the
+      # project's own HAProxy script, but the same endpoint is reachable
+      # either way and proves the proxy is actually forwarding to the real
+      # Docker socket, not just that something is listening. Uses wget
+      # (BusyBox): verified empirically that this exact pinned image (Alpine
+      # base) ships wget but not curl.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # Watchdog for health monitoring
   watchdog:
