@@ -72,6 +72,30 @@ always_fail_transient_cmd() {
     return 1
 }
 
+# The exact error text from the second confirmed transient signature
+# (2026-07-29, current_dev's own Build & Push run for the #1272 merge
+# commit): a golang:latest-toolchain-internal panic inside build-tools'
+# actionlint-builder stage, verbatim.
+real_go_panic_error() {
+    cat <<'EOF'
+#10 108.6 panic: methodref has no signature
+#10 ERROR: process "/bin/bash -o pipefail -c set -euo pipefail; ..." did not complete successfully: exit code: 1
+EOF
+}
+
+# Fails FAKE_FAIL_COUNT times printing the go-panic transient signature, then
+# succeeds. Appends one line per invocation to $attempt_log.
+flaky_go_panic_cmd() {
+    echo "attempt" >> "$attempt_log"
+    local calls
+    calls=$(wc -l < "$attempt_log")
+    if (( calls <= "${FAKE_FAIL_COUNT:-0}" )); then
+        real_go_panic_error
+        return 1
+    fi
+    echo "build succeeded"
+}
+
 # A real Dockerfile error never contains the transient signature -- this is
 # representative of what buildx actually prints for a bad RUN instruction.
 real_dockerfile_error() {
@@ -109,6 +133,15 @@ always_fail_dockerfile_cmd() {
     [ "$status" -ne 0 ]
     [ "$(attempt_count)" -eq "$DOCKER_BUILDX_RETRY_MAX_ATTEMPTS" ]
     [[ "$output" == *"still failing with the transient layer-lock signature after ${DOCKER_BUILDX_RETRY_MAX_ATTEMPTS} attempts"* ]]
+}
+
+@test "docker_buildx_retry retries the golang:latest-toolchain-panic transient signature and succeeds once it stops recurring" {
+    FAKE_FAIL_COUNT=2
+    run docker_buildx_retry -- flaky_go_panic_cmd
+    [ "$status" -eq 0 ]
+    # 2 failed attempts + 1 successful attempt = 3 total.
+    [ "$(attempt_count)" -eq 3 ]
+    [[ "$output" == *"transient layer-lock error detected"* ]]
 }
 
 @test "docker_buildx_retry fails fast on a real Dockerfile error without retrying" {
