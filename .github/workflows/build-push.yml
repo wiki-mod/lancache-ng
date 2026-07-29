@@ -467,6 +467,83 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Auto-assign Dependabot PR milestone
+        # AG-GH-008 requires every PR to carry a milestone. Dependabot cannot
+        # set its own milestone or add itself to a project board -- this used
+        # to be handled by exempting dependabot[bot] from this whole check
+        # (see #1061-#1064), but the maintainer decided (issue #1278) that
+        # auto-tagging real metadata is the right fix instead of skipping the
+        # requirement. Labels and project-board placement are already handled
+        # for Dependabot PRs without this step (GitHub's own dependency
+        # labels plus labeler.yml's path-based labels; add-to-project.yml's
+        # unconditional pull_request_target trigger) -- milestone was the one
+        # real gap, confirmed by checking real Dependabot PRs via the GitHub
+        # API (#1270, #1163: labeled and on the project board, milestone
+        # null).
+        #
+        # Runs before "Fetch current labels/milestone live" below so that
+        # step's live `gh pr view` re-fetch already sees the milestone this
+        # step just set, in the same job run -- no separate job/race needed.
+        #
+        # Uses PROJECT_AUTOMATION_PAT, not the default GITHUB_TOKEN: this
+        # project already standardized on that PAT for every other
+        # Dependabot-adjacent write (add-to-project.yml, the project-board
+        # sub-check two steps down) since GITHUB_TOKEN cannot write Projects
+        # v2 data; reusing the same secret for this REST write keeps the
+        # permission model in one place. Confirmed live (PR #1270's
+        # pr-tracking-metadata-check-hosted run, 2026-07-29) that this PAT
+        # does reach build-push.yml on a Dependabot-authored pull_request run
+        # -- Dependabot PRs are same-repo branches, not forks, so the
+        # fork-secret-withholding restriction documented below does not
+        # apply here.
+        #
+        # Idempotent per AG-OP-006/AG-OP-009: only PATCHes when the PR's live
+        # milestone is genuinely empty, so a re-run (e.g. the `synchronize`
+        # retrigger on a new Dependabot commit) never overwrites a milestone
+        # a maintainer set by hand in between.
+        #
+        # Known, accepted cost: successfully setting a milestone here fires a
+        # real `milestoned` PR event, which re-triggers this entire workflow
+        # once more (this file's `on.pull_request.types` already includes
+        # `milestoned`, and its own comment already accepts bare
+        # label/milestone changes as a bounded, infrequent cost). This is a
+        # ONE-TIME cost per newly-opened Dependabot PR, not recurring, since
+        # the idempotence check above means later runs never PATCH again.
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # Milestone #11, "LanCache-NG Roadmap" -- the repo's existing
+          # general-purpose catch-all milestone for PRs/issues that don't tie
+          # to a specific version release (see `gh api
+          # repos/{owner}/{repo}/milestones` for its own description). If
+          # this milestone is ever renumbered or renamed, update both this
+          # value and the comment together.
+          DEPENDABOT_MILESTONE_NUMBER: 11
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check will fail below (No milestone set) until a maintainer sets one by hand, same as it would for any other PR missing this secret-dependent automation."
+            exit 0
+          fi
+          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
+          if [ -n "$current_milestone" ]; then
+            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
+            exit 0
+          fi
+          # `if !` (rather than a bare command) keeps this under `set -e`
+          # per AG-VAL-004: a command forming an `if` test is exempt from
+          # errexit, so a real API failure here degrades to a warning
+          # instead of aborting the job -- the authoritative gate is the
+          # milestone check inside check-pr-tracking-metadata.sh a couple of
+          # steps below, which will still fail with a clear, actionable
+          # message if this best-effort auto-tag didn't actually land.
+          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
+            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
+            exit 0
+          fi
+          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
       - name: Fetch current labels/milestone live
         # Same class of bug found and fixed in pr-template-check (2026-07-16):
         # github.event.pull_request.labels/.milestone is a snapshot taken when
@@ -503,9 +580,6 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          # Dependabot's own PR author identity -- see
-          # check-pr-tracking-metadata.sh's dependabot[bot] exemption.
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           # PR_LABELS_JSON now names a live-fetched file (mounted below),
@@ -524,7 +598,6 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
-            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
@@ -557,6 +630,35 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Auto-assign Dependabot PR milestone
+        # See the primary pr-tracking-metadata-check job's identical step
+        # (issue #1278) for the full rationale: Dependabot cannot set its
+        # own milestone, so this auto-assigns the "LanCache-NG Roadmap"
+        # catch-all (#11) via PROJECT_AUTOMATION_PAT before the live
+        # label/milestone re-fetch below, instead of exempting Dependabot
+        # from the check entirely (the previous approach, #1061-#1064).
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DEPENDABOT_MILESTONE_NUMBER: 11
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check-hosted will fail below (No milestone set) until a maintainer sets one by hand."
+            exit 0
+          fi
+          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
+          if [ -n "$current_milestone" ]; then
+            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
+            exit 0
+          fi
+          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
+            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
+            exit 0
+          fi
+          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
       - name: Fetch current labels/milestone live
         # See the primary pr-tracking-metadata-check job's identical step for
         # why this fetches live via `gh pr view` instead of trusting
@@ -589,13 +691,6 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          # Dependabot's own PR author identity -- see
-          # check-pr-tracking-metadata.sh's dependabot[bot] exemption. Missing
-          # here (unlike the self-hosted twin above) meant this job always
-          # hard-failed every Dependabot PR that reached it with "No milestone
-          # set", since the script's exemption check never had a value to
-          # compare against -- confirmed live on PR #1269/#1270 (2026-07-29).
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           labels_json="$(cat "$PR_LABELS_JSON")"
@@ -610,7 +705,6 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
-            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
