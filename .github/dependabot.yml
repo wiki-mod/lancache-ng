@@ -9,11 +9,17 @@
 # audit of hardcoded v0.2.0 branch-name references: `v0.2.0` was the active
 # branch when this file was first written, but it is now frozen and
 # `current_dev` took over that role -- relying on the implicit master
-# default, or on stale v0.2.0-only coverage, would silently leave the actual
-# active branch with zero automated dependency scanning). `v0.2.0` keeps its
-# own entries for now since it may still need security-only dependency
-# updates while frozen; `master` keeps its own entries too rather than
+# default would silently leave the actual active branch with zero automated
+# dependency scanning). `master` keeps its own entries too rather than
 # losing coverage there.
+#
+# `v0.2.0` deliberately has NO entries here (removed 2026-07-29): it used to
+# keep its own entries "in case it still needs security-only updates while
+# frozen", but its branch protection sets `lock_branch: true` -- nothing can
+# ever be merged into it regardless of update type, so scanning it only
+# produced PRs (e.g. #1269) that had to be closed unmerged. If `v0.2.0` is
+# ever genuinely unfrozen for a real security backport, re-add a
+# `target-branch: v0.2.0` block per ecosystem then, not before.
 #
 # BURST-FAN-OUT CONTROL (see issue #1065): each ecosystem is deliberately kept
 # to ONE grouped update per target-branch so a weekly run opens ~3 PRs per
@@ -48,14 +54,6 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-  - package-ecosystem: github-actions
-    directory: /
-    target-branch: v0.2.0
-    schedule:
-      interval: weekly
-    groups:
-      actions:
-        patterns: ["*"]
 
   # Rust (Cargo) -- both crates (Admin UI + DNS NATS subscriber) collapse into
   # ONE grouped PR per target branch via the multi-`directories` form, instead
@@ -75,16 +73,6 @@ updates:
       - /services/ui
       - /services/dns/nats-subscriber
     target-branch: current_dev
-    schedule:
-      interval: weekly
-    groups:
-      rust-deps:
-        patterns: ["*"]
-  - package-ecosystem: cargo
-    directories:
-      - /services/ui
-      - /services/dns/nats-subscriber
-    target-branch: v0.2.0
     schedule:
       interval: weekly
     groups:
@@ -118,20 +106,6 @@ updates:
       - /services/dhcp-proxy
       - /services/ui
     target-branch: current_dev
-    schedule:
-      interval: weekly
-    groups:
-      docker-base-images:
-        patterns: ["*"]
-  - package-ecosystem: docker
-    directories:
-      - /services/proxy
-      - /services/dns
-      - /services/watchdog
-      - /services/dhcp
-      - /services/dhcp-proxy
-      - /services/ui
-    target-branch: v0.2.0
     schedule:
       interval: weekly
     groups:
