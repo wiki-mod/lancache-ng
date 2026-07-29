@@ -31,6 +31,22 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 # release that resolves this on its own yet, so `go get` the fixed version
 # directly before building.
 ARG GRPC_GO_VERSION=1.82.1
+# docker-buildx v0.35.0 (go.mod: v0.37.0) and docker-compose v5.2.0 / the
+# Docker CLI v29.6.1 (both: v0.38.0, checked when auditing all three
+# source-built Go tools with a go.mod/vendor.mod for this same CVE class,
+# not just the one CI happened to flag) pin golang.org/x/text at versions
+# carrying CVE-2026-56852 (a norm.Iter infinite loop on malformed input),
+# HIGH severity, fixed in v0.39.0 -- confirmed via Trivy scanning this image
+# (issue #1281, the fourth confirmed instance of this CVE class per
+# CLAUDE.md's AG-KD-003). actionlint has no golang.org/x/text dependency at
+# all (checked directly), so it needs no override. Same reasoning as the
+# containerd/grpc overrides above: neither upstream project has cut a
+# release that resolves this on its own yet, so `go get` the fixed version
+# directly before building. Pinned to v0.40.0 (the actual latest tag as of
+# this fix, one past the v0.39.0 minimum fix version) rather than the bare
+# minimum, since there is no indication of a regression between the two and
+# staying on latest needs no extra reasoning to re-justify later.
+ARG GOLANG_X_TEXT_VERSION=0.40.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -98,6 +114,7 @@ RUN set -euo pipefail; \
     ( cd "$buildx_src" \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
@@ -108,6 +125,7 @@ RUN set -euo pipefail; \
     ( cd "$docker_cli_src" \
       && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go mod vendor \
       && rm go.mod go.sum \
       && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
@@ -118,6 +136,7 @@ RUN set -euo pipefail; \
     git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
     ( cd "$compose_src" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
     rm -rf "$compose_src"; \
     /out/docker-compose version
