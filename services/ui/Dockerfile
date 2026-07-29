@@ -291,7 +291,7 @@ COPY src ./src
 # disable_distcc, resolve_distcc_wrapper_dir, resolve_cargo_jobs, run_cargo_build), this
 # time building the real sources instead of the throwaway `fn main() {}` stub.
 #
-# `find src -type f -exec touch {} +` (issue: `lancache_ui::kea_response_parse`/
+# `cargo clean -p lancache-ui --release` (issue: `lancache_ui::kea_response_parse`/
 # `lancache_ui::netdata_url` unresolved-import failures on every build): COPY
 # preserves each file's original mtime from the build context (the runner's
 # git checkout), not "now". Those checkout mtimes are consistently OLDER than
@@ -302,14 +302,19 @@ COPY src ./src
 # was ~4-5 minutes older than that cached rlib. Cargo's unit-freshness check
 # for the `[lib]` target is mtime-based: source mtime <= cached-artifact mtime
 # reads as "unchanged", so cargo reused the stale, empty-stub rlib instead of
-# recompiling `src/lib.rs`. A prior version of this line only did
-# `touch src/main.rs`, which does force a `[[bin]]` target rebuild (so the
-# `Compiling lancache-ui` step is NOT a no-op) -- but the bin then links
-# against that stale lib rlib, which has no `kea_response_parse`/`netdata_url`
-# modules, producing exactly the `E0432: unresolved import` errors. Touching
-# every file under `src/` (not just `main.rs`) invalidates the `[lib]`
-# target's freshness check too, so the real `lib.rs` and its modules actually
-# get recompiled here.
+# recompiling `src/lib.rs`. Two prior fix attempts relied on bumping mtimes
+# instead of removing the stale artifact outright: `touch src/main.rs` alone
+# (forces a `[[bin]]` rebuild, but the bin then links against the still-stale
+# lib rlib -- exactly the `E0432` failure this fixes), and
+# `find src -type f -exec touch {} +` (works, but relies on Cargo's mtime
+# comparison remaining the deciding factor, which is an implementation detail
+# rather than a documented contract). `cargo clean -p lancache-ui --release`
+# instead removes this package's own previously-built lib/bin artifacts
+# unconditionally -- Cargo then has no stale rlib to fall back to regardless
+# of mtimes, so it must recompile `lib.rs` and its modules for real. `-p` scopes
+# the clean to this package only, leaving every dependency's cached rlib in
+# `target/release/deps/` untouched, so the pre-cache stage's whole point
+# (skip recompiling third-party crates) is preserved.
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
@@ -463,7 +468,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    find src -type f -exec touch {} + \
+    cargo clean -p lancache-ui --release \
     && run_cargo_build
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
