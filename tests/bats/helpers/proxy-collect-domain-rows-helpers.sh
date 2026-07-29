@@ -64,7 +64,18 @@ declare -ag _UNIQUE_DOMAINS=()
 declare -Ag _DOMAIN_IS_ROOT=()
 declare -ag _EXTRA_WILDCARD_BASES=()
 declare -Ag _SEEN_EXTRA_WILDCARD_BASE=()
+declare -ag _EXTRA_EXACT_HOSTS=()
+declare -Ag _SEEN_EXTRA_EXACT_HOST=()
 _DOMAIN_ROWS_SKIPPED=0
+
+# Kept in sync by hand with services/proxy/entrypoint.sh's real
+# _proxy_is_one_label_past().
+_proxy_is_one_label_past() {
+    local domain="$1" root="$2"
+    [ "$domain" = "$root" ] && return 1
+    local stripped="${domain#*.}"
+    [ "$stripped" = "$root" ]
+}
 
 _collect_domain_rows() {
     local domains_file="$1"
@@ -72,6 +83,8 @@ _collect_domain_rows() {
     _DOMAIN_IS_ROOT=()
     _EXTRA_WILDCARD_BASES=()
     _SEEN_EXTRA_WILDCARD_BASE=()
+    _EXTRA_EXACT_HOSTS=()
+    _SEEN_EXTRA_EXACT_HOST=()
     _DOMAIN_ROWS_SKIPPED=0
     local raw_domain domain root is_wildcard_only
 
@@ -108,10 +121,19 @@ _collect_domain_rows() {
         fi
         _DOMAIN_IS_ROOT["$root"]=1
 
-        if [ "$is_wildcard_only" -eq 1 ] && [ "$domain" != "$root" ] \
-            && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
-            _EXTRA_WILDCARD_BASES+=("$domain")
-            _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+        if [ "$is_wildcard_only" -eq 1 ]; then
+            if [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
+                _EXTRA_WILDCARD_BASES+=("$domain")
+                _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+            fi
+        else
+            if ! _proxy_is_one_label_past "$domain" "$root" \
+                && [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_EXACT_HOST[$domain]+set}" ]]; then
+                _EXTRA_EXACT_HOSTS+=("$domain")
+                _SEEN_EXTRA_EXACT_HOST["$domain"]=1
+            fi
         fi
     done < "$domains_file"
 }

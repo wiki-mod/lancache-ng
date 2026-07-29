@@ -126,6 +126,96 @@ setup() {
     [ "${_EXTRA_WILDCARD_BASES[1]}" = "secure.dyn.riotcdn.net" ]
 }
 
+@test "_collect_domain_rows tracks a deep bare entry as an extra exact host" {
+    _registrable_domain() { [ "$1" = "tlu.dl.delivery.mp.microsoft.com" ] && printf 'microsoft.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'tlu.dl.delivery.mp.microsoft.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_UNIQUE_DOMAINS[@]}" -eq 1 ]
+    [ "${_UNIQUE_DOMAINS[0]}" = "microsoft.com" ]
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+    [ "${_EXTRA_EXACT_HOSTS[0]}" = "tlu.dl.delivery.mp.microsoft.com" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
+}
+
+# The "no fundamental limit" case explicitly requested by the maintainer:
+# an absurdly deep bare entry must still get its own exact-host cert,
+# regardless of how many labels separate it from its registrable root.
+@test "_collect_domain_rows tracks an arbitrarily deep bare entry (many labels past root)" {
+    long_host="a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.example.com"
+    _registrable_domain() { [ "$1" = "$long_host" ] && printf 'example.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' "$long_host" > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+    [ "${_EXTRA_EXACT_HOSTS[0]}" = "$long_host" ]
+}
+
+@test "_collect_domain_rows does NOT track a bare entry exactly one label past root as an extra exact host" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows does NOT track a bare root-level entry as an extra exact host" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'steamcontent.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows does NOT track a deep leading-dot entry as an extra exact host" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 0 ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+}
+
+# The same base can legitimately appear once bare and once wildcard-only
+# ("x.cdn.ea.com" plus ".x.cdn.ea.com") -- these need two DIFFERENT certs
+# (exact-only SAN vs wildcard-only SAN), which is exactly why the real
+# entrypoint.sh gives the exact-host cert file its own ".exact-host"
+# suffix. This test only asserts both tracking arrays end up populated
+# independently for the same base string; the cert-file-naming collision
+# itself is a real-file concern verified separately (not unit-testable
+# through this stubbed helper, which never touches $CERT_DIR).
+@test "_collect_domain_rows tracks the same base in both extra arrays when listed both ways" {
+    _registrable_domain() { [ "$1" = "x.cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'x.cdn.ea.com' '.x.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+    [ "${_EXTRA_EXACT_HOSTS[0]}" = "x.cdn.ea.com" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "x.cdn.ea.com" ]
+}
+
+@test "_collect_domain_rows deduplicates repeated extra exact hosts" {
+    _registrable_domain() { [ "$1" = "tlu.dl.delivery.mp.microsoft.com" ] && printf 'microsoft.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'tlu.dl.delivery.mp.microsoft.com' 'tlu.dl.delivery.mp.microsoft.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+}
+
 @test "_collect_domain_rows collects only enabled entries from a mixed file" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     {

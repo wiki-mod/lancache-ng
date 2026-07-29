@@ -464,27 +464,42 @@ _load_public_suffix_list
 # registrable root domain, and populates the globals shared by every
 # generation loop below: _UNIQUE_DOMAINS (first-seen order of unique
 # derived roots), _DOMAIN_IS_ROOT (root -> 1, always — every derived root
-# needs both bare and wildcard cert/map coverage), and
-# _EXTRA_WILDCARD_BASES (first-seen order of leading-dot cdn-domains.txt
-# entries that resolve to something deeper than their own registrable
-# root, e.g. ".cdn.ea.com" under root "ea.com"). The extra-wildcard-base
-# tracking exists because an X.509 wildcard SAN only ever covers one label
-# (RFC 6125): a "*.ea.com" cert (generated from the root alone) validates
-# for "cdn.ea.com" but never for "x.cdn.ea.com" -- exactly the hosts a
-# ".cdn.ea.com" cdn-domains.txt entry spoofs via DNS. Without a dedicated
-# "*.cdn.ea.com" cert for that base, SSL-mode clients hitting those hosts
-# get a certificate that does not validate for their SNI and the
-# connection fails, even though DNS resolution and standard-mode
-# (SNI-passthrough, no cert involved) both work fine. Multiple DNS entries
-# commonly derive the same root (e.g. drivers.amd.com and
-# pat.downloads.amd.com both derive amd.com), so this also deduplicates by
-# root — without that, each map-generation loop below would emit the
-# identical map key more than once, and nginx's map directive rejects
-# duplicate keys at "nginx -t" time, leaving the SSL proxy unable to start.
+# needs both bare and wildcard cert/map coverage), _EXTRA_WILDCARD_BASES
+# (leading-dot entries needing their own deeper wildcard cert), and
+# _EXTRA_EXACT_HOSTS (bare entries needing their own deeper exact-match
+# cert). Both "extra" sets exist for the same underlying reason: an X.509
+# wildcard SAN only ever covers ONE label (RFC 6125) -- a "*.ea.com" cert
+# (generated from the root alone) validates "cdn.ea.com" but never
+# "x.cdn.ea.com" (two labels below the root). This affects a cdn-domains.txt
+# entry regardless of whether it's written as a leading-dot wildcard or a
+# bare exact host:
+#   - ".cdn.ea.com" (wildcard-only) spoofs hosts of the form "*.cdn.ea.com"
+#     -- always ONE label deeper than the entry's own text -- so it needs
+#     its own "*.cdn.ea.com" cert whenever the entry itself is already more
+#     than one label past the root (i.e. "cdn.ea.com" != root "ea.com").
+#   - "tlu.dl.delivery.mp.microsoft.com" (bare) spoofs exactly that one
+#     literal host -- no extra "one label deeper" step -- so it needs its
+#     own exact-match cert whenever the HOST ITSELF is more than one label
+#     past the root (stripping exactly one leading label from it does not
+#     land back on the root, meaning "*.<root>" cannot possibly cover it
+#     either). A bare entry that's exactly one label past the root, like
+#     "cdn.ea.com" itself, needs nothing extra: "*.ea.com" already covers
+#     it.
+# Without the matching dedicated cert, SSL-mode clients hitting these hosts
+# get a certificate that does not validate for their SNI and the connection
+# fails, even though DNS resolution and standard-mode (SNI-passthrough, no
+# cert involved) both work fine. Multiple DNS entries commonly derive the
+# same root (e.g. drivers.amd.com and pat.downloads.amd.com both derive
+# amd.com), so this also deduplicates by root — without that, each
+# map-generation loop below would emit the identical map key more than
+# once, and nginx's map directive rejects duplicate keys at "nginx -t"
+# time, leaving the SSL proxy unable to start.
 declare -a _UNIQUE_DOMAINS=()
 declare -A _DOMAIN_IS_ROOT=()
 declare -a _EXTRA_WILDCARD_BASES=()
 declare -A _SEEN_EXTRA_WILDCARD_BASE=()
+declare -a _EXTRA_EXACT_HOSTS=()
+declare -A _SEEN_EXTRA_EXACT_HOST=()
 # Set to 1 by _collect_domain_rows when any cdn-domains.txt row is skipped
 # (invalid entry, or a root domain that could not be derived). A config
 # generated from a domain list with skipped rows can still pass `nginx -t`
@@ -494,11 +509,27 @@ declare -A _SEEN_EXTRA_WILDCARD_BASE=()
 # would prune away a possibly-complete prior snapshot in favor of this
 # incomplete one). See _proxy_validate_snapshot_or_rollback below.
 _DOMAIN_ROWS_SKIPPED=0
+
+# _proxy_is_one_label_past <domain> <root>
+# True (0) if stripping exactly ONE leading label from <domain> lands
+# exactly on <root> -- i.e. <domain> is precisely the depth "*.<root>"
+# already covers. False (1) if <domain> IS <root> itself (bare root, a
+# different case the callers handle separately) or if <domain> is two or
+# more labels past <root> (needs its own dedicated cert).
+_proxy_is_one_label_past() {
+    local domain="$1" root="$2"
+    [ "$domain" = "$root" ] && return 1
+    local stripped="${domain#*.}"
+    [ "$stripped" = "$root" ]
+}
+
 _collect_domain_rows() {
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
     _EXTRA_WILDCARD_BASES=()
     _SEEN_EXTRA_WILDCARD_BASE=()
+    _EXTRA_EXACT_HOSTS=()
+    _SEEN_EXTRA_EXACT_HOST=()
     _DOMAIN_ROWS_SKIPPED=0
     local raw_domain domain root is_wildcard_only
 
@@ -543,10 +574,27 @@ _collect_domain_rows() {
         fi
         _DOMAIN_IS_ROOT["$root"]=1
 
-        if [ "$is_wildcard_only" -eq 1 ] && [ "$domain" != "$root" ] \
-            && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
-            _EXTRA_WILDCARD_BASES+=("$domain")
-            _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+        if [ "$is_wildcard_only" -eq 1 ]; then
+            # A wildcard-only entry's actual matched hosts are always one
+            # label deeper than the entry text itself -- so it needs its
+            # own cert whenever the entry text is already past the root at
+            # all (not just past by more than one label).
+            if [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
+                _EXTRA_WILDCARD_BASES+=("$domain")
+                _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+            fi
+        else
+            # A bare entry's matched host IS the entry text itself -- needs
+            # its own cert only once it's more than one label past the
+            # root (exactly one label past is already covered by the
+            # root's own "*.<root>" wildcard).
+            if ! _proxy_is_one_label_past "$domain" "$root" \
+                && [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_EXACT_HOST[$domain]+set}" ]]; then
+                _EXTRA_EXACT_HOSTS+=("$domain")
+                _SEEN_EXTRA_EXACT_HOST["$domain"]=1
+            fi
         fi
     done < "$DOMAINS_FILE"
 }
@@ -737,6 +785,28 @@ if [ "${SSL_ENABLED}" = "1" ]; then
             exit 1
         fi
     done
+    # One additional cert per deeper bare/exact host (see _EXTRA_EXACT_HOSTS'
+    # declaration above) -- SAN is the exact hostname only, no wildcard,
+    # since a bare cdn-domains.txt entry matches only that literal host.
+    # File name uses an ".exact-host" suffix, NOT the bare domain string:
+    # cdn-domains.txt can legally list both "x.cdn.ea.com" (bare) and
+    # ".x.cdn.ea.com" (wildcard) as separate entries for the same base --
+    # those need two DIFFERENT certs (one exact-only SAN, one wildcard-only
+    # SAN), and without distinct file names the second one generated would
+    # see the first's file already present and skip, silently leaving one
+    # of the two SANs missing.
+    for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+        [ -f "$CERT_DIR/${domain}.exact-host.crt" ] && [ -f "$CERT_DIR/${domain}.exact-host.key" ] && continue
+
+        echo "[lancache] Generating deeper exact-match cert for $domain..."
+        if ! _sign_cert "$domain" \
+            "$CERT_DIR/${domain}.exact-host.key" \
+            "$CERT_DIR/${domain}.exact-host.crt" \
+            "subjectAltName=DNS:${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for $domain" >&2
+            exit 1
+        fi
+    done
 
     # Keep new keys in the nginx group and make existing/generated keys readable
     # by nginx workers during TLS handshakes.
@@ -769,6 +839,13 @@ fi
     for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
         printf "    %-45s %s;\n" "*.${domain}" "$domain"
     done
+    # Exact-host entries (see _EXTRA_EXACT_HOSTS' declaration above) map the
+    # literal hostname to its dedicated ".exact-host"-suffixed cert -- no
+    # "*."-prefix key, since a bare cdn-domains.txt entry is never a
+    # wildcard match.
+    for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+        printf "    %-45s %s;\n" "$domain" "${domain}.exact-host"
+    done
     echo "    default default;"
     echo "}"
 
@@ -785,6 +862,9 @@ fi
         done
         for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
             printf "    %-45s 1;\n" "*.${domain}"
+        done
+        for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+            printf "    %-45s 1;\n" "$domain"
         done
     else
         echo "    default 1;"
@@ -822,6 +902,9 @@ mkdir -p /etc/nginx/stream.d
         done
         for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
             printf "    %-45s %s:443;\n" "*.${domain}" "$domain"
+        done
+        for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+            printf "    %-45s %s:443;\n" "$domain" "$domain"
         done
     fi
     echo "}"
