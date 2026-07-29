@@ -589,6 +589,13 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          # Dependabot's own PR author identity -- see
+          # check-pr-tracking-metadata.sh's dependabot[bot] exemption. Missing
+          # here (unlike the self-hosted twin above) meant this job always
+          # hard-failed every Dependabot PR that reached it with "No milestone
+          # set", since the script's exemption check never had a value to
+          # compare against -- confirmed live on PR #1269/#1270 (2026-07-29).
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           labels_json="$(cat "$PR_LABELS_JSON")"
@@ -603,6 +610,7 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
+            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
