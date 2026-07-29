@@ -461,19 +461,30 @@ _registrable_domain() {
 _load_public_suffix_list
 
 # Reads $DOMAINS_FILE (cdn-domains.txt) once, derives each line's
-# registrable root domain, and populates two globals shared by every
+# registrable root domain, and populates the globals shared by every
 # generation loop below: _UNIQUE_DOMAINS (first-seen order of unique
-# derived roots) and _DOMAIN_IS_ROOT (root -> 1, always — every derived
-# root needs both bare and wildcard cert/map coverage, since the DNS side
-# already treats every cdn-domains.txt entry as covering its whole
-# subdomain tree). Multiple DNS entries commonly derive the same root (e.g.
-# drivers.amd.com and pat.downloads.amd.com both derive amd.com), so this
-# also deduplicates by root — without that, each map-generation loop below
-# would emit the identical map key more than once, and nginx's map
-# directive rejects duplicate keys at "nginx -t" time, leaving the SSL
-# proxy unable to start.
+# derived roots), _DOMAIN_IS_ROOT (root -> 1, always — every derived root
+# needs both bare and wildcard cert/map coverage), and
+# _EXTRA_WILDCARD_BASES (first-seen order of leading-dot cdn-domains.txt
+# entries that resolve to something deeper than their own registrable
+# root, e.g. ".cdn.ea.com" under root "ea.com"). The extra-wildcard-base
+# tracking exists because an X.509 wildcard SAN only ever covers one label
+# (RFC 6125): a "*.ea.com" cert (generated from the root alone) validates
+# for "cdn.ea.com" but never for "x.cdn.ea.com" -- exactly the hosts a
+# ".cdn.ea.com" cdn-domains.txt entry spoofs via DNS. Without a dedicated
+# "*.cdn.ea.com" cert for that base, SSL-mode clients hitting those hosts
+# get a certificate that does not validate for their SNI and the
+# connection fails, even though DNS resolution and standard-mode
+# (SNI-passthrough, no cert involved) both work fine. Multiple DNS entries
+# commonly derive the same root (e.g. drivers.amd.com and
+# pat.downloads.amd.com both derive amd.com), so this also deduplicates by
+# root — without that, each map-generation loop below would emit the
+# identical map key more than once, and nginx's map directive rejects
+# duplicate keys at "nginx -t" time, leaving the SSL proxy unable to start.
 declare -a _UNIQUE_DOMAINS=()
 declare -A _DOMAIN_IS_ROOT=()
+declare -a _EXTRA_WILDCARD_BASES=()
+declare -A _SEEN_EXTRA_WILDCARD_BASE=()
 # Set to 1 by _collect_domain_rows when any cdn-domains.txt row is skipped
 # (invalid entry, or a root domain that could not be derived). A config
 # generated from a domain list with skipped rows can still pass `nginx -t`
@@ -486,8 +497,10 @@ _DOMAIN_ROWS_SKIPPED=0
 _collect_domain_rows() {
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
+    _EXTRA_WILDCARD_BASES=()
+    _SEEN_EXTRA_WILDCARD_BASE=()
     _DOMAIN_ROWS_SKIPPED=0
-    local raw_domain domain root
+    local raw_domain domain root is_wildcard_only
 
     while IFS= read -r raw_domain || [ -n "$raw_domain" ]; do
         domain="${raw_domain#"${raw_domain%%[![:space:]]*}"}"
@@ -502,6 +515,13 @@ _collect_domain_rows() {
         # row does. Mirrors services/dns/entrypoint.sh's RPZ generation
         # handling of the same marker on the same file.
         [[ "$domain" == !* ]] && continue
+
+        # Captured before _is_valid_domain/_normalize_domain, both of which
+        # strip a leading dot -- same "leading dot = wildcard-only" flag
+        # services/dns/entrypoint.sh's RPZ generation derives from the same
+        # raw row on the same file.
+        is_wildcard_only=0
+        [[ "$domain" == .* ]] && is_wildcard_only=1
 
         # Validate and normalize domain before using it anywhere
         if ! _is_valid_domain "$domain"; then
@@ -522,6 +542,12 @@ _collect_domain_rows() {
             _UNIQUE_DOMAINS+=("$root")
         fi
         _DOMAIN_IS_ROOT["$root"]=1
+
+        if [ "$is_wildcard_only" -eq 1 ] && [ "$domain" != "$root" ] \
+            && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
+            _EXTRA_WILDCARD_BASES+=("$domain")
+            _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+        fi
     done < "$DOMAINS_FILE"
 }
 
@@ -696,6 +722,21 @@ if [ "${SSL_ENABLED}" = "1" ]; then
             exit 1
         fi
     done
+    # One additional cert per deeper wildcard base (see _EXTRA_WILDCARD_BASES'
+    # declaration above) -- SAN is wildcard-only, no bare DNS: entry, since a
+    # leading-dot cdn-domains.txt entry never covers its own bare form either.
+    for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+        [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
+
+        echo "[lancache] Generating deeper wildcard cert for *.$domain..."
+        if ! _sign_cert "$domain" \
+            "$CERT_DIR/${domain}.key" \
+            "$CERT_DIR/${domain}.crt" \
+            "subjectAltName=DNS:*.${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for *.$domain" >&2
+            exit 1
+        fi
+    done
 
     # Keep new keys in the nginx group and make existing/generated keys readable
     # by nginx workers during TLS handshakes.
@@ -721,6 +762,13 @@ fi
             printf "    %-45s %s;\n" "$domain" "$domain"
         fi
     done
+    # More specific than the root entries above -- nginx's hostnames map
+    # picks the longest matching "*."-prefixed wildcard, so an SNI value
+    # under one of these deeper bases (e.g. x.cdn.ea.com) resolves here
+    # instead of to its root's cert, which would not validate for it.
+    for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+        printf "    %-45s %s;\n" "*.${domain}" "$domain"
+    done
     echo "    default default;"
     echo "}"
 
@@ -734,6 +782,9 @@ fi
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
                 printf "    %-45s 1;\n" "$domain"
             fi
+        done
+        for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+            printf "    %-45s 1;\n" "*.${domain}"
         done
     else
         echo "    default 1;"
@@ -768,6 +819,9 @@ mkdir -p /etc/nginx/stream.d
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
                 printf "    %-45s %s:443;\n" "$domain" "$domain"
             fi
+        done
+        for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+            printf "    %-45s %s:443;\n" "*.${domain}" "$domain"
         done
     fi
     echo "}"

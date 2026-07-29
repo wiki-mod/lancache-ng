@@ -69,6 +69,63 @@ setup() {
     [ "${_UNIQUE_DOMAINS[0]}" = "enabled.example.com" ]
 }
 
+# These four tests exercise the "domain != root" branch, which the shared
+# identity _registrable_domain stub (see the helper file's own comment) can
+# never trigger on its own -- each locally overrides it to collapse its
+# specific multi-label fixture to a shorter root, the same way real
+# PSL-based derivation collapses "cdn.ea.com" to "ea.com", without touching
+# the shared default every other test in this file still relies on.
+@test "_collect_domain_rows tracks a deep leading-dot entry as an extra wildcard base" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_UNIQUE_DOMAINS[@]}" -eq 1 ]
+    [ "${_UNIQUE_DOMAINS[0]}" = "ea.com" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
+}
+
+@test "_collect_domain_rows does NOT track a root-level leading-dot entry as an extra wildcard base" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.steamcontent.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_UNIQUE_DOMAINS[@]}" -eq 1 ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows does NOT track a bare (non-leading-dot) deep entry as an extra wildcard base" {
+    _registrable_domain() { [ "$1" = "download2.cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'download2.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows deduplicates repeated extra wildcard bases" {
+    _registrable_domain() {
+        case "$1" in
+            cdn.ea.com) printf 'ea.com' ;;
+            secure.dyn.riotcdn.net) printf 'riotcdn.net' ;;
+            *) printf '%s' "$1" ;;
+        esac
+    }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' '.secure.dyn.riotcdn.net' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 2 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
+    [ "${_EXTRA_WILDCARD_BASES[1]}" = "secure.dyn.riotcdn.net" ]
+}
+
 @test "_collect_domain_rows collects only enabled entries from a mixed file" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     {
