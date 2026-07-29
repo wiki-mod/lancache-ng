@@ -13,13 +13,16 @@
 # dependency scanning). `master` keeps its own entries too rather than
 # losing coverage there.
 #
-# `v0.2.0` deliberately has NO entries here (removed 2026-07-29): it used to
-# keep its own entries "in case it still needs security-only updates while
-# frozen", but its branch protection sets `lock_branch: true` -- nothing can
-# ever be merged into it regardless of update type, so scanning it only
-# produced PRs (e.g. #1269) that had to be closed unmerged. If `v0.2.0` is
-# ever genuinely unfrozen for a real security backport, re-add a
-# `target-branch: v0.2.0` block per ecosystem then, not before.
+# `v0.2.0` deliberately has NO entries here: its branch protection sets
+# `lock_branch: true` -- nothing can ever be merged into it regardless of
+# update type, so scanning it only produced PRs that had to be closed
+# unmerged. Re-adding a `target-branch: v0.2.0` block would not restore
+# coverage for Dependabot's *security* updates either way: GitHub applies
+# `target-branch` only to regular version-update PRs, not to
+# security-update PRs, which always target the repository's default branch
+# regardless of this file's contents. SECURITY.md also only supports the
+# latest stable release, not archived point releases -- if `v0.2.0` needs a
+# fix, that goes through a new release or a manual backport, not this file.
 #
 # BURST-FAN-OUT CONTROL (see issue #1065): each ecosystem is deliberately kept
 # to ONE grouped update per target-branch so a weekly run opens ~3 PRs per
