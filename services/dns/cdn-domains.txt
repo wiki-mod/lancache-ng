@@ -35,8 +35,20 @@ lancache.steampowered.com
 
 # ---- Epic Games ----
 download.epicgames.com
+download2.epicgames.com
+download3.epicgames.com
+download4.epicgames.com
 epicgames-download1.akamaized.net
 fastly.cdn.epicgames.com
+fastly-download.epicgames.com
+egdownload.fastly-edge.com
+cloudflare.epicgamescdn.com
+cdn.unrealengine.com
+cdn1.unrealengine.com
+cdn2.unrealengine.com
+cdn3.unrealengine.com
+cdn1.epicgames.com
+cdn2.epicgames.com
 
 # ---- Blizzard / Battle.net ----
 # Deliberately NOT `.akamaihd.net` (a full wildcard on that root): akamaihd.net
@@ -48,14 +60,20 @@ fastly.cdn.epicgames.com
 level3.blizzard.com
 cdn.blizzard.com
 dist.blizzard.com
+dist.blizzard.com.edgesuite.net
 blzddist1-a.akamaihd.net
 blzddist2-a.akamaihd.net
 blzddist3-a.akamaihd.net
+blizzard.vo.llnwd.net
+edge.blizzard.top.comcast.net
+nydus.battle.net
 
 # ---- EA / Origin ----
 # download2.cdn.ea.com removed: it's a one-label subdomain of cdn.ea.com,
 # already covered by the .cdn.ea.com wildcard below.
 .cdn.ea.com
+lvlt.cdn.ea.com
+cdn-patch.swtor.com
 download.origin.com
 origin-a.akamaihd.net
 
@@ -86,6 +104,7 @@ content.bethesda.net
 
 # ---- Rockstar ----
 gamedownloads.rockstargames.com
+patches.rockstargames.com
 
 # ---- Warframe ----
 content.warframe.com
@@ -96,18 +115,88 @@ patchcdn.pathofexile.com
 
 # ---- Guild Wars 2 ----
 assetcdn.101.arenanetworks.com
+assetcdn.102.arenanetworks.com
+assetcdn.103.arenanetworks.com
+
+# ---- BSG / Escape from Tarkov ----
+cdn-11.eft-store.com
+cl-453343cd.gcdn.co
+
+# ---- Call of Duty ----
+cod-assets.cdn.callofduty.com
+cod-assets.cdn.callofduty.com.edgesuite.net
+
+# ---- City of Heroes (Homecoming) ----
+cdn-eu1.homecomingservers.com
+cdn-na1.homecomingservers.com
+cdn-na2.homecomingservers.com
+cdn-na3.homecomingservers.com
+
+# ---- Daybreak Games ----
+# Do NOT cache manifest.patch.daybreakgames.com (caveat carried forward from
+# uklans/cache-domains: that host serves per-session manifests, not static
+# game content, so caching it would serve stale/incorrect manifests).
+pls.patch.daybreakgames.com
+
+# ---- Elder Scrolls Online ----
+live.patcher.elderscrollsonline.com
+
+# ---- Final Fantasy XIV (Square Enix) ----
+patch-dl.ffxiv.com
+
+# ---- Frontier (Elite Dangerous) ----
+cdn.zaonce.net
+
+# ---- Neverwinter (Cryptic) ----
+level3.nwhttppatch.crypticstudios.com
+
+# ---- NexusMods ----
+filedelivery.nexusmods.com
+
+# ---- RenegadeX ----
+patches.totemarts.games
+patches.totemarts.services
+
+# ---- Wargaming.net (World of Tanks / Warplanes / Warships) ----
+dl-wot-ak.wargaming.net
+dl-wot-cdx.wargaming.net
+dl-wot-gc.wargaming.net
+dl-wot-se.wargaming.net
+dl-wowp-ak.wargaming.net
+dl-wowp-cdx.wargaming.net
+dl-wowp-gc.wargaming.net
+dl-wowp-se.wargaming.net
+dl-wows-ak.wargaming.net
+dl-wows-cdx.wargaming.net
+dl-wows-gc.wargaming.net
+dl-wows-se.wargaming.net
+dl2.wargaming.net
+wg.gcdn.co
+wgus-wotasia.wargaming.net
+wgus-woteu.wargaming.net
 
 # ---- Windows Update / Microsoft ----
 download.windowsupdate.com
+.windowsupdate.com
+.update.microsoft.com
 fg.download.windowsupdate.com.delivery.microsoft.com
 emdl.ws.microsoft.com
 .mp.microsoft.com
+.dl.delivery.mp.microsoft.com
+.do.dsp.mp.microsoft.com
 tlu.dl.delivery.mp.microsoft.com
 dl.delivery.mp.microsoft.com
 download.microsoft.com
 officecdn.microsoft.com
+officecdn.microsoft.com.edgesuite.net
 officecdn-microsoft-com.akamaized.net
+.microsoft.com.edgesuite.net
 software-download.microsoft.com
+amupdatedl.microsoft.com
+amupdatedl2.microsoft.com
+amupdatedl3.microsoft.com
+amupdatedl4.microsoft.com
+amupdatedl5.microsoft.com
 
 # ---- Ubuntu / Canonical ----
 archive.ubuntu.com
@@ -201,5 +290,26 @@ pat.downloads.amd.com
 #   assets1.xboxlive.com
 #   xvcf1.xboxlive.com
 #   xvcf2.xboxlive.com
+
+# ---- Nintendo Switch ----
+# NOT listed here, for the same reason as Xbox / PlayStation above: consoles
+# cannot install custom CAs. If these CDN domains were redirected to our
+# proxy, the TLS handshake would fail and the console could not fall back
+# (our DNS would keep returning our proxy IP on retry). Omitting them means
+# a Switch gets real CDN IPs and everything works -- just without caching.
+#
+# To enable Nintendo Switch caching on a LAN with no Switch consoles,
+# add these manually:
+#   .hac.lp1.d4c.nintendo.net
+#   .hac.lp1.eshop.nintendo.net
+#   .wup.eshop.nintendo.net
+#   .wup.shop.nintendo.net
+#   ccs.cdn.wup.shop.nintendo.net.edgesuite.net
+#   ecs-lp1.hac.shop.nintendo.net
+#   geisha-wup.cdn.nintendo.net
+#   geisha-wup.cdn.nintendo.net.edgekey.net
+#   idbe-wup.cdn.nintendo.net
+#   idbe-wup.cdn.nintendo.net.edgekey.net
+#   receive-lp1.dg.srv.nintendo.net
 
 # ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====

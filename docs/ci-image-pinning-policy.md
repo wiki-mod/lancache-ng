@@ -78,20 +78,20 @@ Alternatively, some projects publish digest-based references; check the action's
 All GitHub Actions in the current set of workflows are already pinned to SHA digests with version comments. Examples:
 
 - `.github/workflows/build-push.yml`:
-  - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
-  - `dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable` ✅ Pinned by commit SHA
+  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
+  - `dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable` ✅ Pinned by commit SHA
   - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
 
 - `.github/workflows/build-tools.yml`:
-  - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
+  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
   - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
 
 - `.github/workflows/codeql.yml`:
-  - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
-  - `github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4` ✅ Pinned by commit SHA
+  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
+  - `github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3` ✅ Pinned by commit SHA
 
 - `.github/workflows/first-interaction.yml`:
-  - `actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0` ✅ Pinned by commit SHA
+  - `actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0` ✅ Pinned by commit SHA
   - `actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0` ✅ Pinned by commit SHA
 
 **Status**: ✅ All GitHub Actions are already pinned.
