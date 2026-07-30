@@ -475,8 +475,10 @@ _load_public_suffix_list
 # bare exact host:
 #   - ".cdn.ea.com" (wildcard-only) spoofs hosts of the form "*.cdn.ea.com"
 #     -- always ONE label deeper than the entry's own text -- so it needs
-#     its own "*.cdn.ea.com" cert whenever the entry itself is already more
-#     than one label past the root (i.e. "cdn.ea.com" != root "ea.com").
+#     its own "*.cdn.ea.com" cert whenever the entry text differs from the
+#     root AT ALL, even by exactly one label (i.e. "cdn.ea.com" != root
+#     "ea.com" already qualifies -- there is no "more than one label"
+#     threshold for this case, unlike the bare-entry case below).
 #   - "tlu.dl.delivery.mp.microsoft.com" (bare) spoofs exactly that one
 #     literal host -- no extra "one label deeper" step -- so it needs its
 #     own exact-match cert whenever the HOST ITSELF is more than one label
@@ -488,7 +490,26 @@ _load_public_suffix_list
 # Without the matching dedicated cert, SSL-mode clients hitting these hosts
 # get a certificate that does not validate for their SNI and the connection
 # fails, even though DNS resolution and standard-mode (SNI-passthrough, no
-# cert involved) both work fine. Multiple DNS entries commonly derive the
+# cert involved) both work fine.
+#
+# KNOWN LIMITATION (issue #1322): this only ever adds ONE extra label of
+# wildcard depth per leading-dot entry. A leading-dot entry's real DNS-side
+# match scope is arbitrary depth (services/dns/entrypoint.sh's RPZ generation
+# spoofs every subdomain of it, at any depth), but no static, pre-generated
+# X.509 cert scheme can match that: a client two or more labels below the
+# entry (e.g. "a.b.cdn.ea.com" under a ".cdn.ea.com" entry) still fails TLS
+# hostname verification. Mitigation that works today: add the specific
+# deeper level as its own leading-dot entry (e.g. ".b.cdn.ea.com") -- nginx's
+# hostnames map picks the more specific of two matching wildcard keys, so
+# the new, more specific cert wins for that level. This does not generalize
+# to arbitrary depth; the same gap recurs one level further for a CDN that
+# genuinely serves from unpredictable subdomain depths. Fully closing this
+# needs dynamic per-SNI certificate issuance at handshake time, a materially
+# different architecture than this pre-generated-cert design (see CLAUDE.md's
+# "Pre-generated wildcard certs" decision) -- a maintainer decision, not a
+# fix reachable here. STATUS: as of 2026-07-30, unresolved; see issue #1322.
+#
+# Multiple DNS entries commonly derive the
 # same root (e.g. drivers.amd.com and pat.downloads.amd.com both derive
 # amd.com), so this also deduplicates by root — without that, each
 # map-generation loop below would emit the identical map key more than
@@ -631,15 +652,19 @@ export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS
 
 # Deterministic, length-bounded cert/key filename for a domain that may
 # be up to 253 bytes long (_is_valid_domain's own limit) -- well past
-# Linux's 255-byte NAME_MAX once combined with any ".crt"/".key"
-# suffix, and past it even sooner for the exact-host case's extra
-# ".exact-host" text. $2 (a short namespace tag, e.g. "wildcard"/
-# "exact") keeps a bare and a leading-dot cdn-domains.txt entry for the
-# same base resolving to two DIFFERENT names, matching this file's own
-# existing requirement that those need two distinct certs. The real
-# hostname is never lost -- it lives in each cert's SAN (see _sign_cert
-# below) and in the nginx maps that select a cert by hostname, neither
-# of which has an equivalent filesystem constraint.
+# Linux's 255-byte NAME_MAX once combined with any ".crt"/".key" suffix,
+# if the raw hostname were used as the filename directly. $2 (a short
+# namespace tag, e.g. "wildcard"/"exact") is mixed into the HASH INPUT
+# (see the sha256sum call below), not appended as filename text -- the
+# output is always a plain 32-character hex string plus the ordinary
+# ".crt"/".key" suffix, with no extra namespace marker in the filename
+# itself. Hashing the namespace-prefixed input is what keeps a bare and a
+# leading-dot cdn-domains.txt entry for the same base resolving to two
+# DIFFERENT names, matching this file's own existing requirement that
+# those need two distinct certs. The real hostname is never lost -- it
+# lives in each cert's SAN (see _sign_cert below) and in the nginx maps
+# that select a cert by hostname, neither of which has an equivalent
+# filesystem constraint.
 #
 # Defined here, unconditionally, rather than inside the SSL_ENABLED
 # block below: the map-generation block further down (see "2. Generate

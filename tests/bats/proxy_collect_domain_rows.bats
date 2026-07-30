@@ -205,8 +205,11 @@ setup() {
 # The same base can legitimately appear once bare and once wildcard-only
 # ("x.cdn.ea.com" plus ".x.cdn.ea.com") -- these need two DIFFERENT certs
 # (exact-only SAN vs wildcard-only SAN), which is exactly why the real
-# entrypoint.sh gives the exact-host cert file its own ".exact-host"
-# suffix. This test only asserts both tracking arrays end up populated
+# entrypoint.sh's _bounded_cert_name mixes a "wildcard"/"exact" namespace
+# tag into its SHA-256 hash INPUT (not into the output filename, which is
+# always a plain hash plus ".crt"/".key" -- see _bounded_cert_name's own
+# comment) so the two cases never collide on the same cert/key filename.
+# This test only asserts both tracking arrays end up populated
 # independently for the same base string; the cert-file-naming collision
 # itself is a real-file concern verified separately (not unit-testable
 # through this stubbed helper, which never touches $CERT_DIR).

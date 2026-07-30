@@ -291,6 +291,54 @@ jobs:
           # standard-passthrough-shim this sim relies on) for the slot it wins.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
 
+  proxy-deep-wildcard-tls-simulation:
+    # Real TLS-handshake test for entrypoint.sh's deep leading-dot wildcard
+    # cert path (_EXTRA_WILDCARD_BASES/_bounded_cert_name/_sign_cert),
+    # exercising a synthetic example.com-rooted fixture rather than the real
+    # cdn-domains.txt (see scripts/proxy-deep-wildcard-tls-simulation.sh's own
+    # header for why this needs its own locally-built image instead of
+    # reusing ssl-mitm-cache-simulation's published-image approach). Does not
+    # need the compute-validation-network subnet/IP outputs at all -- it
+    # builds its own throwaway images and creates its own auto-addressed
+    # Docker network, no docker-compose stack involved -- but still gates on
+    # that job's own result so a runner degraded enough to fail even that
+    # lightweight derivation doesn't also burn time on this Docker-heavy job.
+    name: Proxy deep-wildcard TLS simulation
+    needs: [compute-validation-network]
+    if: >-
+      always() &&
+      inputs.should_run == 'true' &&
+      needs['compute-validation-network'].result != 'failure' &&
+      needs['compute-validation-network'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve build-tools image
+        # See ssl-mitm-cache-simulation's identical step above for why a
+        # same-PR build-tools change prefers the confirmed PR staging tag.
+        id: build-tools-image
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
+          else
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run proxy deep-wildcard TLS simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/proxy-deep-wildcard-tls-simulation.sh
+
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
     # LANCACHE_IMAGE_TAG here is the direct fix for the inconsistency #715

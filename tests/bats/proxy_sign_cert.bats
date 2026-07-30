@@ -56,12 +56,33 @@ setup() {
     [[ "$output" == *"CN=lancache-ng"* ]]
 }
 
-@test "_bounded_cert_name produces a filename that stays within NAME_MAX once suffixed" {
+@test "_bounded_cert_name produces filenames that stay within NAME_MAX for the real .crt/.key suffixes the code writes" {
     cert_name="$(_bounded_cert_name "$long_domain" exact)"
-    filename="${cert_name}.exact-host.crt"
-    [ "${#filename}" -lt 255 ]
+    # These are the ACTUAL filenames entrypoint.sh's exact-host generation
+    # loop writes ("${cert_name}.crt"/"${cert_name}.key", no extra
+    # namespace suffix -- the "wildcard"/"exact" tag is mixed into the hash
+    # INPUT, not appended to the output filename; see _bounded_cert_name's
+    # own comment in entrypoint.sh).
+    crt_filename="${cert_name}.crt"
+    key_filename="${cert_name}.key"
+    [ "${#crt_filename}" -lt 255 ]
+    [ "${#key_filename}" -lt 255 ]
     # sha256sum -c1-32 hex chars, deterministic for the same input.
     [ "${#cert_name}" -eq 32 ]
+}
+
+@test "_bounded_cert_name's output length is independent of the input hostname's length" {
+    # The property that actually bounds the filename regardless of how long
+    # a valid cdn-domains.txt entry gets (up to _is_valid_domain's 253-byte
+    # ceiling): the output is always exactly 32 hex characters, whether the
+    # input is a single short label or the 243-byte fixture used elsewhere
+    # in this file. A test that only ever exercises one input length cannot
+    # tell a genuinely bounded function apart from one that merely happens
+    # to fit for that one fixture.
+    short_name="$(_bounded_cert_name "a.example.com" exact)"
+    long_name="$(_bounded_cert_name "$long_domain" exact)"
+    [ "${#short_name}" -eq 32 ]
+    [ "${#long_name}" -eq 32 ]
 }
 
 @test "_bounded_cert_name gives a bare and a leading-dot entry for the same base different names" {
