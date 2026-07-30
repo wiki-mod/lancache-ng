@@ -49,6 +49,9 @@ else
         printf 'watchdog=false\n'
         printf 'ui=false\n'
         printf 'build_tools=false\n'
+        printf 'dhcp=false\n'
+        printf 'dhcp_proxy=false\n'
+        printf 'ntp=false\n'
     } >> "$GITHUB_OUTPUT"
 fi
 

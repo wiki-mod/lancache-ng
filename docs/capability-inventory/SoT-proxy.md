@@ -103,7 +103,13 @@ time of this audit — see "Branch divergence" at the end.
 ## 3. Docker image / build
 
 - `Dockerfile` installs nginx from the **nginx.org mainline repo** (not
-  Debian's own package) for `libnginx-mod-stream` availability.
+  Debian's own package). nginx.org's own package compiles the stream
+  module in statically (confirmed via `nginx -V`:
+  `--with-stream --with-stream_ssl_preread_module` etc.) — unlike Debian's
+  own nginx package, which splits it into a separate `libnginx-mod-stream`
+  package requiring a `load_module` directive. Neither a separate package
+  nor `load_module` exists in this image or `nginx.conf`. (Corrected
+  2026-07-30 — this line previously gave the opposite, incorrect reason.)
 - Uses a **named additional build context** (`dns-domains` →
   `services/dns/`) to bake a **build-time snapshot** of `cdn-domains.txt`
   into the image as a fallback for deployments with no live bind-mount.

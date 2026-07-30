@@ -3,10 +3,18 @@
 #
 # Per-service change detection for the full-setup DEEP validation gate
 # (#715). Emits `key=value` lines (proxy/dns_image/ui/watchdog/dhcp/
-# dhcp_proxy/build_tools/deploy/scripts/setup_runtime/workflow/docs_only/
+# dhcp_proxy/ntp/build_tools/deploy/scripts/setup_runtime/workflow/docs_only/
 # should_run) describing what a PR actually changed, so the deep suite can
 # (a) decide whether to run at all and (b) drive the same fail-closed
 # staging-tag guard build-push.yml uses.
+#
+# ntp (#1296, 2026-07-30): added alongside dhcp/dhcp_proxy so a PR that
+# actually touches services/ntp/ is correctly treated as "touched" by
+# ensure-pr-staging-images.sh's fail-closed guard, instead of being silently
+# backfilled from the base channel/commit -- the same #626 stale-content bug
+# class dhcp/dhcp_proxy were fixed for in #1305. See that script's own
+# full_setup_services=(...) comment for why ntp itself now belongs in the
+# full-setup service list.
 #
 # SOURCE OF TRUTH NOTE: the path-to-service rules mirror the classifier
 # build-push.yml's `detect-changes` job runs. As of #819 that job no longer
@@ -124,6 +132,7 @@ emit() {
     output_bool "watchdog" touches_prefix "services/watchdog/"
     output_bool "dhcp" touches_prefix "services/dhcp/"
     output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
+    output_bool "ntp" touches_prefix "services/ntp/"
     output_bool "build_tools" touches_prefix "tools/build-tools/"
     output_bool "deploy" touches_prefix "deploy/"
     output_bool "scripts" touches_prefix "scripts/"
