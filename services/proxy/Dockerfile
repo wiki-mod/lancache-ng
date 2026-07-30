@@ -27,6 +27,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
+    # curl and gnupg (which pulls in dirmngr/gpg/gpg-agent/gpgconf/gpgsm/
+    # gnupg-l10n) are needed ONLY to fetch and dearmor nginx.org's signing key
+    # above, before the apt source it authenticates even exists. Nothing at
+    # runtime (entrypoint.sh, nginx itself) invokes curl or any gnupg binary --
+    # verified by inspecting entrypoint.sh's full command surface. Purging
+    # them here, in the same layer they were installed in, removes 8 real
+    # Trivy HIGH findings (curl's 7 CVEs, shared with libcurl4t64; the
+    # gnupg-family's 1 shared CVE across 6 packages) from the final image
+    # instead of merely suppressing them -- and because purge+autoremove runs
+    # in the same RUN/layer as the install, the removed files never persist in
+    # any image layer (no size cost from installing then removing later).
+    # --auto-remove also sweeps up now-orphaned dependents (dirmngr, gpg,
+    # gpg-agent, gpgconf, gpgsm, gnupg-l10n, libcurl4t64) that were pulled in
+    # automatically and are no longer needed by anything still installed.
+    # ca-certificates and openssl are kept: both are genuinely needed at
+    # runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's CA/
+    # cert generation via openssl, and the system trust store for whatever
+    # nginx itself needs).
+    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
