@@ -688,7 +688,16 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
-        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
+        # Subject CN is a fixed, short placeholder, not the real hostname:
+        # OpenSSL's default policy caps commonName at 64 bytes
+        # (ASN1_mbstring_ncopy rejects longer values with "string too long"),
+        # but _is_valid_domain allows domains up to 253 bytes -- a deep
+        # wildcard base or exact host past 64 bytes would otherwise fail
+        # `openssl req -new` outright and abort startup. TLS clients validate
+        # against subjectAltName, not CN (RFC 6125 / CA/Browser Forum
+        # baseline), so the real hostname belongs only in $ext's SAN, which
+        # has no such length limit here.
+        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=lancache-ng" \
             -keyout "$key" -out /tmp/lancache-cert.csr; then
             rm -f /tmp/lancache-cert.csr
             echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
@@ -719,6 +728,21 @@ if [ "${SSL_ENABLED}" = "1" ]; then
             fi
         fi
         rm -f /tmp/lancache-cert.csr
+    }
+
+    # Deterministic, length-bounded cert/key filename for a domain that may
+    # be up to 253 bytes long (_is_valid_domain's own limit) -- well past
+    # Linux's 255-byte NAME_MAX once combined with any ".crt"/".key"
+    # suffix, and past it even sooner for the exact-host case's extra
+    # ".exact-host" text. $2 (a short namespace tag, e.g. "wildcard"/
+    # "exact") keeps a bare and a leading-dot cdn-domains.txt entry for the
+    # same base resolving to two DIFFERENT names, matching this file's own
+    # existing requirement that those need two distinct certs. The real
+    # hostname is never lost -- it lives in each cert's SAN (see
+    # _sign_cert above) and in the nginx maps that select a cert by
+    # hostname, neither of which has an equivalent filesystem constraint.
+    _bounded_cert_name() {
+        printf '%s' "${2}:${1}" | sha256sum | cut -c1-32
     }
 
     # Returns 0 (true = needs regen) if the default cert:
@@ -774,12 +798,13 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     # declaration above) -- SAN is wildcard-only, no bare DNS: entry, since a
     # leading-dot cdn-domains.txt entry never covers its own bare form either.
     for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
-        [ -f "$CERT_DIR/${domain}.crt" ] && [ -f "$CERT_DIR/${domain}.key" ] && continue
+        cert_name="$(_bounded_cert_name "$domain" wildcard)"
+        [ -f "$CERT_DIR/${cert_name}.crt" ] && [ -f "$CERT_DIR/${cert_name}.key" ] && continue
 
         echo "[lancache] Generating deeper wildcard cert for *.$domain..."
         if ! _sign_cert "$domain" \
-            "$CERT_DIR/${domain}.key" \
-            "$CERT_DIR/${domain}.crt" \
+            "$CERT_DIR/${cert_name}.key" \
+            "$CERT_DIR/${cert_name}.crt" \
             "subjectAltName=DNS:*.${domain}"; then
             echo "[lancache] ERROR: Failed to generate certificate for *.$domain" >&2
             exit 1
@@ -788,20 +813,20 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     # One additional cert per deeper bare/exact host (see _EXTRA_EXACT_HOSTS'
     # declaration above) -- SAN is the exact hostname only, no wildcard,
     # since a bare cdn-domains.txt entry matches only that literal host.
-    # File name uses an ".exact-host" suffix, NOT the bare domain string:
-    # cdn-domains.txt can legally list both "x.cdn.ea.com" (bare) and
-    # ".x.cdn.ea.com" (wildcard) as separate entries for the same base --
-    # those need two DIFFERENT certs (one exact-only SAN, one wildcard-only
-    # SAN), and without distinct file names the second one generated would
-    # see the first's file already present and skip, silently leaving one
-    # of the two SANs missing.
+    # File name comes from _bounded_cert_name's "exact" namespace, NOT the
+    # bare domain string: cdn-domains.txt can legally list both
+    # "x.cdn.ea.com" (bare) and ".x.cdn.ea.com" (wildcard) as separate
+    # entries for the same base -- those need two DIFFERENT certs (one
+    # exact-only SAN, one wildcard-only SAN), and the "exact"/"wildcard"
+    # namespace tag keeps their hashed names from colliding.
     for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
-        [ -f "$CERT_DIR/${domain}.exact-host.crt" ] && [ -f "$CERT_DIR/${domain}.exact-host.key" ] && continue
+        cert_name="$(_bounded_cert_name "$domain" exact)"
+        [ -f "$CERT_DIR/${cert_name}.crt" ] && [ -f "$CERT_DIR/${cert_name}.key" ] && continue
 
         echo "[lancache] Generating deeper exact-match cert for $domain..."
         if ! _sign_cert "$domain" \
-            "$CERT_DIR/${domain}.exact-host.key" \
-            "$CERT_DIR/${domain}.exact-host.crt" \
+            "$CERT_DIR/${cert_name}.key" \
+            "$CERT_DIR/${cert_name}.crt" \
             "subjectAltName=DNS:${domain}"; then
             echo "[lancache] ERROR: Failed to generate certificate for $domain" >&2
             exit 1
@@ -837,14 +862,13 @@ fi
     # under one of these deeper bases (e.g. x.cdn.ea.com) resolves here
     # instead of to its root's cert, which would not validate for it.
     for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
-        printf "    %-45s %s;\n" "*.${domain}" "$domain"
+        printf "    %-45s %s;\n" "*.${domain}" "$(_bounded_cert_name "$domain" wildcard)"
     done
     # Exact-host entries (see _EXTRA_EXACT_HOSTS' declaration above) map the
-    # literal hostname to its dedicated ".exact-host"-suffixed cert -- no
-    # "*."-prefix key, since a bare cdn-domains.txt entry is never a
-    # wildcard match.
+    # literal hostname to its dedicated cert -- no "*."-prefix key, since a
+    # bare cdn-domains.txt entry is never a wildcard match.
     for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
-        printf "    %-45s %s;\n" "$domain" "${domain}.exact-host"
+        printf "    %-45s %s;\n" "$domain" "$(_bounded_cert_name "$domain" exact)"
     done
     echo "    default default;"
     echo "}"
@@ -901,7 +925,14 @@ mkdir -p /etc/nginx/stream.d
             fi
         done
         for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
-            printf "    %-45s %s:443;\n" "*.${domain}" "$domain"
+            # Forward to the requested SNI itself, NOT to "$domain:443" --
+            # unlike a registrable root (_UNIQUE_DOMAINS above), a deeper
+            # wildcard base is a cert-selection boundary, not necessarily a
+            # real, independently resolvable host: passthrough must reach
+            # whatever the client actually asked for (e.g. ftp.de.debian.org),
+            # not the wildcard base's own name (de.debian.org), which may
+            # have no DNS record or point at an unrelated endpoint.
+            printf "    %-45s \$ssl_preread_server_name:443;\n" "*.${domain}"
         done
         for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
             printf "    %-45s %s:443;\n" "$domain" "$domain"

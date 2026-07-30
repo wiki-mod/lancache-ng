@@ -108,7 +108,7 @@ setup() {
     [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
 }
 
-@test "_collect_domain_rows deduplicates repeated extra wildcard bases" {
+@test "_collect_domain_rows collects distinct extra wildcard bases" {
     _registrable_domain() {
         case "$1" in
             cdn.ea.com) printf 'ea.com' ;;
@@ -124,6 +124,23 @@ setup() {
     [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 2 ]
     [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
     [ "${_EXTRA_WILDCARD_BASES[1]}" = "secure.dyn.riotcdn.net" ]
+}
+
+# Distinct from the test above: this feeds the SAME base twice (once via a
+# leading-dot entry, once as a descendant of that same base under a
+# different entry), which is the actual duplicate-key case
+# _SEEN_EXTRA_WILDCARD_BASE exists to guard against -- a duplicate wildcard
+# map key makes nginx reject the generated stream/https config outright, so
+# a regression here is a real startup failure, not just a cosmetic one.
+@test "_collect_domain_rows deduplicates a genuinely repeated extra wildcard base" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
 }
 
 @test "_collect_domain_rows tracks a deep bare entry as an extra exact host" {
