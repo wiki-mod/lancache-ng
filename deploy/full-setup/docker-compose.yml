@@ -362,7 +362,7 @@ services:
           # go through the callout. Issue #681: this includes validation-nats-sys
           # (the SYS account's own static user, defined in the accounts{} block
           # above) even though it lives in a different account than the other
-          # four -- auth_callout interception is server-wide, not scoped to $G
+          # four -- auth_callout interception is server-wide, not scoped to $$G
           # (confirmed the hard way: omitting it here made every system-account
           # connection attempt fall through to the callout instead of matching
           # its own static credential, denying nats_kick.rs's own connection
