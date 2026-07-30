@@ -11,7 +11,34 @@ FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# trixie-backports is the standard package source for this image, not an
+# opt-in exception: pin it to the same priority (500) as the regular trixie
+# archive so ordinary version-comparison rules pick whichever is newer,
+# instead of the Debian-default backports pin (100, install-only-if-
+# explicitly-requested-via-`-t`). Concrete reason this exists: curl's 7 real
+# Trivy HIGH findings in plain trixie (8.14.1-2+deb13u4) are already fixed
+# upstream in curl 8.21.0 (confirmed against curl.se's own per-CVE data,
+# 2026-07-30) -- and trixie-backports already carries exactly that version
+# (8.21.0-2~bpo13+1). Debian's own security tracker (which Trivy's DB reads
+# for Debian packages) had simply not caught up to reflect the backports
+# package as fixed; the backports package itself already contains the fix.
+# The pin selector below MUST use `a=stable-backports`, not
+# `a=trixie-backports`: APT's `a=`/release-Archive selector matches the
+# Release file's `Suite:` field, and trixie-backports' own Release file
+# declares `Suite: stable-backports` / `Codename: trixie-backports` -- the
+# two are not interchangeable. A first version of this pin used
+# `a=trixie-backports` and silently never matched anything (apt-cache
+# policy still showed backports at its Debian-default priority 100),
+# so every "backports-sourced" package silently stayed on the vulnerable
+# plain-trixie version despite the pin file being present -- caught only by
+# building the image for real and checking the installed curl version
+# rather than trusting the Dockerfile comment.
+RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
+    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
+    && apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get full-upgrade -y \
+    && apt-get install -y --no-install-recommends \
     gnupg \
     curl \
     ca-certificates \
@@ -25,31 +52,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     lsof \
     ripgrep \
-    wget \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
-    # curl and gnupg (which pulls in dirmngr/gpg/gpg-agent/gpgconf/gpgsm/
-    # gnupg-l10n) are needed ONLY to fetch and dearmor nginx.org's signing key
-    # above, before the apt source it authenticates even exists. Nothing at
-    # runtime (entrypoint.sh, nginx itself) invokes curl or any gnupg binary --
-    # verified by inspecting entrypoint.sh's full command surface. Purging
-    # them here, in the same layer they were installed in, removes 8 real
-    # Trivy HIGH findings (curl's 7 CVEs, shared with libcurl4t64; the
-    # gnupg-family's 1 shared CVE across 6 packages) from the final image
-    # instead of merely suppressing them -- and because purge+autoremove runs
-    # in the same RUN/layer as the install, the removed files never persist in
-    # any image layer (no size cost from installing then removing later).
-    # --auto-remove also sweeps up now-orphaned dependents (dirmngr, gpg,
-    # gpg-agent, gpgconf, gpgsm, gnupg-l10n, libcurl4t64) that were pulled in
-    # automatically and are no longer needed by anything still installed.
-    # ca-certificates and openssl are kept: both are genuinely needed at
-    # runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's CA/
-    # cert generation via openssl, and the system trust store for whatever
-    # nginx itself needs). wget is added here, in the runtime install list,
-    # to replace curl for deploy/{prod,quickstart,full-setup}'s container
-    # healthcheck probes (a real dependency this PR's first pass missed --
-    # purging curl broke every proxy healthcheck, which shells out to it).
-    && apt-get purge -y --auto-remove curl gnupg \
+    # gnupg (which pulls in dirmngr/gpg/gpg-agent/gpgconf/gpgsm/gnupg-l10n)
+    # is needed ONLY to fetch and dearmor nginx.org's signing key above,
+    # before the apt source it authenticates even exists -- purged here, in
+    # the same layer it was installed in, so it never persists in any image
+    # layer. curl is KEPT: deploy/{prod,quickstart,full-setup}'s container
+    # healthcheck probes genuinely shell out to it at runtime (confirmed by
+    # docs/bug-hunt/proxy.md's own prior audit and
+    # docs/capability-inventory/SoT-proxy.md's Compose-wiring section) --
+    # purging it, as this PR's first two passes did, breaks every proxy
+    # healthcheck. curl's own CVEs are handled by pulling curl from
+    # trixie-backports (see this block's own pin-priority setup above),
+    # not by removing curl or swapping it for a different tool.
+    # ca-certificates and openssl are also kept: both are genuinely needed
+    # at runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's
+    # CA/cert generation via openssl, and the system trust store for
+    # whatever nginx itself needs).
+    && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
