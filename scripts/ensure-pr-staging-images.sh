@@ -205,15 +205,25 @@ base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15
 
 # The services deploy/full-setup/docker-compose.yml references, plus
 # build-tools (used by the client-simulation steps, not the compose file
-# itself). dhcp and dhcp-proxy are intentionally NOT here: they are not part
-# of the full-setup compose project. dhcp gets its real coverage from the
-# from-source dhcp-kea-lease-flow simulation; dhcp-proxy has no deep job yet
-# (tracked in #705) and so still has no coverage here -- calling it out
-# rather than pretending the compose-service list covers it. ntp is excluded
-# for the same reason: deploy/full-setup/docker-compose.yml has no ntp
-# service either, and this new service has no dedicated full-setup coverage
-# job yet.
-full_setup_services=(proxy dns watchdog ui build-tools)
+# itself), plus dhcp and dhcp-proxy (#1296): neither is part of the
+# full-setup COMPOSE PROJECT (deploy/full-setup/docker-compose.yml has
+# neither service), but both are pulled directly by
+# scripts/syslog-forwarding-simulation.sh's Triggers 7/8 (real DHCP lease
+# flows over deploy/quickstart/docker-compose.yml, added by #864) -- this
+# script's job is "ensure every staging image any deep-validation job in
+# this workflow needs," not "ensure exactly what full-setup's own compose
+# file needs," so both belong here despite the name. Confirmed live
+# (2026-07-30, issue #1296): PRs #1277/#1294/#1301, none of which touched
+# dhcp/dhcp-proxy, still failed "Syslog forwarding + Admin UI visibility
+# simulation" with `Error manifest unknown` for both images, because this
+# list never ensured (or base-channel-backfilled) either tag. dhcp
+# additionally still gets its own from-source coverage via the separate
+# dhcp-kea-lease-flow-simulation.sh job; that job is unaffected by this
+# change. ntp remains excluded: no simulation in this workflow pulls an
+# ntp image yet (confirmed against scripts/syslog-forwarding-simulation.sh's
+# full trigger list, 8/8, none of them ntp) -- add it here too the day one
+# does, following this same reasoning, not preemptively.
+full_setup_services=(proxy dns watchdog ui build-tools dhcp dhcp-proxy)
 
 declare -A touched_map=(
     [proxy]="${PROXY_TOUCHED:-false}"
@@ -221,6 +231,8 @@ declare -A touched_map=(
     [watchdog]="${WATCHDOG_TOUCHED:-false}"
     [ui]="${UI_TOUCHED:-false}"
     [build-tools]="${BUILD_TOOLS_TOUCHED:-false}"
+    [dhcp]="${DHCP_TOUCHED:-false}"
+    [dhcp-proxy]="${DHCP_PROXY_TOUCHED:-false}"
 )
 
 # Indirection so tests can stub the registry probe without a real daemon.
