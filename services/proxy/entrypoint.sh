@@ -931,7 +931,11 @@ mkdir -p /etc/nginx/stream.d
             # real, independently resolvable host: passthrough must reach
             # whatever the client actually asked for (e.g. ftp.de.debian.org),
             # not the wildcard base's own name (de.debian.org), which may
-            # have no DNS record or point at an unrelated endpoint.
+            # have no DNS record or point at an unrelated endpoint. The
+            # registrable-root loop above has this same class of bug for its
+            # own case (a listed drivers.amd.com forwards to amd.com:443, not
+            # drivers.amd.com:443) -- confirmed separately, tracked as issue
+            # #1297, not fixed here (out of this change's scope).
             printf "    %-45s \$ssl_preread_server_name:443;\n" "*.${domain}"
         done
         for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do

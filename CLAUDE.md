@@ -78,8 +78,17 @@ by configuring which DNS server IP they point to:
   get the proxy's own IP and loop. nginx reads `Host`/`$ssl_server_name` directly, which is
   exactly what a DNS-spoofed client provides.
 - **Pre-generated wildcard certs**: At startup, `entrypoint.sh` generates one 2048-bit cert
-  per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA. nginx selects
-  the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
+  per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA, plus an
+  additional cert per deeper leading-dot wildcard base or bare exact host that
+  `cdn-domains.txt` lists more than one label past its registrable root (issue #1272,
+  e.g. `.a.b.cdn.example.com` gets its own `*.a.b.cdn.example.com`-only cert). Every
+  generated cert's subject CN is a fixed placeholder (`lancache-ng`), never the real
+  hostname — OpenSSL's default CN policy caps it at 64 bytes, well under the 253-byte
+  domains `cdn-domains.txt` can otherwise contain; the real hostname lives only in each
+  cert's SAN, which TLS clients validate against per RFC 6125. Cert/key filenames for
+  these deeper entries are a namespaced SHA-256 hash of the hostname, not the hostname
+  itself, to stay under Linux's 255-byte filename limit. nginx selects the cert via
+  `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
 - **[AG-KD-001]** **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
   not our PowerDNS recursor. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
