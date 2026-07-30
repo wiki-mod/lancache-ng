@@ -133,6 +133,8 @@ jobs:
       watchdog: ${{ steps.plan.outputs.watchdog }}
       ui: ${{ steps.plan.outputs.ui }}
       build_tools: ${{ steps.plan.outputs.build_tools }}
+      dhcp: ${{ steps.plan.outputs.dhcp }}
+      dhcp_proxy: ${{ steps.plan.outputs.dhcp_proxy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -218,6 +220,8 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs.plan.outputs.watchdog }}
           UI_TOUCHED: ${{ needs.plan.outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
+          DHCP_TOUCHED: ${{ needs.plan.outputs.dhcp }}
+          DHCP_PROXY_TOUCHED: ${{ needs.plan.outputs.dhcp_proxy }}
           # #808/#1254/#1255: this PR's own base commit. Needed both to prove
           # the back-fill source image was actually built from it (or later)
           # before backfilling an untouched service, AND (since #1254/#1255)
