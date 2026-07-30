@@ -126,3 +126,50 @@ setup() {
     run validate_ntp_config "$target"
     [ "$status" -eq 0 ]
 }
+
+# Issue #1318: a stale pidfile left behind by a previously crashed chronyd
+# instance (in the SAME container -- restart: always re-execs this
+# entrypoint against the same writable filesystem, /run included) must not
+# survive into the next start attempt, or chronyd fails a second time with
+# a misleading "Another chronyd may already be running" error instead of
+# retrying cleanly. Real-repeat-crash-style proof: simulates exactly that
+# sequence -- a pidfile written by a "previous" crashed instance, present
+# on disk before this function ever runs -- and asserts it's gone
+# afterward, the same convergence property issue #456's checklist expects
+# of any stateful write path this entrypoint touches.
+@test "cleanup_stale_ntp_pidfile removes a pidfile left behind by a previously crashed instance" {
+    stale_pidfile="$BATS_TEST_TMPDIR/chronyd.pid"
+    echo "1" > "$stale_pidfile"
+    [ -f "$stale_pidfile" ]
+
+    cleanup_stale_ntp_pidfile "$stale_pidfile"
+
+    [ ! -f "$stale_pidfile" ]
+}
+
+# Repeating the cleanup (mirroring a second, third, ... crash-then-restart
+# cycle) must stay a no-op rather than erroring -- `rm -f` already gives
+# this for free, but this test makes the idempotence property an explicit,
+# checked assertion rather than an implicit side effect of the flag choice.
+@test "cleanup_stale_ntp_pidfile is idempotent across repeated calls with no pidfile present" {
+    missing_pidfile="$BATS_TEST_TMPDIR/does-not-exist/chronyd.pid"
+    [ ! -f "$missing_pidfile" ]
+
+    run cleanup_stale_ntp_pidfile "$missing_pidfile"
+    [ "$status" -eq 0 ]
+    run cleanup_stale_ntp_pidfile "$missing_pidfile"
+    [ "$status" -eq 0 ]
+}
+
+# Confirms the default argument (chrony's real, confirmed-live default
+# pidfile path -- see cleanup_stale_ntp_pidfile's own comment in
+# entrypoint.sh) is what gets used when no explicit path is passed, the
+# same shape the real (non-test) call site in entrypoint.sh relies on.
+# Reads the loaded function's own body (via `type`) rather than calling it
+# with no argument against the real /run/chrony/chronyd.pid path, which
+# would require root/real filesystem access this test sandbox doesn't need.
+@test "cleanup_stale_ntp_pidfile defaults to chrony's real pidfile path when called with no argument" {
+    run type cleanup_stale_ntp_pidfile
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/run/chrony/chronyd.pid"* ]]
+}
