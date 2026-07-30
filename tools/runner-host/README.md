@@ -27,16 +27,29 @@ sudo tail -n 40 /var/log/lancache-ci-cleanup.log
 
 ## What it does (measure → clean → re-measure)
 1. records disk usage on `/` before cleanup;
-2. reaps **running** build-tools-image containers older than
-   `REAP_BUILD_TOOLS_AFTER_HOURS` (default 2h) — a build-tools container alive
-   for hours is an orphaned/hung CI job (the 2026-07-25 actionlint-deadlock leak
-   class; the SIGKILL guard fixes the source, this is defense-in-depth);
+2. reaps **running** containers of specific known leak-prone kinds, each past
+   its own age threshold — a container of any of these kinds alive that long
+   is an orphaned/hung/crashed CI job whose own teardown step never ran
+   (normal runs of any of these complete in minutes, not hours):
+   - build-tools-image containers, `REAP_BUILD_TOOLS_AFTER_HOURS` (default 2h)
+     — the 2026-07-25 actionlint-deadlock leak class; the SIGKILL guard fixes
+     the source, this is defense-in-depth;
+   - `lancache-ng-validation-*` containers, `REAP_VALIDATION_AFTER_HOURS`
+     (default 2h) — full-setup-deep-validate compose stacks left running
+     after a cancelled/crashed job never reached its own `docker compose down`;
+   - `buildx_buildkit_builder-*` containers, `REAP_BUILDX_BUILDER_AFTER_HOURS`
+     (default 3h) — buildx builders left running after a cancelled/crashed
+     job never reached its own `docker buildx rm` (confirmed 2026-07-30: 19
+     orphaned containers, mostly these last two kinds, had accumulated on one
+     host over 6 days undetected, since neither kind was covered before);
 3. prunes stopped containers, build cache, unused images, and unreferenced
    anonymous volumes;
 4. re-measures and logs the reclaimed delta, so a run that reclaimed nothing is
    visible instead of assumed successful.
 
 Tunables (env): `REAP_BUILD_TOOLS_AFTER_HOURS`, `BUILD_TOOLS_IMAGE_MATCH`,
+`REAP_VALIDATION_AFTER_HOURS`, `VALIDATION_NAME_MATCH`,
+`REAP_BUILDX_BUILDER_AFTER_HOURS`, `BUILDX_BUILDER_NAME_MATCH`,
 `LANCACHE_CI_CLEANUP_LOG`.
 
 ## Related, not done here (needs maintainer go — a daemon restart)
