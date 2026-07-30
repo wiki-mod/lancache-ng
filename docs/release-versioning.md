@@ -80,14 +80,16 @@ Either path runs build-push.yml's full pipeline (build, test, scan, then
 fail-closed by construction: `promote` only runs `needs: merge-manifests`
 after the build/scan jobs succeed, so a broken `current_dev` tip simply never
 reaches `promote` and `nightly` holds its last good state instead of being
-force-moved onto a red commit. One accepted gap: GitHub's `schedule:` trigger
+force-moved onto a red commit. One known gap: GitHub's `schedule:` trigger
 only ever fires from a workflow file as it exists on the repository's default
 branch (`master`), so the daily cron does not actually start firing until
 `nightly-refresh.yml` itself has been merged to `master` -- until then (and
 whenever it lags `current_dev` afterward), `nightly` refreshes only via
-manual dispatch. This is accepted rather than solved here, the same way
-`build-push.yml`'s own daily `latest` schedule already documents an identical
-GitHub limitation as a "KNOWN GAP" comment. This change does not affect
+manual dispatch. Per AG-CI-019 (AGENTS.md), this gap is not treated as a
+long-term accepted tradeoff: it must reach `master` via its own dedicated
+sync PR in reasonably short order, the same way `build-push.yml`'s own daily
+`latest` schedule shares this identical GitHub limitation and the same
+sync obligation. This change does not affect
 #808's untouched-service PR backfill correctness guarantee: that mechanism no
 longer depends on `nightly` staying continuously fresh at all -- see the
 Promotion section below.
