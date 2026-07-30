@@ -277,18 +277,44 @@ RUN --mount=type=secret,id=sccache_redis_url \
     && run_cargo_build \
     && rm -rf src
 
-# This first build only had a throwaway `fn main() {}`, so it compiled every
-# dependency crate but nothing from `src/`. Because only Cargo.toml/Cargo.lock
-# were COPYed before that RUN, Docker's layer cache can reuse the compiled
-# dependency artifacts here even when application source changes on every
-# commit — only this second, real build (after copying the actual `src/`)
-# reruns when the app code changes. The sccache/distcc setup, wrapper checks,
-# and fallback logic in the RUN block below are otherwise identical to the
-# one above for the same acceleration to apply to both builds.
+# This first build only had a throwaway `fn main() {}`/empty `lib.rs`, so it
+# compiled every dependency crate (and a stub `liblancache_ui.rlib`) but
+# nothing real from `src/`. Because only Cargo.toml/Cargo.lock were COPYed
+# before that RUN, Docker's layer cache can reuse the compiled dependency
+# artifacts here even when application source changes on every commit — only
+# this second, real build (after copying the actual `src/`) reruns when the
+# app code changes. The sccache/distcc setup, wrapper checks, and fallback
+# logic in the RUN block below are otherwise identical to the one above for
+# the same acceleration to apply to both builds.
 COPY src ./src
 # Same helper functions as the pre-cache RUN above (configure_sccache, configure_distcc,
 # disable_distcc, resolve_distcc_wrapper_dir, resolve_cargo_jobs, run_cargo_build), this
 # time building the real sources instead of the throwaway `fn main() {}` stub.
+#
+# `cargo clean -p lancache-ui --release` (issue: `lancache_ui::kea_response_parse`/
+# `lancache_ui::netdata_url` unresolved-import failures on every build): COPY
+# preserves each file's original mtime from the build context (the runner's
+# git checkout), not "now". Those checkout mtimes are consistently OLDER than
+# the `liblancache_ui.rlib` the pre-cache RUN above just compiled from the
+# throwaway empty `lib.rs` a few Dockerfile instructions ago -- confirmed by
+# directly comparing `stat` timestamps inside the builder stage: every real
+# `src/*.rs` file (including `lib.rs`, `kea_response_parse.rs`, `netdata_url.rs`)
+# was ~4-5 minutes older than that cached rlib. Cargo's unit-freshness check
+# for the `[lib]` target is mtime-based: source mtime <= cached-artifact mtime
+# reads as "unchanged", so cargo reused the stale, empty-stub rlib instead of
+# recompiling `src/lib.rs`. Two prior fix attempts relied on bumping mtimes
+# instead of removing the stale artifact outright: `touch src/main.rs` alone
+# (forces a `[[bin]]` rebuild, but the bin then links against the still-stale
+# lib rlib -- exactly the `E0432` failure this fixes), and
+# `find src -type f -exec touch {} +` (works, but relies on Cargo's mtime
+# comparison remaining the deciding factor, which is an implementation detail
+# rather than a documented contract). `cargo clean -p lancache-ui --release`
+# instead removes this package's own previously-built lib/bin artifacts
+# unconditionally -- Cargo then has no stale rlib to fall back to regardless
+# of mtimes, so it must recompile `lib.rs` and its modules for real. `-p` scopes
+# the clean to this package only, leaving every dependency's cached rlib in
+# `target/release/deps/` untouched, so the pre-cache stage's whole point
+# (skip recompiling third-party crates) is preserved.
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
@@ -442,7 +468,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    touch src/main.rs \
+    cargo clean -p lancache-ui --release \
     && run_cargo_build
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
