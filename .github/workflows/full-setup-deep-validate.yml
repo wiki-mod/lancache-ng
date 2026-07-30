@@ -135,6 +135,7 @@ jobs:
       build_tools: ${{ steps.plan.outputs.build_tools }}
       dhcp: ${{ steps.plan.outputs.dhcp }}
       dhcp_proxy: ${{ steps.plan.outputs.dhcp_proxy }}
+      ntp: ${{ steps.plan.outputs.ntp }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -222,6 +223,12 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
           DHCP_TOUCHED: ${{ needs.plan.outputs.dhcp }}
           DHCP_PROXY_TOUCHED: ${{ needs.plan.outputs.dhcp_proxy }}
+          # #1296 (2026-07-30): ntp joins the touched map the same way
+          # dhcp/dhcp-proxy did in #1305 -- ensure-pr-staging-images.sh now
+          # includes ntp in full_setup_services, so a PR that actually
+          # touches services/ntp/ must be treated as touched here too,
+          # rather than silently backfilled from the base commit.
+          NTP_TOUCHED: ${{ needs.plan.outputs.ntp }}
           # #808/#1254/#1255: this PR's own base commit. Needed both to prove
           # the back-fill source image was actually built from it (or later)
           # before backfilling an untouched service, AND (since #1254/#1255)
@@ -296,6 +303,54 @@ jobs:
       pr_staging_available: ${{ needs.plan.outputs.pr_staging_available }}
       build_tools_touched: ${{ needs.plan.outputs.build_tools }}
     secrets: inherit
+
+  ntp-cap-sys-time-simulation:
+    # Real end-to-end proof for issue #1296 (completing the 3-of-3 full-setup
+    # deep-validation ask -- dhcp/dhcp-proxy landed via #1305) that the real
+    # `ntp` (chrony) image genuinely disciplines the system clock, not merely
+    # that its container starts. See scripts/ntp-cap-sys-time-simulation.sh's
+    # own header for the full design and proof technique.
+    #
+    # GITHUB-HOSTED, NOT SELF-HOSTED: confirmed live (2026-07-30) that every
+    # host in this project's self-hosted runner fleet is itself an LXC
+    # container, and LXC withholds CAP_SYS_TIME from nested Docker containers
+    # by design, regardless of `cap_add: SYS_TIME` -- reproduced with a plain
+    # `alpine` container, independent of the ntp image or any compose config.
+    # `ntp` was never exercised by this project's automated CI before this
+    # investigation, so this was a first-contact finding, not a regression.
+    # Maintainer decision (#1296, presented three options: accept-and-document
+    # the gap, a liveness-only `-x` opt-in, or a GitHub-hosted runner): this
+    # one, since it is the only option proving real clock discipline rather
+    # than daemon liveness. `ubuntu-24.04` is a real VM, not LXC-nested --
+    # confirmed directly before this job was written (a scratch
+    # workflow-triggered probe, since removed, proved a plain `alpine`
+    # container's `date -s` there actually moves the runner's real system
+    # clock, unlike every self-hosted host).
+    #
+    # Deliberately does NOT use the self-hosted-only reserved-validation-
+    # subnet machinery (scripts/lib/run-in-validation-subnet.sh) the other
+    # simulations here need: this test stands up exactly one isolated
+    # container via a plain `docker run`, with no compose stack, no shared
+    # network, and no host-port publish at all -- there is nothing here that
+    # could collide with a concurrent run the way a shared self-hosted pool's
+    # port-bound services could, so that whole isolation mechanism (built for
+    # a different problem) does not apply.
+    name: ntp CAP_SYS_TIME / clock-discipline simulation
+    needs: [plan, ensure-pr-staging-images]
+    if: >-
+      always() &&
+      needs.plan.outputs.should_run == 'true' &&
+      needs['ensure-pr-staging-images'].result != 'failure' &&
+      needs['ensure-pr-staging-images'].result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run ntp CAP_SYS_TIME / clock-discipline simulation
+        env:
+          REPOSITORY: ${{ github.repository }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+        run: bash scripts/ntp-cap-sys-time-simulation.sh
 
   dns-zone-rollback-simulation:
     # Real end-to-end test (#628) of the PowerDNS zone/record known-good
@@ -586,6 +641,7 @@ jobs:
       - plan
       - ensure-pr-staging-images
       - full-setup-sims
+      - ntp-cap-sys-time-simulation
       - dns-zone-rollback-simulation
       - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
@@ -611,6 +667,7 @@ jobs:
           # faithful pass/fail for the whole shared set; GitHub's checks UI still
           # lists each inner job so a failure is attributable.
           FULL_SETUP_SIMS_RESULT: ${{ needs['full-setup-sims'].result }}
+          NTP_CAP_SYS_TIME_RESULT: ${{ needs['ntp-cap-sys-time-simulation'].result }}
           DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
           UI_KEA_ROLLBACK_RESULT: ${{ needs['dhcp-kea-ui-rollback-simulation'].result }}
           SYSLOG_FORWARDING_RESULT: ${{ needs['syslog-forwarding-simulation'].result }}
@@ -655,6 +712,7 @@ jobs:
           }
           echo "Deep validation job results:"
           check "ensure-pr-staging-images" "$ENSURE_RESULT"
+          check "ntp-cap-sys-time-simulation" "$NTP_CAP_SYS_TIME_RESULT"
           check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
           check "dhcp-kea-ui-rollback-simulation" "$UI_KEA_ROLLBACK_RESULT"
           check "syslog-forwarding-simulation" "$SYSLOG_FORWARDING_RESULT"

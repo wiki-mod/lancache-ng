@@ -219,11 +219,24 @@ base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15
 # list never ensured (or base-channel-backfilled) either tag. dhcp
 # additionally still gets its own from-source coverage via the separate
 # dhcp-kea-lease-flow-simulation.sh job; that job is unaffected by this
-# change. ntp remains excluded: no simulation in this workflow pulls an
-# ntp image yet (confirmed against scripts/syslog-forwarding-simulation.sh's
-# full trigger list, 8/8, none of them ntp) -- add it here too the day one
-# does, following this same reasoning, not preemptively.
-full_setup_services=(proxy dns watchdog ui build-tools dhcp dhcp-proxy)
+# change.
+#
+# ntp (#1296, 2026-07-30, completing the 3-of-3 this issue originally asked
+# for): now included too. scripts/syslog-forwarding-simulation.sh starts it
+# (via --profile ntp, the same explicit-profile pattern already used for
+# dhcp-kea/dhcp-proxy above) and verifies its real Docker HEALTHCHECK
+# (chronyd's chronyc-tracking probe) the same way it verifies every other
+# service's healthcheck -- a genuine consumer, not a name added to this list
+# with nothing exercising it. ntp's own log-forwarding-to-Admin-UI path is a
+# SEPARATE, already-documented, deliberately-deferred gap
+# (docs/architecture-ng.md's logging matrix: "ntp | Not yet wired"), so
+# unlike every other service in that script's trigger list, ntp is proven via
+# real container start + healthcheck, not a marker-in-/logs assertion --
+# fabricating that proof would misrepresent a log path that does not exist
+# yet. This is the same "add it here too the day one does" reasoning this
+# comment previously applied to dhcp/dhcp-proxy, now exercised for ntp
+# instead of left as a standing exclusion.
+full_setup_services=(proxy dns watchdog ui build-tools dhcp dhcp-proxy ntp)
 
 declare -A touched_map=(
     [proxy]="${PROXY_TOUCHED:-false}"
@@ -233,6 +246,7 @@ declare -A touched_map=(
     [build-tools]="${BUILD_TOOLS_TOUCHED:-false}"
     [dhcp]="${DHCP_TOUCHED:-false}"
     [dhcp-proxy]="${DHCP_PROXY_TOUCHED:-false}"
+    [ntp]="${NTP_TOUCHED:-false}"
 )
 
 # Indirection so tests can stub the registry probe without a real daemon.
