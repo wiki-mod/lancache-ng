@@ -21,6 +21,30 @@
 # normally absorbed by a client-side retry; build-tools.yml's local scan
 # builds had none.
 #
+# Second confirmed transient signature (2026-07-29, a current_dev
+# Build & Push run's `coverage (Rust)` job):
+#
+#   panic: methodref has no signature
+#
+# A genuine Go compiler/toolchain-internal panic, surfaced inside
+# tools/build-tools/Dockerfile's actionlint-builder stage while building
+# docker-buildx/docker-cli/docker-compose from source. That stage
+# deliberately uses `FROM golang:latest` (and the image's final stage
+# `FROM rust:latest`) rather than a pinned digest -- an intentional,
+# documented exception to this project's general image-pinning policy (see
+# docs/ci-image-pinning-policy.md and this Dockerfile's own top-of-file
+# comment), so that CI/developer validation always sees current Go/Rust
+# tooling without needing manual pin-bump PRs. That freshness has a real
+# cost: an unpinned upstream toolchain can occasionally hit an internal
+# compiler bug tied to a specific, transient version snapshot -- confirmed
+# non-reproducible: a from-scratch `--no-cache` rebuild of the identical,
+# unmodified Dockerfile on a self-hosted runner immediately afterward
+# succeeded cleanly with no panic. Reverting to a pinned digest would trade
+# away the "always current" property this Dockerfile explicitly chose
+# (maintainer decision, 2026-07-29); retrying here preserves that choice
+# while absorbing this specific, rare toolchain-version-drift failure mode
+# instead of blocking CI on it.
+#
 # Unlike scripts/lib/ghcr-retry.sh's ghcr_retry (which blindly retries any
 # nonzero exit -- appropriate there, because every failure mode a registry
 # push/pull/inspect call can hit is itself transient or auth-shaped), a full
@@ -55,7 +79,15 @@ DOCKER_BUILDX_RETRY_BACKOFF_SECONDS="${DOCKER_BUILDX_RETRY_BACKOFF_SECONDS:-30}"
 # happens to mention "unavailable" on its own. Extended regex, matched
 # line-by-line (buildx emits this as a single line) -- no multiline mode
 # needed.
-DOCKER_BUILDX_RETRY_TRANSIENT_PATTERN='\(\*service\)\.Write failed: rpc error: code = Unavailable desc = ref [^ ]+ locked for [0-9]+ms \(since [^)]*\): unavailable'
+#
+# Second alternative: the exact, literal "panic: methodref has no signature"
+# text of the golang:latest-toolchain-internal-panic signature documented
+# above. Deliberately the full literal string (no varying payload to loosen
+# around, unlike the layer-lock signature) -- narrow and specific on purpose,
+# so this alternation only ever matches this one confirmed Go-internal panic
+# message, never a broader "panic:" from a real, code-caused failure
+# elsewhere in the build.
+DOCKER_BUILDX_RETRY_TRANSIENT_PATTERN='\(\*service\)\.Write failed: rpc error: code = Unavailable desc = ref [^ ]+ locked for [0-9]+ms \(since [^)]*\): unavailable|panic: methodref has no signature'
 
 # docker_buildx_retry -- <command...>
 #
