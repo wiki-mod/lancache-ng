@@ -21,7 +21,18 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
 
-RUN apk add --no-cache \
+# `apk upgrade --no-cache` (before the package install, same layer) upgrades
+# packages already baked into the alpine:3.24 base layer itself (e.g. musl,
+# busybox) -- `apk add --no-cache` only fetches a fresh index for the
+# packages it is asked to install, it does not touch already-installed
+# packages. Verified on a real alpine:3.24 container (2026-07-30): apk-tools
+# and libapk ship in the base layer at 3.0.6-r0 while 3.0.7-r0 is already
+# available from the v3.24 branch's own repo; `apk upgrade --no-cache` alone
+# (no separate `apk update` needed, mirroring `apk add --no-cache`'s own
+# convention) picks it up and, per a real `find /var/cache/apk` check
+# afterward, leaves no persistent index cache behind either.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
     bash \
     dnsmasq \
     gettext-envsubst \

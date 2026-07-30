@@ -113,10 +113,12 @@ STUB
     export EXISTING_IMAGES=""
     export WORKFLOW_CHANGED="false"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # All five full-setup services get a base-commit back-fill.
-    [ "$(wc -l < "$backfill_log")" -eq 5 ]
+    # All seven full-setup services get a base-commit back-fill (#1296:
+    # dhcp/dhcp-proxy joined the five original services here).
+    [ "$(wc -l < "$backfill_log")" -eq 7 ]
     grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha_short}" "$backfill_log"
 }
 
@@ -124,11 +126,14 @@ STUB
     export EXISTING_IMAGES="ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0"
     export WORKFLOW_CHANGED="false"
     export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # proxy was touched+present (no back-fill); the other four are back-filled.
-    [ "$(wc -l < "$backfill_log")" -eq 4 ]
-    ! grep -qF "proxy:pr-715-sha-abcdef0" "$backfill_log"
+    # proxy was touched+present (no back-fill); the other six are back-filled.
+    # Leading slash disambiguates from ".../dhcp-proxy:pr-715-sha-abcdef0",
+    # which is one of those six and would otherwise substring-match "proxy:...".
+    [ "$(wc -l < "$backfill_log")" -eq 6 ]
+    ! grep -qF "/proxy:pr-715-sha-abcdef0" "$backfill_log"
 }
 
 @test "fail-closed: a touched service whose staging tag never appears aborts" {
@@ -153,7 +158,8 @@ STUB
 }
 
 @test "workflow change: build-tools untouched is still back-filled, not required" {
-    # Every forced-touched service present; build-tools untouched -> back-fill.
+    # Every forced-touched service present (#1296: dhcp/dhcp-proxy now
+    # included); build-tools untouched -> back-fill.
     # Declared and exported separately (SC2155): combining them would mask a
     # real failure exit status from the command substitution behind the
     # export builtin's own (always-successful-here) return value.
@@ -161,10 +167,13 @@ STUB
         ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/dns:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/watchdog:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0)"
+        ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:pr-715-sha-abcdef0)"
     export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
     # Only build-tools is back-filled.
@@ -412,9 +421,11 @@ STUB
     export EXISTING_IMAGES=""
     export WORKFLOW_CHANGED="false"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$backfill_log")" -eq 5 ]
+    # #1296: seven full-setup services now, not five (dhcp/dhcp-proxy joined).
+    [ "$(wc -l < "$backfill_log")" -eq 7 ]
 }
 
 @test "#808: BASE_SHA is required -- an omitted BASE_SHA fails closed instead of silently skipping the freshness check" {
